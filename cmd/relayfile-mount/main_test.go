@@ -208,13 +208,11 @@ func TestResolveLocalLayout(t *testing.T) {
 	}
 }
 
-func TestValidateCLIRequestedLocalLayoutRefusesScopedUntilOperatorSurfacesReady(t *testing.T) {
-	if err := validateCLIRequestedLocalLayout(localLayoutExact); err != nil {
-		t.Fatalf("exact layout should remain available: %v", err)
-	}
-	err := validateCLIRequestedLocalLayout(localLayoutScoped)
-	if err == nil || !strings.Contains(err.Error(), "operator surfaces") || !strings.Contains(err.Error(), "--local-layout=exact") {
-		t.Fatalf("expected scoped-layout refusal with exact-layout remedy, got %v", err)
+func TestValidateCLIRequestedLocalLayoutAcceptsSupportedLayouts(t *testing.T) {
+	for _, layout := range []string{localLayoutExact, localLayoutScoped} {
+		if err := validateCLIRequestedLocalLayout(layout); err != nil {
+			t.Fatalf("supported layout %q should remain available: %v", layout, err)
+		}
 	}
 }
 
@@ -300,6 +298,72 @@ func TestExecuteMountDispatchesFuseMode(t *testing.T) {
 	}
 	if pollCalled {
 		t.Fatal("did not expect poll runner to be called")
+	}
+}
+
+func TestExecuteMountPlansSingleScopedFusePathBeforeDispatch(t *testing.T) {
+	catalogDir := t.TempDir()
+	cfg := mountConfig{
+		mode:        mountModeFuse,
+		localDir:    catalogDir,
+		localLayout: localLayoutScoped,
+		remotePaths: []string{"/github"},
+	}
+	var received mountConfig
+
+	err := executeMount(
+		context.Background(),
+		cfg,
+		func(context.Context, mountConfig) error { return nil },
+		func(_ context.Context, planned mountConfig) error {
+			received = planned
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("executeMount returned error: %v", err)
+	}
+	if got, want := received.localDir, filepath.Join(catalogDir, "github"); got != want {
+		t.Fatalf("FUSE local dir = %q, want scoped child %q", got, want)
+	}
+	if received.remotePath != "/github" {
+		t.Fatalf("FUSE remote path = %q, want /github", received.remotePath)
+	}
+	if got := strings.Join(received.remotePaths, ","); got != "/github" {
+		t.Fatalf("FUSE remote paths = %q, want /github", got)
+	}
+	if !received.scopedChild {
+		t.Fatal("expected FUSE config to be marked as a scoped child")
+	}
+}
+
+func TestExecuteMountKeepsScopedRootFuseAtCanonicalLocalDir(t *testing.T) {
+	localRoot := t.TempDir()
+	cfg := mountConfig{
+		mode:        mountModeFuse,
+		localDir:    localRoot,
+		localLayout: localLayoutScoped,
+		remotePaths: []string{"/"},
+	}
+	var received mountConfig
+
+	err := executeMount(
+		context.Background(),
+		cfg,
+		func(context.Context, mountConfig) error { return nil },
+		func(_ context.Context, planned mountConfig) error {
+			received = planned
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("execute scoped root mount: %v", err)
+	}
+	if received.localDir != localRoot || received.remotePath != "/" {
+		t.Fatalf("scoped root plan = local %q remote %q, want %q and /", received.localDir, received.remotePath, localRoot)
+	}
+	if received.scopedChild {
+		t.Fatal("scoped root must retain exact-root content policy")
 	}
 }
 
@@ -720,6 +784,34 @@ func TestRunPollingMountScopedLayoutAppendsRemotePath(t *testing.T) {
 	want := filepath.Join(localRoot, "slack", "channels", "C123")
 	if got[0].localDir != want {
 		t.Fatalf("expected scoped local dir %q, got %q", want, got[0].localDir)
+	}
+}
+
+func TestRunPollingMountScopedLayoutKeepsWorkspaceRootCompatible(t *testing.T) {
+	localRoot := t.TempDir()
+	var got mountConfig
+
+	err := runPollingMountWithRunner(
+		context.Background(),
+		mountConfig{
+			localDir:    localRoot,
+			localLayout: localLayoutScoped,
+			stateDir:    t.TempDir(),
+			remotePaths: []string{"/"},
+		},
+		func(_ context.Context, cfg mountConfig) error {
+			got = cfg
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("run scoped root mount: %v", err)
+	}
+	if got.localDir != localRoot || got.remotePath != "/" {
+		t.Fatalf("scoped root runner = local %q remote %q, want %q and /", got.localDir, got.remotePath, localRoot)
+	}
+	if got.scopedChild {
+		t.Fatal("scoped root runner must retain exact-root content policy")
 	}
 }
 

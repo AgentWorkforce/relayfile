@@ -1265,7 +1265,7 @@ describe("RelayfileSetup", () => {
       const setup = new RelayfileSetup()
       const workspace = await setup.joinWorkspace("ws_123")
       readyControl.resolve()
-      await setup.mountWorkspace({
+      const handle = await setup.mountWorkspace({
         workspace,
         localDir,
         remotePath: "/slack/channels/C123/messages",
@@ -1288,6 +1288,20 @@ describe("RelayfileSetup", () => {
         mode: "poll",
         agentName: "relayfile-mount"
       })
+      const concreteLocalDir = path.join(
+        localDir,
+        "slack",
+        "channels",
+        "C123",
+        "messages"
+      )
+      expect(handle.localDir).toBe(concreteLocalDir)
+      expect(handle.env()).toMatchObject({
+        RELAYFILE_REMOTE_PATH: "/slack/channels/C123/messages",
+        RELAYFILE_LOCAL_DIR: concreteLocalDir,
+        RELAYFILE_MOUNT_LOCAL_LAYOUT: "exact"
+      })
+      await handle.stop()
     } finally {
       await rm(tempRoot, { recursive: true, force: true })
     }

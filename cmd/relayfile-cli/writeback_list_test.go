@@ -8,7 +8,73 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/agentworkforce/relayfile/internal/mountsync"
 )
+
+func TestListWorkspaceWritebackItemsAggregatesScopedChildren(t *testing.T) {
+	localRoot := t.TempDir()
+	record := workspaceRecord{
+		ID:            "ws_demo",
+		LocalDir:      localRoot,
+		LocalLayout:   "scoped",
+		RemotePaths:   []string{"/github", "/slack"},
+		MountStateDir: t.TempDir(),
+		MountKind:     mountsync.MountKindDaemon,
+	}
+	for index, scope := range workspaceMountScopes(record) {
+		relayDir := filepath.Join(scope.LocalDir, ".relay")
+		if err := os.MkdirAll(filepath.Join(relayDir, "dead-letter"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		stateFile, err := workspaceMountStateFile("ws_demo", record, scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		trackedState := `"dirty":true`
+		if index == 1 {
+			// A queued delete has no local file and no hash. The authoritative
+			// deletePending bit must still surface as a pending writeback.
+			trackedState = `"deletePending":true`
+		}
+		tracked := `{"files":{"` + scope.RemotePath + `/draft.md":{` + trackedState + `}}}`
+		if err := os.WriteFile(stateFile, []byte(tracked), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if index == 0 {
+			if err := os.WriteFile(filepath.Join(scope.LocalDir, "draft.md"), []byte("local draft"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		dead := `{"opId":"op_` + scope.RemotePath[1:] + `","path":"` + scope.RemotePath + `/failed.md"}`
+		if err := os.WriteFile(
+			filepath.Join(relayDir, "dead-letter", "op_"+scope.RemotePath[1:]+".json"),
+			[]byte(dead),
+			0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	pending, err := listWorkspaceWritebackItems("ws_demo", record, "pending")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 2 || pending[0].Path != "/github/draft.md" || pending[1].Path != "/slack/draft.md" {
+		t.Fatalf("scoped pending items = %#v", pending)
+	}
+
+	dead, err := listWorkspaceWritebackItems("ws_demo", record, "dead")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dead) != 2 || dead[0].Path != "/github/failed.md" || dead[1].Path != "/slack/failed.md" {
+		t.Fatalf("scoped dead items = %#v", dead)
+	}
+}
 
 // writebackListSDKItem mirrors WritebackItem from
 // packages/sdk/typescript/src/types.ts. Field names MUST stay in sync with the
@@ -203,7 +269,7 @@ func TestWritebackListPendingUsesRemoteRootForNonRootMount(t *testing.T) {
 		t.Fatalf("write mount state failed: %v", err)
 	}
 	writeWritebackListState(t, localDir, syncStateFile{WorkspaceID: "ws_demo", RemoteRoot: "/notion"})
-	upsertWritebackListWorkspace(t, localDir)
+	upsertWritebackListWorkspace(t, localDir, "/notion")
 
 	var out bytes.Buffer
 	if err := run([]string{"writeback", "list", "--state", "pending", "--workspace", "demo", "--json"}, strings.NewReader(""), &out, &out); err != nil {
@@ -246,6 +312,61 @@ func TestLocalWritebackHashesIncludesCatalogNamedProviderContentForScopedChild(t
 	}
 	if _, ok := hashes["/notion/digests/page.json"]; !ok {
 		t.Fatalf("scoped provider content missing from local hashes: %#v", hashes)
+	}
+}
+
+func TestLocalWritebackHashesTreatsMissingScopeAsEmpty(t *testing.T) {
+	localDir := filepath.Join(t.TempDir(), "not-materialized")
+	hashes, err := localWritebackHashes(localDir, "/github", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hashes) != 0 {
+		t.Fatalf("missing scope hashes = %#v, want empty", hashes)
+	}
+}
+
+func TestWritebackListPendingUsesCatalogRootWithoutPublicSnapshot(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	localDir := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(localDir, mountsync.LegacyMountStateFileName),
+		[]byte(`{"files":{"/notion/pages/page-1.json":{"dirty":true}}}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	record := workspaceRecord{
+		ID:          "ws_demo",
+		LocalDir:    localDir,
+		LocalLayout: "exact",
+		RemotePaths: []string{"/notion"},
+	}
+	items, err := listWorkspaceWritebackItems("ws_demo", record, "pending")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Path != "/notion/pages/page-1.json" {
+		t.Fatalf("catalog-root pending items = %#v", items)
+	}
+}
+
+func TestWritebackListPendingRefusesUnknownLegacyExactRoot(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	localDir := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(localDir, mountsync.LegacyMountStateFileName),
+		[]byte(`{"files":{"/notion/pages/page-1.json":{"dirty":true}}}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	_, err := listWorkspaceWritebackItems("ws_demo", workspaceRecord{
+		ID:       "ws_demo",
+		LocalDir: localDir,
+	}, "pending")
+	if err == nil || !strings.Contains(err.Error(), "mount root is unknown") {
+		t.Fatalf("expected unknown legacy root refusal, got %v", err)
 	}
 }
 
@@ -491,14 +612,19 @@ func TestWritebackListDeadJSONMergesErrorSidecar(t *testing.T) {
 	}
 }
 
-func upsertWritebackListWorkspace(t *testing.T, localDir string) {
+func upsertWritebackListWorkspace(t *testing.T, localDir string, remoteRoots ...string) {
 	t.Helper()
+	if len(remoteRoots) == 0 {
+		remoteRoots = []string{"/"}
+	}
 	if _, err := upsertWorkspaceDetails(workspaceRecord{
-		Name:       "demo",
-		ID:         "ws_demo",
-		LocalDir:   localDir,
-		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
-		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+		Name:        "demo",
+		ID:          "ws_demo",
+		LocalDir:    localDir,
+		LocalLayout: "exact",
+		RemotePaths: remoteRoots,
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt:  time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatalf("upsertWorkspaceDetails failed: %v", err)
 	}

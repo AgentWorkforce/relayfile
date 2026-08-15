@@ -422,6 +422,50 @@ type syncStateEventListener struct {
 	NextAttemptAt   string `json:"nextAttemptAt,omitempty"`
 }
 
+// Aggregate status has a topology variant because one root is truthful for an
+// exact mount, plural roots are truthful for a scoped mount, and a legacy
+// blank layout establishes neither. Separate Go types keep the wrong root
+// claim unrepresentable instead of relying on callers to clear a string field.
+type workspaceSyncStatusCommon struct {
+	WorkspaceID                  string              `json:"workspaceId"`
+	Mode                         string              `json:"mode"`
+	Status                       string              `json:"status,omitempty"`
+	Readiness                    string              `json:"readiness,omitempty"`
+	LastReconcileAt              string              `json:"lastReconcileAt,omitempty"`
+	LastSuccessfulReconcileAt    string              `json:"lastSuccessfulReconcileAt,omitempty"`
+	LastEventAt                  string              `json:"lastEventAt,omitempty"`
+	IntervalMs                   int64               `json:"intervalMs"`
+	Providers                    []syncStateProvider `json:"providers,omitempty"`
+	PendingWriteback             int                 `json:"pendingWriteback"`
+	PendingConflicts             int                 `json:"pendingConflicts"`
+	DeniedPaths                  int                 `json:"deniedPaths"`
+	FailedWritebacks             uint64              `json:"failedWritebacks"`
+	StallReason                  string              `json:"stallReason,omitempty"`
+	LastError                    *statusError        `json:"lastError,omitempty"`
+	IncrementalReadNotReadySince map[string]string   `json:"incrementalReadNotReadySince,omitempty"`
+	Daemon                       *syncStateDaemon    `json:"daemon,omitempty"`
+	Guards                       *syncStateGuards    `json:"guards,omitempty"`
+	Bootstrap                    *syncStateBootstrap `json:"bootstrap,omitempty"`
+}
+
+type exactWorkspaceSyncStatus struct {
+	workspaceSyncStatusCommon
+	LocalLayout string `json:"localLayout"`
+	RemoteRoot  string `json:"remoteRoot"`
+}
+
+type scopedWorkspaceSyncStatus struct {
+	workspaceSyncStatusCommon
+	LocalLayout string                 `json:"localLayout"`
+	RemoteRoots []string               `json:"remoteRoots"`
+	Scopes      []workspaceScopeHealth `json:"scopes,omitempty"`
+}
+
+type unknownWorkspaceSyncStatus struct {
+	workspaceSyncStatusCommon
+	LocalLayout string `json:"localLayout"`
+}
+
 // syncStateBootstrap is the CLI-surface mirror of mountsync's public
 // bootstrap status block.
 type syncStateBootstrap struct {
@@ -1994,8 +2038,18 @@ func ensureMirrorLayout(localDir string) error {
 	return ensureMountRuntimeLayout(localDir)
 }
 
-func ensureMirrorLayoutForTopology(localDir, layout string) error {
-	if strings.TrimSpace(layout) == mountscope.LayoutScoped {
+func ensureMirrorLayoutForTopology(localDir, layout string, remotePaths ...string) error {
+	hasScopedChild := strings.TrimSpace(layout) == mountscope.LayoutScoped
+	if len(remotePaths) > 0 {
+		hasScopedChild = false
+		for _, remotePath := range remotePaths {
+			if mountscope.IsScopedChild(layout, remotePath) {
+				hasScopedChild = true
+				break
+			}
+		}
+	}
+	if hasScopedChild {
 		// A workspace digest is global: it can name provider events outside a
 		// scoped mount's allowlist. Creating the directory and activity skill
 		// here would promise a current digest that no scoped child can safely
@@ -3757,6 +3811,10 @@ func runIntegrationDisconnect(args []string, stdin io.Reader, stdout io.Writer) 
 			return nil
 		}
 	}
+	disconnectPlan, err := prepareProviderDisconnect(record, provider)
+	if err != nil {
+		return err
+	}
 	cloudCreds, err := ensureCloudCredentials(strings.TrimSpace(*cloudAPIURL), "", 5*time.Minute, false, io.Discard)
 	if err != nil {
 		return err
@@ -3768,7 +3826,7 @@ func runIntegrationDisconnect(args []string, stdin io.Reader, stdout io.Writer) 
 	if _, _, err := client.do(context.Background(), http.MethodDelete, fmt.Sprintf("/api/v1/workspaces/%s/integrations/%s/status", url.PathEscape(record.ID), url.PathEscape(provider)), nil); err != nil {
 		return err
 	}
-	if err := markProviderDisconnected(record.LocalDir, provider, record.LocalLayout); err != nil {
+	if err := markProviderDisconnectedWithPlan(record, provider, disconnectPlan); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "%s disconnected from workspace %s\n", provider, record.Name)
@@ -4090,6 +4148,7 @@ type workspaceHealthReport struct {
 	Name                       string                  `json:"name,omitempty"`
 	LocalDir                   string                  `json:"localDir,omitempty"`
 	Status                     string                  `json:"status,omitempty"`
+	Readiness                  string                  `json:"readiness,omitempty"`
 	LastSuccessfulReconcileAt  string                  `json:"lastSuccessfulReconcileAt,omitempty"`
 	LastReconcileAt            string                  `json:"lastReconcileAt,omitempty"`
 	LastError                  string                  `json:"lastError,omitempty"`
@@ -4099,7 +4158,22 @@ type workspaceHealthReport struct {
 	OutboxAcked                int                     `json:"outboxAcked"`
 	IncrementalBacklogDraining bool                    `json:"incrementalBacklogDraining,omitempty"`
 	EventListener              *syncStateEventListener `json:"eventListener,omitempty"`
+	Scopes                     []workspaceScopeHealth  `json:"scopes,omitempty"`
 	Views                      []workspaceViewHealth   `json:"views,omitempty"`
+}
+
+// workspaceScopeHealth keeps readiness attributable to the child Syncer that
+// reported it. A single aggregate listener would otherwise hide which scoped
+// root is disconnected or retrying.
+type workspaceScopeHealth struct {
+	RemoteRoot                string                  `json:"remoteRoot"`
+	LocalDir                  string                  `json:"localDir"`
+	Status                    string                  `json:"status,omitempty"`
+	Readiness                 string                  `json:"readiness,omitempty"`
+	LastSuccessfulReconcileAt string                  `json:"lastSuccessfulReconcileAt,omitempty"`
+	LastReconcileAt           string                  `json:"lastReconcileAt,omitempty"`
+	LastError                 string                  `json:"lastError,omitempty"`
+	EventListener             *syncStateEventListener `json:"eventListener,omitempty"`
 }
 
 // workspaceViewHealth reports the projection separately from the canonical
@@ -4321,9 +4395,21 @@ func privateMountStateMatchesRecord(statePath string, record workspaceRecord, lo
 	return sameRoot, true, nil
 }
 
-func validateMountResetMode(localDir, layout string, resetAfterClobber bool) error {
+func validateMountResetMode(localDir, layout string, resetAfterClobber bool, remotePaths ...string) error {
 	if layout != mountscope.LayoutScoped || !resetAfterClobber {
 		return nil
+	}
+	if len(remotePaths) > 0 {
+		hasScopedChild := false
+		for _, remotePath := range remotePaths {
+			if mountscope.IsScopedChild(layout, remotePath) {
+				hasScopedChild = true
+				break
+			}
+		}
+		if !hasScopedChild {
+			return nil
+		}
 	}
 	return fmt.Errorf(
 		"--reset-after-clobber cannot recover a scoped mount transactionally at %s; choose a new LOCAL_DIR and pass --rehome when changing the registered mirror",
@@ -4356,6 +4442,241 @@ func absolutePathOrClean(value string) string {
 		return filepath.Clean(trimmed)
 	}
 	return absolute
+}
+
+// workspaceMountScopes reconstructs the persisted local mount layout. The
+// catalog records the common local root, while scoped mounts keep their
+// private runtime state beneath the corresponding remote-path subtree.
+func workspaceMountScopes(record workspaceRecord) []mountscope.Scope {
+	localRoot := strings.TrimSpace(record.LocalDir)
+	if localRoot == "" {
+		return nil
+	}
+	if strings.TrimSpace(record.LocalLayout) != mountscope.LayoutScoped {
+		// The runtime state is authoritative for an existing exact mount.
+		// Catalog topology can lag a remount, so it is only a fallback when
+		// no live root can be recovered.
+		remoteRoot, _ := readMountRemoteRootIfPresent(localRoot)
+		if remoteRoot == "" {
+			for _, candidate := range record.RemotePaths {
+				if strings.TrimSpace(candidate) != "" {
+					remoteRoot = mountscope.NormalizePath(candidate)
+					break
+				}
+			}
+		}
+		if remoteRoot == "" {
+			remoteRoot = "/"
+		}
+		return []mountscope.Scope{{RemotePath: remoteRoot, LocalDir: localRoot}}
+	}
+	paths := mountscope.NormalizePaths(record.RemotePaths, "/")
+	scopes := make([]mountscope.Scope, 0, len(paths))
+	for _, remotePath := range paths {
+		scopes = append(scopes, mountscope.Scope{
+			RemotePath: remotePath,
+			LocalDir:   mountscope.LocalDir(localRoot, remotePath),
+		})
+	}
+	return scopes
+}
+
+func workspaceRemoteRootForLocalDir(record workspaceRecord, localDir string) (string, error) {
+	if strings.TrimSpace(record.LocalLayout) == mountscope.LayoutScoped {
+		target := filepath.Clean(localDir)
+		for _, scope := range workspaceMountScopes(record) {
+			if filepath.Clean(scope.LocalDir) == target {
+				return scope.RemotePath, nil
+			}
+		}
+		return "", fmt.Errorf("scoped mount root is unknown for local directory %s", localDir)
+	}
+	if root, ok := readMountRemoteRootIfPresent(localDir); ok {
+		return root, nil
+	}
+	for _, remotePath := range record.RemotePaths {
+		if strings.TrimSpace(remotePath) != "" {
+			return mountscope.NormalizePath(remotePath), nil
+		}
+	}
+	return "", fmt.Errorf(
+		"mount root is unknown for legacy exact mirror %s; restore its .relay/state.json or remount before operating on pending writes",
+		localDir,
+	)
+}
+
+// workspaceStateDirs includes the catalog root for compatibility with
+// pre-scoped state, then every persisted scoped runtime root. Consumers use
+// this sweep so state written by any sibling mount remains discoverable.
+func workspaceStateDirs(record workspaceRecord) []string {
+	localRoot := strings.TrimSpace(record.LocalDir)
+	if localRoot == "" {
+		return nil
+	}
+	dirs := []string{localRoot}
+	seen := map[string]struct{}{filepath.Clean(localRoot): {}}
+	for _, scope := range workspaceMountScopes(record) {
+		cleaned := filepath.Clean(scope.LocalDir)
+		if _, ok := seen[cleaned]; ok {
+			continue
+		}
+		seen[cleaned] = struct{}{}
+		dirs = append(dirs, scope.LocalDir)
+	}
+	return dirs
+}
+
+func workspaceRuntimeStateDirs(record workspaceRecord) []string {
+	scopes := workspaceMountScopes(record)
+	dirs := make([]string, 0, len(scopes))
+	seen := map[string]struct{}{}
+	for _, scope := range scopes {
+		cleaned := filepath.Clean(scope.LocalDir)
+		if _, ok := seen[cleaned]; ok {
+			continue
+		}
+		seen[cleaned] = struct{}{}
+		dirs = append(dirs, scope.LocalDir)
+	}
+	return dirs
+}
+
+func workspaceStateDirForDeadLetterPaths(record workspaceRecord, rawPaths string) string {
+	catalogRoot := strings.TrimSpace(record.LocalDir)
+	paths := deadLetterRetryPaths(rawPaths)
+	if len(paths) == 0 {
+		return catalogRoot
+	}
+	resolvedDir := ""
+	for _, path := range paths {
+		scope, ok := workspaceMountScopeForRemotePath(record, path)
+		if !ok {
+			return catalogRoot
+		}
+		if resolvedDir == "" {
+			resolvedDir = scope.LocalDir
+			continue
+		}
+		if filepath.Clean(resolvedDir) != filepath.Clean(scope.LocalDir) {
+			// One record spanning multiple scoped roots belongs at their
+			// shared catalog root so every provider's operator preflight can
+			// discover it.
+			return catalogRoot
+		}
+	}
+	return resolvedDir
+}
+
+func workspaceMountScopeForRemotePath(record workspaceRecord, remotePath string) (mountscope.Scope, bool) {
+	path := mountscope.NormalizePath(remotePath)
+	var best mountscope.Scope
+	for _, scope := range workspaceMountScopes(record) {
+		if !mountscope.IsWithin(scope.RemotePath, path) || len(scope.RemotePath) <= len(best.RemotePath) {
+			continue
+		}
+		best = scope
+	}
+	return best, strings.TrimSpace(best.RemotePath) != ""
+}
+
+func workspaceRetryTarget(record workspaceRecord, recordLocalDir, remotePath string) (localDir, remoteRoot string, err error) {
+	if strings.TrimSpace(record.LocalLayout) == mountscope.LayoutScoped {
+		// The persisted allowlist, not the dead-letter record's storage
+		// directory, owns retry routing. Compatibility and bulk records can
+		// live at either the catalog root or one child root.
+		scope, ok := workspaceMountScopeForRemotePath(record, remotePath)
+		if !ok {
+			return "", "", fmt.Errorf(
+				"dead-letter path %s is outside the persisted scoped allowlist; cannot choose a retry root",
+				remotePath,
+			)
+		}
+		return scope.LocalDir, scope.RemotePath, nil
+	}
+	remoteRoot, err = workspaceRemoteRootForLocalDir(record, recordLocalDir)
+	if err != nil {
+		return "", "", err
+	}
+	return recordLocalDir, remoteRoot, nil
+}
+
+type workspaceDeadLetterRetryGroup struct {
+	LocalDir   string
+	RemoteRoot string
+	Paths      []string
+}
+
+func workspaceDeadLetterRetryGroups(record workspaceRecord, recordLocalDir, rawPaths string) ([]workspaceDeadLetterRetryGroup, error) {
+	paths := deadLetterRetryPaths(rawPaths)
+	if len(paths) == 0 {
+		return nil, errors.New("dead-letter record has no retryable path")
+	}
+	groupIndexes := map[string]int{}
+	groups := make([]workspaceDeadLetterRetryGroup, 0, len(paths))
+	for _, remotePath := range paths {
+		localDir, remoteRoot, err := workspaceRetryTarget(record, recordLocalDir, remotePath)
+		if err != nil {
+			return nil, err
+		}
+		// Resolve every relative path before any Syncer is invoked so a bad
+		// cross-scope record cannot partially retry one group and fail later.
+		if _, err := retryRelativePath(localDir, remoteRoot, remotePath); err != nil {
+			return nil, err
+		}
+		key := filepath.Clean(localDir) + "\x00" + mountscope.NormalizePath(remoteRoot)
+		if index, ok := groupIndexes[key]; ok {
+			groups[index].Paths = append(groups[index].Paths, remotePath)
+			continue
+		}
+		groupIndexes[key] = len(groups)
+		groups = append(groups, workspaceDeadLetterRetryGroup{
+			LocalDir:   localDir,
+			RemoteRoot: remoteRoot,
+			Paths:      []string{remotePath},
+		})
+	}
+	return groups, nil
+}
+
+// workspaceMountStateFile resolves the same private cursor identity used by
+// the Syncer. New mounts keep state beneath MountStateDir; the in-mirror file
+// remains only as a compatibility fallback for pre-private-state mounts.
+func workspaceMountStateFile(workspaceID string, record workspaceRecord, scope mountscope.Scope) (string, error) {
+	resolved, err := mountsync.ResolveMountStatePath(mountsync.MountStatePathOptions{
+		WorkspaceID: strings.TrimSpace(workspaceID),
+		RemoteRoot:  scope.RemotePath,
+		LocalRoot:   scope.LocalDir,
+		StateFile:   record.MountStateFile,
+		StateDir:    record.MountStateDir,
+		MountKind:   record.MountKind,
+	})
+	if err != nil {
+		return "", err
+	}
+	candidates := []string{
+		resolved.StateFile,
+		filepath.Join(scope.LocalDir, mountsync.LegacyMountStateFileName),
+		filepath.Join(scope.LocalDir, mountsync.DefaultMountStateDirName, "state.json"),
+	}
+	seen := map[string]struct{}{}
+	for _, candidate := range candidates {
+		candidate = filepath.Clean(candidate)
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		info, statErr := os.Stat(candidate)
+		if statErr == nil {
+			if !info.Mode().IsRegular() {
+				return "", fmt.Errorf("mount state path %s is not a regular file", candidate)
+			}
+			return candidate, nil
+		}
+		if !errors.Is(statErr, os.ErrNotExist) {
+			return "", fmt.Errorf("inspect mount state %s: %w", candidate, statErr)
+		}
+	}
+	return resolved.StateFile, nil
 }
 
 func sameFilesystemPath(left, right string) (bool, error) {
@@ -4965,12 +5286,16 @@ func resolveWritebackPushPath(localPath, workspaceValue string) (writebackPushRe
 	if rel == "." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || rel == ".." {
 		return writebackPushResolvedPath{}, fmt.Errorf("%s is outside mount root %s", abs, root)
 	}
-	remotePath := joinRemotePath(readMountRemoteRoot(mountRoot), filepath.ToSlash(rel))
+	remoteRoot, ok := readMountRemoteRootIfPresent(mountRoot)
+	if !ok {
+		return writebackPushResolvedPath{}, fmt.Errorf("%s missing remoteRoot", filepath.Join(mountRoot, ".relay", "state.json"))
+	}
+	remotePath := joinRemotePath(remoteRoot, filepath.ToSlash(rel))
 	return writebackPushResolvedPath{
 		LocalPath:   abs,
 		MountRoot:   mountRoot,
 		WorkspaceID: workspaceID,
-		RemoteRoot:  readMountRemoteRoot(mountRoot),
+		RemoteRoot:  remoteRoot,
 		RemotePath:  remotePath,
 	}, nil
 }
@@ -5231,27 +5556,32 @@ func runWritebackSkipStuck(args []string, stdout io.Writer) error {
 	if timeout <= 0 {
 		timeout = defaultMountTimeout
 	}
-	client := mountsync.NewHTTPClient(server, tokenValue, &http.Client{
-		Transport: newWritebackFailureTransport(record.LocalDir, log.Default(), mountsync.NewSyncTransport()),
+	scopes := workspaceMountScopes(record)
+	skipped, backlog, syncErr := skipStuckAcrossScopes(scopes, *maxSkips, func(scope mountscope.Scope, limit int) (int, bool, error) {
+		client := mountsync.NewHTTPClient(server, tokenValue, &http.Client{
+			Transport: newWritebackFailureTransport(scope.LocalDir, log.Default(), mountsync.NewSyncTransport()),
+		})
+		websocketDisabled := false
+		syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
+			WorkspaceID:   workspaceID,
+			RemoteRoot:    scope.RemotePath,
+			LocalRoot:     scope.LocalDir,
+			StateFile:     record.MountStateFile,
+			StateDir:      record.MountStateDir,
+			MountKind:     record.MountKind,
+			ValidateState: true,
+			WebSocket:     &websocketDisabled,
+			RootCtx:       context.Background(),
+			Logger:        log.Default(),
+		})
+		if err != nil {
+			return 0, false, err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		scopeSkipped, err := syncer.SkipStuck(ctx, limit)
+		return scopeSkipped, syncer.BacklogDraining(), err
 	})
-	remoteRoot := readMountRemoteRoot(record.LocalDir)
-	websocketDisabled := false
-	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
-		WorkspaceID: workspaceID,
-		RemoteRoot:  remoteRoot,
-		LocalRoot:   record.LocalDir,
-		WebSocket:   &websocketDisabled,
-		RootCtx:     context.Background(),
-		Logger:      log.Default(),
-	})
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	skipped, syncErr := syncer.SkipStuck(ctx, *maxSkips)
-	backlog := syncer.BacklogDraining()
 
 	if *jsonOutput {
 		result := struct {
@@ -5278,6 +5608,35 @@ func runWritebackSkipStuck(args []string, stdout io.Writer) error {
 	return syncErr
 }
 
+type skipStuckScopeRunner func(scope mountscope.Scope, maxSkips int) (skipped int, backlog bool, err error)
+
+func skipStuckAcrossScopes(scopes []mountscope.Scope, maxSkips int, run skipStuckScopeRunner) (int, bool, error) {
+	totalSkipped := 0
+	backlog := false
+	var runErrors []error
+	for index, scope := range scopes {
+		limit := 0
+		if maxSkips > 0 {
+			limit = maxSkips - totalSkipped
+			if limit <= 0 {
+				backlog = true
+				break
+			}
+		}
+		skipped, scopeBacklog, err := run(scope, limit)
+		totalSkipped += skipped
+		backlog = backlog || scopeBacklog
+		if err != nil {
+			runErrors = append(runErrors, fmt.Errorf("%s: %w", scope.RemotePath, err))
+		}
+		if maxSkips > 0 && totalSkipped >= maxSkips && index < len(scopes)-1 {
+			backlog = true
+			break
+		}
+	}
+	return totalSkipped, backlog, errors.Join(runErrors...)
+}
+
 func runWritebackStatus(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("writeback status", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -5295,7 +5654,7 @@ func runWritebackStatus(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	report, err := buildWritebackStatusReport(workspaceID, record.LocalDir)
+	report, err := buildWritebackStatusReport(workspaceID, record)
 	if err != nil {
 		return err
 	}
@@ -5345,12 +5704,8 @@ func runWritebackRetry(args []string, stdout io.Writer) error {
 	if strings.TrimSpace(record.LocalDir) == "" {
 		return fmt.Errorf("unknown dead-letter op %q: workspace %s has no local mirror", op, workspaceID)
 	}
-	recordPath := filepath.Join(deadLetterDirFor(record.LocalDir), op+".json")
-	payload, err := os.ReadFile(recordPath)
+	recordPath, recordLocalDir, payload, err := findWorkspaceDeadLetterRecord(record, op)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("unknown dead-letter op %q", op)
-		}
 		return err
 	}
 	var dl deadLetterRecord
@@ -5364,18 +5719,57 @@ func runWritebackRetry(args []string, stdout io.Writer) error {
 		return fmt.Errorf("dead-letter record %s contains opId %q, expected %q", recordPath, dl.OpID, op)
 	}
 
-	if err := retryDeadLetterWriteback(workspaceID, record, dl); err != nil {
-		return fmt.Errorf("retry op %s: %w", op, err)
+	retryGroups, err := workspaceDeadLetterRetryGroups(record, recordLocalDir, dl.Path)
+	if err != nil {
+		return err
+	}
+	for _, group := range retryGroups {
+		retryRecord := record
+		retryRecord.LocalDir = group.LocalDir
+		retryDL := dl
+		retryDL.Path = strings.Join(group.Paths, ",")
+		if err := retryDeadLetterWriteback(workspaceID, retryRecord, group.RemoteRoot, retryDL); err != nil {
+			return fmt.Errorf("retry op %s for mount root %s: %w", op, group.RemoteRoot, err)
+		}
 	}
 	if err := os.Remove(recordPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("retry queued but failed to remove %s: %w", recordPath, err)
 	}
-	sidecarPath := deadLetterErrorPathFor(record.LocalDir, op)
+	sidecarPath := deadLetterErrorPathFor(recordLocalDir, op)
 	if err := os.Remove(sidecarPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("retry queued but failed to remove %s: %w", sidecarPath, err)
 	}
 	fmt.Fprintf(stdout, "Retry queued for op %s\n", op)
 	return nil
+}
+
+func findWorkspaceDeadLetterRecord(record workspaceRecord, opID string) (recordPath, localDir string, payload []byte, err error) {
+	// Active child roots are authoritative. The catalog root is searched last
+	// only for compatibility with records written before scoped topology was
+	// persisted, so a stale compatibility duplicate cannot shadow live state.
+	candidateDirs := append([]string(nil), workspaceRuntimeStateDirs(record)...)
+	catalogRoot := strings.TrimSpace(record.LocalDir)
+	catalogSeen := false
+	for _, candidateDir := range candidateDirs {
+		if filepath.Clean(candidateDir) == filepath.Clean(catalogRoot) {
+			catalogSeen = true
+			break
+		}
+	}
+	if catalogRoot != "" && !catalogSeen {
+		candidateDirs = append(candidateDirs, catalogRoot)
+	}
+	for _, candidateDir := range candidateDirs {
+		candidate := filepath.Join(deadLetterDirFor(candidateDir), opID+".json")
+		payload, err = os.ReadFile(candidate)
+		if err == nil {
+			return candidate, candidateDir, payload, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", "", nil, err
+		}
+	}
+	return "", "", nil, fmt.Errorf("unknown dead-letter op %q", opID)
 }
 
 func runOps(args []string, stdin io.Reader, stdout io.Writer) error {
@@ -5433,7 +5827,7 @@ func runOpsList(args []string, stdout io.Writer) error {
 		}
 	}
 
-	records, err := readDeadLetterRecords(record.LocalDir)
+	records, err := readWorkspaceDeadLetterRecords(record)
 	if err != nil {
 		return err
 	}
@@ -5483,6 +5877,27 @@ func readDeadLetterRecords(localDir string) ([]deadLetterRecord, error) {
 			// Use filename as a fallback so the user can still replay it.
 			record.OpID = strings.TrimSuffix(entry.Name(), ".json")
 		}
+		records = append(records, record)
+	}
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].OpID < records[j].OpID
+	})
+	return records, nil
+}
+
+func readWorkspaceDeadLetterRecords(record workspaceRecord) ([]deadLetterRecord, error) {
+	recordsByID := map[string]deadLetterRecord{}
+	for _, localDir := range workspaceStateDirs(record) {
+		records, err := readDeadLetterRecords(localDir)
+		if err != nil {
+			return nil, err
+		}
+		for _, record := range records {
+			recordsByID[record.OpID] = record
+		}
+	}
+	records := make([]deadLetterRecord, 0, len(recordsByID))
+	for _, record := range recordsByID {
 		records = append(records, record)
 	}
 	sort.Slice(records, func(i, j int) bool {
@@ -5547,31 +5962,37 @@ func resolveWorkspaceLikeStatus(value string) (string, workspaceRecord, error) {
 	return workspaceID, record, nil
 }
 
-func buildWritebackStatusReport(workspaceID, localDir string) (writebackStatusReport, error) {
+func buildWritebackStatusReport(workspaceID string, workspace workspaceRecord) (writebackStatusReport, error) {
 	report := writebackStatusReport{
 		WorkspaceID:         workspaceID,
 		DeadLettered:        []writebackStatusDeadLetter{},
 		LastErrorByProvider: map[string]string{},
 	}
-	if strings.TrimSpace(localDir) == "" {
+	if strings.TrimSpace(workspace.LocalDir) == "" {
 		return report, nil
 	}
 
-	state, err := readWritebackState(localDir)
-	if err != nil {
-		return writebackStatusReport{}, err
-	}
-	report.Pending = state.PendingWriteback
-	report.Failed = state.FailedWritebacks
-	for _, provider := range state.Providers {
-		name := strings.TrimSpace(provider.Provider)
-		lastError := strings.TrimSpace(provider.LastError)
-		if name != "" && lastError != "" {
-			report.LastErrorByProvider[name] = lastError
+	for _, scope := range workspaceMountScopes(workspace) {
+		state, err := readWritebackState(scope.LocalDir)
+		if err != nil {
+			return writebackStatusReport{}, err
+		}
+		stateFile, err := workspaceMountStateFile(workspaceID, workspace, scope)
+		if err != nil {
+			return writebackStatusReport{}, err
+		}
+		report.Pending += countPendingTrackedFilesAt(stateFile)
+		report.Failed += state.FailedWritebacks
+		for _, provider := range state.Providers {
+			name := strings.TrimSpace(provider.Provider)
+			lastError := strings.TrimSpace(provider.LastError)
+			if name != "" && lastError != "" {
+				report.LastErrorByProvider[name] = lastError
+			}
 		}
 	}
 
-	records, err := readDeadLetterRecords(localDir)
+	records, err := readWorkspaceDeadLetterRecords(workspace)
 	if err != nil {
 		return writebackStatusReport{}, err
 	}
@@ -5648,7 +6069,7 @@ func printWritebackStatus(stdout io.Writer, record workspaceRecord, report write
 	}
 }
 
-func retryDeadLetterWriteback(workspaceID string, record workspaceRecord, dl deadLetterRecord) error {
+func retryDeadLetterWriteback(workspaceID string, record workspaceRecord, remoteRoot string, dl deadLetterRecord) error {
 	if strings.TrimSpace(record.LocalDir) == "" {
 		return errors.New("workspace has no local mirror")
 	}
@@ -5681,21 +6102,18 @@ func retryDeadLetterWriteback(workspaceID string, record workspaceRecord, dl dea
 	client := mountsync.NewHTTPClient(server, tokenValue, &http.Client{
 		Transport: newWritebackFailureTransport(record.LocalDir, log.Default(), mountsync.NewSyncTransport()),
 	})
-	// Read the live mount's remoteRoot from .relay/state.json instead
-	// of hardcoding "/". CodeRabbit flagged on PR #84: a mount created
-	// with `--remote-path /github` has dead-letter paths under /github,
-	// and retrying with RemoteRoot:"/" would look up `<localDir>/github/...`
-	// instead of `<localDir>/...`, so replay would fail even though the
-	// mirrored file exists.
-	remoteRoot := readMountRemoteRoot(record.LocalDir)
 	websocketDisabled := false
 	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
-		WorkspaceID: workspaceID,
-		RemoteRoot:  remoteRoot,
-		LocalRoot:   record.LocalDir,
-		WebSocket:   &websocketDisabled,
-		RootCtx:     context.Background(),
-		Logger:      log.Default(),
+		WorkspaceID:   workspaceID,
+		RemoteRoot:    remoteRoot,
+		LocalRoot:     record.LocalDir,
+		StateFile:     record.MountStateFile,
+		StateDir:      record.MountStateDir,
+		MountKind:     record.MountKind,
+		ValidateState: true,
+		WebSocket:     &websocketDisabled,
+		RootCtx:       context.Background(),
+		Logger:        log.Default(),
 	})
 	if err != nil {
 		return err
@@ -5716,28 +6134,24 @@ func retryDeadLetterWriteback(workspaceID string, record workspaceRecord, dl dea
 	return nil
 }
 
-// readMountRemoteRoot reads the live mount's remoteRoot from
-// <localDir>/.relay/state.json. Defaults to "/" when missing or
-// unparseable so retry on a root mount works without state.json
-// being present.
-func readMountRemoteRoot(localDir string) string {
+func readMountRemoteRootIfPresent(localDir string) (string, bool) {
 	if strings.TrimSpace(localDir) == "" {
-		return "/"
+		return "", false
 	}
 	data, err := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
 	if err != nil {
-		return "/"
+		return "", false
 	}
 	var s struct {
 		RemoteRoot string `json:"remoteRoot"`
 	}
 	if json.Unmarshal(data, &s) != nil {
-		return "/"
+		return "", false
 	}
 	if root := strings.TrimSpace(s.RemoteRoot); root != "" {
-		return root
+		return root, true
 	}
-	return "/"
+	return "", false
 }
 
 func deadLetterRetryPaths(raw string) []string {
@@ -5799,19 +6213,100 @@ func firstNonBlank(values ...string) string {
 }
 
 type opsListResponse struct {
-	Items []struct {
-		OpID          string  `json:"opId"`
-		Path          string  `json:"path,omitempty"`
-		Action        string  `json:"action,omitempty"`
-		Provider      string  `json:"provider,omitempty"`
-		Status        string  `json:"status"`
-		AttemptCount  int     `json:"attemptCount"`
-		LastError     *string `json:"lastError,omitempty"`
-		CreatedAt     string  `json:"createdAt,omitempty"`
-		UpdatedAt     string  `json:"updatedAt,omitempty"`
-		CorrelationID string  `json:"correlationId,omitempty"`
-	} `json:"items"`
-	NextCursor *string `json:"nextCursor,omitempty"`
+	Items      []opsListItem `json:"items"`
+	NextCursor *string       `json:"nextCursor,omitempty"`
+}
+
+type opsListItem struct {
+	OpID          string  `json:"opId"`
+	Path          string  `json:"path,omitempty"`
+	Action        string  `json:"action,omitempty"`
+	Provider      string  `json:"provider,omitempty"`
+	Status        string  `json:"status"`
+	AttemptCount  int     `json:"attemptCount"`
+	LastError     *string `json:"lastError,omitempty"`
+	CreatedAt     string  `json:"createdAt,omitempty"`
+	UpdatedAt     string  `json:"updatedAt,omitempty"`
+	CorrelationID string  `json:"correlationId,omitempty"`
+}
+
+// deadLetterRefreshPlan exists only for a complete, validated server set.
+// Callers cannot accidentally prune from a partial response because no plan
+// is returned for a missing array, unsafe id, or duplicate id.
+type deadLetterRefreshPlan struct {
+	items      []opsListItem
+	targetDirs map[string]string
+}
+
+func validateDeadLetterRefreshPlan(record workspaceRecord, feed opsListResponse) (deadLetterRefreshPlan, error) {
+	if feed.Items == nil {
+		return deadLetterRefreshPlan{}, errors.New("dead-letter response is missing required items array")
+	}
+	plan := deadLetterRefreshPlan{
+		items:      feed.Items,
+		targetDirs: make(map[string]string, len(feed.Items)),
+	}
+	for _, item := range feed.Items {
+		opID := safeWritebackOpID(item.OpID)
+		if opID == "" {
+			return deadLetterRefreshPlan{}, fmt.Errorf(
+				"dead-letter response contains unsafe or missing opId %q",
+				strings.TrimSpace(item.OpID),
+			)
+		}
+		if _, exists := plan.targetDirs[opID]; exists {
+			return deadLetterRefreshPlan{}, fmt.Errorf("dead-letter response contains duplicate opId %q", opID)
+		}
+		targetDir := workspaceStateDirForDeadLetterPaths(record, item.Path)
+		if targetDir == "" {
+			targetDir = record.LocalDir
+		}
+		plan.targetDirs[opID] = targetDir
+	}
+	return plan, nil
+}
+
+func fetchAllDeadLetterOps(ctx context.Context, client *apiClient, workspaceID string) (opsListResponse, error) {
+	items := make([]opsListItem, 0)
+	cursor := ""
+	seenCursors := map[string]struct{}{}
+	for {
+		query := url.Values{
+			"status": []string{"dead_lettered"},
+			"limit":  []string{"200"},
+		}
+		if cursor != "" {
+			query.Set("cursor", cursor)
+		}
+		var page opsListResponse
+		if err := client.getJSON(
+			ctx,
+			fmt.Sprintf("/v1/workspaces/%s/ops?%s", url.PathEscape(workspaceID), query.Encode()),
+			&page,
+		); err != nil {
+			return opsListResponse{}, err
+		}
+		if page.Items == nil {
+			return opsListResponse{}, errors.New("dead-letter response is missing required items array")
+		}
+		items = append(items, page.Items...)
+
+		nextCursor := ""
+		if page.NextCursor != nil {
+			nextCursor = strings.TrimSpace(*page.NextCursor)
+		}
+		if nextCursor == "" {
+			return opsListResponse{Items: items}, nil
+		}
+		if nextCursor == cursor {
+			return opsListResponse{}, fmt.Errorf("dead-letter response repeated cursor %q", nextCursor)
+		}
+		if _, exists := seenCursors[nextCursor]; exists {
+			return opsListResponse{}, fmt.Errorf("dead-letter response cursor loop detected at %q", nextCursor)
+		}
+		seenCursors[nextCursor] = struct{}{}
+		cursor = nextCursor
+	}
 }
 
 // refreshDeadLetterMirror reconciles the local .relay/dead-letter/ directory
@@ -5832,31 +6327,23 @@ func refreshDeadLetterMirror(record workspaceRecord, serverOverride, tokenOverri
 		return err
 	}
 
-	var feed opsListResponse
-	if err := client.getJSON(
-		context.Background(),
-		fmt.Sprintf("/v1/workspaces/%s/ops?status=dead_lettered&limit=200", url.PathEscape(record.ID)),
-		&feed,
-	); err != nil {
+	feed, err := fetchAllDeadLetterOps(context.Background(), client, record.ID)
+	if err != nil {
+		return err
+	}
+	plan, err := validateDeadLetterRefreshPlan(record, feed)
+	if err != nil {
 		return err
 	}
 
-	dir := deadLetterDirFor(record.LocalDir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-
-	keep := make(map[string]struct{}, len(feed.Items))
 	baseURL := strings.TrimRight(client.baseURL, "/")
-	for _, item := range feed.Items {
+	for _, item := range plan.items {
 		opID := safeWritebackOpID(item.OpID)
-		if opID == "" {
-			if trimmed := strings.TrimSpace(item.OpID); trimmed != "" {
-				fmt.Fprintf(os.Stderr, "warning: skipping dead-letter op with unsafe id %q\n", trimmed)
-			}
-			continue
+		targetDir := plan.targetDirs[opID]
+		dir := deadLetterDirFor(targetDir)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
 		}
-		keep[opID] = struct{}{}
 		message := ""
 		if item.LastError != nil {
 			message = strings.TrimSpace(*item.LastError)
@@ -5887,27 +6374,31 @@ func refreshDeadLetterMirror(record workspaceRecord, serverOverride, tokenOverri
 	}
 
 	// Prune local payload records the server no longer reports as
-	// dead-lettered. Diagnostic sidecars (<opID>.error.json) are bound to
-	// their payload's lifecycle: they are skipped here and removed together
-	// with the payload, never evaluated as standalone payload records.
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
+	// dead-lettered, plus stale duplicates left at a different scope root.
+	// Diagnostic sidecars (<opID>.error.json) are bound to their payload's
+	// lifecycle and removed together with the payload.
+	for _, localDir := range workspaceStateDirs(record) {
+		dir := deadLetterDirFor(localDir)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
 		}
-		return err
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".error.json") {
-			continue
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".error.json") {
+				continue
+			}
+			opID := strings.TrimSuffix(name, ".json")
+			targetDir, retained := plan.targetDirs[opID]
+			if retained && filepath.Clean(targetDir) == filepath.Clean(localDir) {
+				continue
+			}
+			_ = os.Remove(filepath.Join(dir, name))
+			_ = os.Remove(deadLetterErrorPathFor(localDir, opID))
 		}
-		opID := strings.TrimSuffix(name, ".json")
-		if _, ok := keep[opID]; ok {
-			continue
-		}
-		_ = os.Remove(filepath.Join(dir, name))
-		_ = os.Remove(deadLetterErrorPathFor(record.LocalDir, opID))
 	}
 	return nil
 }
@@ -5969,12 +6460,12 @@ func runOpsReplay(args []string, stdin io.Reader, stdout io.Writer) error {
 	}
 	// Per contract §8.4, on successful replay the local mirror record is
 	// removed so the user's view stays in sync with the queue.
-	if record.LocalDir != "" {
-		path := filepath.Join(deadLetterDirFor(record.LocalDir), opID+".json")
+	for _, localDir := range workspaceStateDirs(record) {
+		path := filepath.Join(deadLetterDirFor(localDir), opID+".json")
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			fmt.Fprintf(stdout, "warning: replay queued but failed to remove %s: %v\n", path, err)
 		}
-		sidecar := deadLetterErrorPathFor(record.LocalDir, opID)
+		sidecar := deadLetterErrorPathFor(localDir, opID)
 		if err := os.Remove(sidecar); err != nil && !os.IsNotExist(err) {
 			fmt.Fprintf(stdout, "warning: replay queued but failed to remove %s: %v\n", sidecar, err)
 		}
@@ -6499,7 +6990,11 @@ func workspaceViewTarget(canonicalRoot, remotePath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	canonicalRemoteRoot, err := normalizeWorkspaceViewRemotePath(readMountRemoteRoot(canonicalRoot))
+	canonicalRemoteRootValue, ok := readMountRemoteRootIfPresent(canonicalRoot)
+	if !ok {
+		canonicalRemoteRootValue = "/"
+	}
+	canonicalRemoteRoot, err := normalizeWorkspaceViewRemotePath(canonicalRemoteRootValue)
 	if err != nil {
 		return "", err
 	}
@@ -6664,32 +7159,79 @@ func buildWorkspaceHealthReport(workspaceID string, record workspaceRecord) work
 	if report.LocalDir == "" {
 		return report
 	}
-	state := readWritebackStateBestEffort(report.LocalDir)
-	report.Status = strings.TrimSpace(state.Status)
-	report.LastSuccessfulReconcileAt = strings.TrimSpace(state.LastSuccessfulReconcileAt)
-	report.LastReconcileAt = strings.TrimSpace(state.LastReconcileAt)
-	report.EventListener = cloneSyncStateEventListener(state.EventListener)
-	if state.LastError != nil {
-		report.LastError = strings.TrimSpace(firstNonBlank(state.LastError.Message, state.LastError.Code))
+	statuses := map[string]struct{}{}
+	readinesses := map[string]struct{}{}
+	errorsSeen := map[string]struct{}{}
+	lastSuccessfulReconcileUnknown := false
+	lastReconcileUnknown := false
+	scopes := workspaceMountScopes(record)
+	for _, scope := range scopes {
+		localDir := scope.LocalDir
+		state := readWritebackStateBestEffort(localDir)
+		status := strings.TrimSpace(state.Status)
+		readiness := canonicalViewStatus(state)
+		if status != "" {
+			statuses[status] = struct{}{}
+		}
+		if readiness != "" {
+			readinesses[readiness] = struct{}{}
+		}
+		scopeHealth := workspaceScopeHealth{
+			RemoteRoot:                scope.RemotePath,
+			LocalDir:                  scope.LocalDir,
+			Status:                    status,
+			Readiness:                 readiness,
+			LastSuccessfulReconcileAt: strings.TrimSpace(state.LastSuccessfulReconcileAt),
+			LastReconcileAt:           strings.TrimSpace(state.LastReconcileAt),
+			EventListener:             cloneSyncStateEventListener(state.EventListener),
+		}
+		report.LastSuccessfulReconcileAt, lastSuccessfulReconcileUnknown = latestRFC3339Timestamp(
+			report.LastSuccessfulReconcileAt,
+			state.LastSuccessfulReconcileAt,
+			lastSuccessfulReconcileUnknown,
+		)
+		report.LastReconcileAt, lastReconcileUnknown = latestRFC3339Timestamp(
+			report.LastReconcileAt,
+			state.LastReconcileAt,
+			lastReconcileUnknown,
+		)
+		if state.LastError != nil {
+			if message := strings.TrimSpace(firstNonBlank(state.LastError.Message, state.LastError.Code)); message != "" {
+				errorsSeen[message] = struct{}{}
+				scopeHealth.LastError = message
+			}
+		}
+		report.Scopes = append(report.Scopes, scopeHealth)
+		// Each scoped loop owns an independent cursor. Within one root, retain
+		// the existing max(public state, private cursor) rule.
+		scopeStuckCount := len(state.IncrementalReadNotReadySince)
+		cursorStuckCount, backlogDraining := readWorkspaceMountCursorHealth(workspaceID, record, scope)
+		if cursorStuckCount > scopeStuckCount {
+			scopeStuckCount = cursorStuckCount
+		}
+		report.StuckEventCount += scopeStuckCount
+		report.IncrementalBacklogDraining = report.IncrementalBacklogDraining || backlogDraining
 	}
-	// Use the public sync state's not-ready set as the stuck-event baseline so
-	// the count is non-zero even when the private cursor files are absent or
-	// the first readable one lacks the field; then take the max with the
-	// private cursor health (which also carries the backlog-draining flag).
-	report.StuckEventCount = len(state.IncrementalReadNotReadySince)
-	cursorStuckCount, backlogDraining := readLocalMountCursorHealth(report.LocalDir)
-	if cursorStuckCount > report.StuckEventCount {
-		report.StuckEventCount = cursorStuckCount
+	// Outbox state can remain at the catalog root for compatibility even when
+	// active scoped loops own child roots. Sweep the complete deduplicated
+	// state-dir set so health never reports a clean queue by omission.
+	for _, localDir := range workspaceStateDirs(record) {
+		report.OutboxPending += countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "pending")).Count
+		report.OutboxFailed += countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "failed")).Count
+		report.OutboxAcked += countJSONFiles(filepath.Join(localDir, ".relay", "outbox", "acked")).Count
 	}
-	report.IncrementalBacklogDraining = backlogDraining
-	report.OutboxPending = countJSONFiles(filepath.Join(report.LocalDir, ".relay", "outbox", "pending"))
-	report.OutboxFailed = countJSONFiles(filepath.Join(report.LocalDir, ".relay", "outbox", "failed"))
-	report.OutboxAcked = countJSONFiles(filepath.Join(report.LocalDir, ".relay", "outbox", "acked"))
-	report.Views = buildWorkspaceViewHealth(record, state)
+	report.Status = joinSortedKeys(statuses)
+	report.Readiness = joinSortedKeys(readinesses)
+	report.LastError = joinSortedKeys(errorsSeen)
+	if len(scopes) == 1 {
+		report.EventListener = cloneSyncStateEventListener(report.Scopes[0].EventListener)
+		report.Scopes = nil
+	}
+	report.Views = buildWorkspaceViewHealth(record)
 	return report
 }
 
-func buildWorkspaceViewHealth(record workspaceRecord, state syncStateFile) []workspaceViewHealth {
+func buildWorkspaceViewHealth(record workspaceRecord) []workspaceViewHealth {
 	if len(record.Views) == 0 {
 		return nil
 	}
@@ -6698,6 +7240,10 @@ func buildWorkspaceViewHealth(record workspaceRecord, state syncStateFile) []wor
 		remotePath, err := normalizeWorkspaceViewRemotePath(view.RemotePath)
 		if err != nil {
 			remotePath = strings.TrimSpace(view.RemotePath)
+		}
+		var state syncStateFile
+		if scope, ok := workspaceMountScopeForRemotePath(record, remotePath); ok {
+			state = readWritebackStateBestEffort(scope.LocalDir)
 		}
 		report := workspaceViewHealth{
 			RemotePath:                remotePath,
@@ -6777,6 +7323,41 @@ func cloneSyncStateEventListener(listener *syncStateEventListener) *syncStateEve
 	return &clone
 }
 
+func latestRFC3339Timestamp(current, candidate string, unknown bool) (string, bool) {
+	if unknown {
+		return "", true
+	}
+	current = strings.TrimSpace(current)
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		return current, false
+	}
+	candidateTime, candidateErr := time.Parse(time.RFC3339Nano, candidate)
+	if candidateErr != nil {
+		// One malformed child makes the aggregate latest time unknown. Picking
+		// a parseable sibling would present a confident answer from partial
+		// persisted state.
+		return "", true
+	}
+	currentTime, currentErr := time.Parse(time.RFC3339Nano, current)
+	if current != "" && currentErr != nil {
+		return "", true
+	}
+	if current == "" || candidateTime.After(currentTime) {
+		return candidate, false
+	}
+	return current, false
+}
+
+func joinSortedKeys(values map[string]struct{}) string {
+	keys := make([]string, 0, len(values))
+	for value := range values {
+		keys = append(keys, value)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, "; ")
+}
+
 func readWritebackStateBestEffort(localDir string) syncStateFile {
 	state, err := readWritebackState(localDir)
 	if err == nil {
@@ -6785,34 +7366,37 @@ func readWritebackStateBestEffort(localDir string) syncStateFile {
 	return syncStateFile{}
 }
 
-func readLocalMountCursorHealth(localDir string) (stuckCount int, backlogDraining bool) {
-	for _, path := range []string{
-		filepath.Join(localDir, ".relayfile-mount-state.json"),
-		filepath.Join(localDir, mountsync.DefaultMountStateDirName, "state.json"),
-	} {
-		payload, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		var state struct {
-			IncrementalReadNotReadySince map[string]string `json:"incrementalReadNotReadySince"`
-			IncrementalBacklogDraining   bool              `json:"incrementalBacklogDraining"`
-		}
-		if json.Unmarshal(payload, &state) != nil {
-			continue
-		}
-		if count := len(state.IncrementalReadNotReadySince); count > stuckCount {
-			stuckCount = count
-		}
-		backlogDraining = backlogDraining || state.IncrementalBacklogDraining
+func readWorkspaceMountCursorHealth(workspaceID string, record workspaceRecord, scope mountscope.Scope) (stuckCount int, backlogDraining bool) {
+	stateFile, err := workspaceMountStateFile(workspaceID, record, scope)
+	if err != nil {
+		return 0, false
 	}
-	return stuckCount, backlogDraining
+	payload, err := os.ReadFile(stateFile)
+	if err != nil {
+		return 0, false
+	}
+	var state struct {
+		IncrementalReadNotReadySince map[string]string `json:"incrementalReadNotReadySince"`
+		IncrementalBacklogDraining   bool              `json:"incrementalBacklogDraining"`
+	}
+	if json.Unmarshal(payload, &state) != nil {
+		return 0, false
+	}
+	return len(state.IncrementalReadNotReadySince), state.IncrementalBacklogDraining
 }
 
-func countJSONFiles(dir string) int {
+type observedFileCount struct {
+	Count int
+	Err   error
+}
+
+func countJSONFiles(dir string) observedFileCount {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return 0
+		if errors.Is(err, os.ErrNotExist) {
+			return observedFileCount{}
+		}
+		return observedFileCount{Err: err}
 	}
 	count := 0
 	for _, entry := range entries {
@@ -6820,7 +7404,7 @@ func countJSONFiles(dir string) int {
 			count++
 		}
 	}
-	return count
+	return observedFileCount{Count: count}
 }
 
 func printWorkspaceHealthReport(stdout io.Writer, report workspaceHealthReport) {
@@ -6835,12 +7419,20 @@ func printWorkspaceHealthReport(stdout io.Writer, report workspaceHealthReport) 
 	}
 	fmt.Fprintf(stdout, "local mirror: %s\n", report.LocalDir)
 	fmt.Fprintf(stdout, "status: %s\n", defaultIfBlank(report.Status, "-"))
+	fmt.Fprintf(stdout, "readiness: %s\n", defaultIfBlank(report.Readiness, "-"))
 	fmt.Fprintf(stdout, "last successful reconcile: %s\n", defaultIfBlank(report.LastSuccessfulReconcileAt, "-"))
 	fmt.Fprintf(stdout, "last reconcile: %s\n", defaultIfBlank(report.LastReconcileAt, "-"))
 	fmt.Fprintf(stdout, "stuck events: %d\n", report.StuckEventCount)
 	fmt.Fprintf(stdout, "outbox: pending=%d failed=%d acked=%d\n", report.OutboxPending, report.OutboxFailed, report.OutboxAcked)
 	if report.EventListener != nil {
 		fmt.Fprintf(stdout, "event listener: %s (%s)\n", report.EventListener.Status, report.EventListener.Mode)
+	}
+	for _, scope := range report.Scopes {
+		fmt.Fprintf(stdout, "scope %s: %s; readiness %s", scope.RemoteRoot, defaultIfBlank(scope.Status, "-"), defaultIfBlank(scope.Readiness, "-"))
+		if scope.EventListener != nil {
+			fmt.Fprintf(stdout, "; event listener %s (%s)", scope.EventListener.Status, scope.EventListener.Mode)
+		}
+		fmt.Fprintln(stdout)
 	}
 	for _, view := range report.Views {
 		fmt.Fprintf(stdout, "view %s: %s\n", view.RemotePath, view.Status)
@@ -7238,7 +7830,7 @@ func runMount(args []string) error {
 			}
 		}
 	}
-	if err := validateMountResetMode(absLocalDir, resolvedLocalLayout, *resetAfterClobber); err != nil {
+	if err := validateMountResetMode(absLocalDir, resolvedLocalLayout, *resetAfterClobber, effectiveRemotePaths...); err != nil {
 		return err
 	}
 	if strings.EqualFold(strings.TrimSpace(*mode), "fuse") || boolEnv("RELAYFILE_MOUNT_FUSE", false) {
@@ -7293,10 +7885,17 @@ func runMount(args []string) error {
 	// inspect every root without authorizing mutation: a reset that recovers
 	// only the catalog root would report success while child roots remain
 	// clobbered.
-	if err := preflightMountRootInvariant(absLocalDir, *resetAfterClobber && resolvedLocalLayout == mountscope.LayoutExact); err != nil {
+	hasScopedChild := false
+	for _, scope := range mountScopes {
+		if mountscope.IsScopedChild(resolvedLocalLayout, scope.RemotePath) {
+			hasScopedChild = true
+			break
+		}
+	}
+	if err := preflightMountRootInvariant(absLocalDir, *resetAfterClobber && !hasScopedChild); err != nil {
 		return err
 	}
-	if resolvedLocalLayout == mountscope.LayoutScoped {
+	if hasScopedChild {
 		for _, scope := range mountScopes {
 			if scope.LocalDir == absLocalDir {
 				continue
@@ -7314,7 +7913,7 @@ func runMount(args []string) error {
 	// Validate and remove only provably generated catalog artifacts before
 	// persisting scoped topology. An unsafe artifact refusal must leave both
 	// the filesystem and the prior workspace record unchanged.
-	if resolvedLocalLayout == mountscope.LayoutScoped {
+	if hasScopedChild {
 		if err := prepareScopedCatalogRoot(absLocalDir); err != nil {
 			return err
 		}
@@ -7352,7 +7951,7 @@ func runMount(args []string) error {
 	if _, err := upsertWorkspaceDetails(record); err != nil {
 		return err
 	}
-	if err := ensureMirrorLayoutForTopology(absLocalDir, resolvedLocalLayout); err != nil {
+	if err := ensureMirrorLayoutForTopology(absLocalDir, resolvedLocalLayout, effectiveRemotePaths...); err != nil {
 		return err
 	}
 	for _, scope := range mountScopes {
@@ -7418,7 +8017,7 @@ func runMount(args []string) error {
 			WorkspaceID:               workspaceID,
 			RemoteRoot:                scope.RemotePath,
 			EventProvider:             strings.TrimSpace(*eventProvider),
-			ScopedChild:               resolvedLocalLayout == mountscope.LayoutScoped,
+			ScopedChild:               mountscope.IsScopedChild(resolvedLocalLayout, scope.RemotePath),
 			LocalRoot:                 scope.LocalDir,
 			StateFile:                 strings.TrimSpace(*stateFile),
 			StateDir:                  strings.TrimSpace(*stateDir),
@@ -7460,10 +8059,8 @@ func runMount(args []string) error {
 	})
 }
 
-// Scoped runtime state is implemented below this CLI boundary, but its
-// operator surfaces are not yet complete. Refuse every route that can select
-// scoped layout (flag, environment, or recorded catalog inheritance) until
-// status/list/retry can see every scoped child state location.
+// resolveCLIRequestedLocalLayout gives the explicit flag precedence over the
+// environment and persisted topology, then validates the selected layout.
 func resolveCLIRequestedLocalLayout(flagValue, envValue, recordedValue string, flagProvided bool) (string, error) {
 	resolved := flagValue
 	if !flagProvided {
@@ -7476,9 +8073,6 @@ func resolveCLIRequestedLocalLayout(flagValue, envValue, recordedValue string, f
 	resolved, err := mountscope.ResolveLayout(resolved)
 	if err != nil {
 		return "", fmt.Errorf("resolve local layout: %w", err)
-	}
-	if resolved == mountscope.LayoutScoped {
-		return "", fmt.Errorf("--local-layout=%s is temporarily unavailable until scoped operator surfaces are ready; use --local-layout=%s", mountscope.LayoutScoped, mountscope.LayoutExact)
 	}
 	return resolved, nil
 }
@@ -9083,10 +9677,10 @@ func runStatus(args []string, stdout io.Writer) error {
 		return err
 	}
 	workspaceID := commandClient.workspaceID
-	persistedStallReason := readPersistedStallReason(record.LocalDir)
-	snapshot := buildSyncStateSnapshot(status, workspaceID, defaultMountMode, defaultMountInterval, record.LocalDir, readDaemonPID(record.LocalDir), persistedStallReason)
+	snapshot := buildWorkspaceSyncStateSnapshot(status, workspaceID, record)
+	persistedStallReason := snapshot.StallReason
 	if *jsonOutput {
-		return writeJSON(stdout, snapshot)
+		return writeJSON(stdout, workspaceSyncStatusJSON(snapshot, record))
 	}
 	workspaceLabel := workspaceID
 	if strings.TrimSpace(record.Name) != "" && record.Name != workspaceID {
@@ -9198,6 +9792,177 @@ func readPersistedStallReason(localDir string) string {
 		return ""
 	}
 	return strings.TrimSpace(snapshot.StallReason)
+}
+
+func buildWorkspaceSyncStateSnapshot(status syncStatusResponse, workspaceID string, record workspaceRecord) syncStateFile {
+	localRoot := strings.TrimSpace(record.LocalDir)
+	snapshot := buildSyncStateSnapshot(status, workspaceID, defaultMountMode, defaultMountInterval, localRoot, readDaemonPID(localRoot), "")
+	if strings.TrimSpace(record.LocalLayout) == mountscope.LayoutExact {
+		if runtimeRoot, ok := readMountRemoteRootIfPresent(localRoot); ok {
+			snapshot.RemoteRoot = runtimeRoot
+		} else {
+			snapshot.RemoteRoot = mountscope.NormalizePaths(record.RemotePaths, "/")[0]
+		}
+	}
+	snapshot.PendingWriteback = 0
+	snapshot.PendingConflicts = 0
+	snapshot.DeniedPaths = 0
+	snapshot.FailedWritebacks = 0
+	snapshot.StallReason = ""
+	snapshot.Guards = nil
+	snapshot.Bootstrap = nil
+
+	stallReasons := map[string]struct{}{}
+	for _, scope := range workspaceMountScopes(record) {
+		localDir := scope.LocalDir
+		local := buildSyncStateSnapshot(syncStatusResponse{}, workspaceID, defaultMountMode, defaultMountInterval, localDir, 0, readPersistedStallReason(localDir))
+		if stateFile, err := workspaceMountStateFile(workspaceID, record, scope); err == nil {
+			local.PendingWriteback = countPendingTrackedFilesAt(stateFile)
+		}
+		snapshot.PendingWriteback += local.PendingWriteback
+		snapshot.PendingConflicts += local.PendingConflicts
+		snapshot.DeniedPaths += local.DeniedPaths
+		snapshot.FailedWritebacks += local.FailedWritebacks
+		if local.StallReason != "" {
+			stallReasons[local.StallReason] = struct{}{}
+		}
+		snapshot.Guards = mergeSyncStateGuards(snapshot.Guards, local.Guards)
+		snapshot.Bootstrap = mergeSyncStateBootstrap(snapshot.Bootstrap, local.Bootstrap)
+	}
+	reasons := make([]string, 0, len(stallReasons))
+	for reason := range stallReasons {
+		reasons = append(reasons, reason)
+	}
+	sort.Strings(reasons)
+	snapshot.StallReason = strings.Join(reasons, "; ")
+	if strings.TrimSpace(record.LocalLayout) == mountscope.LayoutScoped {
+		health := buildWorkspaceHealthReport(workspaceID, record)
+		snapshot.Status = health.Status
+		snapshot.LastReconcileAt = health.LastReconcileAt
+		snapshot.LastSuccessfulReconcileAt = health.LastSuccessfulReconcileAt
+		if health.LastError == "" {
+			snapshot.LastError = nil
+		} else {
+			snapshot.LastError = &statusError{
+				Kind:    "scoped_children",
+				Message: health.LastError,
+				At:      health.LastReconcileAt,
+			}
+		}
+	}
+	return snapshot
+}
+
+func workspaceSyncStatusJSON(snapshot syncStateFile, record workspaceRecord) any {
+	health := buildWorkspaceHealthReport(snapshot.WorkspaceID, record)
+	common := workspaceSyncStatusCommon{
+		WorkspaceID:                  snapshot.WorkspaceID,
+		Mode:                         snapshot.Mode,
+		Status:                       snapshot.Status,
+		Readiness:                    health.Readiness,
+		LastReconcileAt:              snapshot.LastReconcileAt,
+		LastSuccessfulReconcileAt:    snapshot.LastSuccessfulReconcileAt,
+		LastEventAt:                  snapshot.LastEventAt,
+		IntervalMs:                   snapshot.IntervalMs,
+		Providers:                    snapshot.Providers,
+		PendingWriteback:             snapshot.PendingWriteback,
+		PendingConflicts:             snapshot.PendingConflicts,
+		DeniedPaths:                  snapshot.DeniedPaths,
+		FailedWritebacks:             snapshot.FailedWritebacks,
+		StallReason:                  snapshot.StallReason,
+		LastError:                    snapshot.LastError,
+		IncrementalReadNotReadySince: snapshot.IncrementalReadNotReadySince,
+		Daemon:                       snapshot.Daemon,
+		Guards:                       snapshot.Guards,
+		Bootstrap:                    snapshot.Bootstrap,
+	}
+	switch strings.TrimSpace(record.LocalLayout) {
+	case mountscope.LayoutExact:
+		root := strings.TrimSpace(snapshot.RemoteRoot)
+		if root == "" {
+			root = mountscope.NormalizePaths(record.RemotePaths, "/")[0]
+		}
+		return exactWorkspaceSyncStatus{
+			workspaceSyncStatusCommon: common,
+			LocalLayout:               mountscope.LayoutExact,
+			RemoteRoot:                root,
+		}
+	case mountscope.LayoutScoped:
+		return scopedWorkspaceSyncStatus{
+			workspaceSyncStatusCommon: common,
+			LocalLayout:               mountscope.LayoutScoped,
+			RemoteRoots:               mountscope.NormalizePaths(record.RemotePaths, "/"),
+			Scopes:                    health.Scopes,
+		}
+	default:
+		return unknownWorkspaceSyncStatus{
+			workspaceSyncStatusCommon: common,
+			LocalLayout:               "unknown",
+		}
+	}
+}
+
+func mergeSyncStateBootstrap(current, next *syncStateBootstrap) *syncStateBootstrap {
+	if next == nil {
+		return current
+	}
+	if current == nil {
+		copy := *next
+		return &copy
+	}
+	current.FilesSynced += next.FilesSynced
+	current.FilesTotal += next.FilesTotal
+	if current.Phase == "" {
+		current.Phase = next.Phase
+	} else if next.Phase != "" && next.Phase != current.Phase {
+		current.Phase = "multiple"
+	}
+	if current.StartedAt == "" || (next.StartedAt != "" && next.StartedAt < current.StartedAt) {
+		current.StartedAt = next.StartedAt
+	}
+	return current
+}
+
+func mergeSyncStateGuards(current, next *syncStateGuards) *syncStateGuards {
+	if next == nil {
+		return current
+	}
+	if current == nil {
+		copy := *next
+		if next.Circuit != nil {
+			circuit := *next.Circuit
+			copy.Circuit = &circuit
+		}
+		return &copy
+	}
+	current.SkippedOversizeWriteback += next.SkippedOversizeWriteback
+	current.DeniedRootTarget += next.DeniedRootTarget
+	current.SnapshotDeleteBlocked += next.SnapshotDeleteBlocked
+	current.CircuitOpenEvents += next.CircuitOpenEvents
+	current.TombstonesPending += next.TombstonesPending
+	current.TombstonesConfirmed += next.TombstonesConfirmed
+	current.TombstonesAgedOut += next.TombstonesAgedOut
+	current.PathCollisionQuarantined += next.PathCollisionQuarantined
+	if current.LastAppliedRevision == "" {
+		current.LastAppliedRevision = next.LastAppliedRevision
+	} else if next.LastAppliedRevision != "" && next.LastAppliedRevision != current.LastAppliedRevision {
+		current.LastAppliedRevision = "multiple"
+	}
+	if next.Circuit != nil && current.Circuit == nil {
+		circuit := *next.Circuit
+		current.Circuit = &circuit
+	} else if next.Circuit != nil {
+		current.Circuit.Open = current.Circuit.Open || next.Circuit.Open
+		current.Circuit.OpenEvents += next.Circuit.OpenEvents
+		current.Circuit.Failures += next.Circuit.Failures
+		if current.Circuit.OpenedAt == "" || (next.Circuit.OpenedAt != "" && next.Circuit.OpenedAt < current.Circuit.OpenedAt) {
+			current.Circuit.OpenedAt = next.Circuit.OpenedAt
+		}
+		if next.Circuit.NextRetry > current.Circuit.NextRetry {
+			current.Circuit.NextRetry = next.Circuit.NextRetry
+		}
+	}
+	return current
 }
 
 func statusAuthLine(localDir string, now time.Time) string {
@@ -11577,18 +12342,19 @@ func buildSyncStateSnapshot(status syncStatusResponse, workspaceID, mode string,
 	var pendingConflicts, deniedPaths int
 	if strings.TrimSpace(localDir) != "" {
 		localState = readWritebackStateBestEffort(localDir)
-		pendingConflicts = countFilesInDir(filepath.Join(localDir, ".relay", "conflicts"))
+		pendingConflicts = countFilesInDir(filepath.Join(localDir, ".relay", "conflicts")).Count
 		deniedPaths = countLines(filepath.Join(localDir, ".relay", "permissions-denied.log"))
 	}
+	remoteRoot, _ := readMountRemoteRootIfPresent(localDir)
 	snapshot := syncStateFile{
 		WorkspaceID:                  workspaceID,
-		RemoteRoot:                   readMountRemoteRoot(localDir),
+		RemoteRoot:                   remoteRoot,
 		Mode:                         defaultIfBlank(mode, defaultMountMode),
 		Status:                       strings.TrimSpace(localState.Status),
 		IntervalMs:                   interval.Milliseconds(),
 		LastReconcileAt:              strings.TrimSpace(localState.LastReconcileAt),
 		LastSuccessfulReconcileAt:    strings.TrimSpace(localState.LastSuccessfulReconcileAt),
-		PendingWriteback:             countDirtyTrackedFiles(localDir),
+		PendingWriteback:             countPendingTrackedFiles(localDir),
 		PendingConflicts:             pendingConflicts,
 		DeniedPaths:                  deniedPaths,
 		FailedWritebacks:             readPersistedFailedWritebacks(localDir),
@@ -11830,35 +12596,48 @@ func uint64FromJSONValue(value any) uint64 {
 	return 0
 }
 
-func countDirtyTrackedFiles(localDir string) int {
+func countPendingTrackedFiles(localDir string) int {
 	if localDir == "" {
 		return 0
 	}
-	var state struct {
-		Files map[string]struct {
-			Dirty bool `json:"dirty"`
-		} `json:"files"`
-	}
-	payload, err := os.ReadFile(filepath.Join(localDir, ".relayfile-mount-state.json"))
-	if err != nil {
-		return 0
-	}
-	if err := json.Unmarshal(payload, &state); err != nil {
-		return 0
-	}
-	count := 0
-	for _, tracked := range state.Files {
-		if tracked.Dirty {
-			count++
-		}
-	}
+	return countPendingTrackedFilesAt(filepath.Join(localDir, mountsync.LegacyMountStateFileName))
+}
+
+func countPendingTrackedFilesAt(stateFile string) int {
+	count, _ := pendingTrackedFileCountAt(stateFile)
 	return count
 }
 
-func countFilesInDir(dir string) int {
+func pendingTrackedFileCountAt(stateFile string) (int, error) {
+	var state struct {
+		Files map[string]mountsync.TrackedFileState `json:"files"`
+	}
+	payload, err := os.ReadFile(stateFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	if err := json.Unmarshal(payload, &state); err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, tracked := range state.Files {
+		if tracked.HasPendingWriteback() {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func countFilesInDir(dir string) observedFileCount {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return 0
+		if errors.Is(err, os.ErrNotExist) {
+			return observedFileCount{}
+		}
+		return observedFileCount{Err: err}
 	}
 	count := 0
 	for _, entry := range entries {
@@ -11866,14 +12645,18 @@ func countFilesInDir(dir string) int {
 			if entry.Name() == "resolved" {
 				continue
 			}
-			count += countFilesInDir(filepath.Join(dir, entry.Name()))
+			child := countFilesInDir(filepath.Join(dir, entry.Name()))
+			count += child.Count
+			if child.Err != nil {
+				return observedFileCount{Count: count, Err: child.Err}
+			}
 			continue
 		}
 		if !entry.IsDir() {
 			count++
 		}
 	}
-	return count
+	return observedFileCount{Count: count}
 }
 
 func countLines(path string) int {
@@ -12555,20 +13338,21 @@ func loadSavedConnectionID(localDir, provider string) string {
 	return strings.TrimSpace(state.ConnectionID)
 }
 
-func markProviderDisconnected(localDir, provider, localLayout string) error {
+func markProviderDisconnected(record workspaceRecord, provider string) error {
+	plan, err := prepareProviderDisconnect(record, provider)
+	if err != nil {
+		return err
+	}
+	return markProviderDisconnectedWithPlan(record, provider, plan)
+}
+
+func markProviderDisconnectedWithPlan(record workspaceRecord, provider string, plan providerDisconnectPlan) error {
+	localDir := strings.TrimSpace(record.LocalDir)
 	if localDir == "" {
 		return nil
 	}
-	providerPath := filepath.Join(localDir, providerRootDir(provider))
-	if strings.TrimSpace(localLayout) == mountscope.LayoutScoped {
-		// Scoped child roots own runtime state under .relay. Remove only
-		// mirrored provider content; recursively deleting the child would
-		// destroy outbox/dead-letter/retry state while a syncer may use it.
-		if err := removeScopedProviderContent(providerPath); err != nil {
-			return err
-		}
-	} else {
-		_ = os.RemoveAll(providerPath)
+	if err := removeProviderMirrorWithPlan(plan); err != nil {
+		return err
 	}
 	if err := ensureMountRuntimeLayout(localDir); err != nil {
 		return err
@@ -12589,35 +13373,484 @@ func markProviderDisconnected(localDir, provider, localLayout string) error {
 	return nil
 }
 
-func removeScopedProviderContent(root string) error {
-	entries, err := os.ReadDir(root)
-	if errors.Is(err, os.ErrNotExist) {
+type providerDisconnectPlan struct {
+	cleanScopeDirs    []string
+	removeSubtrees    []string
+	stateDirs         []string
+	wholeProviderDirs []string
+	stateFiles        []string
+	stateSources      []providerDisconnectStateSource
+	unknownStateRoots []string
+	deletions         []providerDisconnectDeletion
+}
+
+type providerDisconnectDeletion struct {
+	path        string
+	kind        string
+	fingerprint string
+}
+
+type providerDisconnectStateSource struct {
+	stateFile   string
+	localDir    string
+	remoteRoot  string
+	scopedChild bool
+}
+
+func planProviderDisconnect(record workspaceRecord, provider string) (providerDisconnectPlan, error) {
+	localRoot := strings.TrimSpace(record.LocalDir)
+	if localRoot == "" {
+		return providerDisconnectPlan{}, nil
+	}
+	providerRoot := mountscope.NormalizePath("/" + providerRootDir(provider))
+	var plan providerDisconnectPlan
+	addScopeState := func(scope mountscope.Scope) error {
+		stateFiles, err := workspaceMountStateFilesForRecord(record, scope)
+		if err != nil {
+			return err
+		}
+		if len(stateFiles) == 0 {
+			plan.unknownStateRoots = append(plan.unknownStateRoots, scope.LocalDir)
+			return nil
+		}
+		for _, stateFile := range stateFiles {
+			plan.stateFiles = append(plan.stateFiles, stateFile)
+			plan.stateSources = append(plan.stateSources, providerDisconnectStateSource{
+				stateFile:   stateFile,
+				localDir:    scope.LocalDir,
+				remoteRoot:  scope.RemotePath,
+				scopedChild: mountscope.IsScopedChild(record.LocalLayout, scope.RemotePath),
+			})
+		}
 		return nil
 	}
+	if strings.TrimSpace(record.LocalLayout) != mountscope.LayoutScoped {
+		scope := workspaceMountScopes(record)[0]
+		if err := addScopeState(scope); err != nil {
+			return providerDisconnectPlan{}, err
+		}
+		plan.removeSubtrees = append(plan.removeSubtrees, filepath.Join(localRoot, filepath.FromSlash(strings.TrimPrefix(providerRoot, "/"))))
+		plan.stateDirs = append(plan.stateDirs, localRoot)
+		return plan, nil
+	}
+
+	// Scoped mounts can retain compatibility dead letters at the catalog
+	// root, including bulk operations spanning more than one child. Inspect
+	// that root with provider filtering before any destructive disconnect.
+	plan.stateDirs = append(plan.stateDirs, localRoot)
+	matchedScope := false
+	for _, scope := range workspaceMountScopes(record) {
+		switch {
+		case mountscope.IsWithin(providerRoot, scope.RemotePath):
+			// This scope's .relay directory contains conflicts, dead letters,
+			// outbox entries, and cursor state. Remove only mirrored content.
+			matchedScope = true
+			plan.cleanScopeDirs = append(plan.cleanScopeDirs, scope.LocalDir)
+			plan.stateDirs = append(plan.stateDirs, scope.LocalDir)
+			plan.wholeProviderDirs = append(plan.wholeProviderDirs, scope.LocalDir)
+			if err := addScopeState(scope); err != nil {
+				return providerDisconnectPlan{}, err
+			}
+		case mountscope.IsWithin(scope.RemotePath, providerRoot):
+			// A broader scope (normally "/") keeps its runtime state outside
+			// the provider subtree, so the provider subtree is safe to remove.
+			matchedScope = true
+			relative := strings.TrimPrefix(providerRoot, scope.RemotePath)
+			relative = strings.TrimPrefix(relative, "/")
+			plan.removeSubtrees = append(plan.removeSubtrees, filepath.Join(scope.LocalDir, filepath.FromSlash(relative)))
+			plan.stateDirs = append(plan.stateDirs, scope.LocalDir)
+			if err := addScopeState(scope); err != nil {
+				return providerDisconnectPlan{}, err
+			}
+		}
+	}
+	if !matchedScope {
+		legacyStateFile := filepath.Join(localRoot, mountsync.LegacyMountStateFileName)
+		plan.removeSubtrees = append(plan.removeSubtrees, filepath.Join(localRoot, filepath.FromSlash(strings.TrimPrefix(providerRoot, "/"))))
+		plan.stateDirs = append(plan.stateDirs, localRoot)
+		plan.stateFiles = append(plan.stateFiles, legacyStateFile)
+		plan.stateSources = append(plan.stateSources, providerDisconnectStateSource{
+			stateFile:  legacyStateFile,
+			localDir:   localRoot,
+			remoteRoot: "/",
+		})
+	}
+	return plan, nil
+}
+
+func workspaceMountStateFilesForRecord(record workspaceRecord, scope mountscope.Scope) ([]string, error) {
+	// Mounts key private state by the runtime workspace ID passed to Syncer.
+	// Delegated Cloud records persist that identity as RelayWorkspaceID, while
+	// older/direct records may have used ID or Name. Inspect every distinct
+	// identity that can have keyed this record rather than guessing an order.
+	workspaceIDs := []string{record.RelayWorkspaceID, record.ID, record.Name}
+	seenIDs := map[string]struct{}{}
+	seenPaths := map[string]struct{}{}
+	var stateFiles []string
+	for _, workspaceID := range workspaceIDs {
+		workspaceID = strings.TrimSpace(workspaceID)
+		if workspaceID == "" {
+			continue
+		}
+		if _, ok := seenIDs[workspaceID]; ok {
+			continue
+		}
+		seenIDs[workspaceID] = struct{}{}
+		stateFile, err := workspaceMountStateFile(workspaceID, record, scope)
+		if err != nil {
+			return nil, err
+		}
+		stateFile = filepath.Clean(stateFile)
+		if _, ok := seenPaths[stateFile]; ok {
+			continue
+		}
+		info, err := os.Stat(stateFile)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("inspect mount state %s: %w", stateFile, err)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("mount state path %s is not a regular file", stateFile)
+		}
+		seenPaths[stateFile] = struct{}{}
+		stateFiles = append(stateFiles, stateFile)
+	}
+	return stateFiles, nil
+}
+
+func preflightProviderDisconnect(record workspaceRecord, provider string) error {
+	_, err := prepareProviderDisconnect(record, provider)
+	return err
+}
+
+func prepareProviderDisconnect(record workspaceRecord, provider string) (providerDisconnectPlan, error) {
+	if strings.TrimSpace(record.LocalDir) == "" {
+		return providerDisconnectPlan{}, nil
+	}
+	plan, err := planProviderDisconnect(record, provider)
+	if err != nil {
+		return providerDisconnectPlan{}, fmt.Errorf("resolve mount state before disconnecting %s: %w", provider, err)
+	}
+	running, stalePID, err := runningMountDaemons(record.LocalDir, record.ID, record.Name)
+	if err != nil {
+		return providerDisconnectPlan{}, fmt.Errorf("check running mounts before disconnecting %s: %w", provider, err)
+	}
+	if len(running) > 0 {
+		return providerDisconnectPlan{}, fmt.Errorf(
+			"refusing to disconnect %s while workspace %s has a running mount (%s); stop the mount before disconnecting",
+			provider,
+			firstNonBlank(record.Name, record.ID),
+			formatDaemonPIDs(running),
+		)
+	}
+	if stalePID != 0 {
+		return providerDisconnectPlan{}, fmt.Errorf(
+			"refusing to disconnect %s while workspace %s has unverified mount state (pid %d); confirm the mount is stopped and clear %s before disconnecting",
+			provider,
+			firstNonBlank(record.Name, record.ID),
+			stalePID,
+			mountPIDFile(record.LocalDir),
+		)
+	}
+	if err := refuseProviderDisconnectWithPendingState(provider, plan); err != nil {
+		return providerDisconnectPlan{}, err
+	}
+	if err := captureProviderDisconnectDeletions(&plan); err != nil {
+		return providerDisconnectPlan{}, fmt.Errorf("snapshot local files before disconnecting %s: %w", provider, err)
+	}
+	return plan, nil
+}
+
+func removeProviderMirror(record workspaceRecord, provider string) error {
+	plan, err := prepareProviderDisconnect(record, provider)
 	if err != nil {
 		return err
 	}
-	for _, entry := range entries {
-		if entry.Name() == mountscope.RuntimeTopLevel {
+	return removeProviderMirrorWithPlan(plan)
+}
+
+func removeProviderMirrorWithPlan(plan providerDisconnectPlan) error {
+	// Verify the complete allow-list before deleting any entry. The plan is a
+	// snapshot, not a rule: paths created after preflight are never selected.
+	for _, deletion := range plan.deletions {
+		kind, fingerprint, err := providerDisconnectPathIdentity(deletion.path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return err
+		}
+		if kind != deletion.kind || fingerprint != deletion.fingerprint {
+			return fmt.Errorf(
+				"refusing local disconnect cleanup because %s changed after preflight",
+				deletion.path,
+			)
+		}
+	}
+	for _, deletion := range plan.deletions {
+		err := os.Remove(deletion.path)
+		if deletion.kind == "directory" && errors.Is(err, syscall.ENOTEMPTY) {
+			// A child created after preflight is intentionally absent from the
+			// deletion allow-list. Preserve that arrival and keep committing
+			// the validated cleanup instead of stranding the disconnect after
+			// the Cloud DELETE has already succeeded.
 			continue
 		}
-		path := filepath.Join(root, entry.Name())
-		if entry.IsDir() {
-			if err := removeScopedProviderContent(path); err != nil {
-				return err
-			}
-			// Remove now-empty mirror directories, but retain any directory
-			// that still contains a nested runtime tree.
-			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTEMPTY) {
-				return err
-			}
-			continue
-		}
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
 	return nil
+}
+
+func captureProviderDisconnectDeletions(plan *providerDisconnectPlan) error {
+	if plan == nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	addTree := func(root string, includeRoot, preserveInfrastructure bool) error {
+		root = filepath.Clean(strings.TrimSpace(root))
+		if root == "." {
+			return nil
+		}
+		return filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+			if err != nil {
+				if path == root && errors.Is(err, os.ErrNotExist) {
+					return nil
+				}
+				return err
+			}
+			if path == root && !includeRoot {
+				return nil
+			}
+			if preserveInfrastructure && path != root {
+				rel, relErr := filepath.Rel(root, path)
+				if relErr != nil {
+					return relErr
+				}
+				topLevel := strings.SplitN(rel, string(os.PathSeparator), 2)[0]
+				if topLevel == ".relay" || mountscope.IsInfrastructureTopLevelAt(root, topLevel) {
+					if entry.IsDir() && rel == topLevel {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+			}
+			cleaned := filepath.Clean(path)
+			if _, ok := seen[cleaned]; ok {
+				return nil
+			}
+			kind, fingerprint, identityErr := providerDisconnectPathIdentity(cleaned)
+			if identityErr != nil {
+				return identityErr
+			}
+			seen[cleaned] = struct{}{}
+			plan.deletions = append(plan.deletions, providerDisconnectDeletion{
+				path:        cleaned,
+				kind:        kind,
+				fingerprint: fingerprint,
+			})
+			return nil
+		})
+	}
+	for _, scopeDir := range plan.cleanScopeDirs {
+		if err := addTree(scopeDir, false, true); err != nil {
+			return err
+		}
+	}
+	for _, subtree := range plan.removeSubtrees {
+		if err := addTree(subtree, true, false); err != nil {
+			return err
+		}
+	}
+	sort.Slice(plan.deletions, func(i, j int) bool {
+		leftDepth := strings.Count(filepath.Clean(plan.deletions[i].path), string(os.PathSeparator))
+		rightDepth := strings.Count(filepath.Clean(plan.deletions[j].path), string(os.PathSeparator))
+		if leftDepth != rightDepth {
+			return leftDepth > rightDepth
+		}
+		return plan.deletions[i].path > plan.deletions[j].path
+	})
+	return nil
+}
+
+func providerDisconnectPathIdentity(path string) (string, string, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", "", err
+	}
+	switch {
+	case info.IsDir():
+		return "directory", "", nil
+	case info.Mode().IsRegular():
+		hash, hashErr := hashLocalWritebackFile(path)
+		return "file", hash, hashErr
+	case info.Mode()&os.ModeSymlink != 0:
+		target, readErr := os.Readlink(path)
+		if readErr != nil {
+			return "", "", readErr
+		}
+		sum := sha256.Sum256([]byte(target))
+		return "symlink", hex.EncodeToString(sum[:]), nil
+	default:
+		return "", "", fmt.Errorf("unsupported local entry %s (%s)", path, info.Mode())
+	}
+}
+
+func refuseProviderDisconnectWithPendingState(provider string, plan providerDisconnectPlan) error {
+	if len(plan.unknownStateRoots) > 0 {
+		return fmt.Errorf(
+			"refusing to disconnect %s because private mount state is unknown for %s; restore the mount state or remount before disconnecting",
+			provider,
+			strings.Join(plan.unknownStateRoots, ", "),
+		)
+	}
+	seen := map[string]struct{}{}
+	providerRoot := mountscope.NormalizePath("/" + providerRootDir(provider))
+	wholeProviderDir := map[string]struct{}{}
+	for _, localDir := range plan.wholeProviderDirs {
+		wholeProviderDir[filepath.Clean(strings.TrimSpace(localDir))] = struct{}{}
+	}
+	outbox, conflicts, deadLetters, privatePending := 0, 0, 0, 0
+	for _, localDir := range plan.stateDirs {
+		cleaned := filepath.Clean(strings.TrimSpace(localDir))
+		if cleaned == "." {
+			continue
+		}
+		if _, ok := seen[cleaned]; ok {
+			continue
+		}
+		seen[cleaned] = struct{}{}
+		runtimeRoot := filepath.Join(cleaned, ".relay")
+		_, wholeDir := wholeProviderDir[cleaned]
+		if wholeDir {
+			for _, state := range []string{"pending", "failed", "attention"} {
+				count := countFilesInDir(filepath.Join(runtimeRoot, "outbox", state))
+				if count.Err != nil {
+					return fmt.Errorf("inspect outbox before disconnecting %s: %w", provider, count.Err)
+				}
+				outbox += count.Count
+			}
+			count := countFilesInDir(filepath.Join(runtimeRoot, "conflicts"))
+			if count.Err != nil {
+				return fmt.Errorf("inspect conflicts before disconnecting %s: %w", provider, count.Err)
+			}
+			conflicts += count.Count
+		} else {
+			for _, state := range []string{"pending", "failed", "attention"} {
+				count, err := countProviderOutboxRecords(filepath.Join(runtimeRoot, "outbox", state), providerRoot)
+				if err != nil {
+					return fmt.Errorf("inspect outbox before disconnecting %s: %w", provider, err)
+				}
+				outbox += count
+			}
+			count := countFilesInDir(
+				filepath.Join(runtimeRoot, "conflicts", filepath.FromSlash(strings.TrimPrefix(providerRoot, "/"))),
+			)
+			if count.Err != nil {
+				return fmt.Errorf("inspect conflicts before disconnecting %s: %w", provider, count.Err)
+			}
+			conflicts += count.Count
+		}
+		records, err := readDeadLetterRecords(cleaned)
+		if err != nil {
+			return fmt.Errorf("inspect dead letters before disconnecting %s: %w", provider, err)
+		}
+		for _, record := range records {
+			if wholeDir || deadLetterRecordBelongsToProvider(record.Path, providerRoot) {
+				deadLetters++
+			}
+		}
+	}
+	for _, source := range plan.stateSources {
+		cleaned := filepath.Clean(strings.TrimSpace(source.stateFile))
+		if cleaned == "." {
+			continue
+		}
+		if _, ok := seen[cleaned]; ok {
+			continue
+		}
+		seen[cleaned] = struct{}{}
+		items, err := readPendingWritebackItemsFromState(
+			"",
+			source.localDir,
+			source.remoteRoot,
+			cleaned,
+			source.scopedChild,
+		)
+		if err != nil {
+			return fmt.Errorf("inspect private mount state before disconnecting %s: %w", provider, err)
+		}
+		for _, item := range items {
+			if strings.TrimSpace(item.Path) == "" || mountscope.IsWithin(providerRoot, item.Path) {
+				privatePending++
+			}
+		}
+	}
+	if outbox == 0 && conflicts == 0 && deadLetters == 0 && privatePending == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"refusing to disconnect %s while unsynced local state remains (outbox=%d conflicts=%d deadLetters=%d privatePending=%d); resolve or replay the pending work before disconnecting",
+		provider,
+		outbox,
+		conflicts,
+		deadLetters,
+		privatePending,
+	)
+}
+
+func deadLetterRecordBelongsToProvider(rawPath, providerRoot string) bool {
+	paths := deadLetterRetryPaths(rawPath)
+	if len(paths) == 0 {
+		// Missing or unparseable ownership cannot be proven unrelated.
+		return true
+	}
+	for _, remotePath := range paths {
+		if mountscope.IsWithin(providerRoot, remotePath) {
+			return true
+		}
+	}
+	return false
+}
+
+func countProviderOutboxRecords(dir, providerRoot string) (int, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			// An entry with an unexpected shape cannot be proven unrelated to
+			// the provider, so make the destructive preflight refuse.
+			count++
+			continue
+		}
+		payload, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			return 0, err
+		}
+		var record struct {
+			RemotePath string `json:"remotePath"`
+		}
+		if err := json.Unmarshal(payload, &record); err != nil {
+			// An unreadable record cannot be proven unrelated to the provider.
+			// Count it conservatively so disconnect refuses instead of deleting
+			// state whose ownership is unknown.
+			count++
+			continue
+		}
+		if strings.TrimSpace(record.RemotePath) == "" || mountscope.IsWithin(providerRoot, record.RemotePath) {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // providerRootDir maps a provider id to the directory name it occupies
@@ -13426,7 +14659,7 @@ func jitteredIntervalWithSample(base time.Duration, jitterRatio, sample float64)
 var spawnBackgroundMountProcessFn = spawnBackgroundMountProcess
 
 func spawnBackgroundMountProcess(originalArgs, resolvedRemotePaths []string, localDir, pidFile, logFile, localLayout string) error {
-	if err := prepareBackgroundMountLayout(localDir, logFile, localLayout); err != nil {
+	if err := prepareBackgroundMountLayout(localDir, logFile, localLayout, resolvedRemotePaths...); err != nil {
 		return err
 	}
 	executable, err := os.Executable()
@@ -13589,12 +14822,12 @@ func resolvedBackgroundMountArgs(originalArgs, resolvedRemotePaths []string) []s
 	return filteredArgs
 }
 
-func prepareBackgroundMountLayout(localDir, logFile, localLayout string) error {
+func prepareBackgroundMountLayout(localDir, logFile, localLayout string, remotePaths ...string) error {
 	// The foreground path has already initialized the topology, but repeat the
 	// operation here so the detached-process boundary remains self-contained.
 	// It must remain topology-aware: the legacy exact-root initializer creates
 	// global digests and skills that a scoped mount cannot honestly populate.
-	if err := ensureMirrorLayoutForTopology(localDir, localLayout); err != nil {
+	if err := ensureMirrorLayoutForTopology(localDir, localLayout, remotePaths...); err != nil {
 		return err
 	}
 	return rotateLogFile(logFile)

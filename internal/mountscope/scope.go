@@ -315,6 +315,14 @@ type Scope struct {
 	LocalDir   string
 }
 
+// IsScopedChild reports whether a mount owns an isolated child root. A scoped
+// layout with the workspace root (/) is intentionally root-compatible: Cloud
+// applies the scoped layout environment default to every persona, including
+// root mounts, but / still owns the canonical local root and its artifacts.
+func IsScopedChild(layout, remotePath string) bool {
+	return strings.EqualFold(strings.TrimSpace(layout), LayoutScoped) && NormalizePath(remotePath) != "/"
+}
+
 // Plan resolves the remote allowlist into non-overlapping local mount roots.
 // Exact layout preserves the historical single-root behavior; multiple roots
 // require scoped layout so their files and private .relay state cannot collide.
@@ -338,14 +346,7 @@ func Plan(localRoot, layout string, paths []string, fallback, stateFile string) 
 	scopes := make([]Scope, 0, len(normalized))
 	for _, remotePath := range normalized {
 		localDir := localRoot
-		if resolvedLayout == LayoutScoped {
-			if remotePath == "/" {
-				return nil, fmt.Errorf(
-					"workspace root / cannot use --local-layout=%s because it has no isolated child root; use --local-layout=%s",
-					LayoutScoped,
-					LayoutExact,
-				)
-			}
+		if IsScopedChild(resolvedLayout, remotePath) {
 			segments := strings.Split(strings.TrimPrefix(remotePath, "/"), "/")
 			firstSegment := segments[0]
 			if IsReservedLocalTopLevelIdentity(firstSegment) {

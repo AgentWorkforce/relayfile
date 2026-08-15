@@ -54,6 +54,21 @@ func markLocalDirtyForTest(t *testing.T, syncer *Syncer, remotePath, localPath s
 	syncer.state.Files[normalizeRemotePath(remotePath)] = tracked
 }
 
+func TestTrackedFileStateHasPendingWriteback(t *testing.T) {
+	for name, tracked := range map[string]TrackedFileState{
+		"clean":          {},
+		"dirty":          {Dirty: true},
+		"delete-pending": {DeletePending: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			want := name != "clean"
+			if got := tracked.HasPendingWriteback(); got != want {
+				t.Fatalf("HasPendingWriteback() = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
 func TestHTTPClientRetryDelayHonorsRetryAfter(t *testing.T) {
 	client := NewHTTPClient("https://example.test", "token", nil)
 	if got := client.retryDelay(1, "30"); got != 30*time.Second {
@@ -3176,9 +3191,12 @@ func TestOutboxFlushUsesIndependentDeadlineNotPerCycleCtx(t *testing.T) {
 		t.Fatalf("NewSyncer second: %v", err)
 	}
 
-	tinyCtx, cancel := context.WithTimeout(context.Background(), 15*time.Millisecond)
+	// Use a deadline that is already in the past instead of relying on a
+	// millisecond timer firing under host load. The contract under test is that
+	// an expired per-cycle context cannot leak into the independent outbox
+	// upload deadline.
+	tinyCtx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
-	time.Sleep(20 * time.Millisecond) // the inbound per-cycle ctx is now expired
 	if tinyCtx.Err() == nil {
 		t.Fatal("precondition: expected inbound per-cycle ctx to be already expired")
 	}

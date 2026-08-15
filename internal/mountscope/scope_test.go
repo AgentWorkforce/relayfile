@@ -16,10 +16,18 @@ func TestPlanRequiresScopedLayoutForMultiplePaths(t *testing.T) {
 	}
 }
 
-func TestPlanRejectsWorkspaceRootWithScopedLayout(t *testing.T) {
-	_, err := Plan(t.TempDir(), LayoutScoped, []string{"/"}, "/", "")
-	if err == nil || !strings.Contains(err.Error(), "has no isolated child root") || !strings.Contains(err.Error(), "--local-layout=exact") {
-		t.Fatalf("expected exact-layout guidance for scoped workspace root, got %v", err)
+func TestPlanKeepsWorkspaceRootCompatibleWithScopedLayout(t *testing.T) {
+	root := t.TempDir()
+	got, err := Plan(root, LayoutScoped, []string{"/"}, "/", "")
+	if err != nil {
+		t.Fatalf("plan Cloud-compatible scoped root: %v", err)
+	}
+	want := []Scope{{RemotePath: "/", LocalDir: root}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Plan() = %#v, want root-compatible %#v", got, want)
+	}
+	if IsScopedChild(LayoutScoped, "/") {
+		t.Fatal("workspace root must not be treated as an isolated scoped child")
 	}
 }
 

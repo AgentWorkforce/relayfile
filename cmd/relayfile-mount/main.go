@@ -93,7 +93,7 @@ func main() {
 	pathsFile := flag.String("paths-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PATHS_FILE")), "file containing remote root paths, as JSON array or newline-separated list")
 	eventProvider := flag.String("provider", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PROVIDER")), "event provider filter")
 	localDir := flag.String("local-dir", strings.TrimSpace(os.Getenv("RELAYFILE_LOCAL_DIR")), "local mirror directory")
-	localLayout := flag.String("local-layout", envOrDefault("RELAYFILE_MOUNT_LOCAL_LAYOUT", localLayoutExact), "local directory layout: exact (scoped layout is temporarily unavailable until operator surfaces are ready)")
+	localLayout := flag.String("local-layout", envOrDefault("RELAYFILE_MOUNT_LOCAL_LAYOUT", localLayoutExact), "local directory layout: exact (local-dir is mirror root) or scoped (remote path is appended under local-dir)")
 	stateFile := flag.String("state-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_STATE_FILE")), "state file path")
 	stateDir := flag.String("state-dir", envOrDefault("RELAYFILE_MOUNT_STATE_DIR", mountsync.DefaultMountStateDir()), "directory for private mount state")
 	mountKind := flag.String("mount-kind", envOrDefault("RELAYFILE_MOUNT_KIND", mountsync.MountKindDaemon), "private state identity kind: daemon, flush, or initial-sync")
@@ -243,14 +243,9 @@ func resolveLocalLayout(layout string) (string, error) {
 	return mountscope.ResolveLayout(layout)
 }
 
-// Scoped runtime state is implemented below this CLI boundary, but its
-// operator surfaces are not yet complete. Refuse the user-facing capability
-// until status/list/retry can see every scoped child state location.
 func validateCLIRequestedLocalLayout(layout string) error {
-	if layout == localLayoutScoped {
-		return fmt.Errorf("--local-layout=%s is temporarily unavailable until scoped operator surfaces are ready; use --local-layout=%s", localLayoutScoped, localLayoutExact)
-	}
-	return nil
+	_, err := mountscope.ResolveLayout(layout)
+	return err
 }
 
 func resolveSyncMode(mode string) (string, error) {
@@ -282,9 +277,24 @@ func executeMount(rootCtx context.Context, cfg mountConfig, runPoll pollRunner, 
 		if len(remotePaths) == 0 {
 			remotePaths = []string{cfg.remotePath}
 		}
-		if len(mountscope.NormalizePaths(remotePaths, "/")) > 1 {
+		scopes, err := mountscope.Plan(
+			cfg.localDir,
+			cfg.localLayout,
+			remotePaths,
+			cfg.remotePath,
+			cfg.stateFile,
+		)
+		if err != nil {
+			return err
+		}
+		if len(scopes) > 1 {
 			return fmt.Errorf("multiple --remote-path values are not supported with --mode=%s; use --mode=%s", mountModeFuse, mountModePoll)
 		}
+		scope := scopes[0]
+		cfg.remotePath = scope.RemotePath
+		cfg.remotePaths = []string{scope.RemotePath}
+		cfg.localDir = scope.LocalDir
+		cfg.scopedChild = mountscope.IsScopedChild(cfg.localLayout, scope.RemotePath)
 		return runFuse(rootCtx, cfg)
 	default:
 		return fmt.Errorf("unsupported mount mode %q", cfg.mode)
@@ -346,7 +356,7 @@ func runScopedPollingMountsWithRunner(
 		scoped.remotePath = scope.RemotePath
 		scoped.remotePaths = nil
 		scoped.localDir = scope.LocalDir
-		scoped.scopedChild = true
+		scoped.scopedChild = mountscope.IsScopedChild(localLayoutScoped, scope.RemotePath)
 		scoped.stateFile = cfg.stateFile
 		if err := os.MkdirAll(scoped.localDir, 0o755); err != nil {
 			return fmt.Errorf("create scoped local dir for %s: %w", scope.RemotePath, err)
