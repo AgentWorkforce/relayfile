@@ -8131,6 +8131,10 @@ type hierarchicalTreeCall struct {
 type pagedTreeClient struct {
 	*fakeClient
 	pageSize int
+	// totalFiles, when nonzero, is reported on every page as TreeResponse.TotalFiles,
+	// mirroring the production contract that the total is stable across
+	// server pagination.
+	totalFiles int
 }
 
 func (c *pagedTreeClient) ListTree(_ context.Context, _ string, path string, _ int, cursor string) (TreeResponse, error) {
@@ -8171,7 +8175,7 @@ func (c *pagedTreeClient) ListTree(_ context.Context, _ string, path string, _ i
 		value := strconv.Itoa(end)
 		next = &value
 	}
-	return TreeResponse{Path: base, Entries: entries, NextCursor: next}, nil
+	return TreeResponse{Path: base, Entries: entries, NextCursor: next, TotalFiles: c.totalFiles}, nil
 }
 
 // hierarchicalTreeClient mirrors the production tree contract: a request
@@ -10915,6 +10919,73 @@ func TestBootstrapProgressSuppressesTotalWhenRuntimeSubtreeOutlivesFileBudget(t 
 	}
 	if state.BootstrapFilesTotal != 0 || !state.BootstrapFilesTotalUnavailable {
 		t.Fatalf("runtime subtree outside the budgeted chunk left an unreachable total publishable: total=%d unavailable=%t", state.BootstrapFilesTotal, state.BootstrapFilesTotalUnavailable)
+	}
+}
+
+// TestBootstrapProgressSelfCorrectsWhenRuntimeSubtreeIsOnALaterRootPage
+// covers a pruned runtime subtree that only appears on a later cursor page
+// of the remote root's own listing. The first root page reports a positive
+// totalFiles and contains no runtime entries, so it is published eagerly
+// (matching TestBootstrapStallCycleGuardPersistsAndFailsHard's expectation
+// that a large, slow, multi-page bootstrap gets an early progress signal
+// rather than none at all while its own pagination is still in flight). The
+// total is transiently optimistic until the runtime-bearing page is reached,
+// at which point it must self-correct to unavailable rather than staying
+// published as an unreachable denominator forever.
+func TestBootstrapProgressSelfCorrectsWhenRuntimeSubtreeIsOnALaterRootPage(t *testing.T) {
+	files := map[string]RemoteFile{
+		"/workspace/a.txt": {Path: "/workspace/a.txt", Revision: "rev_a", Content: "a"},
+		"/workspace/b.txt": {Path: "/workspace/b.txt", Revision: "rev_b", Content: "b"},
+		"/workspace/z/.relay/state.json": {
+			Path: "/workspace/z/.relay/state.json", Revision: "rev_runtime", Content: `{"runtime":true}`,
+		},
+		// Real work still pending after the runtime page keeps bootstrap
+		// incomplete past cycle 2, so the self-corrected flag persists long
+		// enough to assert on rather than being cleared by completion.
+		"/workspace/zz_extra1.txt": {Path: "/workspace/zz_extra1.txt", Revision: "rev_e1", Content: "e1"},
+		"/workspace/zz_extra2.txt": {Path: "/workspace/zz_extra2.txt", Revision: "rev_e2", Content: "e2"},
+	}
+	localDir := t.TempDir()
+	client := &pagedTreeClient{fakeClient: &fakeClient{files: files}, pageSize: 2, totalFiles: 5}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:               "ws_runtime_total_paginated_root",
+		RemoteRoot:                "/workspace",
+		LocalRoot:                 localDir,
+		BootstrapMaxFilesPerCycle: 2,
+		BootstrapStallCycles:      5,
+		FullPullEvery:             -1,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	// Root page 1 (a.txt, b.txt) exactly fills this cycle's budget and
+	// reports totalFiles=5; the runtime subtree is not on this page, so the
+	// total is published eagerly as the early progress signal.
+	if err := syncer.pullRemoteFullTree(context.Background(), nil, bootstrapProgress{}); err != nil {
+		t.Fatalf("first bootstrap cycle failed: %v", err)
+	}
+	if got := syncer.state.BootstrapFilesSynced; got != 2 {
+		t.Fatalf("files synced = %d, want 2 (root page 1 only)", got)
+	}
+	if syncer.state.BootstrapFilesTotal != 5 {
+		t.Fatalf("root page 1's totalFiles was not published eagerly: total=%d", syncer.state.BootstrapFilesTotal)
+	}
+	if syncer.state.BootstrapCursor == "" {
+		t.Fatalf("expected a persisted cursor into root page 2, got none")
+	}
+
+	// Root page 2, reached by cursor, carries the pruned runtime subtree.
+	// The previously-published total must self-correct to unavailable
+	// instead of staying published as an unreachable denominator.
+	if err := syncer.pullRemoteFullTree(context.Background(), nil, bootstrapProgress{}); err != nil {
+		t.Fatalf("second bootstrap cycle failed: %v", err)
+	}
+	if syncer.state.BootstrapComplete {
+		t.Fatalf("bootstrap unexpectedly completed with root pagination still pending")
+	}
+	if syncer.state.BootstrapFilesTotal != 0 || !syncer.state.BootstrapFilesTotalUnavailable {
+		t.Fatalf("runtime subtree on a later root pagination page left an unreachable total published: total=%d unavailable=%t", syncer.state.BootstrapFilesTotal, syncer.state.BootstrapFilesTotalUnavailable)
 	}
 }
 

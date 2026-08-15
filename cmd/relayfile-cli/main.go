@@ -11574,8 +11574,11 @@ func providerReadyForMirror(client *apiClient, workspaceID, provider string, sta
 
 func buildSyncStateSnapshot(status syncStatusResponse, workspaceID, mode string, interval time.Duration, localDir string, pid int, stallReason string) syncStateFile {
 	var localState syncStateFile
+	var pendingConflicts, deniedPaths int
 	if strings.TrimSpace(localDir) != "" {
 		localState = readWritebackStateBestEffort(localDir)
+		pendingConflicts = countFilesInDir(filepath.Join(localDir, ".relay", "conflicts"))
+		deniedPaths = countLines(filepath.Join(localDir, ".relay", "permissions-denied.log"))
 	}
 	snapshot := syncStateFile{
 		WorkspaceID:                  workspaceID,
@@ -11586,8 +11589,8 @@ func buildSyncStateSnapshot(status syncStatusResponse, workspaceID, mode string,
 		LastReconcileAt:              strings.TrimSpace(localState.LastReconcileAt),
 		LastSuccessfulReconcileAt:    strings.TrimSpace(localState.LastSuccessfulReconcileAt),
 		PendingWriteback:             countDirtyTrackedFiles(localDir),
-		PendingConflicts:             countFilesInDir(filepath.Join(localDir, ".relay", "conflicts")),
-		DeniedPaths:                  countLines(filepath.Join(localDir, ".relay", "permissions-denied.log")),
+		PendingConflicts:             pendingConflicts,
+		DeniedPaths:                  deniedPaths,
 		FailedWritebacks:             readPersistedFailedWritebacks(localDir),
 		StallReason:                  stallReason,
 		LastError:                    localState.LastError,

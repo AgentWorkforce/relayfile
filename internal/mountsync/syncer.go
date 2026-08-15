@@ -4878,6 +4878,21 @@ func isLazyGithubRepoSubtreePath(path string) bool {
 	return false
 }
 
+// markBootstrapTotalUnavailable persistently suppresses the bootstrap file
+// total once a reserved runtime subtree is discovered anywhere in the
+// traversal. totalFiles counts every caller-visible remote file, including
+// reserved mount runtime descendants, but this traversal prunes those
+// subtrees before enumeration, so their exact contribution is unknown; an
+// already-suppressed total is left alone rather than logged again.
+func (s *Syncer) markBootstrapTotalUnavailable(runtimeRoot string) {
+	if s.state.BootstrapFilesTotalUnavailable {
+		return
+	}
+	s.state.BootstrapFilesTotal = 0
+	s.state.BootstrapFilesTotalUnavailable = true
+	s.logf("bootstrap file total unavailable after pruning reserved runtime subtree %s", runtimeRoot)
+}
+
 func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]struct{}, prog bootstrapProgress) (returnErr error) {
 	maxDirectories := s.bootstrapMaxDirectories
 	if maxDirectories <= 0 {
@@ -4989,10 +5004,8 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			// check would persist an unreachable denominator for every cycle
 			// between now and whichever later cycle happens to walk that entry.
 			for _, entry := range page.Entries {
-				if mountRuntimeRemoteRoot(normalizeRemotePath(entry.Path)) != "" {
-					s.state.BootstrapFilesTotal = 0
-					s.state.BootstrapFilesTotalUnavailable = true
-					s.logf("bootstrap file total unavailable after pruning reserved runtime subtree %s", mountRuntimeRemoteRoot(normalizeRemotePath(entry.Path)))
+				if runtimeRoot := mountRuntimeRemoteRoot(normalizeRemotePath(entry.Path)); runtimeRoot != "" {
+					s.markBootstrapTotalUnavailable(runtimeRoot)
 					break
 				}
 			}
@@ -5002,6 +5015,17 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			// caller-visible subtree, not just this page. Persist it on the root
 			// frontier so N/M is an actual completion denominator. Older servers
 			// omit it (zero), in which case status intentionally renders N only.
+			//
+			// A runtime subtree that only appears on a later page of the root
+			// frontier's own pagination can still leave this total transiently
+			// wrong until that later page is walked and markBootstrapTotalUnavailable
+			// self-corrects it (both scans above run on every page). Deferring
+			// publication until the root frontier's pagination fully drains would
+			// close that window, but it also delays the very early-progress signal
+			// this field exists for during a large, slow, multi-page bootstrap
+			// (TestBootstrapStallCycleGuardPersistsAndFailsHard depends on the
+			// eager value surfacing across repeatedly-retried, never-draining
+			// cycles). Eager-and-self-correcting is the intentional tradeoff.
 			s.state.BootstrapFilesTotal = page.TotalFiles
 		}
 		entryStart := pageOffset
@@ -5050,16 +5074,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			runtimeRoot := mountRuntimeRemoteRoot(remotePath)
 			if runtimeRoot != "" {
 				metrics.runtimeEntriesSeen++
-				if !s.state.BootstrapFilesTotalUnavailable {
-					// totalFiles counts every caller-visible remote file, including
-					// reserved mount runtime descendants. This traversal prunes those
-					// subtrees before enumeration, so their exact contribution is
-					// unknown. Persistently suppress the denominator instead of
-					// displaying an unreachable total after a page/process resume.
-					s.state.BootstrapFilesTotal = 0
-					s.state.BootstrapFilesTotalUnavailable = true
-					s.logf("bootstrap file total unavailable after pruning reserved runtime subtree %s", runtimeRoot)
-				}
+				s.markBootstrapTotalUnavailable(runtimeRoot)
 			}
 			if !isUnderRemoteRoot(s.remoteRoot, remotePath) {
 				continue
