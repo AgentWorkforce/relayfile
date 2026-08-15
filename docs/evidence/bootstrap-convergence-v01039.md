@@ -108,14 +108,68 @@ The following gates passed on the candidate checkout:
 go build ./...                                                   PASS
 go vet ./...                                                     PASS
 go test ./...                                                    PASS
-go test -race ./internal/mountsync \
-  -run 'TestTreeBootstrapPersistsWithinPageBeforeDeadlineAndResumes|TestInitialTreeBootstrapYieldsAtFileBudgetAndResumes|TestBootstrapStallCycleGuardPersistsAndFailsHard' \
-  -count=1                                                       PASS
+go test -race ./internal/mountsync/... ./cmd/relayfile-cli/...   PASS
 scripts/check-contract-surface.sh                                PASS
   SDK parity check passed
   contract check passed
 scripts/test-bootstrap-convergence-v01039.sh                     PASS
 ```
+
+## Review round: findings addressed
+
+PR #425 review (CodeRabbit + cubic) surfaced five substantive issues beyond
+the initial implementation, all fixed in follow-up commits on the same
+branch and re-verified against the full gate list above and the black-box
+reproduction:
+
+- **Terminal bootstrap error silently blocked outbox flushing.** The
+  persisted-terminal-error early return in `syncReserved` skipped
+  `flushDueOutboxRecords` entirely, so local writes queued behind a
+  terminally-wedged read-side bootstrap were never delivered — a direct
+  violation of this issue's "pending writebacks are not silently lost"
+  acceptance criterion. Fixed: the terminal gate now flushes due outbox
+  records before returning the terminal error, and the gate itself is
+  skipped for write-only mounts (which never run the read-side traversal at
+  all), so a mount reconfigured write-only after a prior read-side stall is
+  not permanently blocked either. Covered by
+  `TestPersistedBootstrapTerminalErrorStillFlushesDueOutbox` and
+  `TestWriteOnlyMountBypassesPersistedBootstrapTerminalError`.
+- **`BootstrapDirectoriesDiscovered` was never reset for a fresh traversal.**
+  A periodic/forced full-tree audit of an already-`BootstrapComplete` mount
+  reused the counter left over from the previous (possibly limit-tripped)
+  traversal, so a completed mount whose earlier audit hit the directory
+  limit would fail every subsequent audit immediately regardless of its
+  actual size. Fixed: the counter resets on any traversal that is not
+  resuming a persisted directory frontier.
+- **A resumed checkpoint already over `BootstrapMaxDirectories` bypassed the
+  guard.** The in-loop limit check only fires on a newly-discovered
+  directory, so a persisted frontier that already exceeded a
+  since-lowered limit (or predates the guard) would keep issuing live
+  `ListTree` requests every cycle instead of failing terminally. Fixed: the
+  restored frontier size is validated up front, before any request. Covered
+  by `TestResumedBootstrapAboveMaxDirectoriesFailsWithoutListTree`.
+- **The bootstrap status override was wider than intended.** It
+  unconditionally replaced the top-level status with `"bootstrapping"`,
+  which also hid independent, actionable states — `writeback-needs-attention`
+  and `conflict` — behind a long-running bootstrap. Fixed: the override now
+  applies only to `"ready"`, `"stale"`, and `"offline"` (the last is the
+  generic last-cloud-call-failed bucket that fires on ordinary transient
+  retries mid-bootstrap, so it is intentionally still masked — see
+  `TestBootstrapStatusSurfacesPhase`); `writeback-needs-attention` and
+  `conflict` now remain surfaced. Covered by
+  `TestBootstrapStatusDoesNotHideOutboxNeedsAttention`.
+- **Per-chunk checkpoint durability vs. write cost.** `persistTraversal` ran
+  a full `saveState()` (including a scan of every locally mirrored file)
+  once per 32-file chunk — for a large page at the default 2000-file cycle
+  budget, up to ~62 full local-file scans per cycle. Fixed: every chunk
+  still durably persists the private resume checkpoint and a cheap
+  (no-local-scan) public status refresh so `relayfile status` stays live;
+  the expensive full per-file status scan now runs only at page/directory/
+  cycle-yield boundaries, matching its pre-chunking cadence.
+- Also fixed on review: `scripts/test-bootstrap-convergence-v01039.sh` now
+  fetches tag `v0.10.39` when a shallow checkout lacks it locally, and no
+  longer builds the unused `relayfile-mount` helper binary (the black-box
+  test invokes the CLI binaries directly).
 
 ## Safe rollout and recovery for `rw_7ccfea89`
 
