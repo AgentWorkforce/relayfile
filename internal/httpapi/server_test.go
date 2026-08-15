@@ -2936,6 +2936,121 @@ func TestFilePermissionPolicyInheritanceFromAclMarker(t *testing.T) {
 	}
 }
 
+func TestFilePermissionPolicyPathOverridesWithRelayAuthScopes(t *testing.T) {
+	server := NewServer(relayfile.NewStore())
+	workspaceID := "ws_perm_path_overrides"
+	token := mustTestJWT(
+		t,
+		"dev-secret",
+		workspaceID,
+		"relayfile-local",
+		[]string{"relayfile:fs:read:*", "relayfile:fs:write:*"},
+		time.Now().Add(time.Hour),
+	)
+
+	allowed := writeFileForTest(t, server, token, workspaceID, "/allowed/document.md", "0", "allowed", "corr_perm_path_1")
+	protected := writeFileForTest(t, server, token, workspaceID, "/protected/document.md", "0", "protected", "corr_perm_path_2")
+	ignored := writeFileForTest(t, server, token, workspaceID, "/ignored/document.md", "0", "ignored", "corr_perm_path_3")
+
+	aclWrite := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=/.relayfile.acl",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_perm_path_4",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "text/plain",
+			"content":     "# Managed by workspace API\n",
+			"semantics": map[string]any{
+				"permissions": []string{
+					"allow:scope:fs:read",
+					"allow:scope:fs:write",
+					"deny:scope:relayfile:fs:write:/protected/*",
+					"deny:scope:relayfile:fs:read:/ignored/*",
+					"deny:scope:relayfile:fs:write:/ignored/*",
+				},
+			},
+		},
+	})
+	if aclWrite.Code != http.StatusAccepted {
+		t.Fatalf("expected ACL marker write 202, got %d (%s)", aclWrite.Code, aclWrite.Body.String())
+	}
+
+	protectedRead := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=/protected/document.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_perm_path_5",
+		},
+	})
+	if protectedRead.Code != http.StatusOK {
+		t.Fatalf("expected readonly path read 200, got %d (%s)", protectedRead.Code, protectedRead.Body.String())
+	}
+
+	protectedWrite := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=/protected/document.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_perm_path_6",
+			"If-Match":         protected.TargetRevision,
+		},
+		body: map[string]any{
+			"contentType": "text/markdown",
+			"content":     "must stay protected",
+		},
+	})
+	if protectedWrite.Code != http.StatusForbidden {
+		t.Fatalf("expected readonly path write 403, got %d (%s)", protectedWrite.Code, protectedWrite.Body.String())
+	}
+
+	ignoredRead := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=/ignored/document.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_perm_path_7",
+		},
+	})
+	if ignoredRead.Code != http.StatusForbidden {
+		t.Fatalf("expected ignored path read 403, got %d (%s)", ignoredRead.Code, ignoredRead.Body.String())
+	}
+
+	ignoredWrite := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=/ignored/document.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_perm_path_8",
+			"If-Match":         ignored.TargetRevision,
+		},
+		body: map[string]any{
+			"contentType": "text/markdown",
+			"content":     "must stay ignored",
+		},
+	})
+	if ignoredWrite.Code != http.StatusForbidden {
+		t.Fatalf("expected ignored path write 403, got %d (%s)", ignoredWrite.Code, ignoredWrite.Body.String())
+	}
+
+	updated := writeFileForTest(
+		t,
+		server,
+		token,
+		workspaceID,
+		"/allowed/document.md",
+		allowed.TargetRevision,
+		"updated",
+		"corr_perm_path_9",
+	)
+	if updated.TargetRevision == allowed.TargetRevision {
+		t.Fatalf("expected allowed path write to advance revision")
+	}
+}
+
 func TestOpsListProviderFilterEndpoint(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{
 		Adapters: []relayfile.ProviderAdapter{
