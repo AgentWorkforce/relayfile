@@ -4982,6 +4982,21 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		}
 		s.recordCloudSuccess()
 		prog.touch()
+		if !s.state.BootstrapFilesTotalUnavailable {
+			// The per-cycle file budget below only walks a chunk of page.Entries,
+			// so a reserved runtime subtree can sit past that chunk on this very
+			// page. Scan the full page up front: trusting totalFiles before this
+			// check would persist an unreachable denominator for every cycle
+			// between now and whichever later cycle happens to walk that entry.
+			for _, entry := range page.Entries {
+				if mountRuntimeRemoteRoot(normalizeRemotePath(entry.Path)) != "" {
+					s.state.BootstrapFilesTotal = 0
+					s.state.BootstrapFilesTotalUnavailable = true
+					s.logf("bootstrap file total unavailable after pruning reserved runtime subtree %s", mountRuntimeRemoteRoot(normalizeRemotePath(entry.Path)))
+					break
+				}
+			}
+		}
 		if currentDirectory == s.remoteRoot && !s.lazyRepos && !s.state.BootstrapFilesTotalUnavailable && page.TotalFiles > 0 {
 			// totalFiles is stable across server pagination and counts the full
 			// caller-visible subtree, not just this page. Persist it on the root

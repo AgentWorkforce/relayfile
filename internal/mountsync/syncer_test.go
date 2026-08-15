@@ -10875,6 +10875,49 @@ func TestBootstrapProgressSuppressesRuntimeInclusiveTotalAcrossRestart(t *testin
 	}
 }
 
+// TestBootstrapProgressSuppressesTotalWhenRuntimeSubtreeOutlivesFileBudget
+// covers a runtime subtree whose entries sort after enough real files to
+// fall outside the per-cycle file budget's processed chunk on the very page
+// that already reported an authoritative-looking page.TotalFiles. The
+// runtime dir/file never enter s.state via the budget-limited entry loop
+// this cycle, so only a full-page scan ahead of persisting the total catches
+// it; persisting page.TotalFiles here renders an unreachable N/M until some
+// later cycle happens to walk that entry.
+func TestBootstrapProgressSuppressesTotalWhenRuntimeSubtreeOutlivesFileBudget(t *testing.T) {
+	files := map[string]RemoteFile{
+		"/workspace/a.txt": {Path: "/workspace/a.txt", Revision: "rev_a", Content: "a"},
+		"/workspace/b.txt": {Path: "/workspace/b.txt", Revision: "rev_b", Content: "b"},
+		"/workspace/z/.relay/state.json": {
+			Path: "/workspace/z/.relay/state.json", Revision: "rev_runtime", Content: `{"runtime":true}`,
+		},
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(&hierarchicalTreeClient{fakeClient: &fakeClient{files: files}}, SyncerOptions{
+		WorkspaceID:               "ws_runtime_total_budget",
+		RemoteRoot:                "/workspace",
+		LocalRoot:                 localDir,
+		BootstrapMaxFilesPerCycle: 1,
+		BootstrapStallCycles:      5,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	// The single-file budget's chunk this cycle covers only a.txt: b.txt and
+	// the nested runtime subtree sort after it and stay outside the loop that
+	// would otherwise discover the runtime path and suppress the total.
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("first bootstrap cycle failed: %v", err)
+	}
+	state := loadPersistedState(t, localDir)
+	if state.BootstrapFilesSynced != 1 {
+		t.Fatalf("files synced = %d, want 1 (only a.txt processed this cycle)", state.BootstrapFilesSynced)
+	}
+	if state.BootstrapFilesTotal != 0 || !state.BootstrapFilesTotalUnavailable {
+		t.Fatalf("runtime subtree outside the budgeted chunk left an unreachable total publishable: total=%d unavailable=%t", state.BootstrapFilesTotal, state.BootstrapFilesTotalUnavailable)
+	}
+}
+
 func TestPullRemoteFullTreePrunesNestedMountRuntimeBeforeDescendantEnumeration(t *testing.T) {
 	files := map[string]RemoteFile{
 		"/slack/channels/C123/messages/1780145510_376649.json": {
