@@ -50,6 +50,8 @@ func TestBootstrapConvergenceAgainstV01039(t *testing.T) {
 		scenario := prepareBootstrapBlackBoxScenario(t, server.URL, "baseline")
 		for cycle := 1; cycle <= 2; cycle++ {
 			started := time.Now()
+			treeCallsBefore := fixture.treeCalls.Load()
+			firstReadBefore := fixture.readCount(bootstrapBlackBoxFilePath(0))
 			result := runCLI(t, baselineBin, scenario.env, mountArgs(scenario, "300ms", true)...)
 			if result.err == nil {
 				t.Fatalf("baseline cycle %d unexpectedly completed: %s", cycle, result.output)
@@ -60,7 +62,11 @@ func TestBootstrapConvergenceAgainstV01039(t *testing.T) {
 			state := readBootstrapBlackBoxState(t, scenario.stateFile)
 			assertBootstrapCheckpoint(t, state, 0, bootstrapBlackBoxPendingDirs, bootstrapBlackBoxStartingFiles)
 			waitForNoFixtureRequests(t, fixture, 3*time.Second)
-			t.Logf("BEFORE cycle=%d elapsed=%s path=%s cursor=%q page_offset=%d directories_pending=%d files_synced=%d terminal=%q",
+			if fixture.treeCalls.Load() != treeCallsBefore+1 || fixture.readCount(bootstrapBlackBoxFilePath(0)) != firstReadBefore+1 {
+				t.Fatalf("baseline cycle %d did not reach one ListTree followed by ReadFile: tree calls %d->%d first-file reads %d->%d", cycle,
+					treeCallsBefore, fixture.treeCalls.Load(), firstReadBefore, fixture.readCount(bootstrapBlackBoxFilePath(0)))
+			}
+			t.Logf("BEFORE cycle=%d elapsed=%s path=%s cursor=%q page_offset=%d directories_pending=%d files_synced=%d blocked_operation=ReadFile terminal=%q",
 				cycle, time.Since(started).Round(time.Millisecond), state.currentPath(), state.BootstrapCursor,
 				state.BootstrapPageOffset, len(state.BootstrapDirectories), state.BootstrapFilesSynced, "context deadline exceeded")
 		}
@@ -96,6 +102,7 @@ func TestBootstrapConvergenceAgainstV01039(t *testing.T) {
 		if incompleteText.err != nil || !strings.Contains(incompleteText.output, "mount: bootstrapping") {
 			t.Fatalf("candidate incomplete text status did not report mount-level bootstrapping: %v\n%s", incompleteText.err, incompleteText.output)
 		}
+		t.Logf("STATUS incomplete (scratch path redacted):\n%s", redactBootstrapBlackBoxOutput(incompleteText.output, scenario))
 
 		canceledBefore := fixture.canceled.Load()
 		if err := cmd.Process.Signal(os.Interrupt); err != nil {
@@ -147,6 +154,7 @@ func TestBootstrapConvergenceAgainstV01039(t *testing.T) {
 		if completeText.err != nil || !strings.Contains(completeText.output, "mount: healthy") {
 			t.Fatalf("candidate completed text status did not report mount-level healthy: %v\n%s", completeText.err, completeText.output)
 		}
+		t.Logf("STATUS complete (scratch path redacted):\n%s", redactBootstrapBlackBoxOutput(completeText.output, scenario))
 		t.Logf("AFTER complete restart_elapsed=%s total_elapsed=%s bootstrap_complete=%t directories_pending=%d mirrored_files=%d active_requests=%d child_alive=false",
 			time.Since(completionStarted).Round(time.Millisecond), time.Since(started).Round(time.Millisecond), completed.BootstrapComplete,
 			len(completed.BootstrapDirectories), bootstrapBlackBoxPageFiles, fixture.active.Load())
@@ -158,6 +166,7 @@ type bootstrapBlackBoxFixture struct {
 	active         atomic.Int64
 	canceled       atomic.Int64
 	bulkWrites     atomic.Int64
+	treeCalls      atomic.Int64
 	blockSlowReads atomic.Bool
 	mu             sync.Mutex
 	reads          map[string]int
@@ -175,6 +184,7 @@ func (f *bootstrapBlackBoxFixture) resetReads() {
 	f.reads = make(map[string]int)
 	f.mu.Unlock()
 	f.blockSlowReads.Store(true)
+	f.treeCalls.Store(0)
 }
 
 func (f *bootstrapBlackBoxFixture) readCount(path string) int {
@@ -189,6 +199,7 @@ func (f *bootstrapBlackBoxFixture) serveHTTP(w http.ResponseWriter, r *http.Requ
 	case strings.HasSuffix(r.URL.Path, "/fs/export"):
 		http.Error(w, `{"error":{"code":"not_found","message":"export disabled by fixture"}}`, http.StatusNotFound)
 	case strings.HasSuffix(r.URL.Path, "/fs/tree"):
+		f.treeCalls.Add(1)
 		path := r.URL.Query().Get("path")
 		entries := make([]map[string]any, 0)
 		if path == bootstrapBlackBoxPath {
@@ -550,6 +561,10 @@ func countMirroredFixtureFiles(t *testing.T, mirrorDir string) int {
 		t.Fatalf("count mirrored fixture files: %v", err)
 	}
 	return count
+}
+
+func redactBootstrapBlackBoxOutput(output string, scenario bootstrapBlackBoxScenario) string {
+	return strings.ReplaceAll(output, scenario.mirrorDir, "[scratch mirror]")
 }
 
 func writeJSONFile(t *testing.T, path string, value any, mode os.FileMode) {
