@@ -11573,7 +11573,10 @@ func providerReadyForMirror(client *apiClient, workspaceID, provider string, sta
 }
 
 func buildSyncStateSnapshot(status syncStatusResponse, workspaceID, mode string, interval time.Duration, localDir string, pid int, stallReason string) syncStateFile {
-	localState := readWritebackStateBestEffort(localDir)
+	var localState syncStateFile
+	if strings.TrimSpace(localDir) != "" {
+		localState = readWritebackStateBestEffort(localDir)
+	}
 	snapshot := syncStateFile{
 		WorkspaceID:                  workspaceID,
 		RemoteRoot:                   readMountRemoteRoot(localDir),
