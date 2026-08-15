@@ -3482,22 +3482,17 @@ func (s *Store) AcknowledgeWriteback(workspaceID, itemID string, ack WritebackAc
 	if !ok {
 		return nil, ErrNotFound
 	}
-	alreadySucceeded := op.Status == "succeeded"
-
 	response := map[string]any{
 		"status":        "acknowledged",
 		"id":            itemID,
 		"correlationId": correlationID,
 		"success":       ack.Success,
 	}
-	if alreadySucceeded {
+	if op.Status == "succeeded" {
+		// The first provider-confirmed receipt is immutable terminal evidence.
+		// Every later acknowledgment is a no-op, including a nominally successful
+		// replay carrying conflicting provider fields.
 		response["replayed"] = true
-	}
-
-	// Provider-confirmed success is terminal. A stale retry, delayed failure,
-	// or local post-delivery error cannot turn the delivery back into a failed
-	// operation or make it eligible for another provider write.
-	if alreadySucceeded && !ack.Success {
 		response["success"] = true
 		if op.BookkeepingError != nil {
 			response["bookkeepingError"] = *op.BookkeepingError

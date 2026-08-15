@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -449,6 +450,43 @@ func TestSucceededReceiptCannotBeDowngradedByFailureReplay(t *testing.T) {
 	}
 	if first["success"] != true {
 		t.Fatalf("unexpected success receipt: %+v", first)
+	}
+	terminal, err := store.GetOperation("ws_terminal_replay", write.OpID)
+	if err != nil {
+		t.Fatalf("get terminal operation: %v", err)
+	}
+	terminalEvents, err := store.GetEvents("ws_terminal_replay", "", "", 100)
+	if err != nil {
+		t.Fatalf("get terminal events: %v", err)
+	}
+
+	successReplay, err := store.AcknowledgeWriteback("ws_terminal_replay", write.OpID, WritebackAck{
+		Success:    true,
+		ExternalID: "conflicting-provider-id",
+		ProviderResult: map[string]any{
+			"ts":      "conflicting-provider-ts",
+			"channel": "CONFLICT",
+		},
+	}, "corr_success_replay")
+	if err != nil {
+		t.Fatalf("successful receipt replay: %v", err)
+	}
+	if successReplay["success"] != true || successReplay["replayed"] != true {
+		t.Fatalf("successful receipt replay was not a terminal no-op: %+v", successReplay)
+	}
+	afterSuccessReplay, err := store.GetOperation("ws_terminal_replay", write.OpID)
+	if err != nil {
+		t.Fatalf("get operation after successful replay: %v", err)
+	}
+	if !reflect.DeepEqual(afterSuccessReplay, terminal) {
+		t.Fatalf("successful replay mutated terminal receipt:\n before=%+v\n after=%+v", terminal, afterSuccessReplay)
+	}
+	afterReplayEvents, err := store.GetEvents("ws_terminal_replay", "", "", 100)
+	if err != nil {
+		t.Fatalf("get events after successful replay: %v", err)
+	}
+	if !reflect.DeepEqual(afterReplayEvents, terminalEvents) {
+		t.Fatalf("successful replay emitted bookkeeping events:\n before=%+v\n after=%+v", terminalEvents, afterReplayEvents)
 	}
 
 	replayed, err := store.AcknowledgeWriteback("ws_terminal_replay", write.OpID, WritebackAck{

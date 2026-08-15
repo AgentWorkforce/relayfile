@@ -2075,7 +2075,10 @@ paths:
                       operation, a replayed failure cannot downgrade it.
                   replayed:
                     type: boolean
-                    description: True when the operation was already succeeded.
+                    description: |
+                      True when the operation was already succeeded. The
+                      acknowledgment is a no-op and cannot replace the original
+                      terminal provider receipt.
                   bookkeepingError:
                     type: string
                     description: |
