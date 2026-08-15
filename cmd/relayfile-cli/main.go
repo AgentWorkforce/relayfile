@@ -1604,7 +1604,7 @@ func loadLegacyCloudCredentials() (cloudCredentials, error) {
 // A9 ("Cloud refresh token expired").
 var ErrCloudRefreshExpired = errors.New("cloud session expired. Run 'agent-relay cloud login' to sign in again.")
 
-var ErrDelegatedRelayfileCredentialsExpired = errors.New("delegated relayfile credentials expired or revoked. Re-bootstrap relayfile credentials with agent-relay cloud login.")
+var ErrDelegatedRelayfileCredentialsExpired = errors.New("delegated relayfile credentials expired or revoked; automatic Cloud re-mint did not succeed")
 
 // ErrDelegatedScopeInsufficient is returned when the cloud delegated-token
 // mint rejects the requested scopes. This requires human/admin intervention
@@ -13660,7 +13660,7 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 	degradedAttempts := 0
 	var nextDegradedAttempt time.Time
 	var statusMu sync.Mutex
-	const degradedStallReason = "delegated relayfile credentials expired or revoked — re-bootstrap relayfile credentials with agent-relay cloud login"
+	const degradedStallReason = "delegated relayfile credentials expired or revoked — automatic Cloud re-mint did not succeed; relayfile will retry"
 
 	enterDegraded := func() {
 		statusMu.Lock()
