@@ -7709,8 +7709,20 @@ func TestRefreshDelegatedCredentialsSurfacesRemintFailure(t *testing.T) {
 	if !errors.Is(err, ErrDelegatedRelayfileCredentialsExpired) {
 		t.Fatalf("expected delegated expiry sentinel, got %v", err)
 	}
+	if !errors.Is(err, ErrCloudRefreshExpired) {
+		t.Fatalf("missing Cloud session must preserve the needs-human sentinel, got %v", err)
+	}
 	if !strings.Contains(err.Error(), "no Agent Relay cloud session") || !strings.Contains(err.Error(), "cloud-auth.json") {
 		t.Fatalf("expected remint failure detail naming the missing cloud session, got %v", err)
+	}
+	reason := degradedStallReasonFor(err)
+	for _, want := range []string{"requires human action", "agent-relay cloud login"} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("missing-session stall reason %q does not contain %q", reason, want)
+		}
+	}
+	if strings.Contains(reason, "relayfile will retry") {
+		t.Fatalf("missing-session stall reason must not claim automatic recovery: %q", reason)
 	}
 }
 
@@ -7734,25 +7746,25 @@ func TestDegradedStallReasonNamesCauseAndActionability(t *testing.T) {
 		{
 			name:    "transient remint failure promises a retry",
 			err:     transient,
-			want:    []string{"relayauth_unavailable", "relayfile will retry"},
-			notWant: []string{"cannot recover"},
+			want:    []string{"is retryable", "relayauth_unavailable", "relayfile will retry"},
+			notWant: []string{"requires human action", "cannot recover"},
 		},
 		{
 			name:    "expired cloud session needs a human, not a retry",
 			err:     fmt.Errorf("refresh delegated credentials: %w", ErrCloudRefreshExpired),
-			want:    []string{"cannot recover", "sign-in"},
+			want:    []string{"requires human action", "cannot recover", "sign-in"},
 			notWant: []string{"relayfile will retry"},
 		},
 		{
 			name:    "insufficient scope needs a human, not a retry",
 			err:     fmt.Errorf("%w: workspace denies fs:write", ErrDelegatedScopeInsufficient),
-			want:    []string{"cannot recover", "scopes must be corrected"},
+			want:    []string{"requires human action", "cannot recover", "scopes must be corrected"},
 			notWant: []string{"relayfile will retry"},
 		},
 		{
 			name:    "invalid scope needs a human, not a retry",
 			err:     fmt.Errorf("%w: malformed", ErrDelegatedScopeInvalid),
-			want:    []string{"cannot recover", "scopes must be corrected"},
+			want:    []string{"requires human action", "cannot recover", "scopes must be corrected"},
 			notWant: []string{"relayfile will retry"},
 		},
 	} {
@@ -7774,6 +7786,35 @@ func TestDegradedStallReasonNamesCauseAndActionability(t *testing.T) {
 				t.Fatalf("stall reason %q reinstates blanket re-bootstrap advice", reason)
 			}
 		})
+	}
+}
+
+func TestDegradedStallClassIgnoresVolatileErrorDetail(t *testing.T) {
+	firstErr := fmt.Errorf("%w; cloud re-mint fallback failed: request_id=req-1 retry=1",
+		ErrDelegatedRelayfileCredentialsExpired)
+	secondErr := fmt.Errorf("%w; cloud re-mint fallback failed: request_id=req-2 retry=2",
+		ErrDelegatedRelayfileCredentialsExpired)
+
+	firstReason, firstClass, _ := degradedStallUpdateFor(degradedStallUnknown, firstErr)
+	secondReason, secondClass, resetNotice := degradedStallUpdateFor(firstClass, secondErr)
+	if firstReason == secondReason {
+		t.Fatal("volatile-detail treatment was not administered: rendered reasons must differ")
+	}
+	if firstClass != degradedStallRetryable || secondClass != degradedStallRetryable {
+		t.Fatalf("transient failures classified as %v and %v, want retryable", firstClass, secondClass)
+	}
+	if firstClass != secondClass {
+		t.Fatalf("volatile details changed recovery class from %v to %v", firstClass, secondClass)
+	}
+	if resetNotice {
+		t.Fatal("volatile detail within the retryable class reset the degraded-notice throttle")
+	}
+	_, humanClass, resetNotice := degradedStallUpdateFor(secondClass, fmt.Errorf("%w: denied", ErrDelegatedScopeInsufficient))
+	if humanClass == firstClass {
+		t.Fatalf("scope refusal class %v must differ from retryable class %v", humanClass, firstClass)
+	}
+	if !resetNotice {
+		t.Fatal("retryable-to-needs-human class transition did not reset the degraded-notice throttle")
 	}
 }
 
@@ -7829,6 +7870,74 @@ func TestRefreshDelegatedCredentialsReportsActualCloudRemintFailure(t *testing.T
 			t.Fatalf("healthy cloud session failure must not recommend %q, got: %v", harmful, err)
 		}
 	}
+	reason := degradedStallReasonFor(err)
+	if !strings.Contains(reason, "is retryable") || !strings.Contains(reason, "relayfile will retry") {
+		t.Fatalf("transient re-mint failure must be reported as retryable, got: %s", reason)
+	}
+	if strings.Contains(reason, "requires human action") {
+		t.Fatalf("transient re-mint failure must not require human action, got: %s", reason)
+	}
+	t.Logf("RETRYABLE: %s", reason)
+}
+
+func TestRefreshDelegatedCredentialsPreservesScopeRefusalForClassification(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	installBrokerShapedAgentRelayBin(t)
+
+	expired := testJWTWithWorkspaceAgentAndExpiry("ws_relay", "relayfile-cli", time.Now().Add(-time.Minute))
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/tokens/refresh":
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"code":"delegation_expired"}`))
+		case "/api/v1/workspaces/ws_cloud/relayfile/delegated-token":
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"code":"scope_insufficient","message":"workspace denies fs:write"}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	writeAgentRelayCloudAuthForTest(t, server.URL, "cld_access")
+
+	path := delegatedCredentialsPathForRequest("ws_cloud", defaultInspectScopes)
+	bundle := delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayauthURL:         server.URL,
+		RelayfileWorkspaceID: "ws_relay",
+		WorkspaceID:          "ws_cloud",
+		AccessToken:          expired,
+		RefreshToken:         "refresh_old",
+		AgentName:            "relayfile-cli",
+		Scopes:               append([]string(nil), defaultInspectScopes...),
+	}
+	if err := delegatedauth.SaveAtomic(path, bundle); err != nil {
+		t.Fatalf("save delegated credentials failed: %v", err)
+	}
+
+	_, err := refreshDelegatedCredentials(path, bundle, false)
+	if err == nil {
+		t.Fatal("expected scope refusal")
+	}
+	if !errors.Is(err, ErrDelegatedRelayfileCredentialsExpired) {
+		t.Fatalf("expected rejected-refresh sentinel, got: %v", err)
+	}
+	if !errors.Is(err, ErrDelegatedScopeInsufficient) {
+		t.Fatalf("scope sentinel was lost during rejected-refresh wrapping: %v", err)
+	}
+	reason := degradedStallReasonFor(err)
+	for _, want := range []string{"requires human action", "workspace denies fs:write", "scopes must be corrected"} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("scope-refusal stall reason %q does not contain %q", reason, want)
+		}
+	}
+	if strings.Contains(reason, "relayfile will retry") {
+		t.Fatalf("scope-refusal stall reason must not claim automatic recovery: %q", reason)
+	}
+	t.Logf("REQUIRES-HUMAN-ACTION: %s", reason)
 }
 
 func TestWorkspaceCommandRefreshPreservesCatalogDefaultScopes(t *testing.T) {
