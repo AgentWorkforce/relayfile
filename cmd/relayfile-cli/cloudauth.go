@@ -278,7 +278,17 @@ func refreshAgentRelayStoredAuth(ctx context.Context, auth agentRelayStoredAuth)
 		refreshErr := fmt.Errorf("refresh the stored Agent Relay cloud login at %s: HTTP %d", endpoint, resp.StatusCode)
 		switch resp.StatusCode {
 		case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden:
-			return agentRelayStoredAuth{}, fmt.Errorf("%w: %v", ErrCloudRefreshExpired, refreshErr)
+			// ErrCloudRefreshExpired's own text prescribes `agent-relay cloud
+			// login`, which is unreachable for a session supplied through the
+			// CLOUD_API_* environment. This function cannot tell whether `auth`
+			// came from the stored file or from the environment, so name both
+			// recovery paths rather than misdirect a non-interactive caller to
+			// an interactive one — the same wording the missing-session branch
+			// below already uses.
+			return agentRelayStoredAuth{}, fmt.Errorf(
+				"%w (the CLOUD_API_* environment is the non-interactive alternative): %v",
+				ErrCloudRefreshExpired, refreshErr,
+			)
 		default:
 			return agentRelayStoredAuth{}, refreshErr
 		}

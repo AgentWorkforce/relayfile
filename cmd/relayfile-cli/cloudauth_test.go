@@ -249,6 +249,14 @@ func TestCloudCredentialsReportExpiredLoginWhenRefreshRejected(t *testing.T) {
 	if strings.Contains(err.Error(), minAgentRelayCLIVersion) {
 		t.Fatalf("an expired login must not be reported as a CLI version problem, got: %v", err)
 	}
+	// A session supplied through CLOUD_API_* cannot run an interactive login,
+	// and this branch cannot tell which source `auth` came from. Naming only
+	// the interactive command misdirects non-interactive callers — the exact
+	// class of defect this PR exists to remove. The missing-session branch
+	// already names both paths; this one must too.
+	if !strings.Contains(err.Error(), "CLOUD_API_*") {
+		t.Fatalf("a rejected refresh must also name the non-interactive CLOUD_API_* alternative, got: %v", err)
+	}
 }
 
 func TestCloudCredentialsTreatTransientRefreshFailureAsRetryable(t *testing.T) {
