@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -88,6 +89,9 @@ func TestCloudCredentialsStillFailWithoutACanonicalSession(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error when no cloud session exists")
 	}
+	if !errors.Is(err, ErrCloudRefreshExpired) {
+		t.Fatalf("missing canonical session must require human action, got: %v", err)
+	}
 	if !strings.Contains(err.Error(), "cloud-auth.json") {
 		t.Fatalf("error must name the credential file it looked for, got: %v", err)
 	}
@@ -117,6 +121,9 @@ func TestCloudCredentialsRejectIncompleteCanonicalSession(t *testing.T) {
 	_, err := cloudCredentialsFromAgentRelay()
 	if err == nil || !strings.Contains(err.Error(), "incomplete") {
 		t.Fatalf("expected an incomplete-session error, got: %v", err)
+	}
+	if !errors.Is(err, ErrCloudRefreshExpired) {
+		t.Fatalf("incomplete canonical session must require human action, got: %v", err)
 	}
 }
 
@@ -229,8 +236,50 @@ func TestCloudCredentialsReportExpiredLoginWhenRefreshRejected(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "agent-relay cloud login") {
 		t.Fatalf("expected an expired-login error naming the recovery command, got: %v", err)
 	}
+	if !errors.Is(err, ErrCloudRefreshExpired) {
+		t.Fatalf("rejected Cloud refresh must preserve the needs-human sentinel, got: %v", err)
+	}
+	reason := degradedStallReasonFor(err)
+	if !strings.Contains(reason, "requires human action") || !strings.Contains(reason, "agent-relay cloud login") {
+		t.Fatalf("expired Cloud session must name the required sign-in action, got: %s", reason)
+	}
+	if strings.Contains(reason, "relayfile will retry") {
+		t.Fatalf("expired Cloud session must not claim automatic recovery, got: %s", reason)
+	}
 	if strings.Contains(err.Error(), minAgentRelayCLIVersion) {
 		t.Fatalf("an expired login must not be reported as a CLI version problem, got: %v", err)
+	}
+	// A session supplied through CLOUD_API_* cannot run an interactive login,
+	// and this branch cannot tell which source `auth` came from. Naming only
+	// the interactive command misdirects non-interactive callers — the exact
+	// class of defect this PR exists to remove. The missing-session branch
+	// already names both paths; this one must too.
+	if !strings.Contains(err.Error(), "CLOUD_API_*") {
+		t.Fatalf("a rejected refresh must also name the non-interactive CLOUD_API_* alternative, got: %v", err)
+	}
+}
+
+func TestCloudCredentialsTreatTransientRefreshFailureAsRetryable(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	installBrokerShapedAgentRelayBin(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	writeAgentRelayCloudAuthExpiringForTest(t, server.URL, "cld_at_expired", time.Now().Add(-time.Minute))
+
+	_, err := cloudCredentialsFromAgentRelay()
+	if err == nil {
+		t.Fatal("expected transient Cloud refresh failure")
+	}
+	if errors.Is(err, ErrCloudRefreshExpired) {
+		t.Fatalf("HTTP 503 must not be classified as requiring a new sign-in: %v", err)
+	}
+	reason := degradedStallReasonFor(err)
+	if !strings.Contains(reason, "is retryable") || strings.Contains(reason, "requires human action") {
+		t.Fatalf("HTTP 503 must remain retryable, got: %s", reason)
 	}
 }
 

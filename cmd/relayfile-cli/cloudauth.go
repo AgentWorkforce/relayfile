@@ -275,10 +275,23 @@ func refreshAgentRelayStoredAuth(ctx context.Context, auth agentRelayStoredAuth)
 	var payload agentRelayStoredAuth
 	decodeErr := json.NewDecoder(resp.Body).Decode(&payload)
 	if resp.StatusCode != http.StatusOK {
-		return agentRelayStoredAuth{}, fmt.Errorf(
-			"the stored Agent Relay cloud login has expired (%s returned HTTP %d); run `agent-relay cloud login`",
-			endpoint, resp.StatusCode,
-		)
+		refreshErr := fmt.Errorf("refresh the stored Agent Relay cloud login at %s: HTTP %d", endpoint, resp.StatusCode)
+		switch resp.StatusCode {
+		case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden:
+			// ErrCloudRefreshExpired's own text prescribes `agent-relay cloud
+			// login`, which is unreachable for a session supplied through the
+			// CLOUD_API_* environment. This function cannot tell whether `auth`
+			// came from the stored file or from the environment, so name both
+			// recovery paths rather than misdirect a non-interactive caller to
+			// an interactive one — the same wording the missing-session branch
+			// below already uses.
+			return agentRelayStoredAuth{}, fmt.Errorf(
+				"%w (the CLOUD_API_* environment is the non-interactive alternative): %v",
+				ErrCloudRefreshExpired, refreshErr,
+			)
+		default:
+			return agentRelayStoredAuth{}, refreshErr
+		}
 	}
 	if decodeErr != nil {
 		return agentRelayStoredAuth{}, fmt.Errorf("parse the refresh response from %s: %w", endpoint, decodeErr)
@@ -286,10 +299,7 @@ func refreshAgentRelayStoredAuth(ctx context.Context, auth agentRelayStoredAuth)
 	if strings.TrimSpace(payload.AccessToken) == "" ||
 		strings.TrimSpace(payload.RefreshToken) == "" ||
 		strings.TrimSpace(payload.AccessTokenExpiresAt) == "" {
-		return agentRelayStoredAuth{}, fmt.Errorf(
-			"the refresh response from %s did not include a complete token set; run `agent-relay cloud login`",
-			endpoint,
-		)
+		return agentRelayStoredAuth{}, fmt.Errorf("the refresh response from %s did not include a complete token set", endpoint)
 	}
 	next := agentRelayStoredAuth{
 		APIURL:               firstNonEmpty(strings.TrimSpace(payload.APIURL), apiURL),
@@ -336,16 +346,16 @@ func ensureAgentRelayCloudSession(ctx context.Context) (agentRelayStoredAuth, ag
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return agentRelayStoredAuth{}, agentRelayCloudSessionFromFile, fmt.Errorf(
-				"no Agent Relay cloud session: %s does not exist. Run `agent-relay cloud login`, or set CLOUD_API_URL, CLOUD_API_ACCESS_TOKEN, CLOUD_API_REFRESH_TOKEN and CLOUD_API_ACCESS_TOKEN_EXPIRES_AT",
-				path,
+				"%w: no Agent Relay cloud session; %s does not exist (the CLOUD_API_* environment is the non-interactive alternative)",
+				ErrCloudRefreshExpired, path,
 			)
 		}
 		return agentRelayStoredAuth{}, agentRelayCloudSessionFromFile, err
 	}
 	if !auth.valid() {
 		return agentRelayStoredAuth{}, agentRelayCloudSessionFromFile, fmt.Errorf(
-			"the Agent Relay cloud session at %s is incomplete (needs apiUrl, accessToken, refreshToken and an RFC3339 accessTokenExpiresAt); run `agent-relay cloud login`",
-			path,
+			"%w: the Agent Relay cloud session at %s is incomplete (needs apiUrl, accessToken, refreshToken and an RFC3339 accessTokenExpiresAt)",
+			ErrCloudRefreshExpired, path,
 		)
 	}
 	if !auth.needsRefresh(time.Now()) {

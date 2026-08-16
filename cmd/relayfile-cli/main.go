@@ -1598,13 +1598,13 @@ func loadLegacyCloudCredentials() (cloudCredentials, error) {
 	return creds, nil
 }
 
-// ErrCloudRefreshExpired indicates the cloud refresh token cannot mint new
-// access tokens. The mount loop uses this to enter the read-only degraded
-// state described in the productized cloud-mount contract acceptance test
-// A9 ("Cloud refresh token expired").
-var ErrCloudRefreshExpired = errors.New("cloud session expired. Run 'agent-relay cloud login' to sign in again.")
+// ErrCloudRefreshExpired indicates that the canonical Cloud session is absent,
+// incomplete, or can no longer refresh, so automatic delegated-credential
+// recovery requires a new sign-in. The historical name is retained because
+// callers already use it as the needs-human sentinel for this condition.
+var ErrCloudRefreshExpired = errors.New("Agent Relay cloud session requires a new sign-in; run 'agent-relay cloud login'")
 
-var ErrDelegatedRelayfileCredentialsExpired = errors.New("delegated relayfile credentials expired or revoked. Re-bootstrap relayfile credentials with agent-relay cloud login.")
+var ErrDelegatedRelayfileCredentialsExpired = errors.New("delegated relayfile credentials expired or revoked; automatic Cloud re-mint did not succeed")
 
 // ErrDelegatedScopeInsufficient is returned when the cloud delegated-token
 // mint rejects the requested scopes. This requires human/admin intervention
@@ -1618,6 +1618,68 @@ var ErrDelegatedScopeInsufficient = errors.New("delegated relayfile credentials 
 // permanent client error that must surface to a human (correct the scope shape)
 // rather than drive an endless retry loop.
 var ErrDelegatedScopeInvalid = errors.New("delegated relayfile credentials requested invalid scopes — scopes must be valid relayfile path scopes; retrying will not succeed, re-mint with corrected scopes")
+
+type degradedStallClass uint8
+
+const (
+	degradedStallUnknown degradedStallClass = iota
+	degradedStallRetryable
+	degradedStallRequiresSignIn
+	degradedStallRequiresScopeCorrection
+)
+
+// degradedStallClassFor returns the stable recovery class used both for the
+// operator-facing message and for degraded-notice throttling. Error text may
+// contain a different request ID or retry detail on every attempt; those
+// details must not make an unchanged recovery class look like a state change.
+func degradedStallClassFor(err error) degradedStallClass {
+	if err == nil {
+		return degradedStallUnknown
+	}
+	switch {
+	case errors.Is(err, ErrCloudRefreshExpired):
+		return degradedStallRequiresSignIn
+	case errors.Is(err, ErrDelegatedScopeInsufficient), errors.Is(err, ErrDelegatedScopeInvalid):
+		return degradedStallRequiresScopeCorrection
+	default:
+		return degradedStallRetryable
+	}
+}
+
+// degradedStallReasonFor renders the read-only mount's stall reason from the
+// error that caused it, and is deliberately not a single fixed sentence.
+//
+// Both blanket forms are wrong in opposite directions. "Re-authenticate"
+// blamed a healthy Cloud session for what is usually a transient re-mint
+// failure, and sent operators to run `agent-relay cloud login` for nothing. A
+// blanket "relayfile will retry" is the mirror image: for a fully expired
+// Cloud session or scopes Cloud refuses to mint, no amount of retrying can
+// restore the credential, so promising self-healing leaves the mount read-only
+// indefinitely while `relayfile status` claims it is recovering. Name the
+// actual cause, and say only of the recoverable case that it will be retried.
+func degradedStallReasonFor(err error) string {
+	switch degradedStallClassFor(err) {
+	case degradedStallUnknown:
+		return "delegated relayfile credentials unusable; cause not recorded"
+	case degradedStallRequiresSignIn:
+		return fmt.Sprintf("delegated relayfile credential recovery requires human action: %v — automatic Cloud re-mint cannot recover this without a new sign-in", err)
+	case degradedStallRequiresScopeCorrection:
+		return fmt.Sprintf("delegated relayfile credential recovery requires human action: %v — automatic Cloud re-mint cannot recover this; the scopes must be corrected before re-minting", err)
+	case degradedStallRetryable:
+		return fmt.Sprintf("delegated relayfile credential recovery is retryable: %v — relayfile will retry", err)
+	default:
+		panic("unknown degraded credential recovery class")
+	}
+}
+
+// degradedStallUpdateFor returns the newly rendered detail together with the
+// stable class transition that controls whether the notice throttle resets.
+// The rendered reason is always refreshed, but volatile detail alone is not a
+// class transition and must not trigger another immediate log line.
+func degradedStallUpdateFor(previousClass degradedStallClass, err error) (reason string, nextClass degradedStallClass, resetNotice bool) {
+	nextClass = degradedStallClassFor(err)
+	return degradedStallReasonFor(err), nextClass, previousClass != nextClass
+}
 
 func isMountCredentialExpired(err error) bool {
 	return errors.Is(err, ErrCloudRefreshExpired) ||
@@ -1640,7 +1702,7 @@ func mapDelegatedTokenCloudError(err error) error {
 	}
 	switch ae.Code {
 	case "needs_reauth":
-		return fmt.Errorf("%w: %s", ErrDelegatedRelayfileCredentialsExpired, ae.Message)
+		return fmt.Errorf("%w: %s", ErrCloudRefreshExpired, ae.Message)
 	case "scope_insufficient":
 		return fmt.Errorf("%w: %s", ErrDelegatedScopeInsufficient, ae.Message)
 	case "invalid_scope":
@@ -10668,9 +10730,9 @@ func refreshDelegatedCredentials(path string, bundle delegatedauth.Bundle, force
 				return nil
 			}
 			if errors.Is(err, delegatedauth.ErrRefreshRejected) {
-				return fmt.Errorf("%w; cloud re-mint fallback failed: %v", ErrDelegatedRelayfileCredentialsExpired, remintErr)
+				return fmt.Errorf("%w; cloud re-mint fallback failed: %w", ErrDelegatedRelayfileCredentialsExpired, remintErr)
 			}
-			return fmt.Errorf("%w; cloud re-mint fallback failed: %v", err, remintErr)
+			return fmt.Errorf("%w; cloud re-mint fallback failed: %w", err, remintErr)
 		}
 		if !changed {
 			renewed = bundle
@@ -13660,22 +13722,45 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 	degradedAttempts := 0
 	var nextDegradedAttempt time.Time
 	var statusMu sync.Mutex
-	const degradedStallReason = "delegated relayfile credentials expired or revoked — re-bootstrap relayfile credentials with agent-relay cloud login"
+	degradedStallReason := degradedStallReasonFor(nil)
+	degradedRecoveryClass := degradedStallClassFor(nil)
 
-	enterDegraded := func() {
+	enterDegraded := func(cause error) {
+		reason := degradedStallReasonFor(cause)
+		class := degradedStallClassFor(cause)
 		statusMu.Lock()
 		changed := false
 		if !degraded {
 			degraded = true
-			stallReason = degradedStallReason
+			degradedStallReason = reason
+			degradedRecoveryClass = class
+			stallReason = reason
 			lastDegradedNotice = time.Time{}
 			nextDegradedAttempt = time.Time{}
 			changed = true
 		}
 		statusMu.Unlock()
 		if changed {
-			log.Printf("mount entering read-only degraded state: %s", degradedStallReason)
+			log.Printf("mount entering read-only degraded state: %s", reason)
 		}
+	}
+	// Refresh the recorded cause while degraded: a stall that began as a
+	// transient re-mint failure can later become one only a human can clear
+	// (the Cloud session fully expires, or Cloud starts refusing the scopes),
+	// and the reported reason has to follow it rather than keep promising a
+	// retry that can no longer succeed.
+	updateDegradedCause := func(cause error) {
+		statusMu.Lock()
+		if degraded {
+			reason, class, classChanged := degradedStallUpdateFor(degradedRecoveryClass, cause)
+			degradedStallReason = reason
+			degradedRecoveryClass = class
+			stallReason = reason
+			if classChanged {
+				lastDegradedNotice = time.Time{}
+			}
+		}
+		statusMu.Unlock()
 	}
 	exitDegraded := func() {
 		statusMu.Lock()
@@ -13683,6 +13768,7 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 		if degraded {
 			degraded = false
 			stallReason = ""
+			degradedRecoveryClass = degradedStallUnknown
 			lastDegradedNotice = time.Time{}
 			degradedAttempts = 0
 			nextDegradedAttempt = time.Time{}
@@ -13704,8 +13790,9 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 			return
 		}
 		lastDegradedNotice = time.Now()
+		reason := degradedStallReason
 		statusMu.Unlock()
-		log.Printf("mount degraded: %s", degradedStallReason)
+		log.Printf("mount degraded: %s", reason)
 	}
 	isDegraded := func() bool {
 		statusMu.Lock()
@@ -13843,6 +13930,7 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 		statusMu.Lock()
 		currentlyDegraded := degraded
 		degradedRetryAt := nextDegradedAttempt
+		currentDegradedReason := degradedStallReason
 		statusMu.Unlock()
 		if currentlyDegraded {
 			// Exponential backoff: skip recovery attempts until nextDegradedAttempt.
@@ -13850,7 +13938,7 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 			if !degradedRetryAt.IsZero() && time.Now().Before(degradedRetryAt) {
 				maybePrintRecovery()
 				writeSnapshot()
-				return errors.New(degradedStallReason)
+				return errors.New(currentDegradedReason)
 			}
 			// Try to recover by re-running auth refresh.
 			if err := refreshMountAuth(true); err != nil {
@@ -13870,6 +13958,7 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 				nextDegradedAttempt = time.Now().Add(backoff)
 				statusMu.Unlock()
 				if isMountCredentialExpired(err) {
+					updateDegradedCause(err)
 					maybePrintRecovery()
 					writeSnapshot()
 					return err
@@ -13888,7 +13977,7 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 		})
 		if err != nil {
 			if isMountCredentialExpired(err) {
-				enterDegraded()
+				enterDegraded(err)
 				maybePrintRecovery()
 				writeSnapshot()
 				return err
@@ -13949,7 +14038,7 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 				return syncer.HandleLocalChange(ctx, relativePath, op)
 			}); err != nil {
 				if isMountCredentialExpired(err) {
-					enterDegraded()
+					enterDegraded(err)
 					maybePrintRecovery()
 					writeSnapshot()
 					return

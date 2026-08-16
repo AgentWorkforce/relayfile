@@ -40,7 +40,7 @@ func TestMapDelegatedTokenCloudError(t *testing.T) {
 		{
 			name:           "needs_reauth is permanent",
 			err:            &apiError{StatusCode: 401, Code: "needs_reauth", Message: "session expired"},
-			wantSentinel:   ErrDelegatedRelayfileCredentialsExpired,
+			wantSentinel:   ErrCloudRefreshExpired,
 			wantCredExpiry: true,
 		},
 		{

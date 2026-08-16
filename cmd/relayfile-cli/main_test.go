@@ -7450,9 +7450,15 @@ func TestLoadDelegatedCredentialsForRequestIgnoresInsufficientLegacyBundle(t *te
 	}
 }
 
-func TestRefreshDelegatedCredentialsFallsBackToCloudRemint(t *testing.T) {
+// MUST FIRE: a rejected delegated refresh must re-mint through Cloud even when
+// AGENT_RELAY_BIN points at relay's Rust broker and PATH contains no Node CLI.
+// Before the direct cloud-session path this exact environment made relayfile
+// exec the broker's nonexistent `cloud` subcommand instead of reaching the
+// delegated-token endpoint.
+func TestRefreshDelegatedCredentialsCloudRemintIgnoresBrokerShapedAgentRelayBin(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
+	installBrokerShapedAgentRelayBin(t)
 
 	expired := testJWTWithWorkspaceAgentAndExpiry("ws_relay", "relayfile-cli", time.Now().Add(-time.Minute))
 	reminted := testJWTWithWorkspaceAgentAndExpiry("ws_relay", "relayfile-cli", time.Now().Add(time.Hour))
@@ -7479,7 +7485,7 @@ func TestRefreshDelegatedCredentialsFallsBackToCloudRemint(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	installFakeAgentRelaySession(t, server.URL, "cld_access", "demo", "ws_cloud", "ws_relay")
+	writeAgentRelayCloudAuthForTest(t, server.URL, "cld_access")
 
 	path := delegatedCredentialsPathForRequest("ws_cloud", defaultInspectScopes)
 	if err := delegatedauth.SaveAtomic(path, delegatedauth.Bundle{
@@ -7518,6 +7524,149 @@ func TestRefreshDelegatedCredentialsFallsBackToCloudRemint(t *testing.T) {
 	}
 	if persisted.BearerToken() != reminted {
 		t.Fatalf("expected reminted token persisted, got %#v", persisted)
+	}
+}
+
+// Manual acceptance arm for a relay-spawned process. Unlike the hermetic
+// regression above, this test must inherit the real AGENT_RELAY_BIN unchanged.
+// Run with RELAYFILE_LIVE_BROKER_COLLISION=1; the test first proves that the
+// inherited binary rejects `cloud`, then proves delegated re-mint still reaches
+// Cloud and succeeds.
+func TestLiveInheritedBrokerDelegatedRemint(t *testing.T) {
+	if os.Getenv("RELAYFILE_LIVE_BROKER_COLLISION") != "1" {
+		t.Skip("set RELAYFILE_LIVE_BROKER_COLLISION=1 inside a relay-spawned process")
+	}
+	broker := strings.TrimSpace(os.Getenv("AGENT_RELAY_BIN"))
+	if broker == "" {
+		t.Fatal("AGENT_RELAY_BIN must be inherited from the relay broker")
+	}
+	output, probeErr := exec.Command(broker, "cloud").CombinedOutput()
+	if probeErr == nil || !strings.Contains(strings.ToLower(string(output)), "unrecognized subcommand") {
+		t.Fatalf("AGENT_RELAY_BIN treatment was not administered: %q cloud returned err=%v output=%q", broker, probeErr, output)
+	}
+
+	t.Setenv("HOME", t.TempDir())
+	for _, name := range []string{
+		"RELAYFILE_AGENT_RELAY_BIN",
+		"RELAYFILE_SERVER",
+		"RELAYFILE_BASE_URL",
+		"RELAYFILE_TOKEN",
+		"RELAYFILE_WORKSPACE",
+		"RELAYFILE_CLOUD_API_URL",
+		"RELAYFILE_CLOUD_TOKEN",
+		"RELAYFILE_MOUNT_CREDS_FILE",
+		"RELAYFILE_DELEGATED_CREDENTIALS_FILE",
+		"CLOUD_API_URL",
+		"CLOUD_API_ACCESS_TOKEN",
+		"CLOUD_API_REFRESH_TOKEN",
+		"CLOUD_API_ACCESS_TOKEN_EXPIRES_AT",
+		"CLOUD_API_REFRESH_TOKEN_EXPIRES_AT",
+	} {
+		t.Setenv(name, "")
+	}
+
+	expired := testJWTWithWorkspaceAgentAndExpiry("ws_relay", "relayfile-cli", time.Now().Add(-time.Minute))
+	reminted := testJWTWithWorkspaceAgentAndExpiry("ws_relay", "relayfile-cli", time.Now().Add(time.Hour))
+	var sawRemint bool
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/api/v1/workspaces/ws_cloud/relayfile/delegated-token" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		sawRemint = true
+		writeDelegatedBundleResponse(t, w, server.URL, "ws_relay", reminted, "refresh_new")
+	}))
+	defer server.Close()
+	writeAgentRelayCloudAuthForTest(t, server.URL, "cld_access")
+
+	path := delegatedCredentialsPathForRequest("ws_cloud", defaultInspectScopes)
+	bundle := delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayfileWorkspaceID: "ws_relay",
+		WorkspaceID:          "ws_cloud",
+		AccessToken:          expired,
+		RefreshToken:         "refresh_old",
+		AgentName:            "relayfile-cli",
+		Scopes:               append([]string(nil), defaultInspectScopes...),
+	}
+	if err := delegatedauth.SaveAtomic(path, bundle); err != nil {
+		t.Fatalf("save delegated credentials failed: %v", err)
+	}
+	renewed, err := refreshDelegatedCredentials(path, bundle, false)
+	if err != nil {
+		t.Fatalf("delegated credential re-mint failed with inherited AGENT_RELAY_BIN=%q: %v", broker, err)
+	}
+	if !sawRemint || renewed.BearerToken() != reminted {
+		t.Fatalf("delegated credential re-mint did not return the minted token: sawRemint=%v bundle=%#v", sawRemint, renewed)
+	}
+	if got := os.Getenv("AGENT_RELAY_BIN"); got != broker {
+		t.Fatalf("test changed AGENT_RELAY_BIN: got %q want inherited %q", got, broker)
+	}
+	t.Logf("delegated credential re-mint succeeded with inherited AGENT_RELAY_BIN=%s", broker)
+}
+
+// MUST NOT FIRE: the normal delegated-token refresh remains the preferred
+// happy path. A usable Cloud session is present so a regression that
+// needlessly falls back to re-mint would be observable at the endpoint.
+func TestRefreshDelegatedCredentialsDoesNotRemintWhenRefreshSucceeds(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	installBrokerShapedAgentRelayBin(t)
+
+	expired := testJWTWithWorkspaceAgentAndExpiry("ws_relay", "relayfile-cli", time.Now().Add(-time.Minute))
+	refreshed := testJWTWithWorkspaceAgentAndExpiry("ws_relay", "relayfile-cli", time.Now().Add(time.Hour))
+	var refreshCalls int
+	var remintCalls int
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/tokens/refresh":
+			refreshCalls++
+			_ = json.NewEncoder(w).Encode(delegatedauth.TokenPair{
+				AccessToken:           refreshed,
+				RefreshToken:          "refresh_new",
+				AccessTokenExpiresAt:  time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+				RefreshTokenExpiresAt: time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
+			})
+		case "/api/v1/workspaces/ws_cloud/relayfile/delegated-token":
+			remintCalls++
+			writeDelegatedBundleResponse(t, w, server.URL, "ws_relay", "unexpected_remint", "unexpected_refresh")
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	writeAgentRelayCloudAuthForTest(t, server.URL, "cld_access")
+
+	path := delegatedCredentialsPathForRequest("ws_cloud", defaultInspectScopes)
+	bundle := delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayauthURL:         server.URL,
+		RelayfileWorkspaceID: "ws_relay",
+		WorkspaceID:          "ws_cloud",
+		AccessToken:          expired,
+		RefreshToken:         "refresh_old",
+		AgentName:            "relayfile-cli",
+		Scopes:               append([]string(nil), defaultInspectScopes...),
+	}
+	if err := delegatedauth.SaveAtomic(path, bundle); err != nil {
+		t.Fatalf("save delegated credentials failed: %v", err)
+	}
+
+	renewed, err := refreshDelegatedCredentials(path, bundle, false)
+	if err != nil {
+		t.Fatalf("refreshDelegatedCredentials failed: %v", err)
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("delegated refresh calls = %d, want 1", refreshCalls)
+	}
+	if remintCalls != 0 {
+		t.Fatalf("cloud re-mint calls = %d, want 0", remintCalls)
+	}
+	if renewed.BearerToken() != refreshed || renewed.RotationToken() != "refresh_new" {
+		t.Fatalf("unexpected renewed bundle: %#v", renewed)
 	}
 }
 
@@ -7560,9 +7709,235 @@ func TestRefreshDelegatedCredentialsSurfacesRemintFailure(t *testing.T) {
 	if !errors.Is(err, ErrDelegatedRelayfileCredentialsExpired) {
 		t.Fatalf("expected delegated expiry sentinel, got %v", err)
 	}
+	if !errors.Is(err, ErrCloudRefreshExpired) {
+		t.Fatalf("missing Cloud session must preserve the needs-human sentinel, got %v", err)
+	}
 	if !strings.Contains(err.Error(), "no Agent Relay cloud session") || !strings.Contains(err.Error(), "cloud-auth.json") {
 		t.Fatalf("expected remint failure detail naming the missing cloud session, got %v", err)
 	}
+	reason := degradedStallReasonFor(err)
+	for _, want := range []string{"requires human action", "agent-relay cloud login"} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("missing-session stall reason %q does not contain %q", reason, want)
+		}
+	}
+	if strings.Contains(reason, "relayfile will retry") {
+		t.Fatalf("missing-session stall reason must not claim automatic recovery: %q", reason)
+	}
+}
+
+// The degraded mount's stall reason has to track the actual cause. Two blanket
+// messages are each wrong in one direction: "re-authenticate" blames a healthy
+// Cloud session for a transient re-mint failure, and "relayfile will retry"
+// promises self-healing for a fully expired session or refused scopes, where
+// retrying can never succeed and the mount would sit read-only indefinitely.
+func TestDegradedStallReasonNamesCauseAndActionability(t *testing.T) {
+	transient := fmt.Errorf("%w; cloud re-mint fallback failed: %v",
+		ErrDelegatedRelayfileCredentialsExpired,
+		errors.New("mint delegated relayfile credentials: relayauth_unavailable"))
+
+	for _, tc := range []struct {
+		name string
+		err  error
+		// want appears in the reason; notWant must not.
+		want    []string
+		notWant []string
+	}{
+		{
+			name:    "transient remint failure promises a retry",
+			err:     transient,
+			want:    []string{"is retryable", "relayauth_unavailable", "relayfile will retry"},
+			notWant: []string{"requires human action", "cannot recover"},
+		},
+		{
+			name:    "expired cloud session needs a human, not a retry",
+			err:     fmt.Errorf("refresh delegated credentials: %w", ErrCloudRefreshExpired),
+			want:    []string{"requires human action", "cannot recover", "sign-in"},
+			notWant: []string{"relayfile will retry"},
+		},
+		{
+			name:    "insufficient scope needs a human, not a retry",
+			err:     fmt.Errorf("%w: workspace denies fs:write", ErrDelegatedScopeInsufficient),
+			want:    []string{"requires human action", "cannot recover", "scopes must be corrected"},
+			notWant: []string{"relayfile will retry"},
+		},
+		{
+			name:    "invalid scope needs a human, not a retry",
+			err:     fmt.Errorf("%w: malformed", ErrDelegatedScopeInvalid),
+			want:    []string{"requires human action", "cannot recover", "scopes must be corrected"},
+			notWant: []string{"relayfile will retry"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reason := degradedStallReasonFor(tc.err)
+			for _, want := range tc.want {
+				if !strings.Contains(reason, want) {
+					t.Fatalf("stall reason %q does not contain %q", reason, want)
+				}
+			}
+			for _, notWant := range tc.notWant {
+				if strings.Contains(reason, notWant) {
+					t.Fatalf("stall reason %q must not contain %q", reason, notWant)
+				}
+			}
+			// Whatever the class, the reason must never send an operator to
+			// re-authenticate a session that is not the failure.
+			if strings.Contains(reason, "Re-bootstrap relayfile credentials") {
+				t.Fatalf("stall reason %q reinstates blanket re-bootstrap advice", reason)
+			}
+		})
+	}
+}
+
+func TestDegradedStallClassIgnoresVolatileErrorDetail(t *testing.T) {
+	firstErr := fmt.Errorf("%w; cloud re-mint fallback failed: request_id=req-1 retry=1",
+		ErrDelegatedRelayfileCredentialsExpired)
+	secondErr := fmt.Errorf("%w; cloud re-mint fallback failed: request_id=req-2 retry=2",
+		ErrDelegatedRelayfileCredentialsExpired)
+
+	firstReason, firstClass, _ := degradedStallUpdateFor(degradedStallUnknown, firstErr)
+	secondReason, secondClass, resetNotice := degradedStallUpdateFor(firstClass, secondErr)
+	if firstReason == secondReason {
+		t.Fatal("volatile-detail treatment was not administered: rendered reasons must differ")
+	}
+	if firstClass != degradedStallRetryable || secondClass != degradedStallRetryable {
+		t.Fatalf("transient failures classified as %v and %v, want retryable", firstClass, secondClass)
+	}
+	if firstClass != secondClass {
+		t.Fatalf("volatile details changed recovery class from %v to %v", firstClass, secondClass)
+	}
+	if resetNotice {
+		t.Fatal("volatile detail within the retryable class reset the degraded-notice throttle")
+	}
+	_, humanClass, resetNotice := degradedStallUpdateFor(secondClass, fmt.Errorf("%w: denied", ErrDelegatedScopeInsufficient))
+	if humanClass == firstClass {
+		t.Fatalf("scope refusal class %v must differ from retryable class %v", humanClass, firstClass)
+	}
+	if !resetNotice {
+		t.Fatal("retryable-to-needs-human class transition did not reset the degraded-notice throttle")
+	}
+}
+
+func TestRefreshDelegatedCredentialsReportsActualCloudRemintFailure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	installBrokerShapedAgentRelayBin(t)
+
+	expired := testJWTWithWorkspaceAgentAndExpiry("ws_relay", "relayfile-cli", time.Now().Add(-time.Minute))
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/tokens/refresh":
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"code":"delegation_expired"}`))
+		case "/api/v1/workspaces/ws_cloud/relayfile/delegated-token":
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"code":"relayauth_unavailable","message":"delegated credential service unavailable"}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	writeAgentRelayCloudAuthForTest(t, server.URL, "cld_access")
+
+	path := delegatedCredentialsPathForRequest("ws_cloud", defaultInspectScopes)
+	bundle := delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayauthURL:         server.URL,
+		RelayfileWorkspaceID: "ws_relay",
+		WorkspaceID:          "ws_cloud",
+		AccessToken:          expired,
+		RefreshToken:         "refresh_old",
+		AgentName:            "relayfile-cli",
+		Scopes:               append([]string(nil), defaultInspectScopes...),
+	}
+	if err := delegatedauth.SaveAtomic(path, bundle); err != nil {
+		t.Fatalf("save delegated credentials failed: %v", err)
+	}
+
+	_, err := refreshDelegatedCredentials(path, bundle, false)
+	if err == nil {
+		t.Fatal("expected refresh failure")
+	}
+	for _, want := range []string{"cloud re-mint fallback failed", "http 503", "relayauth_unavailable"} {
+		if !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(want)) {
+			t.Fatalf("error must name actual re-mint failure %q, got: %v", want, err)
+		}
+	}
+	for _, harmful := range []string{"missing fs:write", "re-authenticate", "agent-relay cloud login"} {
+		if strings.Contains(strings.ToLower(err.Error()), strings.ToLower(harmful)) {
+			t.Fatalf("healthy cloud session failure must not recommend %q, got: %v", harmful, err)
+		}
+	}
+	reason := degradedStallReasonFor(err)
+	if !strings.Contains(reason, "is retryable") || !strings.Contains(reason, "relayfile will retry") {
+		t.Fatalf("transient re-mint failure must be reported as retryable, got: %s", reason)
+	}
+	if strings.Contains(reason, "requires human action") {
+		t.Fatalf("transient re-mint failure must not require human action, got: %s", reason)
+	}
+	t.Logf("RETRYABLE: %s", reason)
+}
+
+func TestRefreshDelegatedCredentialsPreservesScopeRefusalForClassification(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	installBrokerShapedAgentRelayBin(t)
+
+	expired := testJWTWithWorkspaceAgentAndExpiry("ws_relay", "relayfile-cli", time.Now().Add(-time.Minute))
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/tokens/refresh":
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"code":"delegation_expired"}`))
+		case "/api/v1/workspaces/ws_cloud/relayfile/delegated-token":
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"code":"scope_insufficient","message":"workspace denies fs:write"}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	writeAgentRelayCloudAuthForTest(t, server.URL, "cld_access")
+
+	path := delegatedCredentialsPathForRequest("ws_cloud", defaultInspectScopes)
+	bundle := delegatedauth.Bundle{
+		RelayfileURL:         server.URL,
+		RelayauthURL:         server.URL,
+		RelayfileWorkspaceID: "ws_relay",
+		WorkspaceID:          "ws_cloud",
+		AccessToken:          expired,
+		RefreshToken:         "refresh_old",
+		AgentName:            "relayfile-cli",
+		Scopes:               append([]string(nil), defaultInspectScopes...),
+	}
+	if err := delegatedauth.SaveAtomic(path, bundle); err != nil {
+		t.Fatalf("save delegated credentials failed: %v", err)
+	}
+
+	_, err := refreshDelegatedCredentials(path, bundle, false)
+	if err == nil {
+		t.Fatal("expected scope refusal")
+	}
+	if !errors.Is(err, ErrDelegatedRelayfileCredentialsExpired) {
+		t.Fatalf("expected rejected-refresh sentinel, got: %v", err)
+	}
+	if !errors.Is(err, ErrDelegatedScopeInsufficient) {
+		t.Fatalf("scope sentinel was lost during rejected-refresh wrapping: %v", err)
+	}
+	reason := degradedStallReasonFor(err)
+	for _, want := range []string{"requires human action", "workspace denies fs:write", "scopes must be corrected"} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("scope-refusal stall reason %q does not contain %q", reason, want)
+		}
+	}
+	if strings.Contains(reason, "relayfile will retry") {
+		t.Fatalf("scope-refusal stall reason must not claim automatic recovery: %q", reason)
+	}
+	t.Logf("REQUIRES-HUMAN-ACTION: %s", reason)
 }
 
 func TestWorkspaceCommandRefreshPreservesCatalogDefaultScopes(t *testing.T) {

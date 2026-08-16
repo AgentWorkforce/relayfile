@@ -1,0 +1,57 @@
+{
+  "id": "traj_1pmb0dufncg0",
+  "version": 1,
+  "task": {
+    "title": "Replace delegated credential shell-out with direct SDK mint",
+    "source": {
+      "system": "plain",
+      "id": "relayfile-sdk-remint-0815"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-08-15T21:38:24.295Z",
+  "completedAt": "2026-08-15T21:42:38.104Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-08-15T21:38:31.621Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_adte9hja8loe",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-08-15T21:38:31.621Z",
+      "endedAt": "2026-08-15T21:42:38.104Z",
+      "events": [
+        {
+          "ts": 1786829911623,
+          "type": "decision",
+          "content": "Kept origin/main's direct canonical-session and Cloud API mint path; added boundary-level two-arm regression coverage instead of renaming any binary variable: Kept origin/main's direct canonical-session and Cloud API mint path; added boundary-level two-arm regression coverage instead of renaming any binary variable",
+          "raw": {
+            "question": "Kept origin/main's direct canonical-session and Cloud API mint path; added boundary-level two-arm regression coverage instead of renaming any binary variable",
+            "chosen": "Kept origin/main's direct canonical-session and Cloud API mint path; added boundary-level two-arm regression coverage instead of renaming any binary variable",
+            "alternatives": [],
+            "reasoning": "Commit 92c495e already removed the delegated re-mint shell-out. The remaining measurable gap was that the refresh-to-remint regression did not poison AGENT_RELAY_BIN, and delegated-expiry text still prescribed cloud login even when the session was healthy."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Pinned delegated credential recovery to direct Cloud behavior with broker-shaped AGENT_RELAY_BIN regression arms, corrected misleading delegated-expiry guidance, and verified live mint plus daemon status.",
+    "approach": "Standard approach",
+    "confidence": 0.93
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "6af7ca2a8a9b3e7148c37cc60e3756bfe88aba31",
+    "endRef": "6af7ca2a8a9b3e7148c37cc60e3756bfe88aba31"
+  }
+}
