@@ -7714,6 +7714,69 @@ func TestRefreshDelegatedCredentialsSurfacesRemintFailure(t *testing.T) {
 	}
 }
 
+// The degraded mount's stall reason has to track the actual cause. Two blanket
+// messages are each wrong in one direction: "re-authenticate" blames a healthy
+// Cloud session for a transient re-mint failure, and "relayfile will retry"
+// promises self-healing for a fully expired session or refused scopes, where
+// retrying can never succeed and the mount would sit read-only indefinitely.
+func TestDegradedStallReasonNamesCauseAndActionability(t *testing.T) {
+	transient := fmt.Errorf("%w; cloud re-mint fallback failed: %v",
+		ErrDelegatedRelayfileCredentialsExpired,
+		errors.New("mint delegated relayfile credentials: relayauth_unavailable"))
+
+	for _, tc := range []struct {
+		name string
+		err  error
+		// want appears in the reason; notWant must not.
+		want    []string
+		notWant []string
+	}{
+		{
+			name:    "transient remint failure promises a retry",
+			err:     transient,
+			want:    []string{"relayauth_unavailable", "relayfile will retry"},
+			notWant: []string{"cannot recover"},
+		},
+		{
+			name:    "expired cloud session needs a human, not a retry",
+			err:     fmt.Errorf("refresh delegated credentials: %w", ErrCloudRefreshExpired),
+			want:    []string{"cannot recover", "sign-in"},
+			notWant: []string{"relayfile will retry"},
+		},
+		{
+			name:    "insufficient scope needs a human, not a retry",
+			err:     fmt.Errorf("%w: workspace denies fs:write", ErrDelegatedScopeInsufficient),
+			want:    []string{"cannot recover", "scopes must be corrected"},
+			notWant: []string{"relayfile will retry"},
+		},
+		{
+			name:    "invalid scope needs a human, not a retry",
+			err:     fmt.Errorf("%w: malformed", ErrDelegatedScopeInvalid),
+			want:    []string{"cannot recover", "scopes must be corrected"},
+			notWant: []string{"relayfile will retry"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reason := degradedStallReasonFor(tc.err)
+			for _, want := range tc.want {
+				if !strings.Contains(reason, want) {
+					t.Fatalf("stall reason %q does not contain %q", reason, want)
+				}
+			}
+			for _, notWant := range tc.notWant {
+				if strings.Contains(reason, notWant) {
+					t.Fatalf("stall reason %q must not contain %q", reason, notWant)
+				}
+			}
+			// Whatever the class, the reason must never send an operator to
+			// re-authenticate a session that is not the failure.
+			if strings.Contains(reason, "Re-bootstrap relayfile credentials") {
+				t.Fatalf("stall reason %q reinstates blanket re-bootstrap advice", reason)
+			}
+		})
+	}
+}
+
 func TestRefreshDelegatedCredentialsReportsActualCloudRemintFailure(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
