@@ -10513,6 +10513,15 @@ func loadDelegatedCredentials(path string) (delegatedauth.Bundle, string, error)
 }
 
 func loadDelegatedCredentialsForRequest(path, workspaceValue string, scopes []string) (delegatedauth.Bundle, string, error) {
+	if explicitPath, ok := explicitDelegatedCredentialsPath(path); ok {
+		return loadDelegatedCredentials(explicitPath)
+	}
+	if strings.TrimSpace(workspaceValue) == "" {
+		legacyBundle, legacyPath, legacyErr := loadDelegatedCredentials(delegatedCredentialsPath())
+		if legacyErr == nil && delegatedBundleSatisfiesRequestedScopes(legacyBundle, scopes) {
+			return legacyBundle, legacyPath, nil
+		}
+	}
 	canonicalWorkspaceValue, canonicalWorkspaceOK := canonicalWorkspaceShardValueStatus(workspaceValue)
 	if !canonicalWorkspaceOK && strings.TrimSpace(workspaceValue) != "" {
 		fmt.Fprintf(os.Stderr, "warning: delegated credential workspace %q was not uniquely resolved in %s; using raw workspace shard and probing alias shards\n", canonicalWorkspaceValue, workspacesPath())

@@ -1278,6 +1278,13 @@ func TestReadPrintsRemoteFileContent(t *testing.T) {
 func TestReadUsesTokenWorkspaceWhenWorkspaceArgOmitted(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
+	agentRelayLog := filepath.Join(t.TempDir(), "agent-relay.log")
+	t.Setenv("AGENT_RELAY_LOG", agentRelayLog)
+	installFakeAgentRelay(t, `
+printf '%s\n' "$*" >> "$AGENT_RELAY_LOG"
+echo "unexpected agent-relay call: $*" >&2
+exit 2
+`)
 
 	token := testJWTWithWorkspace("ws_token")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1305,6 +1312,9 @@ func TestReadUsesTokenWorkspaceWhenWorkspaceArgOmitted(t *testing.T) {
 
 	if got := stdout.String(); got != "ok\n" {
 		t.Fatalf("unexpected file content: %q", got)
+	}
+	if _, err := os.Stat(agentRelayLog); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read with a token workspace unexpectedly called agent-relay: %v", err)
 	}
 }
 
