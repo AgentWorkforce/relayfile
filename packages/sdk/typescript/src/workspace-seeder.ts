@@ -282,6 +282,14 @@ export async function createWorkspaceIfNeeded(
     { id: workspace },
   ];
   let lastFailure: string | null = null;
+  // A 404 on the collection route means this deployment has no workspace-create
+  // endpoint — not that creation failed. relayfile-cloud addresses each workspace
+  // as a Durable Object by name (`WORKSPACE_DO.idFromName(workspaceId)`), so the
+  // workspace comes into existence on the first request addressed to it and there
+  // is nothing to pre-create. Treating that as fatal made every caller that seeds
+  // a workspace (notably relayflows' per-agent permission provisioning) fail
+  // before doing any work.
+  let sawRouteMissing = false;
 
   for (const body of bodyCandidates) {
     try {
@@ -304,6 +312,12 @@ export async function createWorkspaceIfNeeded(
         return;
       }
 
+      if (response.status === 404) {
+        // Retrying the other body shapes cannot conjure a route that is absent.
+        sawRouteMissing = true;
+        break;
+      }
+
       const responseBody = await response.text().catch(() => '');
       lastFailure = `HTTP ${response.status} ${responseBody}`.trim();
       if (response.status < 500 && response.status !== 409) {
@@ -314,8 +328,15 @@ export async function createWorkspaceIfNeeded(
     }
   }
 
+  if (sawRouteMissing) {
+    // Implicit-workspace deployment: nothing to create, so seeding can proceed.
+    return;
+  }
+
   if (lastFailure) {
-    throw new Error(`Failed to create workspace ${workspace}: ${lastFailure}`);
+    throw new Error(
+      `Failed to create workspace ${workspace} at ${endpoint}: ${lastFailure}`
+    );
   }
 }
 

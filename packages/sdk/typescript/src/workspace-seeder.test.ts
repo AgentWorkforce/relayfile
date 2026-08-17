@@ -5,7 +5,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { RelayFileClient } from './client.js';
 
-import { seedAclRules, seedWorkflowAcls, seedWorkspace } from './workspace-seeder.js';
+import {
+  createWorkspaceIfNeeded,
+  seedAclRules,
+  seedWorkflowAcls,
+  seedWorkspace,
+} from './workspace-seeder.js';
 
 const originalFetch = globalThis.fetch;
 
@@ -319,5 +324,52 @@ describe('workspace-seeder', () => {
         '/': ['allow:agent:builder:read'],
       })
     ).rejects.toThrow('failed to seed workspace workspace-http: HTTP 503 relay unavailable');
+  });
+});
+
+describe('createWorkspaceIfNeeded', () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  it('treats a 404 collection route as an implicit-workspace deployment', async () => {
+    // relayfile-cloud addresses each workspace as a Durable Object by name, so it
+    // exposes no workspace-create endpoint and the workspace materializes on first
+    // use. A 404 here means "nothing to create", not "creation failed".
+    const calls: string[] = [];
+    globalThis.fetch = vi.fn(async (input: any) => {
+      calls.push(String(input));
+      return new Response(
+        JSON.stringify({ code: 'not_found', message: 'Route not found' }),
+        { status: 404, headers: { 'content-type': 'application/json' } }
+      );
+    }) as unknown as typeof fetch;
+
+    await expect(
+      createWorkspaceIfNeeded('https://file.agentrelay.com', 'tok', 'rw_abc123')
+    ).resolves.toBeUndefined();
+
+    // One attempt only: retrying other body shapes cannot conjure an absent route.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toBe('https://file.agentrelay.com/v1/workspaces');
+  });
+
+  it('still throws on a real failure, naming the endpoint it tried', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response('boom', { status: 500 })
+    ) as unknown as typeof fetch;
+
+    await expect(
+      createWorkspaceIfNeeded('https://file.agentrelay.com', 'tok', 'rw_abc123')
+    ).rejects.toThrow(/Failed to create workspace rw_abc123 at https:\/\/file\.agentrelay\.com\/v1\/workspaces/);
+  });
+
+  it('succeeds on 409 (already exists)', async () => {
+    globalThis.fetch = vi.fn(async () => new Response('', { status: 409 })) as unknown as typeof fetch;
+
+    await expect(
+      createWorkspaceIfNeeded('https://file.agentrelay.com', 'tok', 'rw_abc123')
+    ).resolves.toBeUndefined();
   });
 });
