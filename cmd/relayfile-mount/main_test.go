@@ -130,6 +130,22 @@ func TestWriteOnlyMountDisablesWebSocketCadence(t *testing.T) {
 	}
 }
 
+func TestPullOnlyMountKeepsWebSocketButDisablesLocalWatcher(t *testing.T) {
+	cfg := mountConfig{websocketEnabled: true, syncMode: syncModePullOnly}
+	if !mountWebSocketEnabled(cfg) {
+		t.Fatal("pull-only mount should keep remote websocket events")
+	}
+	if mountWatchesLocalChanges(cfg) {
+		t.Fatal("pull-only mount must not watch local changes for writeback")
+	}
+	if !mountReconcileUsesWebSocketCadence(cfg, false) {
+		t.Fatal("pull-only mount should use websocket cadence without a local watcher")
+	}
+	if !mountWatchesLocalChanges(mountConfig{syncMode: syncModeMirror}) {
+		t.Fatal("mirror mount should keep its local watcher")
+	}
+}
+
 func TestWatcherUnavailableDisablesWebSocketReconcileCadence(t *testing.T) {
 	cfg := mountConfig{websocketEnabled: true, syncMode: syncModeMirror}
 	if !mountReconcileUsesWebSocketCadence(cfg, true) {
@@ -227,6 +243,7 @@ func TestResolveSyncMode(t *testing.T) {
 	}{
 		{name: "default empty sync mode uses mirror", want: syncModeMirror},
 		{name: "explicit mirror", mode: "mirror", want: syncModeMirror},
+		{name: "explicit pull-only", mode: "pull-only", want: syncModePullOnly},
 		{name: "explicit write-only", mode: "write-only", want: syncModeWriteOnly},
 		{name: "case and whitespace normalized", mode: " WRITE-ONLY ", want: syncModeWriteOnly},
 		{name: "invalid sync mode errors", mode: "push", wantErr: true},

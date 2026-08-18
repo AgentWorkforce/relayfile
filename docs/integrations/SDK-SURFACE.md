@@ -242,7 +242,7 @@ connect → data-ready flow and the provider sync-coverage matrix.
 `{ workspaceId, localDir, remotePath, mode: "poll"|"fuse", ready: boolean, expiresAt, suggestedRefreshAt }`
 Methods: `env(): Record<string,string>`, `status(): Promise<MountedWorkspaceStatus>`, `stop(): Promise<void>`.
 
-`EnsureMountedWorkspaceInput extends MountWorkspaceInput` with `{ provider?, verifyProvider?, providerReadyTimeoutMs? }`. `MountWorkspaceInput`: `{ workspace? | workspaceId, localDir, remotePath?, mode?: "poll"|"fuse", localLayout?: "exact"|"scoped", syncMode?: "mirror"|"write-only", background?, agentName?, scopes?, signal?, launcher?, readyTimeoutMs? }`.
+`EnsureMountedWorkspaceInput extends MountWorkspaceInput` with `{ provider?, verifyProvider?, providerReadyTimeoutMs? }`. `MountWorkspaceInput`: `{ workspace? | workspaceId, localDir, remotePath?, mode?: "poll"|"fuse", localLayout?: "exact"|"scoped", syncMode?: "mirror"|"pull-only"|"write-only", background?, agentName?, scopes?, signal?, launcher?, readyTimeoutMs? }`.
 
 ---
 

@@ -1133,6 +1133,8 @@ func (noopLogger) Printf(string, ...any) {}
 
 func normalizeSyncMode(mode string) string {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "pull-only":
+		return "pull-only"
 	case "write-only":
 		return "write-only"
 	default:
@@ -1270,6 +1272,7 @@ type Syncer struct {
 	lazyRepos             bool
 	lazySkipUntrackedPush bool
 	lowMemory             bool
+	pullOnly              bool
 	writeOnly             bool
 	layoutRegistrar       ProviderLayoutRegistrar
 	githubWorkingTree     *githubWorkingTreeMount
@@ -1993,6 +1996,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		denialLogPath:             filepath.Join(localRoot, ".relay", "permissions-denied.log"),
 		bulkFlushThreshold:        bulkFlushThreshold,
 		mode:                      strings.TrimSpace(opts.Mode),
+		pullOnly:                  normalizeSyncMode(opts.SyncMode) == "pull-only",
 		writeOnly:                 normalizeSyncMode(opts.SyncMode) == "write-only",
 		interval:                  opts.Interval,
 		fullPullEvery:             fullPullEvery,
@@ -2140,6 +2144,9 @@ func (s *Syncer) SkipStuck(ctx context.Context, max int) (int, error) {
 // without reconciling the local mirror. It is intentionally O(outbox): no
 // local tree scan, pushLocal, pullRemote, websocket, or digest work.
 func (s *Syncer) FlushOutboxOnce(ctx context.Context) error {
+	if s.pullOnly {
+		return errors.New("outbox flush is disabled in pull-only sync mode")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -2186,6 +2193,9 @@ func (s *Syncer) FlushOutboxOnce(ctx context.Context) error {
 // a full reconcile it still skips pullRemote/digest/websocket, so it cannot
 // reintroduce the pull-side flush-124 stalls.
 func (s *Syncer) PushLocalAndFlushOnce(ctx context.Context) error {
+	if s.pullOnly {
+		return errors.New("local push is disabled in pull-only sync mode")
+	}
 	// Same top-of-cycle invariant as syncReserved: pushLocal scans and mutates
 	// the local mirror, so refuse to run if the mount root was wiped/clobbered
 	// (recovery is gated behind --reset-after-clobber). FlushOutboxOnce skips
@@ -2252,6 +2262,9 @@ func (s *Syncer) PushLocalAndFlushOnce(ctx context.Context) error {
 // is no actual content change, so spurious events (Chmod-only on an
 // unmodified file) do not generate noise on the wire.
 func (s *Syncer) HandleLocalChange(ctx context.Context, relativePath string, op fsnotify.Op) error {
+	if s.pullOnly {
+		return nil
+	}
 	relativePath = filepath.ToSlash(strings.TrimSpace(filepath.Clean(relativePath)))
 	if relativePath == "" || relativePath == "." {
 		return nil
@@ -2483,6 +2496,9 @@ func (s *Syncer) flushDueOutboxRecords(ctx context.Context, conflicted map[strin
 }
 
 func (s *Syncer) flushOutboxRecords(ctx context.Context, conflicted map[string]struct{}, forceDue bool) error {
+	if s.pullOnly {
+		return nil
+	}
 	if s.circuit != nil && s.circuit.IsOpen() {
 		return nil
 	}
@@ -3344,9 +3360,11 @@ func (s *Syncer) syncReserved(ctx context.Context, forcePoll bool) error {
 			// writes must not pause indefinitely just because the read-side
 			// bootstrap is terminally wedged: keep draining the outbox so pending
 			// writebacks are still delivered while the mount reports stalled.
-			terminalConflicted := map[string]struct{}{}
-			if flushErr := s.flushDueOutboxRecords(ctx, terminalConflicted); flushErr != nil {
-				s.logf("outbox flush failed while bootstrap is terminally stalled: %v", flushErr)
+			if !s.pullOnly {
+				terminalConflicted := map[string]struct{}{}
+				if flushErr := s.flushDueOutboxRecords(ctx, terminalConflicted); flushErr != nil {
+					s.logf("outbox flush failed while bootstrap is terminally stalled: %v", flushErr)
+				}
 			}
 			_ = s.saveState()
 			s.mu.Unlock()
@@ -3368,22 +3386,26 @@ func (s *Syncer) syncReserved(ctx context.Context, forcePoll bool) error {
 	s.listenerHeartbeatAt = time.Now().UTC()
 	s.markReconcileStarted()
 	s.staleAliasSkips = 0
-	if err := s.runClosingDigestJobsLocked(ctx); err != nil {
-		s.markSyncError(err)
-		_ = s.saveState()
-		return err
-	}
-	if err := s.runRollingDigestJobsLocked(ctx); err != nil {
-		s.markSyncError(err)
-		_ = s.saveState()
-		return err
+	if !s.pullOnly {
+		if err := s.runClosingDigestJobsLocked(ctx); err != nil {
+			s.markSyncError(err)
+			_ = s.saveState()
+			return err
+		}
+		if err := s.runRollingDigestJobsLocked(ctx); err != nil {
+			s.markSyncError(err)
+			_ = s.saveState()
+			return err
+		}
 	}
 
 	conflicted := map[string]struct{}{}
-	if err := s.flushDueOutboxRecords(ctx, conflicted); err != nil {
-		s.markSyncError(err)
-		_ = s.saveState()
-		return err
+	if !s.pullOnly {
+		if err := s.flushDueOutboxRecords(ctx, conflicted); err != nil {
+			s.markSyncError(err)
+			_ = s.saveState()
+			return err
+		}
 	}
 	didPoll := false
 	if s.writeOnly {
@@ -3409,11 +3431,14 @@ func (s *Syncer) syncReserved(ctx context.Context, forcePoll bool) error {
 		didPoll = true
 	}
 
-	conflicted, err := s.pushLocal(ctx)
-	if err != nil {
-		s.markSyncError(err)
-		_ = s.saveState()
-		return err
+	if !s.pullOnly {
+		var err error
+		conflicted, err = s.pushLocal(ctx)
+		if err != nil {
+			s.markSyncError(err)
+			_ = s.saveState()
+			return err
+		}
 	}
 
 	shouldPoll := !didPoll && (forcePoll || !s.bootstrapped || s.wsConn == nil)
@@ -6839,6 +6864,9 @@ func (s *Syncer) applyLocalPermissions(localPath string, canWrite bool) error {
 }
 
 func (s *Syncer) canWritePath(filePath string) bool {
+	if s.pullOnly {
+		return false
+	}
 	if len(s.scopes) == 0 {
 		return true
 	}
@@ -6958,6 +6986,9 @@ func (s *Syncer) applyRemoteDelete(remotePath string, conflicted map[string]stru
 }
 
 func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
+	if s.pullOnly {
+		return map[string]struct{}{}, nil
+	}
 	conflicted := map[string]struct{}{}
 	localFiles, err := s.scanLocalFiles()
 	if err != nil {
@@ -7673,6 +7704,9 @@ func (s *Syncer) loadState() error {
 }
 
 func (s *Syncer) currentSyncMode() string {
+	if s.pullOnly {
+		return "pull-only"
+	}
 	if s.writeOnly {
 		return "write-only"
 	}
@@ -7887,16 +7921,12 @@ func (s *Syncer) savePublicState() error {
 	if mode == "" {
 		mode = "poll"
 	}
-	syncMode := "mirror"
-	if s.writeOnly {
-		syncMode = "write-only"
-	}
 	public := publicState{
 		WorkspaceID:               s.workspace,
 		RemoteRoot:                s.remoteRoot,
 		LocalRoot:                 s.localRoot,
 		Mode:                      mode,
-		SyncMode:                  syncMode,
+		SyncMode:                  s.currentSyncMode(),
 		IntervalMs:                s.interval.Milliseconds(),
 		LastReconcileAt:           s.state.LastReconcileAt,
 		LastSuccessfulReconcileAt: s.state.LastSuccessfulReconcileAt,

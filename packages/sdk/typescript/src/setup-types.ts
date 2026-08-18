@@ -90,7 +90,7 @@ export type WorkspaceMountEnv = Record<string, string>
 
 export type MountMode = "poll" | "fuse"
 export type MountLocalLayout = "exact" | "scoped"
-export type MountSyncMode = "mirror" | "write-only"
+export type MountSyncMode = "mirror" | "pull-only" | "write-only"
 
 export interface MountSessionRequest {
   localDir: string

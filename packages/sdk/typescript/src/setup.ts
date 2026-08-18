@@ -1816,7 +1816,11 @@ function normalizeMountLocalLayoutInput(layout?: string): MountLocalLayout {
 
 function normalizeMountSyncModeInput(mode?: string): MountSyncMode {
   const normalized = normalizeNonEmptyString(mode) ?? DEFAULT_MOUNT_SYNC_MODE
-  if (normalized !== "mirror" && normalized !== "write-only") {
+  if (
+    normalized !== "mirror" &&
+    normalized !== "pull-only" &&
+    normalized !== "write-only"
+  ) {
     throw new MountSessionInputError(
       `Invalid syncMode "${normalized}" for mount session.`
     )

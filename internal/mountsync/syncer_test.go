@@ -614,6 +614,108 @@ func TestSyncOnceWriteOnlySkipsRemotePullButPushesLocalFiles(t *testing.T) {
 	}
 }
 
+func TestSyncOncePullOnlyPullsRemoteWithoutAnyWriteback(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+		revisionCounter: 1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_pull_only",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		SyncMode:    "pull-only",
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial pull-only sync failed: %v", err)
+	}
+
+	localFile := filepath.Join(localDir, "Docs", "A.md")
+	assertLocalFileContent(t, localFile, "# A")
+	if client.listTreeCalls == 0 || client.readFileCalls == 0 {
+		t.Fatalf("pull-only sync did not pull remote records; tree=%d read=%d", client.listTreeCalls, client.readFileCalls)
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(localFile)
+		if err != nil {
+			t.Fatalf("stat mirrored file: %v", err)
+		}
+		if got := info.Mode().Perm() & 0o222; got != 0 {
+			t.Fatalf("pull-only mirrored file has write bits %#o, want none", got)
+		}
+	}
+
+	// Simulate a local process bypassing the read-only mode bits. Neither the
+	// watcher entry point nor a later reconcile may send that edit upstream.
+	if err := os.Chmod(localFile, 0o644); err != nil {
+		t.Fatalf("make local file editable for test: %v", err)
+	}
+	if err := os.WriteFile(localFile, []byte("# local edit"), 0o644); err != nil {
+		t.Fatalf("write local edit: %v", err)
+	}
+	if err := syncer.HandleLocalChange(context.Background(), "Docs/A.md", fsnotify.Write); err != nil {
+		t.Fatalf("pull-only watcher event failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "local-draft.md"), []byte("draft"), 0o644); err != nil {
+		t.Fatalf("write local draft: %v", err)
+	}
+
+	// A pending record from a previous mirror-mode run must stay durable and
+	// must not leak through the pull-only cycle.
+	record := outboxRecord{
+		CommandID:     "cmd_stale_before_pull_only",
+		WorkspaceID:   "ws_pull_only",
+		RemotePath:    "/notion/Docs/stale.md",
+		ContentType:   "text/markdown",
+		Content:       "stale",
+		Status:        outboxStatusPending,
+		FirstSeenAt:   time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano),
+		NextAttemptAt: time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano),
+	}
+	if err := syncer.saveOutboxRecord(record); err != nil {
+		t.Fatalf("save stale outbox record: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("second pull-only sync failed: %v", err)
+	}
+	if client.writeFileCalls != 0 || client.bulkWriteCalls != 0 || len(client.deleteCalls) != 0 {
+		t.Fatalf("pull-only sync wrote remotely: writes=%d bulk=%d deletes=%d", client.writeFileCalls, client.bulkWriteCalls, len(client.deleteCalls))
+	}
+	if got := client.files["/notion/Docs/A.md"].Content; got != "# A" {
+		t.Fatalf("pull-only sync changed remote content to %q", got)
+	}
+	if _, err := os.Stat(syncer.pendingOutboxPath(record.CommandID)); err != nil {
+		t.Fatalf("pull-only sync consumed stale outbox record: %v", err)
+	}
+	if err := syncer.FlushOutboxOnce(context.Background()); err == nil {
+		t.Fatal("pull-only outbox flush unexpectedly succeeded")
+	}
+	if err := syncer.PushLocalAndFlushOnce(context.Background()); err == nil {
+		t.Fatal("pull-only local push unexpectedly succeeded")
+	}
+
+	private := loadPersistedState(t, localDir)
+	if private.SyncMode != "pull-only" || !private.BootstrapComplete {
+		t.Fatalf("private state did not persist completed pull-only mode: %+v", private)
+	}
+	public := readPublicStateFile(t, localDir)
+	if public.SyncMode != "pull-only" {
+		t.Fatalf("public state syncMode = %q, want pull-only", public.SyncMode)
+	}
+}
+
 func TestOneShotStatusUpdatesDoNotRefreshListenerHeartbeat(t *testing.T) {
 	baseline := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
 	syncer := &Syncer{listenerHeartbeatAt: baseline}

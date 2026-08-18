@@ -383,7 +383,11 @@ function normalizeMountLocalLayout(layout?: string): MountLocalLayout {
 }
 
 function normalizeMountSyncMode(mode?: string): MountSyncMode {
-  return mode === "write-only" ? "write-only" : "mirror"
+  return mode === "pull-only"
+    ? "pull-only"
+    : mode === "write-only"
+      ? "write-only"
+      : "mirror"
 }
 
 function resolveMountLocalDir(
