@@ -6863,12 +6863,15 @@ func (s *Syncer) applyLocalPermissions(localPath string, canWrite bool) error {
 	return os.Chmod(localPath, 0o444)
 }
 
-// enforcePullOnlyPermissionsOnTransition makes the persisted mirror read-only
-// before a pull-only cycle can take its quiet incremental fast path. Without
-// this migration, unchanged files created by a previous mirror-mode process
-// retain their writable mode until a remote event happens to touch them.
-func (s *Syncer) enforcePullOnlyPermissionsOnTransition() error {
-	if !s.pullOnly || normalizeSyncMode(s.state.SyncMode) == "pull-only" {
+// enforceSyncModePermissionsOnTransition applies the current scope-derived
+// permissions whenever a mount enters or leaves pull-only. It runs before a
+// quiet incremental cycle can skip unchanged files, so mirror->pull-only makes
+// existing files read-only immediately and pull-only->mirror restores only the
+// paths the current scopes permit to write.
+func (s *Syncer) enforceSyncModePermissionsOnTransition() error {
+	previousMode := normalizeSyncMode(s.state.SyncMode)
+	currentMode := s.currentSyncMode()
+	if previousMode == currentMode || (previousMode != "pull-only" && currentMode != "pull-only") {
 		return nil
 	}
 
@@ -6882,33 +6885,39 @@ func (s *Syncer) enforcePullOnlyPermissionsOnTransition() error {
 	for _, remotePath := range remotePaths {
 		localPath, err := s.remoteToLocalPath(remotePath)
 		if err != nil {
-			return fmt.Errorf("resolve tracked path %s for pull-only transition: %w", remotePath, err)
+			return fmt.Errorf("resolve tracked path %s for sync-mode transition: %w", remotePath, err)
 		}
+		canWrite := s.canWritePath(remotePath)
+		tracked := s.state.Files[remotePath]
+		tracked.ReadOnly = !canWrite
+		s.state.Files[remotePath] = tracked
+
 		info, err := os.Lstat(localPath)
 		if errors.Is(err, os.ErrNotExist) {
-			tracked := s.state.Files[remotePath]
-			tracked.ReadOnly = true
-			s.state.Files[remotePath] = tracked
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("inspect tracked path %s for pull-only transition: %w", remotePath, err)
+			return fmt.Errorf("inspect tracked path %s for sync-mode transition: %w", remotePath, err)
 		}
 		if !info.Mode().IsRegular() {
-			return fmt.Errorf("tracked path %s is not a regular file during pull-only transition", remotePath)
+			// Lstat deliberately avoids following symlinks. A local replacement
+			// must not let chmod escape the mount or wedge every healthy path.
+			s.logf("skipping non-regular tracked path %s during %s->%s transition", remotePath, previousMode, currentMode)
+			continue
 		}
-		if info.Mode().Perm()&0o222 != 0 {
-			if err := s.applyLocalPermissions(localPath, false); err != nil {
-				return fmt.Errorf("make tracked path %s read-only during pull-only transition: %w", remotePath, err)
+		desiredMode := os.FileMode(0o444)
+		if canWrite {
+			desiredMode = 0o644
+		}
+		if info.Mode().Perm() != desiredMode {
+			if err := s.applyLocalPermissions(localPath, canWrite); err != nil {
+				return fmt.Errorf("apply permissions to tracked path %s during %s->%s transition: %w", remotePath, previousMode, currentMode, err)
 			}
 			changed++
 		}
-		tracked := s.state.Files[remotePath]
-		tracked.ReadOnly = true
-		s.state.Files[remotePath] = tracked
 	}
 	if changed > 0 {
-		s.logf("pull-only transition made %d tracked files read-only", changed)
+		s.logf("sync-mode transition %s->%s updated permissions on %d tracked files", previousMode, currentMode, changed)
 	}
 	return nil
 }
@@ -7726,7 +7735,7 @@ func (s *Syncer) loadState() error {
 	s.state.WorkspaceID = s.workspace
 	s.state.RemoteRoot = s.remoteRoot
 	s.state.LocalRoot = s.localRoot
-	if err := s.enforcePullOnlyPermissionsOnTransition(); err != nil {
+	if err := s.enforceSyncModePermissionsOnTransition(); err != nil {
 		// loadState marks the state loaded optimistically. Re-arm it here so a
 		// transient chmod/stat failure cannot let the next cycle bypass an
 		// incomplete permissions migration.
