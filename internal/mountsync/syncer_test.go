@@ -716,6 +716,86 @@ func TestSyncOncePullOnlyPullsRemoteWithoutAnyWriteback(t *testing.T) {
 	}
 }
 
+func TestSyncOncePullOnlyTransitionMakesQuietExistingMirrorReadOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits are not enforced on Windows")
+	}
+
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+		revisionCounter: 1,
+	}
+	localDir := t.TempDir()
+	webSocket := false
+	mirror, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_pull_only_transition",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		SyncMode:    "mirror",
+		WebSocket:   &webSocket,
+	})
+	if err != nil {
+		t.Fatalf("new mirror syncer failed: %v", err)
+	}
+	if err := mirror.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial mirror sync failed: %v", err)
+	}
+
+	localFile := filepath.Join(localDir, "Docs", "A.md")
+	info, err := os.Stat(localFile)
+	if err != nil {
+		t.Fatalf("stat mirrored file: %v", err)
+	}
+	if got := info.Mode().Perm() & 0o222; got == 0 {
+		t.Fatalf("mirror file unexpectedly has no write bits: mode=%#o", info.Mode().Perm())
+	}
+	// Model a mature mirror whose persisted cursor is already at the event
+	// feed tip. The pull-only transition must chmod its existing files even
+	// though the next incremental probe has no changed content to apply.
+	client.events = append(client.events, FilesystemEvent{EventID: "evt_tip"})
+	mirror.state.EventsCursor = "evt_tip"
+	if err := mirror.saveState(); err != nil {
+		t.Fatalf("persist usable events cursor: %v", err)
+	}
+	readsBeforeTransition := client.requestedReadCalls()
+
+	pullOnly, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_pull_only_transition",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		SyncMode:    "pull-only",
+		WebSocket:   &webSocket,
+	})
+	if err != nil {
+		t.Fatalf("new pull-only syncer failed: %v", err)
+	}
+	if err := pullOnly.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("quiet pull-only transition failed: %v", err)
+	}
+
+	info, err = os.Stat(localFile)
+	if err != nil {
+		t.Fatalf("stat transitioned file: %v", err)
+	}
+	if got := info.Mode().Perm() & 0o222; got != 0 {
+		t.Fatalf("transitioned file has write bits %#o, want none", got)
+	}
+	if got := client.requestedReadCalls(); got != readsBeforeTransition {
+		t.Fatalf("quiet transition fetched unchanged remote content: reads=%d, want %d", got, readsBeforeTransition)
+	}
+	state := loadPersistedState(t, localDir)
+	if state.SyncMode != "pull-only" || !state.Files["/notion/Docs/A.md"].ReadOnly {
+		t.Fatalf("transition state did not persist pull-only permissions: %+v", state)
+	}
+}
+
 func TestOneShotStatusUpdatesDoNotRefreshListenerHeartbeat(t *testing.T) {
 	baseline := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
 	syncer := &Syncer{listenerHeartbeatAt: baseline}

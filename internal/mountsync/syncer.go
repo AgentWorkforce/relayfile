@@ -6863,6 +6863,56 @@ func (s *Syncer) applyLocalPermissions(localPath string, canWrite bool) error {
 	return os.Chmod(localPath, 0o444)
 }
 
+// enforcePullOnlyPermissionsOnTransition makes the persisted mirror read-only
+// before a pull-only cycle can take its quiet incremental fast path. Without
+// this migration, unchanged files created by a previous mirror-mode process
+// retain their writable mode until a remote event happens to touch them.
+func (s *Syncer) enforcePullOnlyPermissionsOnTransition() error {
+	if !s.pullOnly || normalizeSyncMode(s.state.SyncMode) == "pull-only" {
+		return nil
+	}
+
+	remotePaths := make([]string, 0, len(s.state.Files))
+	for remotePath := range s.state.Files {
+		remotePaths = append(remotePaths, remotePath)
+	}
+	sort.Strings(remotePaths)
+
+	changed := 0
+	for _, remotePath := range remotePaths {
+		localPath, err := s.remoteToLocalPath(remotePath)
+		if err != nil {
+			return fmt.Errorf("resolve tracked path %s for pull-only transition: %w", remotePath, err)
+		}
+		info, err := os.Lstat(localPath)
+		if errors.Is(err, os.ErrNotExist) {
+			tracked := s.state.Files[remotePath]
+			tracked.ReadOnly = true
+			s.state.Files[remotePath] = tracked
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspect tracked path %s for pull-only transition: %w", remotePath, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("tracked path %s is not a regular file during pull-only transition", remotePath)
+		}
+		if info.Mode().Perm()&0o222 != 0 {
+			if err := s.applyLocalPermissions(localPath, false); err != nil {
+				return fmt.Errorf("make tracked path %s read-only during pull-only transition: %w", remotePath, err)
+			}
+			changed++
+		}
+		tracked := s.state.Files[remotePath]
+		tracked.ReadOnly = true
+		s.state.Files[remotePath] = tracked
+	}
+	if changed > 0 {
+		s.logf("pull-only transition made %d tracked files read-only", changed)
+	}
+	return nil
+}
+
 func (s *Syncer) canWritePath(filePath string) bool {
 	if s.pullOnly {
 		return false
@@ -7676,6 +7726,13 @@ func (s *Syncer) loadState() error {
 	s.state.WorkspaceID = s.workspace
 	s.state.RemoteRoot = s.remoteRoot
 	s.state.LocalRoot = s.localRoot
+	if err := s.enforcePullOnlyPermissionsOnTransition(); err != nil {
+		// loadState marks the state loaded optimistically. Re-arm it here so a
+		// transient chmod/stat failure cannot let the next cycle bypass an
+		// incomplete permissions migration.
+		s.loaded = false
+		return err
+	}
 	if s.state.BootstrapComplete && s.state.SyncMode == "write-only" && !s.writeOnly {
 		s.logf("syncMode transition write-only->mirror detected; resetting BootstrapComplete to force a full bootstrap pull (backfills records missed while write-only)")
 		s.state.BootstrapComplete = false

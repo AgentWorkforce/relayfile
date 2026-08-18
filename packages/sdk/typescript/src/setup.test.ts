@@ -1371,6 +1371,23 @@ describe("RelayfileSetup", () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  it("mountWorkspace rejects pull-only FUSE before any HTTP request", async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal("fetch", fetchMock)
+    const setup = new RelayfileSetup()
+
+    await expect(
+      setup.mountWorkspace({
+        workspaceId: "ws_123",
+        localDir: "/tmp/relayfile-mount",
+        mode: "fuse",
+        syncMode: "pull-only"
+      })
+    ).rejects.toThrow('syncMode "pull-only" requires mode "poll"')
+
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it("mountWorkspace maps Cloud mount-session validation errors from httpBody.error", async () => {
     const tempRoot = await mkdtemp(
       path.join(os.tmpdir(), "relayfile-sdk-mount-validation-")

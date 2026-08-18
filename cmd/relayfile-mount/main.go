@@ -98,7 +98,7 @@ func main() {
 	stateFile := flag.String("state-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_STATE_FILE")), "state file path")
 	stateDir := flag.String("state-dir", envOrDefault("RELAYFILE_MOUNT_STATE_DIR", mountsync.DefaultMountStateDir()), "directory for private mount state")
 	mountKind := flag.String("mount-kind", envOrDefault("RELAYFILE_MOUNT_KIND", mountsync.MountKindDaemon), "private state identity kind: daemon, flush, or initial-sync")
-	syncModeFlag := flag.String("sync-mode", envOrDefault("RELAYFILE_MOUNT_SYNC_MODE", syncModeMirror), "sync behavior: mirror (pull and push), pull-only (mirror remote changes without writeback), or write-only (push local changes without mirroring provider history)")
+	syncModeFlag := flag.String("sync-mode", envOrDefault("RELAYFILE_MOUNT_SYNC_MODE", syncModeMirror), "sync behavior: mirror (pull and push), pull-only (poll mode only; mirror remote changes without writeback), or write-only (push local changes without mirroring provider history)")
 	interval := flag.Duration("interval", durationEnv("RELAYFILE_MOUNT_INTERVAL", 30*time.Second), "sync interval")
 	intervalJitter := flag.Float64("interval-jitter", floatEnv("RELAYFILE_MOUNT_INTERVAL_JITTER", 0.2), "sync interval jitter ratio (0.0-1.0)")
 	timeout := flag.Duration("timeout", durationEnv("RELAYFILE_MOUNT_TIMEOUT", 15*time.Second), "per-sync timeout")
@@ -268,6 +268,9 @@ func resolveSyncMode(mode string) (string, error) {
 }
 
 func executeMount(rootCtx context.Context, cfg mountConfig, runPoll pollRunner, runFuse fuseRunner) error {
+	if cfg.mode == mountModeFuse && cfg.syncMode == syncModePullOnly {
+		return fmt.Errorf("--sync-mode=%s is not supported with --mode=%s; use --mode=%s", syncModePullOnly, mountModeFuse, mountModePoll)
+	}
 	if strings.TrimSpace(cfg.baseURL) != "" && strings.TrimSpace(cfg.workspaceID) != "" {
 		lease, err := mountlease.Acquire(cfg.baseURL, cfg.workspaceID, cfg.localDir)
 		if err != nil {

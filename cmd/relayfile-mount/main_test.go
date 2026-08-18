@@ -320,6 +320,34 @@ func TestExecuteMountDispatchesFuseMode(t *testing.T) {
 	}
 }
 
+func TestExecuteMountRejectsPullOnlyFuseMode(t *testing.T) {
+	cfg := mountConfig{mode: mountModeFuse, syncMode: syncModePullOnly}
+	pollCalled := false
+	fuseCalled := false
+
+	err := executeMount(context.Background(), cfg,
+		func(context.Context, mountConfig) error {
+			pollCalled = true
+			return nil
+		},
+		func(context.Context, mountConfig) error {
+			fuseCalled = true
+			return nil
+		},
+	)
+	if err == nil {
+		t.Fatal("expected pull-only FUSE mount to be rejected")
+	}
+	for _, want := range []string{syncModePullOnly, mountModeFuse, "--mode=" + mountModePoll} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not contain %q", err, want)
+		}
+	}
+	if pollCalled || fuseCalled {
+		t.Fatalf("unsupported mount dispatched a runner: poll=%t fuse=%t", pollCalled, fuseCalled)
+	}
+}
+
 func TestExecuteMountRejectsMultipleFusePaths(t *testing.T) {
 	cfg := mountConfig{
 		mode:        mountModeFuse,
