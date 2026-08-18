@@ -1,0 +1,56 @@
+{
+  "id": "relayfile-feature-guardian",
+  "intent": "relay-orchestrator",
+  "tags": ["relayfile", "verification", "proactive", "catalog", "health"],
+  "description": "Reads Relayfile's authoritative feature catalog from a repository-scoped clone each hour, advances an exact revisioned bounded cycle, and optionally posts one idempotent receipt-confirmed check to an input-selected Slack channel.",
+  "cloud": true,
+  "harness": "opencode",
+  "model": "deepseek-v4-flash-free",
+  "harnessSettings": {
+    "reasoning": "low",
+    "timeoutSeconds": 300
+  },
+  "integrations": {
+    "github": {
+      "scope": {
+        "repo": "AgentWorkforce/relayfile"
+      },
+      "relayfileMount": {
+        "requiredReadPaths": [
+          "/github/repos/AgentWorkforce/relayfile/.agentworkforce/features/manifest.yaml",
+          "/github/repos/AgentWorkforce/relayfile/.agentworkforce/features/critical-paths.md",
+          "/github/repos/AgentWorkforce/relayfile/.agentworkforce/features/verify/procedures.md"
+        ],
+        "writeOnlyPaths": []
+      }
+    },
+    "slack": {
+      "optional": true,
+      "enabledByInput": "SLACK_CHANNEL",
+      "scope": {
+        "paths": "/slack/channels/${SLACK_CHANNEL}/**"
+      },
+      "relayfileMount": {
+        "requiredReadPaths": [],
+        "writeOnlyPaths": ["/slack/channels/${SLACK_CHANNEL}/**"]
+      }
+    }
+  },
+  "inputs": {
+    "SLACK_CHANNEL": {
+      "description": "Optional disposable Slack channel ID. No Slack mount or post occurs when absent.",
+      "env": "SLACK_CHANNEL",
+      "optional": true,
+      "picker": {
+        "provider": "slack",
+        "resource": "channels"
+      }
+    }
+  },
+  "memory": {
+    "enabled": true,
+    "scopes": ["workspace"],
+    "ttlDays": 14
+  },
+  "onEvent": "./agent.ts"
+}

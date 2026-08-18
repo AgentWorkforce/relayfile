@@ -73,5 +73,14 @@ site/dist/
 packages/file-observer/out/
 packages/agents/dist
 .scratch/
+.workflow-artifacts/
 .agentworkforce/
+!.agentworkforce/
+.agentworkforce/*
+!.agentworkforce/features/
+!.agentworkforce/features/**
+!.agentworkforce/agents/
+.agentworkforce/agents/*
+!.agentworkforce/agents/relayfile-feature-guardian/
+!.agentworkforce/agents/relayfile-feature-guardian/**
 packages/**/.claude/
