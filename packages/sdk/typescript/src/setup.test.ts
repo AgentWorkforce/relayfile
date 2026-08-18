@@ -1248,50 +1248,53 @@ describe("RelayfileSetup", () => {
     }
   })
 
-  it("passes explicit local layout and sync mode only to the local mount launcher", async () => {
-    const tempRoot = await mkdtemp(
-      path.join(os.tmpdir(), "relayfile-sdk-mount-workspace-contract-")
-    )
-    const localDir = path.join(tempRoot, "mirror")
-    const fetchMock = queueFetch(
-      makeJoinResponse("rf_jwt_joined"),
-      makeMountSessionResponse({
-        remotePath: "/slack/channels/C123/messages"
-      })
-    )
-    const { launcher, readyControl } = createLauncherStub()
+  it.each(["pull-only", "write-only"] as const)(
+    "passes explicit local layout and %s sync mode only to the local mount launcher",
+    async (syncMode) => {
+      const tempRoot = await mkdtemp(
+        path.join(os.tmpdir(), "relayfile-sdk-mount-workspace-contract-")
+      )
+      const localDir = path.join(tempRoot, "mirror")
+      const fetchMock = queueFetch(
+        makeJoinResponse("rf_jwt_joined"),
+        makeMountSessionResponse({
+          remotePath: "/slack/channels/C123/messages"
+        })
+      )
+      const { launcher, readyControl } = createLauncherStub()
 
-    try {
-      const setup = new RelayfileSetup()
-      const workspace = await setup.joinWorkspace("ws_123")
-      readyControl.resolve()
-      await setup.mountWorkspace({
-        workspace,
-        localDir,
-        remotePath: "/slack/channels/C123/messages",
-        mode: "poll",
-        localLayout: "scoped",
-        syncMode: "write-only",
-        launcher
-      })
+      try {
+        const setup = new RelayfileSetup()
+        const workspace = await setup.joinWorkspace("ws_123")
+        readyControl.resolve()
+        await setup.mountWorkspace({
+          workspace,
+          localDir,
+          remotePath: "/slack/channels/C123/messages",
+          mode: "poll",
+          localLayout: "scoped",
+          syncMode,
+          launcher
+        })
 
-      const launcherStart = (launcher.start as ReturnType<typeof vi.fn>).mock.calls[0][0]
-      expect(launcherStart.env).toMatchObject({
-        RELAYFILE_REMOTE_PATH: "/slack/channels/C123/messages",
-        RELAYFILE_LOCAL_DIR: localDir,
-        RELAYFILE_MOUNT_LOCAL_LAYOUT: "scoped",
-        RELAYFILE_MOUNT_SYNC_MODE: "write-only"
-      })
-      expect(readRequestBody(fetchMock, 1)).toEqual({
-        localDir,
-        remotePath: "/slack/channels/C123/messages",
-        mode: "poll",
-        agentName: "relayfile-mount"
-      })
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true })
+        const launcherStart = (launcher.start as ReturnType<typeof vi.fn>).mock.calls[0][0]
+        expect(launcherStart.env).toMatchObject({
+          RELAYFILE_REMOTE_PATH: "/slack/channels/C123/messages",
+          RELAYFILE_LOCAL_DIR: localDir,
+          RELAYFILE_MOUNT_LOCAL_LAYOUT: "scoped",
+          RELAYFILE_MOUNT_SYNC_MODE: syncMode
+        })
+        expect(readRequestBody(fetchMock, 1)).toEqual({
+          localDir,
+          remotePath: "/slack/channels/C123/messages",
+          mode: "poll",
+          agentName: "relayfile-mount"
+        })
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true })
+      }
     }
-  })
+  )
 
   it("mountWorkspace joins by workspaceId before mounting", async () => {
     const tempRoot = await mkdtemp(
@@ -1364,6 +1367,23 @@ describe("RelayfileSetup", () => {
         mode: "stream" as unknown as "poll"
       })
     ).rejects.toBeInstanceOf(InvalidMountModeError)
+
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it("mountWorkspace rejects pull-only FUSE before any HTTP request", async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal("fetch", fetchMock)
+    const setup = new RelayfileSetup()
+
+    await expect(
+      setup.mountWorkspace({
+        workspaceId: "ws_123",
+        localDir: "/tmp/relayfile-mount",
+        mode: "fuse",
+        syncMode: "pull-only"
+      })
+    ).rejects.toThrow('syncMode "pull-only" requires mode "poll"')
 
     expect(fetchMock).not.toHaveBeenCalled()
   })

@@ -242,7 +242,9 @@ connect → data-ready flow and the provider sync-coverage matrix.
 `{ workspaceId, localDir, remotePath, mode: "poll"|"fuse", ready: boolean, expiresAt, suggestedRefreshAt }`
 Methods: `env(): Record<string,string>`, `status(): Promise<MountedWorkspaceStatus>`, `stop(): Promise<void>`.
 
-`EnsureMountedWorkspaceInput extends MountWorkspaceInput` with `{ provider?, verifyProvider?, providerReadyTimeoutMs? }`. `MountWorkspaceInput`: `{ workspace? | workspaceId, localDir, remotePath?, mode?: "poll"|"fuse", localLayout?: "exact"|"scoped", syncMode?: "mirror"|"write-only", background?, agentName?, scopes?, signal?, launcher?, readyTimeoutMs? }`.
+`EnsureMountedWorkspaceInput extends MountWorkspaceInput` with `{ provider?, verifyProvider?, providerReadyTimeoutMs? }`. `MountWorkspaceInput`: `{ workspace? | workspaceId, localDir, remotePath?, mode?: "poll"|"fuse", localLayout?: "exact"|"scoped", syncMode?: "mirror"|"pull-only"|"write-only", background?, agentName?, scopes?, signal?, launcher?, readyTimeoutMs? }`.
+
+`syncMode: "pull-only"` is supported only with `mode: "poll"`. It keeps remote hydration and incremental reconciliation active, disables every remote mutation path, and makes tracked mirror files read-only. Entering pull-only with an existing mirror performs a one-time permissions pass over tracked files before the first reconcile completes.
 
 ---
 

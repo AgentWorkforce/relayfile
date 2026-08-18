@@ -614,6 +614,335 @@ func TestSyncOnceWriteOnlySkipsRemotePullButPushesLocalFiles(t *testing.T) {
 	}
 }
 
+func TestSyncOncePullOnlyPullsRemoteWithoutAnyWriteback(t *testing.T) {
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+		},
+		revisionCounter: 1,
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_pull_only",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		SyncMode:    "pull-only",
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial pull-only sync failed: %v", err)
+	}
+
+	localFile := filepath.Join(localDir, "Docs", "A.md")
+	assertLocalFileContent(t, localFile, "# A")
+	if client.listTreeCalls == 0 || client.readFileCalls == 0 {
+		t.Fatalf("pull-only sync did not pull remote records; tree=%d read=%d", client.listTreeCalls, client.readFileCalls)
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(localFile)
+		if err != nil {
+			t.Fatalf("stat mirrored file: %v", err)
+		}
+		if got := info.Mode().Perm() & 0o222; got != 0 {
+			t.Fatalf("pull-only mirrored file has write bits %#o, want none", got)
+		}
+	}
+
+	// Simulate a local process bypassing the read-only mode bits. Neither the
+	// watcher entry point nor a later reconcile may send that edit upstream.
+	if err := os.Chmod(localFile, 0o644); err != nil {
+		t.Fatalf("make local file editable for test: %v", err)
+	}
+	if err := os.WriteFile(localFile, []byte("# local edit"), 0o644); err != nil {
+		t.Fatalf("write local edit: %v", err)
+	}
+	if err := syncer.HandleLocalChange(context.Background(), "Docs/A.md", fsnotify.Write); err != nil {
+		t.Fatalf("pull-only watcher event failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "local-draft.md"), []byte("draft"), 0o644); err != nil {
+		t.Fatalf("write local draft: %v", err)
+	}
+
+	// A pending record from a previous mirror-mode run must stay durable and
+	// must not leak through the pull-only cycle.
+	record := outboxRecord{
+		CommandID:     "cmd_stale_before_pull_only",
+		WorkspaceID:   "ws_pull_only",
+		RemotePath:    "/notion/Docs/stale.md",
+		ContentType:   "text/markdown",
+		Content:       "stale",
+		Status:        outboxStatusPending,
+		FirstSeenAt:   time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano),
+		NextAttemptAt: time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano),
+	}
+	if err := syncer.saveOutboxRecord(record); err != nil {
+		t.Fatalf("save stale outbox record: %v", err)
+	}
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("second pull-only sync failed: %v", err)
+	}
+	if client.writeFileCalls != 0 || client.bulkWriteCalls != 0 || len(client.deleteCalls) != 0 {
+		t.Fatalf("pull-only sync wrote remotely: writes=%d bulk=%d deletes=%d", client.writeFileCalls, client.bulkWriteCalls, len(client.deleteCalls))
+	}
+	if got := client.files["/notion/Docs/A.md"].Content; got != "# A" {
+		t.Fatalf("pull-only sync changed remote content to %q", got)
+	}
+	if _, err := os.Stat(syncer.pendingOutboxPath(record.CommandID)); err != nil {
+		t.Fatalf("pull-only sync consumed stale outbox record: %v", err)
+	}
+	if err := syncer.FlushOutboxOnce(context.Background()); err == nil {
+		t.Fatal("pull-only outbox flush unexpectedly succeeded")
+	}
+	if err := syncer.PushLocalAndFlushOnce(context.Background()); err == nil {
+		t.Fatal("pull-only local push unexpectedly succeeded")
+	}
+
+	private := loadPersistedState(t, localDir)
+	if private.SyncMode != "pull-only" || !private.BootstrapComplete {
+		t.Fatalf("private state did not persist completed pull-only mode: %+v", private)
+	}
+	public := readPublicStateFile(t, localDir)
+	if public.SyncMode != "pull-only" {
+		t.Fatalf("public state syncMode = %q, want pull-only", public.SyncMode)
+	}
+}
+
+func TestSyncOncePullOnlyTransitionRoundTripRestoresScopeDerivedPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits are not enforced on Windows")
+	}
+
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/A.md": {
+				Path:        "/notion/Docs/A.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# A",
+			},
+			"/notion/Docs/B.md": {
+				Path:        "/notion/Docs/B.md",
+				Revision:    "rev_2",
+				ContentType: "text/markdown",
+				Content:     "# B",
+			},
+		},
+		revisionCounter: 2,
+	}
+	localDir := t.TempDir()
+	webSocket := false
+	scopes := []string{"relayfile:fs:write:/notion/Docs/A.md"}
+	mirror, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_pull_only_transition",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		SyncMode:    "mirror",
+		WebSocket:   &webSocket,
+		Scopes:      scopes,
+	})
+	if err != nil {
+		t.Fatalf("new mirror syncer failed: %v", err)
+	}
+	if err := mirror.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial mirror sync failed: %v", err)
+	}
+
+	writableFile := filepath.Join(localDir, "Docs", "A.md")
+	readOnlyFile := filepath.Join(localDir, "Docs", "B.md")
+	info, err := os.Stat(writableFile)
+	if err != nil {
+		t.Fatalf("stat mirrored file: %v", err)
+	}
+	if got := info.Mode().Perm() & 0o222; got == 0 {
+		t.Fatalf("mirror file unexpectedly has no write bits: mode=%#o", info.Mode().Perm())
+	}
+	info, err = os.Stat(readOnlyFile)
+	if err != nil {
+		t.Fatalf("stat scope-read-only mirror file: %v", err)
+	}
+	if got := info.Mode().Perm() & 0o222; got != 0 {
+		t.Fatalf("scope-read-only mirror file has write bits %#o, want none", got)
+	}
+	// Model a mature mirror whose persisted cursor is already at the event
+	// feed tip. The pull-only transition must chmod its existing files even
+	// though the next incremental probe has no changed content to apply.
+	client.events = append(client.events, FilesystemEvent{EventID: "evt_tip"})
+	mirror.state.EventsCursor = "evt_tip"
+	if err := mirror.saveState(); err != nil {
+		t.Fatalf("persist usable events cursor: %v", err)
+	}
+	readsBeforeTransition := client.requestedReadCalls()
+
+	pullOnly, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_pull_only_transition",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		SyncMode:    "pull-only",
+		WebSocket:   &webSocket,
+		Scopes:      scopes,
+	})
+	if err != nil {
+		t.Fatalf("new pull-only syncer failed: %v", err)
+	}
+	if err := pullOnly.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("quiet pull-only transition failed: %v", err)
+	}
+
+	info, err = os.Stat(writableFile)
+	if err != nil {
+		t.Fatalf("stat transitioned file: %v", err)
+	}
+	if got := info.Mode().Perm() & 0o222; got != 0 {
+		t.Fatalf("transitioned file has write bits %#o, want none", got)
+	}
+	if got := client.requestedReadCalls(); got != readsBeforeTransition {
+		t.Fatalf("quiet transition fetched unchanged remote content: reads=%d, want %d", got, readsBeforeTransition)
+	}
+	state := loadPersistedState(t, localDir)
+	if state.SyncMode != "pull-only" || !state.Files["/notion/Docs/A.md"].ReadOnly {
+		t.Fatalf("transition state did not persist pull-only permissions: %+v", state)
+	}
+
+	mirrorAgain, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_pull_only_transition",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		SyncMode:    "mirror",
+		WebSocket:   &webSocket,
+		Scopes:      scopes,
+	})
+	if err != nil {
+		t.Fatalf("new resumed mirror syncer failed: %v", err)
+	}
+	if err := mirrorAgain.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("quiet transition back to mirror failed: %v", err)
+	}
+
+	info, err = os.Stat(writableFile)
+	if err != nil {
+		t.Fatalf("stat restored writable file: %v", err)
+	}
+	if got := info.Mode().Perm() & 0o222; got == 0 {
+		t.Fatalf("write-scoped file stayed read-only after returning to mirror: mode=%#o", info.Mode().Perm())
+	}
+	info, err = os.Stat(readOnlyFile)
+	if err != nil {
+		t.Fatalf("stat restored scope-read-only file: %v", err)
+	}
+	if got := info.Mode().Perm() & 0o222; got != 0 {
+		t.Fatalf("scope-read-only file became writable after returning to mirror: mode=%#o", info.Mode().Perm())
+	}
+	state = loadPersistedState(t, localDir)
+	if state.SyncMode != "mirror" || state.Files["/notion/Docs/A.md"].ReadOnly || !state.Files["/notion/Docs/B.md"].ReadOnly {
+		t.Fatalf("mirror transition did not restore scope-derived state: %+v", state)
+	}
+
+	if err := os.WriteFile(writableFile, []byte("# local after mirror"), 0o644); err != nil {
+		t.Fatalf("edit restored writable file: %v", err)
+	}
+	if err := mirrorAgain.HandleLocalChange(context.Background(), "Docs/A.md", fsnotify.Write); err != nil {
+		t.Fatalf("write back after returning to mirror: %v", err)
+	}
+	if got := client.files["/notion/Docs/A.md"].Content; got != "# local after mirror" {
+		t.Fatalf("restored mirror did not write local edit remotely: %q", got)
+	}
+}
+
+func TestSyncOncePullOnlyTransitionSkipsNonRegularTrackedPaths(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink and POSIX mode behavior differs on Windows")
+	}
+
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/directory.md": {Path: "/notion/Docs/directory.md", Revision: "rev_1", Content: "directory replacement"},
+			"/notion/Docs/symlink.md":   {Path: "/notion/Docs/symlink.md", Revision: "rev_2", Content: "symlink replacement"},
+			"/notion/Docs/healthy.md":   {Path: "/notion/Docs/healthy.md", Revision: "rev_3", Content: "healthy"},
+		},
+		revisionCounter: 3,
+	}
+	localDir := t.TempDir()
+	webSocket := false
+	mirror, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_pull_only_non_regular",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		SyncMode:    "mirror",
+		WebSocket:   &webSocket,
+	})
+	if err != nil {
+		t.Fatalf("new mirror syncer failed: %v", err)
+	}
+	if err := mirror.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial mirror sync failed: %v", err)
+	}
+
+	directoryPath := filepath.Join(localDir, "Docs", "directory.md")
+	symlinkPath := filepath.Join(localDir, "Docs", "symlink.md")
+	healthyPath := filepath.Join(localDir, "Docs", "healthy.md")
+	if err := os.Remove(directoryPath); err != nil {
+		t.Fatalf("remove tracked file for directory replacement: %v", err)
+	}
+	if err := os.Mkdir(directoryPath, 0o755); err != nil {
+		t.Fatalf("replace tracked file with directory: %v", err)
+	}
+	if err := os.Remove(symlinkPath); err != nil {
+		t.Fatalf("remove tracked file for symlink replacement: %v", err)
+	}
+	externalFile := filepath.Join(t.TempDir(), "outside.md")
+	if err := os.WriteFile(externalFile, []byte("outside"), 0o644); err != nil {
+		t.Fatalf("write external symlink target: %v", err)
+	}
+	if err := os.Symlink(externalFile, symlinkPath); err != nil {
+		t.Fatalf("replace tracked file with symlink: %v", err)
+	}
+	client.events = append(client.events, FilesystemEvent{EventID: "evt_tip"})
+	mirror.state.EventsCursor = "evt_tip"
+	if err := mirror.saveState(); err != nil {
+		t.Fatalf("persist usable events cursor: %v", err)
+	}
+
+	pullOnly, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_pull_only_non_regular",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		SyncMode:    "pull-only",
+		WebSocket:   &webSocket,
+	})
+	if err != nil {
+		t.Fatalf("new pull-only syncer failed: %v", err)
+	}
+	if err := pullOnly.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("pull-only transition with non-regular paths failed: %v", err)
+	}
+
+	if info, err := os.Lstat(directoryPath); err != nil || !info.IsDir() {
+		t.Fatalf("directory replacement changed during transition: info=%v err=%v", info, err)
+	}
+	if info, err := os.Lstat(symlinkPath); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("symlink replacement changed during transition: info=%v err=%v", info, err)
+	}
+	if info, err := os.Stat(externalFile); err != nil {
+		t.Fatalf("stat external symlink target: %v", err)
+	} else if got := info.Mode().Perm() & 0o222; got == 0 {
+		t.Fatalf("transition followed symlink and changed external permissions: mode=%#o", info.Mode().Perm())
+	}
+	if info, err := os.Stat(healthyPath); err != nil {
+		t.Fatalf("stat healthy tracked file: %v", err)
+	} else if got := info.Mode().Perm() & 0o222; got != 0 {
+		t.Fatalf("healthy tracked file has write bits %#o, want none", got)
+	}
+}
+
 func TestOneShotStatusUpdatesDoNotRefreshListenerHeartbeat(t *testing.T) {
 	baseline := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
 	syncer := &Syncer{listenerHeartbeatAt: baseline}

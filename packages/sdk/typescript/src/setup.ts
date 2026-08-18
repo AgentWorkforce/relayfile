@@ -1741,14 +1741,22 @@ function normalizeMountWorkspaceInput(
     throw new InvalidLocalDirError(String(input.localDir ?? ""))
   }
 
+  const mode = normalizeMountModeInput(input.mode)
+  const syncMode = normalizeMountSyncModeInput(input.syncMode)
+  if (mode === "fuse" && syncMode === "pull-only") {
+    throw new MountSessionInputError(
+      'Mount syncMode "pull-only" requires mode "poll"; FUSE mutation handlers are not read-only.'
+    )
+  }
+
   return {
     workspace: input.workspace,
     workspaceId: normalizeNonEmptyString(input.workspaceId),
     localDir: resolveLocalDir(localDir),
     remotePath: normalizeMountRemotePath(input.remotePath),
-    mode: normalizeMountModeInput(input.mode),
+    mode,
     localLayout: normalizeMountLocalLayoutInput(input.localLayout),
-    syncMode: normalizeMountSyncModeInput(input.syncMode),
+    syncMode,
     background: input.background !== false,
     agentName: normalizeNonEmptyString(input.agentName),
     scopes:
@@ -1816,7 +1824,11 @@ function normalizeMountLocalLayoutInput(layout?: string): MountLocalLayout {
 
 function normalizeMountSyncModeInput(mode?: string): MountSyncMode {
   const normalized = normalizeNonEmptyString(mode) ?? DEFAULT_MOUNT_SYNC_MODE
-  if (normalized !== "mirror" && normalized !== "write-only") {
+  if (
+    normalized !== "mirror" &&
+    normalized !== "pull-only" &&
+    normalized !== "write-only"
+  ) {
     throw new MountSessionInputError(
       `Invalid syncMode "${normalized}" for mount session.`
     )

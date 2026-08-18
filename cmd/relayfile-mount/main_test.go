@@ -130,6 +130,22 @@ func TestWriteOnlyMountDisablesWebSocketCadence(t *testing.T) {
 	}
 }
 
+func TestPullOnlyMountKeepsWebSocketButDisablesLocalWatcher(t *testing.T) {
+	cfg := mountConfig{websocketEnabled: true, syncMode: syncModePullOnly}
+	if !mountWebSocketEnabled(cfg) {
+		t.Fatal("pull-only mount should keep remote websocket events")
+	}
+	if mountWatchesLocalChanges(cfg) {
+		t.Fatal("pull-only mount must not watch local changes for writeback")
+	}
+	if !mountReconcileUsesWebSocketCadence(cfg, false) {
+		t.Fatal("pull-only mount should use websocket cadence without a local watcher")
+	}
+	if !mountWatchesLocalChanges(mountConfig{syncMode: syncModeMirror}) {
+		t.Fatal("mirror mount should keep its local watcher")
+	}
+}
+
 func TestWatcherUnavailableDisablesWebSocketReconcileCadence(t *testing.T) {
 	cfg := mountConfig{websocketEnabled: true, syncMode: syncModeMirror}
 	if !mountReconcileUsesWebSocketCadence(cfg, true) {
@@ -227,6 +243,7 @@ func TestResolveSyncMode(t *testing.T) {
 	}{
 		{name: "default empty sync mode uses mirror", want: syncModeMirror},
 		{name: "explicit mirror", mode: "mirror", want: syncModeMirror},
+		{name: "explicit pull-only", mode: "pull-only", want: syncModePullOnly},
 		{name: "explicit write-only", mode: "write-only", want: syncModeWriteOnly},
 		{name: "case and whitespace normalized", mode: " WRITE-ONLY ", want: syncModeWriteOnly},
 		{name: "invalid sync mode errors", mode: "push", wantErr: true},
@@ -300,6 +317,34 @@ func TestExecuteMountDispatchesFuseMode(t *testing.T) {
 	}
 	if pollCalled {
 		t.Fatal("did not expect poll runner to be called")
+	}
+}
+
+func TestExecuteMountRejectsPullOnlyFuseMode(t *testing.T) {
+	cfg := mountConfig{mode: mountModeFuse, syncMode: syncModePullOnly}
+	pollCalled := false
+	fuseCalled := false
+
+	err := executeMount(context.Background(), cfg,
+		func(context.Context, mountConfig) error {
+			pollCalled = true
+			return nil
+		},
+		func(context.Context, mountConfig) error {
+			fuseCalled = true
+			return nil
+		},
+	)
+	if err == nil {
+		t.Fatal("expected pull-only FUSE mount to be rejected")
+	}
+	for _, want := range []string{syncModePullOnly, mountModeFuse, "--mode=" + mountModePoll} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not contain %q", err, want)
+		}
+	}
+	if pollCalled || fuseCalled {
+		t.Fatalf("unsupported mount dispatched a runner: poll=%t fuse=%t", pollCalled, fuseCalled)
 	}
 }
 
