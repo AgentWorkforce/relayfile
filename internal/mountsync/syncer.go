@@ -138,7 +138,7 @@ const (
 	// write sits in the outbox retrying across cycles for minutes (the
 	// churn-digest "context deadline exceeded" / late-reply failure mode). This
 	// mirrors bootstrapContext's "derive from rootCtx, not the per-cycle ctx".
-	defaultOutboxFlushTimeout         = 60 * time.Second
+	defaultOutboxFlushTimeout         = defaultBackpressureDeadline
 	defaultIncrementalReadNotReadyTTL = 5 * time.Minute
 	defaultCursorResolutionAttempts   = 3
 	defaultCursorRetryBaseDelay       = 250 * time.Millisecond
@@ -151,6 +151,13 @@ const (
 	fullTreeTraversalDepth           = 3
 	defaultIncrementalEventPageLimit = 50
 	defaultRetryAfterMaxDelay        = 60 * time.Second
+	// Relayfile-generated backpressure is not an upstream/provider failure.
+	// Match the cloud ingest posture: six total attempts, exponential delay
+	// from 500ms capped at 30s, and no retry scheduled beyond four minutes.
+	defaultBackpressureMaxAttempts   = 6
+	defaultBackpressureBaseDelay     = 500 * time.Millisecond
+	defaultBackpressureMaxDelay      = 30 * time.Second
+	defaultBackpressureDeadline      = 240 * time.Second
 	defaultWebSocketReconnectBase    = 1 * time.Second
 	defaultWebSocketReconnectMax     = 60 * time.Second
 	defaultWebSocketReconnectJitter  = 200 * time.Millisecond
@@ -459,17 +466,21 @@ type LazyMaterializeClient interface {
 }
 
 type HTTPClient struct {
-	baseURL          string
-	token            string
-	tokenMu          sync.RWMutex
-	tokenRefreshMu   sync.RWMutex
-	tokenRefreshFunc AuthTokenRefreshFunc
-	httpClient       *http.Client
-	maxRetries       int
-	baseDelay        time.Duration
-	maxDelay         time.Duration
-	httpStatusLogMu  sync.RWMutex
-	httpStatusLogger Logger
+	baseURL                 string
+	token                   string
+	tokenMu                 sync.RWMutex
+	tokenRefreshMu          sync.RWMutex
+	tokenRefreshFunc        AuthTokenRefreshFunc
+	httpClient              *http.Client
+	maxRetries              int
+	baseDelay               time.Duration
+	maxDelay                time.Duration
+	backpressureMaxAttempts int
+	backpressureBaseDelay   time.Duration
+	backpressureMaxDelay    time.Duration
+	backpressureDeadline    time.Duration
+	httpStatusLogMu         sync.RWMutex
+	httpStatusLogger        Logger
 }
 
 // AuthTokenRefreshFunc returns a replacement bearer token after the current
@@ -542,12 +553,16 @@ func NewHTTPClient(baseURL, token string, httpClient *http.Client) *HTTPClient {
 		httpClient = &cloned
 	}
 	return &HTTPClient{
-		baseURL:    baseURL,
-		token:      strings.TrimSpace(token),
-		httpClient: httpClient,
-		maxRetries: 3,
-		baseDelay:  100 * time.Millisecond,
-		maxDelay:   defaultRetryAfterMaxDelay,
+		baseURL:                 baseURL,
+		token:                   strings.TrimSpace(token),
+		httpClient:              httpClient,
+		maxRetries:              3,
+		baseDelay:               100 * time.Millisecond,
+		maxDelay:                defaultRetryAfterMaxDelay,
+		backpressureMaxAttempts: defaultBackpressureMaxAttempts,
+		backpressureBaseDelay:   defaultBackpressureBaseDelay,
+		backpressureMaxDelay:    defaultBackpressureMaxDelay,
+		backpressureDeadline:    defaultBackpressureDeadline,
 	}
 }
 
@@ -857,6 +872,7 @@ func (c *HTTPClient) doJSON(
 		}
 	}
 	authRefreshTried := false
+	startedAt := time.Now()
 	for attempt := 0; ; attempt++ {
 		var bodyReader io.Reader
 		if bodyBytes != nil {
@@ -909,18 +925,25 @@ func (c *HTTPClient) doJSON(
 			}
 		}
 
-		if (resp.StatusCode == http.StatusTooManyRequests || (resp.StatusCode >= 500 && resp.StatusCode <= 599)) && attempt < c.maxRetries {
-			if waitErr := waitWithContext(ctx, c.retryDelay(attempt+1, resp.Header.Get("Retry-After"))); waitErr != nil {
-				return waitErr
-			}
-			continue
-		}
-
 		var errPayload struct {
 			Code    string `json:"code"`
 			Message string `json:"message"`
 		}
 		_ = json.Unmarshal(payloadBytes, &errPayload)
+		if delay, retry := c.httpFailureRetryDelay(
+			attempt,
+			method,
+			requestPath,
+			resp.StatusCode,
+			errPayload.Code,
+			resp.Header.Get("Retry-After"),
+			startedAt,
+		); retry {
+			if waitErr := waitWithContext(ctx, delay); waitErr != nil {
+				return waitErr
+			}
+			continue
+		}
 		// Only a plain revision conflict (the shape WriteFile/WriteFilesBulk/
 		// DeleteFile return) collapses to the untyped ErrConflict sentinel.
 		// A differently-coded 409 (e.g. merge_conflict, merge_base_unavailable
@@ -936,6 +959,89 @@ func (c *HTTPClient) doJSON(
 			Message:    errPayload.Message,
 		}
 	}
+}
+
+// httpFailureRetryDelay keeps Relayfile's own admission backpressure separate
+// from generic provider/server failures. attempt is zero-based and describes
+// the request that just failed; the returned delay precedes the next attempt.
+func (c *HTTPClient) httpFailureRetryDelay(attempt int, method, requestPath string, status int, code, retryAfter string, startedAt time.Time) (time.Duration, bool) {
+	if isRelayfileWriteRequest(method, requestPath) && isRelayfileBackpressure(status, code) {
+		attemptsMade := attempt + 1
+		maxAttempts := c.backpressureMaxAttempts
+		if maxAttempts <= 0 {
+			maxAttempts = defaultBackpressureMaxAttempts
+		}
+		if attemptsMade >= maxAttempts {
+			return 0, false
+		}
+		delay := retryDelayWithBounds(
+			attemptsMade,
+			retryAfter,
+			c.backpressureBaseDelay,
+			c.backpressureMaxDelay,
+			defaultBackpressureBaseDelay,
+			defaultBackpressureMaxDelay,
+		)
+		deadline := c.backpressureDeadline
+		if deadline <= 0 {
+			deadline = defaultBackpressureDeadline
+		}
+		if !startedAt.IsZero() && time.Since(startedAt)+delay > deadline {
+			return 0, false
+		}
+		return delay, true
+	}
+	if (status == http.StatusTooManyRequests || (status >= 500 && status <= 599)) && attempt < c.maxRetries {
+		return c.retryDelay(attempt+1, retryAfter), true
+	}
+	return 0, false
+}
+
+func isRelayfileWriteRequest(method, requestPath string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodDelete:
+		return strings.Contains(requestPath, "/fs/")
+	default:
+		return false
+	}
+}
+
+func isRelayfileBackpressure(status int, code string) bool {
+	if status != http.StatusTooManyRequests {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(code)) {
+	case "workspace_busy", "queue_full":
+		return true
+	default:
+		return false
+	}
+}
+
+func retryDelayWithBounds(attempt int, retryAfterHeader string, baseDelay, maxDelay, defaultBase, defaultMax time.Duration) time.Duration {
+	if maxDelay <= 0 {
+		maxDelay = defaultMax
+	}
+	if retryAfter := parseRetryAfter(retryAfterHeader); retryAfter > 0 {
+		if retryAfter > maxDelay {
+			return maxDelay
+		}
+		return retryAfter
+	}
+	if baseDelay <= 0 {
+		baseDelay = defaultBase
+	}
+	delay := baseDelay
+	for i := 1; i < attempt; i++ {
+		delay *= 2
+		if delay >= maxDelay {
+			return maxDelay
+		}
+	}
+	if delay > maxDelay {
+		return maxDelay
+	}
+	return delay
 }
 
 func (c *HTTPClient) Token() string {

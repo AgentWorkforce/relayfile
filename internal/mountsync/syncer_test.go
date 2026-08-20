@@ -4316,6 +4316,48 @@ func TestOutboxRetryCapSurfacesNeedsAttention(t *testing.T) {
 	}
 }
 
+func TestLegacyDeadLetterSurfacesNeedsAttention(t *testing.T) {
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(&fakeClient{files: map[string]RemoteFile{}}, SyncerOptions{
+		WorkspaceID: "ws_legacy_dead_letter_health",
+		RemoteRoot:  "/slack/channels/C123/messages",
+		LocalRoot:   localDir,
+		Mode:        "poll",
+		Interval:    30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+	if err := syncer.savePublicState(); err != nil {
+		t.Fatalf("save clean public state: %v", err)
+	}
+	clean := readPublicState(t, localDir)
+	if clean.Status == "writeback-needs-attention" || clean.States.OutboxNeedsAttention {
+		t.Fatalf("control: clean mount unexpectedly needs attention: %+v", clean)
+	}
+
+	if err := os.MkdirAll(syncer.deadLetterDir, 0o755); err != nil {
+		t.Fatalf("mkdir dead-letter: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(syncer.deadLetterDir, "op_failed.json"), []byte(`{"opId":"op_failed"}`), 0o644); err != nil {
+		t.Fatalf("write dead-letter payload: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(syncer.deadLetterDir, "op_failed.error.json"), []byte(`{"code":"provider_4xx"}`), 0o644); err != nil {
+		t.Fatalf("write dead-letter sidecar: %v", err)
+	}
+	if err := syncer.savePublicState(); err != nil {
+		t.Fatalf("save dead-letter public state: %v", err)
+	}
+
+	failed := readPublicState(t, localDir)
+	if failed.Status != "writeback-needs-attention" || !failed.States.OutboxNeedsAttention {
+		t.Fatalf("legacy dead-letter did not reach operator health: %+v", failed)
+	}
+	if failed.Outbox.DeadLettered != 1 || failed.Outbox.NeedsAttention != 1 {
+		t.Fatalf("legacy dead-letter summary = %+v, want deadLettered=1 needsAttention=1", failed.Outbox)
+	}
+}
+
 func TestFlushOutboxOnceFlushesPendingWithoutMirrorScan(t *testing.T) {
 	localDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(localDir, "command.json"), []byte(`{"text":"hello"}`), 0o644); err != nil {

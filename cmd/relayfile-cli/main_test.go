@@ -5936,6 +5936,35 @@ func TestBuildSyncStateSnapshotPreservesRemoteRoot(t *testing.T) {
 	}
 }
 
+func TestBuildSyncStateSnapshotPreservesWritebackAttention(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(localDir, ".relay"), 0o755); err != nil {
+		t.Fatalf("mkdir .relay failed: %v", err)
+	}
+	state := `{"workspaceId":"ws_attention","status":"writeback-needs-attention","states":{"stale":false,"offline":false,"hasConflicts":false,"hasPendingWriteback":true,"outboxNeedsAttention":true},"outbox":{"pending":1,"needsAttention":1,"failed":0,"acked":0,"deadLettered":1},"bootstrap":{"phase":"in_progress"}}`
+	if err := os.WriteFile(filepath.Join(localDir, ".relay", "state.json"), []byte(state+"\n"), 0o644); err != nil {
+		t.Fatalf("write state failed: %v", err)
+	}
+
+	snapshot := buildSyncStateSnapshot(syncStatusResponse{}, "ws_attention", defaultMountMode, defaultMountInterval, localDir, 0, "")
+	if snapshot.Status != "writeback-needs-attention" || snapshot.States == nil || !snapshot.States.OutboxNeedsAttention {
+		t.Fatalf("snapshot erased actionable writeback state: %+v", snapshot)
+	}
+	if snapshot.Outbox == nil || snapshot.Outbox.Pending != 1 || snapshot.Outbox.NeedsAttention != 1 || snapshot.Outbox.DeadLettered != 1 {
+		t.Fatalf("snapshot erased outbox detail: %+v", snapshot.Outbox)
+	}
+	if err := writeMirrorStateFile(localDir, snapshot); err != nil {
+		t.Fatalf("write enriched state failed: %v", err)
+	}
+	persisted, err := readWritebackState(localDir)
+	if err != nil {
+		t.Fatalf("read enriched state failed: %v", err)
+	}
+	if persisted.Status != "writeback-needs-attention" || persisted.States == nil || !persisted.States.OutboxNeedsAttention || persisted.Outbox == nil || persisted.Outbox.DeadLettered != 1 {
+		t.Fatalf("daemon rewrite erased writeback signal: %+v", persisted)
+	}
+}
+
 func TestReadGuardCountersAcceptsMirrorStateGuardsShape(t *testing.T) {
 	localDir := t.TempDir()
 	if err := writeMirrorStateFile(localDir, syncStateFile{
