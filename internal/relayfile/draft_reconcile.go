@@ -33,9 +33,10 @@ type WritebackAck struct {
 	// service falls back to the ExternalID-derived name.
 	CanonicalPath string
 	// ProviderResult carries additional fields the provider echoed back about
-	// the written record (e.g. a Slack message ts/channel). They are surfaced
-	// verbatim on the operation's providerResult. The reserved server-owned
-	// key providerRevision cannot be overridden via this map.
+	// the written record (e.g. a Slack message ts/channel). It is terminal
+	// receipt data, surfaced on the operation's providerResult and never
+	// re-ingested as provider input. The reserved server-owned key
+	// providerRevision cannot be overridden via this map.
 	ProviderResult map[string]any
 }
 

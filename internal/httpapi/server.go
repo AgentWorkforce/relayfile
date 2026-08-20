@@ -2389,9 +2389,10 @@ func (s *Server) handleWritebackAck(w http.ResponseWriter, r *http.Request, work
 		ack.CanonicalPath = canonicalPath
 	}
 
-	// Optional: an external writeback consumer may report fields the provider
-	// echoed back about the written record (e.g. a Slack message `ts`/`channel`).
-	// These are surfaced on the operation's providerResult. Strip the reserved,
+	// Optional: an external writeback consumer may report terminal receipt
+	// fields the provider returned (e.g. a Slack message `ts`/`channel`). These
+	// are surfaced on the operation's providerResult and never reclassified as
+	// writable provider input. Strip the reserved,
 	// server-owned providerRevision at this trust boundary so an untrusted
 	// consumer cannot attempt to overwrite it. (mergeProviderResult also
 	// re-stamps the authoritative value as a backstop; this makes the intent

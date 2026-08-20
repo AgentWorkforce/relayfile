@@ -1,0 +1,9 @@
+{
+  "provider": "slack",
+  "action": "reply_in_thread",
+  "endpoint": "/chat.postMessage",
+  "status": 200,
+  "channel": "C0B9Z4CLG1J",
+  "ts": "1786747030.233189",
+  "acknowledgedAt": "2026-08-14T22:37:11.171Z"
+}

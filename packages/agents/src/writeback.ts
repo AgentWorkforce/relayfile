@@ -12,6 +12,8 @@ export interface OpReceipt {
   status: string;
   providerResult?: Record<string, unknown>;
   lastError?: string | null;
+  /** Post-delivery local error; provider delivery remains succeeded. */
+  bookkeepingError?: string | null;
   attemptCount?: number;
 }
 
@@ -33,6 +35,7 @@ async function pollOp(
         status: op.status,
         providerResult: op.providerResult,
         lastError: op.lastError,
+        bookkeepingError: op.bookkeepingError,
         attemptCount: op.attemptCount,
       };
       if (op.status === "succeeded" || op.status === "failed" || op.status === "dead_lettered") {

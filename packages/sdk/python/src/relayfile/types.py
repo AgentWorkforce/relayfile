@@ -415,6 +415,9 @@ class OperationStatusResponse:
     provider: str | None = None
     next_attempt_at: str | None = None
     last_error: str | None = None
+    # Post-delivery local error; does not change a succeeded delivery status.
+    bookkeeping_error: str | None = None
+    # Terminal provider receipt data, never a new provider write payload.
     provider_result: dict[str, Any] | None = None
     correlation_id: str | None = None
     created_at: str | None = None
@@ -705,9 +708,9 @@ class AckWritebackInput:
     # the same provider root as the draft.
     canonical_path: str | None = None
     # Optional fields the provider echoed back about the written record (e.g. a
-    # Slack message ts/channel). Surfaced verbatim on the operation's
-    # providerResult (recoverable via get_operation). The reserved key
-    # providerRevision is server-owned and cannot be overridden via this map.
+    # Slack message ts/channel). This is terminal receipt data surfaced on the
+    # operation's providerResult and never re-ingested as a provider write. The
+    # reserved key providerRevision is server-owned and cannot be overridden.
     provider_result: dict[str, Any] | None = None
     correlation_id: str | None = None
 
@@ -718,6 +721,10 @@ class AckWritebackResponse:
     id: str
     success: bool
     correlation_id: str | None = None
+    # True when the operation had already reached succeeded.
+    replayed: bool | None = None
+    # Post-delivery local error; delivery remains succeeded.
+    bookkeeping_error: str | None = None
 
 
 # ---------------------------------------------------------------------------
