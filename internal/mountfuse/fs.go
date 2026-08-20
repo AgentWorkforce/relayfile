@@ -123,6 +123,7 @@ type fsState struct {
 	cacheMu     sync.RWMutex
 	dirCache    map[string]cachedDir
 	fileCache   map[string]cachedFile
+	fileLoads   map[string]*fileLoad
 	lazyRepos   *LazyMaterializeCache
 	inodeMu     sync.Mutex
 	inodeByPath map[string]uint64
@@ -147,6 +148,12 @@ type cachedDir struct {
 type cachedFile struct {
 	file      mountsync.RemoteFile
 	expiresAt time.Time
+}
+
+type fileLoad struct {
+	done chan struct{}
+	file mountsync.RemoteFile
+	err  error
 }
 
 func newFSState(cfg Config) *fsState {
@@ -180,6 +187,7 @@ func newFSState(cfg Config) *fsState {
 		manifests:   normalizeLayoutManifests(cfg.LayoutManifests),
 		dirCache:    make(map[string]cachedDir),
 		fileCache:   make(map[string]cachedFile),
+		fileLoads:   make(map[string]*fileLoad),
 		inodeByPath: map[string]uint64{normalizeRemotePath(cfg.RemoteRoot): 1},
 		pathByInode: map[uint64]string{1: normalizeRemotePath(cfg.RemoteRoot)},
 	}
@@ -290,7 +298,7 @@ func (s *fsState) getFile(remotePath string) (mountsync.RemoteFile, bool) {
 	s.cacheMu.RLock()
 	cached, ok := s.fileCache[remotePath]
 	s.cacheMu.RUnlock()
-	if !ok || now.After(cached.expiresAt) {
+	if !ok || (!cached.expiresAt.IsZero() && now.After(cached.expiresAt)) {
 		if ok {
 			s.cacheMu.Lock()
 			delete(s.fileCache, remotePath)
@@ -303,12 +311,68 @@ func (s *fsState) getFile(remotePath string) (mountsync.RemoteFile, bool) {
 
 func (s *fsState) putFile(file mountsync.RemoteFile) {
 	file.Path = normalizeRemotePath(file.Path)
+	expiresAt := time.Now().Add(s.contentTTL)
+	if isStaticScaffoldPath(s.remoteRoot, file.Path) {
+		// Scaffold files are immutable within a mount generation. A websocket
+		// generation event still evicts them through invalidate().
+		expiresAt = time.Time{}
+	}
 	s.cacheMu.Lock()
 	s.fileCache[file.Path] = cachedFile{
 		file:      file,
-		expiresAt: time.Now().Add(s.contentTTL),
+		expiresAt: expiresAt,
 	}
 	s.cacheMu.Unlock()
+}
+
+func (s *fsState) loadRemoteFile(ctx context.Context, remotePath string) (mountsync.RemoteFile, error) {
+	remotePath = normalizeRemotePath(remotePath)
+	now := time.Now()
+	s.cacheMu.Lock()
+	if cached, ok := s.fileCache[remotePath]; ok {
+		if cached.expiresAt.IsZero() || !now.After(cached.expiresAt) {
+			s.cacheMu.Unlock()
+			return cached.file, nil
+		}
+		delete(s.fileCache, remotePath)
+	}
+	if existing, ok := s.fileLoads[remotePath]; ok {
+		s.cacheMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return mountsync.RemoteFile{}, ctx.Err()
+		case <-existing.done:
+			return existing.file, existing.err
+		}
+	}
+	load := &fileLoad{done: make(chan struct{})}
+	s.fileLoads[remotePath] = load
+	s.cacheMu.Unlock()
+
+	file, err := s.client.ReadFile(ctx, s.workspaceID, remotePath)
+	if err == nil {
+		file.Path = normalizeRemotePath(file.Path)
+		s.putFile(file)
+	}
+
+	s.cacheMu.Lock()
+	load.file = file
+	load.err = err
+	delete(s.fileLoads, remotePath)
+	close(load.done)
+	s.cacheMu.Unlock()
+	return file, err
+}
+
+func isStaticScaffoldPath(remoteRoot, remotePath string) bool {
+	rel, ok := relativeToRemoteRoot(remoteRoot, remotePath)
+	if !ok {
+		return false
+	}
+	rel = strings.TrimPrefix(rel, "/")
+	return rel == "LAYOUT.md" ||
+		strings.HasSuffix(rel, "/LAYOUT.md") ||
+		strings.HasPrefix(rel, "discovery/")
 }
 
 func (s *fsState) invalidate(remotePath string) {
@@ -463,16 +527,7 @@ func (s *fsState) readFile(ctx context.Context, remotePath string) (mountsync.Re
 			return readVirtualSchema(parentPath, provider, resource, payload), nil
 		}
 	}
-	if file, ok := s.getFile(remotePath); ok {
-		return file, nil
-	}
-	file, err := s.client.ReadFile(ctx, s.workspaceID, remotePath)
-	if err != nil {
-		return mountsync.RemoteFile{}, err
-	}
-	file.Path = normalizeRemotePath(file.Path)
-	s.putFile(file)
-	return file, nil
+	return s.loadRemoteFile(ctx, remotePath)
 }
 
 func (s *fsState) treeEntryToMeta(entry mountsync.TreeEntry, parentPath string) (nodeMeta, bool) {

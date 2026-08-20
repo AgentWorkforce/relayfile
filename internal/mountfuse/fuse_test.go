@@ -19,9 +19,11 @@ import (
 // FuseClient wrapper. Each method returns pre-configured data or injected
 // errors.
 type fakeRemoteClient struct {
-	files        map[string]mountsync.RemoteFile
-	trees        map[string]mountsync.TreeResponse
-	listTreeFunc func(path string) (mountsync.TreeResponse, error)
+	files         map[string]mountsync.RemoteFile
+	trees         map[string]mountsync.TreeResponse
+	listTreeFunc  func(path string) (mountsync.TreeResponse, error)
+	readFileFunc  func(ctx context.Context, path string) (mountsync.RemoteFile, error)
+	readFileCalls int32
 
 	// Optional error injection — when non-nil the corresponding method
 	// returns this error instead of looking up data.
@@ -53,9 +55,13 @@ func (f *fakeRemoteClient) LatestEventID(_ context.Context, _, _ string) (string
 	return "", nil
 }
 
-func (f *fakeRemoteClient) ReadFile(_ context.Context, _, path string) (mountsync.RemoteFile, error) {
+func (f *fakeRemoteClient) ReadFile(ctx context.Context, _, path string) (mountsync.RemoteFile, error) {
+	atomic.AddInt32(&f.readFileCalls, 1)
 	if f.readFileErr != nil {
 		return mountsync.RemoteFile{}, f.readFileErr
+	}
+	if f.readFileFunc != nil {
+		return f.readFileFunc(ctx, path)
 	}
 	file, ok := f.files[path]
 	if !ok {
