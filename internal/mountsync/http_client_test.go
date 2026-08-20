@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestHTTPClientListTreeRequestsPrePaginationMountRuntimeExclusion(t *testing.T) {
@@ -118,6 +119,66 @@ func TestHTTPClientLogsRetriedHTTPStatus(t *testing.T) {
 		if strings.Contains(line, "relayfile http 200") && strings.Contains(line, "retry-after=") {
 			t.Fatalf("did not expect Retry-After field on final 200 log line %q", line)
 		}
+	}
+}
+
+func TestHTTPClientWorkspaceBusyUsesExtendedRetryCeiling(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		if call < defaultBackpressureMaxAttempts {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"code":"workspace_busy","message":"retry after the advertised delay"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"written":1,"errorCount":0,"errors":[]}`))
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, "token", server.Client())
+	// Keep the test deterministic and fast while exercising the production
+	// attempt ceiling. The production defaults remain 500ms/30s/240s.
+	client.backpressureBaseDelay = time.Millisecond
+	client.backpressureMaxDelay = time.Millisecond
+	client.backpressureDeadline = time.Second
+	_, err := client.WriteFilesBulk(context.Background(), "ws_busy", []BulkWriteFile{{
+		Path:        "/slack/channels/C123/messages/draft.json",
+		ContentType: "application/json",
+		Content:     `{"text":"hello"}`,
+	}})
+	if err != nil {
+		t.Fatalf("sixth workspace_busy attempt should recover: %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != defaultBackpressureMaxAttempts {
+		t.Fatalf("workspace_busy calls = %d, want %d (old ceiling was 4)", got, defaultBackpressureMaxAttempts)
+	}
+}
+
+func TestHTTPClientOrdinary429KeepsGenericRetryCeiling(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"code":"rate_limited","message":"provider quota"}`))
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, "token", server.Client())
+	client.baseDelay = time.Millisecond
+	client.maxDelay = time.Millisecond
+	_, err := client.WriteFilesBulk(context.Background(), "ws_rate_limited", []BulkWriteFile{{
+		Path:        "/slack/channels/C123/messages/draft.json",
+		ContentType: "application/json",
+		Content:     `{"text":"hello"}`,
+	}})
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.Code != "rate_limited" {
+		t.Fatalf("ordinary 429 should remain terminal after generic retries, got %v", err)
+	}
+	if got, want := atomic.LoadInt32(&calls), int32(client.maxRetries+1); got != want {
+		t.Fatalf("ordinary 429 calls = %d, want generic ceiling %d", got, want)
 	}
 }
 

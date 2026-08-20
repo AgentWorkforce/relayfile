@@ -411,6 +411,28 @@ type syncStateFile struct {
 	// workspace can be listened to successfully, while a disconnected listener
 	// must not be reported as merely having no events.
 	EventListener *syncStateEventListener `json:"eventListener,omitempty"`
+	// Preserve mountsync's actionable writeback health when the CLI daemon
+	// enriches and rewrites the same public state file. Dropping these fields
+	// made durable outbox failures invisible between reconcile cycles.
+	States *syncStateFlags  `json:"states,omitempty"`
+	Outbox *syncStateOutbox `json:"outbox,omitempty"`
+}
+
+type syncStateFlags struct {
+	Stale                bool `json:"stale"`
+	Offline              bool `json:"offline"`
+	Syncing              bool `json:"syncing,omitempty"`
+	HasConflicts         bool `json:"hasConflicts"`
+	HasPendingWriteback  bool `json:"hasPendingWriteback"`
+	OutboxNeedsAttention bool `json:"outboxNeedsAttention,omitempty"`
+}
+
+type syncStateOutbox struct {
+	Pending        int `json:"pending"`
+	NeedsAttention int `json:"needsAttention"`
+	Failed         int `json:"failed"`
+	Acked          int `json:"acked"`
+	DeadLettered   int `json:"deadLettered,omitempty"`
 }
 
 type syncStateEventListener struct {
@@ -11657,6 +11679,8 @@ func buildSyncStateSnapshot(status syncStatusResponse, workspaceID, mode string,
 		StallReason:                  stallReason,
 		LastError:                    localState.LastError,
 		IncrementalReadNotReadySince: localState.IncrementalReadNotReadySince,
+		States:                       localState.States,
+		Outbox:                       localState.Outbox,
 	}
 	if pid != 0 {
 		snapshot.Daemon = &syncStateDaemon{
@@ -11698,7 +11722,7 @@ func buildSyncStateSnapshot(status syncStatusResponse, workspaceID, mode string,
 	switch {
 	case snapshot.Bootstrap != nil && strings.EqualFold(snapshot.Bootstrap.Phase, "stalled"):
 		snapshot.Status = "stalled"
-	case snapshot.Bootstrap != nil:
+	case snapshot.Bootstrap != nil && !strings.EqualFold(snapshot.Status, "writeback-needs-attention"):
 		snapshot.Status = "bootstrapping"
 	case strings.TrimSpace(stallReason) != "":
 		snapshot.Status = "stalled"
@@ -12813,6 +12837,7 @@ type writebackFailureSample struct {
 	OpID          string
 	Path          string
 	Status        int
+	Code          string
 	Body          string
 	BodyTruncated bool
 }
@@ -12863,15 +12888,21 @@ func (t *writebackFailureTransport) RoundTrip(req *http.Request) (*http.Response
 	}
 
 	sample := sampleWritebackFailure(req, resp, requestBody)
-	attempts, firstAttemptAt := t.recordFailureAttempt(key)
 	if t.logger != nil {
-		t.logger.Printf("WARN writeback request failed opId=%s path=%s status=%d bodyTruncated=%t body=%q",
-			sample.OpID, sample.Path, sample.Status, sample.BodyTruncated, sample.Body)
+		t.logger.Printf("WARN writeback request failed opId=%s path=%s status=%d code=%s bodyTruncated=%t body=%q",
+			sample.OpID, sample.Path, sample.Status, sample.Code, sample.BodyTruncated, sample.Body)
 	}
 	if err := incrementFailedWritebacksInState(t.localDir); err != nil && t.logger != nil {
 		t.logger.Printf("WARN failed to persist failedWritebacks path=%s error=%v", sample.Path, err)
 	}
-	if writebackRetriesExhausted(resp.StatusCode, attempts) {
+	if isRelayfileWritebackBackpressure(sample) {
+		// The durable outbox owns this lifecycle. Do not retain an unbounded
+		// legacy attempt-map entry while admission remains closed.
+		t.clearAttempt(key)
+		return resp, nil
+	}
+	attempts, firstAttemptAt := t.recordFailureAttempt(key)
+	if writebackRetriesExhausted(sample, attempts) {
 		if err := writeDeadLetterWriteback(t.localDir, sample, attempts, firstAttemptAt); err != nil && t.logger != nil {
 			t.logger.Printf("WARN failed to write dead-letter opId=%s path=%s error=%v", sample.OpID, sample.Path, err)
 		}
@@ -12949,9 +12980,20 @@ func sampleWritebackFailure(req *http.Request, resp *http.Response, requestBody 
 		OpID:          opID,
 		Path:          path,
 		Status:        resp.StatusCode,
+		Code:          writebackFailureCode(body),
 		Body:          body,
 		BodyTruncated: bodyTruncated,
 	}
+}
+
+func writebackFailureCode(body string) string {
+	var payload struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(payload.Code))
 }
 
 func writebackFailurePath(req *http.Request, requestBody string) string {
@@ -13039,11 +13081,30 @@ func safeWritebackOpID(value string) string {
 	return value
 }
 
-func writebackRetriesExhausted(status, attempts int) bool {
-	if status == http.StatusTooManyRequests || (status >= 500 && status <= 599) {
+func writebackRetriesExhausted(sample writebackFailureSample, attempts int) bool {
+	// workspace_busy and queue_full are admission backpressure from Relayfile,
+	// not terminal provider failures. The durable outbox owns their retry and
+	// needs-attention lifecycle; writing a legacy dead-letter here would both
+	// misclassify the failure and falsely imply that the command was discarded.
+	if isRelayfileWritebackBackpressure(sample) {
+		return false
+	}
+	if sample.Status == http.StatusTooManyRequests || (sample.Status >= 500 && sample.Status <= 599) {
 		return attempts >= writebackMaxHTTPAttempts
 	}
 	return true
+}
+
+func isRelayfileWritebackBackpressure(sample writebackFailureSample) bool {
+	if sample.Status != http.StatusTooManyRequests {
+		return false
+	}
+	switch sample.Code {
+	case "workspace_busy", "queue_full":
+		return true
+	default:
+		return false
+	}
 }
 
 func writeDeadLetterWriteback(localDir string, sample writebackFailureSample, attempts int, firstAttemptAt time.Time) error {
