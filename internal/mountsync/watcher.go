@@ -304,6 +304,38 @@ func (fw *FileWatcher) shouldSkip(rel string) bool {
 	return false
 }
 
+// isEphemeralAtomicSaveRelativePath identifies conventional editor/tool
+// staging names. The Syncer applies this only while a path is untracked, so a
+// deliberately tracked file with one of these names remains writable. This is
+// intentionally separate from FileWatcher.shouldSkip: state is required to
+// distinguish an atomic-save staging file from legitimate tracked content.
+func isEphemeralAtomicSaveRelativePath(relativePath string) bool {
+	base := strings.ToLower(filepath.Base(filepath.Clean(relativePath)))
+	if base == "" || base == "." {
+		return false
+	}
+	if strings.HasPrefix(base, ".#") ||
+		strings.HasPrefix(base, ".goutputstream-") ||
+		(strings.HasPrefix(base, ".~lock.") && strings.HasSuffix(base, "#")) {
+		return true
+	}
+	if strings.HasSuffix(base, "___jb_tmp___") ||
+		strings.HasSuffix(base, "___jb_old___") ||
+		strings.HasSuffix(base, ".swp") ||
+		strings.HasSuffix(base, ".swo") ||
+		strings.HasSuffix(base, ".swx") ||
+		strings.HasSuffix(base, ".tmp") ||
+		strings.HasSuffix(base, "~") {
+		return true
+	}
+	for _, marker := range []string{".tmp-", ".writer-tmp-"} {
+		if index := strings.LastIndex(base, marker); index > 0 && index+len(marker) < len(base) {
+			return true
+		}
+	}
+	return false
+}
+
 func collidesWithMountRootBasename(localRoot, remoteRoot, first string) bool {
 	return strings.TrimSpace(localRoot) != "" &&
 		normalizeRemotePath(remoteRoot) == "/" &&

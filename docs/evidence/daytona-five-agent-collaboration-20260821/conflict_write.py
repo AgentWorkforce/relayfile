@@ -19,11 +19,12 @@ def main():
     parser.add_argument("--role", required=True)
     parser.add_argument("--barrier-url", required=True)
     parser.add_argument("--parties", type=int, default=5)
+    parser.add_argument("--barrier-timeout-s", type=float, default=120)
     args = parser.parse_args()
 
     relative = f"testdata/daytona-five-agent/{args.run_id}/conflict/shared.txt"
     content = f"{args.run_id}-agent-{args.role}-conflict".encode()
-    barrier = JSONConnection(args.barrier_url, timeout_s=40)
+    barrier = JSONConnection(args.barrier_url, timeout_s=args.barrier_timeout_s + 10)
     try:
         release = barrier.request(
             "POST",
@@ -32,7 +33,7 @@ def main():
                 "key": f"{args.run_id}:conflict",
                 "role": args.role,
                 "parties": args.parties,
-                "timeout_s": 30,
+                "timeout_s": args.barrier_timeout_s,
             },
         )
     finally:

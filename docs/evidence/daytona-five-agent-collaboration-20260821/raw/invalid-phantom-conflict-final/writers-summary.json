@@ -1,0 +1,9 @@
+{
+  "run_id": "conflict-final",
+  "writers": 5,
+  "distinct_contents": 5,
+  "distinct_hashes": 5,
+  "one_barrier_release": true,
+  "errors": [],
+  "status": "pass"
+}

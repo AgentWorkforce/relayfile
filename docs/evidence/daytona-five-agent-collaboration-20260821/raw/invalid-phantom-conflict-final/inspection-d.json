@@ -1,0 +1,38 @@
+{
+  "role": "d",
+  "manifest": {
+    "files": 7999,
+    "bytes": 143489008,
+    "manifest_sha256": "53b9c65de316b68465efc1c2504e4aa2a04c4e769df8bed823454696525ea07e"
+  },
+  "state": {
+    "status": "conflict",
+    "last_applied_revision": null,
+    "event_listener": {
+      "mode": "websocket",
+      "status": "listening",
+      "heartbeatAt": "2026-08-21T20:15:31.604802092Z",
+      "lastConnectedAt": "2026-08-21T19:55:29.828746798Z",
+      "lastAttemptAt": "2026-08-21T19:55:29.578726781Z"
+    },
+    "cursor": "evt_19366",
+    "tracked_files": 7999,
+    "conflicts": 1
+  },
+  "conflict": {
+    "canonical": "conflict-final-agent-e-conflict",
+    "canonical_sha256": "e817c583638e008e61b7f7303aebc32fba0e109bc194d26e4748049c540c4fcd",
+    "artifacts": [
+      {
+        "path": ".relay/conflicts/testdata/daytona-five-agent/conflict-final/conflict/shared.txt.unknown.local",
+        "content": "conflict-final-agent-d-conflict",
+        "sha256": "8f6b8c2325001c74439716230955d5179b2fe3bb13133d8c071c0286e87492cb"
+      }
+    ]
+  },
+  "execution": {
+    "daytona_returncode": 0,
+    "control_plane_attempts": 1,
+    "stderr_tail": "time=\"2026-08-21T22:15:40+02:00\" level=warning msg=\"Version mismatch: Daytona CLI is on v0.205.1 and API is on v0.207.0.\\nMake sure the versions are aligned using 'brew upgrade daytonaio/cli/daytona' or by downloading the latest version from https://github.com/daytona/clients/releases.\"\n"
+  }
+}

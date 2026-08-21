@@ -76,7 +76,7 @@ These names are interpolated by Compose even when they are not read directly by 
 | `RELAYFILE_INTERNAL_MAX_SKEW` | duration | `5m` | Allowed clock skew for signed internal requests |
 | `RELAYFILE_RATE_LIMIT_MAX` | int | `0` | Request cap per rate-limit window; `0` means unlimited |
 | `RELAYFILE_RATE_LIMIT_WINDOW` | duration | `1m` | Rate-limit window |
-| `RELAYFILE_MAX_BODY_BYTES` | int64 | `0` | Max request body size; `0` means unlimited |
+| `RELAYFILE_MAX_BODY_BYTES` | int64 | `1048576` | Max request body size; non-positive values select the 1 MiB server default |
 
 ### Storage profile and state backend
 
@@ -94,6 +94,14 @@ State backend precedence is:
 1. `RELAYFILE_STATE_BACKEND_DSN`
 2. `RELAYFILE_STATE_FILE`
 3. Profile-derived defaults from `RELAYFILE_BACKEND_PROFILE`
+
+State backend DSNs support `memory://`, `file:///path/to/state.json`,
+`segmented-file:///path/to/state-directory`, and PostgreSQL DSNs. The
+`segmented-file` backend is the durable local choice for repository-scale
+workspaces: immutable file payloads are stored by revision outside the mutable
+metadata checkpoint, so a small edit does not rewrite every unchanged byte in
+the workspace. Its orphaned old-revision blobs are crash-safe and may be
+removed by an offline compactor after their revision is no longer referenced.
 
 ### Queue backends and store tuning
 

@@ -11,6 +11,9 @@ import sys
 import time
 
 
+CONTROL_PLANE_RETRIES = 3
+
+
 def percentile(values, fraction):
     ordered = sorted(values)
     position = fraction * (len(ordered) - 1)
@@ -39,6 +42,23 @@ def parse_json_output(stdout):
     raise ValueError(f"no JSON object in output: {stdout[-1000:]}")
 
 
+def run_daytona_command(command, timeout_s):
+    control_plane_attempts = 0
+    while True:
+        control_plane_attempts += 1
+        completed = subprocess.run(command, text=True, capture_output=True, timeout=timeout_s)
+        safely_pre_execution = (
+            completed.returncode != 0
+            and not completed.stdout.strip()
+            and "failed to execute request:" in completed.stderr
+            and "/process/execute" in completed.stderr
+            and ("dial tcp" in completed.stderr or "i/o timeout" in completed.stderr)
+        )
+        if not safely_pre_execution or control_plane_attempts >= CONTROL_PLANE_RETRIES:
+            return completed, control_plane_attempts
+        time.sleep(0.25)
+
+
 def run_agent(agent, agents, barrier_url, run_id, path_set, shape, trial, timeout_s):
     command = [
         "daytona",
@@ -46,7 +66,7 @@ def run_agent(agent, agents, barrier_url, run_id, path_set, shape, trial, timeou
         "exec",
         agent["id"],
         "--timeout",
-        str(int(timeout_s + 40)),
+        str(int(timeout_s + 150)),
         "--",
         "python3",
         "/opt/relayfile-benchmark/fanout_trial.py",
@@ -70,19 +90,41 @@ def run_agent(agent, agents, barrier_url, run_id, path_set, shape, trial, timeou
     for receiver in agents:
         if receiver["role"] != agent["role"]:
             command.extend(["--receiver", f"{receiver['role']}={receiver['probe_url']}"])
-    completed = subprocess.run(command, text=True, capture_output=True, timeout=timeout_s + 60)
-    if completed.returncode:
+    completed, control_plane_attempts = run_daytona_command(command, timeout_s + 180)
+    try:
+        result = parse_json_output(completed.stdout)
+    except (ValueError, json.JSONDecodeError) as error:
         raise RuntimeError(
             json.dumps(
                 {
                     "role": agent["role"],
                     "returncode": completed.returncode,
+                    "parse_error": str(error),
                     "stdout": completed.stdout[-2000:],
                     "stderr": completed.stderr[-2000:],
                 }
             )
         )
-    return parse_json_output(completed.stdout)
+    result["execution"] = {
+        "daytona_returncode": completed.returncode,
+        "control_plane_attempts": control_plane_attempts,
+        "stderr_tail": completed.stderr[-1000:],
+    }
+    return result
+
+
+def write_round_failure(output, shape, trial, results, errors):
+    failure = {
+        "shape": shape,
+        "trial": trial,
+        "results_retained": len(results),
+        "all_visible": bool(results) and all(item.get("all_visible") for item in results),
+        "errors": errors,
+    }
+    path = os.path.join(output, "raw", f"{shape}-{trial:03d}-failure.json")
+    with open(path, "w") as handle:
+        json.dump(failure, handle, indent=2)
+        handle.write("\n")
 
 
 def main():
@@ -110,8 +152,8 @@ def main():
         for trial in range(1, rounds + 1):
             round_started = time.monotonic()
             with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
-                futures = [
-                    pool.submit(
+                futures = {
+                    agent["role"]: pool.submit(
                         run_agent,
                         agent,
                         agents,
@@ -123,8 +165,14 @@ def main():
                         timeout_s,
                     )
                     for agent in agents
-                ]
-                round_results = [future.result() for future in futures]
+                }
+                round_results = []
+                round_errors = []
+                for role, future in futures.items():
+                    try:
+                        round_results.append(future.result())
+                    except Exception as error:
+                        round_errors.append({"role": role, "error": str(error)})
             round_results.sort(key=lambda item: item["role"])
             for result in round_results:
                 path = os.path.join(
@@ -135,6 +183,21 @@ def main():
                 with open(path, "w") as handle:
                     json.dump(result, handle, indent=2)
                     handle.write("\n")
+            if round_errors or not all(item.get("all_visible") for item in round_results):
+                write_round_failure(args.output, shape, trial, round_results, round_errors)
+                print(
+                    json.dumps(
+                        {
+                            "shape": shape,
+                            "trial": trial,
+                            "status": "fail",
+                            "results_retained": len(round_results),
+                            "errors": round_errors,
+                        }
+                    ),
+                    flush=True,
+                )
+                raise SystemExit(1)
             results.extend(round_results)
             print(
                 json.dumps(

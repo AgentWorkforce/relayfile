@@ -600,6 +600,49 @@ func TestBulkWrite(t *testing.T) {
 	}
 }
 
+func TestBuiltinNoopWritebackPersistsBurstOnce(t *testing.T) {
+	backend := &memoryStateBackend{}
+	store := NewStoreWithOptions(StoreOptions{StateBackend: backend})
+	t.Cleanup(store.Close)
+
+	files := make([]BulkWriteFile, 0, 11)
+	for index := 0; index < 11; index++ {
+		files = append(files, BulkWriteFile{
+			Path:        fmt.Sprintf("/repo/file-%02d.txt", index),
+			IfMatch:     "0",
+			ContentType: "text/plain",
+			Content:     fmt.Sprintf("content-%02d", index),
+		})
+	}
+	written, results, errs := store.BulkWrite("ws_noop_batch", files)
+	if len(errs) != 0 || written != len(files) {
+		t.Fatalf("bulk write = written %d errors %+v, want %d and no errors", written, errs, len(files))
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		allSucceeded := true
+		for _, result := range results {
+			op, err := store.GetOperation("ws_noop_batch", result.OpID)
+			if err != nil || op.Status != "succeeded" {
+				allSucceeded = false
+				break
+			}
+		}
+		if allSucceeded {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for batched no-op writeback completion")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	if got := atomic.LoadInt32(&backend.saveCalls); got != 2 {
+		t.Fatalf("state backend saves = %d, want one bulk checkpoint plus one receipt-burst checkpoint", got)
+	}
+}
+
 func TestBulkWriteOverwrite(t *testing.T) {
 	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)

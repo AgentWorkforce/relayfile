@@ -76,6 +76,17 @@ const defaultBulkFlushThreshold = 256
 // JSON-escaping headroom while retaining a finite defensive bound.
 const maxWebSocketMessageBytes int64 = 2 << 20
 
+// The socket read pump is intentionally decoupled from materialization. A
+// synchronized agent fleet can emit hundreds of events in one save burst; if
+// the client stops reading while it atomically writes every file and rewrites
+// its complete state document, the server's bounded live subscription can
+// overflow even though the mount is otherwise healthy.
+const (
+	webSocketApplyQueueSize      = 4096
+	webSocketCheckpointBatchSize = 64
+	webSocketCheckpointQuietTime = 5 * time.Millisecond
+)
+
 const (
 	mountWritebackCreateDraftContentIdentityKind       = "mount-writeback-create-draft"
 	mountWritebackCreateDraftContentIdentityTTLSeconds = 2592000
@@ -2371,6 +2382,11 @@ func (s *Syncer) handleLocalChanges(ctx context.Context, changes []LocalChange, 
 			if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
 				continue
 			}
+			if isEphemeralAtomicSaveRelativePath(relativePath) {
+				if _, tracked := s.state.Files[remotePath]; !tracked {
+					continue
+				}
+			}
 			localPath := filepath.Join(s.localDir, filepath.FromSlash(relativePath))
 			info, statErr := os.Stat(localPath)
 			if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
@@ -3782,9 +3798,73 @@ func (s *Syncer) connectWebSocket(ctx context.Context) error {
 func (s *Syncer) readWebSocketLoop(ctx context.Context, conn *websocket.Conn) {
 	defer s.handleWebSocketDisconnect(conn)
 
+	eventCh := make(chan websocketEvent, webSocketApplyQueueSize)
+	readErrCh := make(chan error, 1)
+	go func() {
+		for {
+			var event websocketEvent
+			if err := wsjson.Read(ctx, conn, &event); err != nil {
+				select {
+				case readErrCh <- err:
+				case <-ctx.Done():
+				}
+				return
+			}
+			select {
+			case eventCh <- event:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	var checkpointTimer *time.Timer
+	var checkpointC <-chan time.Time
+	pendingCheckpoint := 0
+	stopCheckpointTimer := func() {
+		if checkpointTimer != nil && !checkpointTimer.Stop() {
+			select {
+			case <-checkpointTimer.C:
+			default:
+			}
+		}
+		checkpointC = nil
+	}
+	armCheckpointTimer := func() {
+		stopCheckpointTimer()
+		if checkpointTimer == nil {
+			checkpointTimer = time.NewTimer(webSocketCheckpointQuietTime)
+		} else {
+			checkpointTimer.Reset(webSocketCheckpointQuietTime)
+		}
+		checkpointC = checkpointTimer.C
+	}
+	flushCheckpoint := func() error {
+		if pendingCheckpoint == 0 {
+			return nil
+		}
+		stopCheckpointTimer()
+		s.mu.Lock()
+		err := s.savePrivateState()
+		s.mu.Unlock()
+		if err == nil {
+			pendingCheckpoint = 0
+		}
+		return err
+	}
+	defer stopCheckpointTimer()
+
 	for {
-		var event websocketEvent
-		if err := wsjson.Read(ctx, conn, &event); err != nil {
+		select {
+		case <-ctx.Done():
+			if err := flushCheckpoint(); err != nil {
+				s.logf("websocket checkpoint flush failed during shutdown: %v", err)
+			}
+			return
+		case err := <-readErrCh:
+			if flushErr := flushCheckpoint(); flushErr != nil {
+				s.logf("websocket checkpoint flush failed after read stopped: %v", flushErr)
+			}
 			if websocket.CloseStatus(err) == websocket.StatusNormalClosure ||
 				websocket.CloseStatus(err) == websocket.StatusGoingAway ||
 				errors.Is(err, context.Canceled) {
@@ -3792,21 +3872,58 @@ func (s *Syncer) readWebSocketLoop(ctx context.Context, conn *websocket.Conn) {
 			}
 			s.logf("websocket read failed; falling back to polling: %v", err)
 			return
-		}
-		if err := s.applyWebSocketEvent(ctx, event); err != nil {
-			s.logf("websocket event apply failed for %s: %v", strings.TrimSpace(event.Path), err)
-			// Cursor safety requires a contiguous applied prefix. Stop at the
-			// first failed event so reconnect catch-up starts from the last
-			// durable cursor instead of silently advancing around a gap.
-			return
+		case <-checkpointC:
+			checkpointC = nil
+			if err := flushCheckpoint(); err != nil {
+				s.logf("websocket checkpoint flush failed; falling back to polling: %v", err)
+				return
+			}
+		case event := <-eventCh:
+			if err := s.applyWebSocketEventWithPersistence(ctx, event, false); err != nil {
+				if flushErr := flushCheckpoint(); flushErr != nil {
+					s.logf("websocket checkpoint flush failed after apply error: %v", flushErr)
+				}
+				s.logf("websocket event apply failed for %s: %v", strings.TrimSpace(event.Path), err)
+				// Cursor safety requires a contiguous applied prefix. Stop at the
+				// first failed event so reconnect catch-up starts from the last
+				// durable cursor instead of silently advancing around a gap.
+				return
+			}
+			if websocketEventNeedsCheckpoint(event) {
+				pendingCheckpoint++
+				if pendingCheckpoint >= webSocketCheckpointBatchSize {
+					if err := flushCheckpoint(); err != nil {
+						s.logf("websocket checkpoint flush failed; falling back to polling: %v", err)
+						return
+					}
+				} else {
+					armCheckpointTimer()
+				}
+			}
 		}
 	}
 }
 
 func (s *Syncer) checkpointWebSocketEvent(event websocketEvent, eventAt string) error {
+	return s.checkpointWebSocketEventWithPersistence(event, eventAt, true)
+}
+
+func (s *Syncer) checkpointWebSocketEventWithPersistence(event websocketEvent, eventAt string, persist bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.markWebSocketEventAppliedLocked(event, eventAt)
+	return s.persistWebSocketStateLocked(persist)
+}
+
+func websocketEventNeedsCheckpoint(event websocketEvent) bool {
+	eventType := strings.TrimSpace(event.Type)
+	return eventType != "" && eventType != "pong"
+}
+
+func (s *Syncer) persistWebSocketStateLocked(persist bool) error {
+	if !persist {
+		return nil
+	}
 	return s.savePrivateState()
 }
 
@@ -3820,6 +3937,10 @@ func (s *Syncer) markWebSocketEventAppliedLocked(event websocketEvent, eventAt s
 }
 
 func (s *Syncer) applyWebSocketEvent(ctx context.Context, event websocketEvent) error {
+	return s.applyWebSocketEventWithPersistence(ctx, event, true)
+}
+
+func (s *Syncer) applyWebSocketEventWithPersistence(ctx context.Context, event websocketEvent, persist bool) error {
 	eventAt := strings.TrimSpace(event.Timestamp)
 	if eventAt == "" {
 		eventAt = time.Now().UTC().Format(time.RFC3339Nano)
@@ -3830,7 +3951,7 @@ func (s *Syncer) applyWebSocketEvent(ctx context.Context, event websocketEvent) 
 	case "file.created", "file.updated":
 		remotePath := normalizeRemotePath(event.Path)
 		if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
-			return s.checkpointWebSocketEvent(event, eventAt)
+			return s.checkpointWebSocketEventWithPersistence(event, eventAt, persist)
 		}
 		if event.InlineContent {
 			file := RemoteFile{
@@ -3854,7 +3975,7 @@ func (s *Syncer) applyWebSocketEvent(ctx context.Context, event websocketEvent) 
 				return err
 			}
 			s.markWebSocketEventAppliedLocked(event, eventAt)
-			return s.savePrivateState()
+			return s.persistWebSocketStateLocked(persist)
 		}
 		// ReadFile intentionally runs without mu so local writeback is not
 		// blocked by remote I/O. Remember the path state before that read: a
@@ -3868,7 +3989,27 @@ func (s *Syncer) applyWebSocketEvent(ctx context.Context, event websocketEvent) 
 		if err != nil {
 			var httpErr *HTTPError
 			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
-				return fmt.Errorf("websocket file %s is not readable yet: %w", remotePath, err)
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				currentTracked, currentTrackedExists := s.state.Files[remotePath]
+				if currentTrackedExists != observedTrackedExists ||
+					(currentTrackedExists && currentTracked != observedTracked) {
+					s.logf("discarding stale websocket absence for %s after tracked state advanced", remotePath)
+					s.markWebSocketEventAppliedLocked(event, eventAt)
+					return s.persistWebSocketStateLocked(persist)
+				}
+				// The event feed is an ordered mutation log, while ReadFile returns
+				// authoritative current state. If a historical create/update is
+				// absent now, a later delete already superseded it. Treat current
+				// absence as the materialized state and advance the cursor; retrying
+				// this same historical event forever prevents every later stable
+				// file from reaching the mount.
+				if deleteErr := s.applyRemoteDelete(remotePath, nil); deleteErr != nil {
+					return deleteErr
+				}
+				s.logf("websocket event for %s was superseded by current remote absence; advancing cursor", remotePath)
+				s.markWebSocketEventAppliedLocked(event, eventAt)
+				return s.persistWebSocketStateLocked(persist)
 			}
 			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
 				s.logf("skipping denied file: %s", remotePath)
@@ -3878,7 +4019,7 @@ func (s *Syncer) applyWebSocketEvent(ctx context.Context, event websocketEvent) 
 					return markErr
 				}
 				s.markWebSocketEventAppliedLocked(event, eventAt)
-				return s.savePrivateState()
+				return s.persistWebSocketStateLocked(persist)
 			}
 			return err
 		}
@@ -3889,17 +4030,17 @@ func (s *Syncer) applyWebSocketEvent(ctx context.Context, event websocketEvent) 
 			(currentTrackedExists && currentTracked != observedTracked) {
 			s.logf("discarding stale websocket read for %s after tracked state advanced", remotePath)
 			s.markWebSocketEventAppliedLocked(event, eventAt)
-			return s.savePrivateState()
+			return s.persistWebSocketStateLocked(persist)
 		}
 		if err := s.applyRemoteFile(remotePath, file, nil); err != nil {
 			return err
 		}
 		s.markWebSocketEventAppliedLocked(event, eventAt)
-		return s.savePrivateState()
+		return s.persistWebSocketStateLocked(persist)
 	case "file.deleted":
 		remotePath := normalizeRemotePath(event.Path)
 		if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
-			return s.checkpointWebSocketEvent(event, eventAt)
+			return s.checkpointWebSocketEventWithPersistence(event, eventAt, persist)
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -3907,15 +4048,15 @@ func (s *Syncer) applyWebSocketEvent(ctx context.Context, event websocketEvent) 
 			return err
 		}
 		s.markWebSocketEventAppliedLocked(event, eventAt)
-		return s.savePrivateState()
+		return s.persistWebSocketStateLocked(persist)
 	case "directory.created":
 		remotePath := normalizeRemotePath(event.Path)
 		if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
-			return s.checkpointWebSocketEvent(event, eventAt)
+			return s.checkpointWebSocketEventWithPersistence(event, eventAt, persist)
 		}
 		provider, _, ok := providerLayoutParts(s.remoteRoot, remotePath)
 		if !ok {
-			return s.checkpointWebSocketEvent(event, eventAt)
+			return s.checkpointWebSocketEventWithPersistence(event, eventAt, persist)
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -3923,9 +4064,9 @@ func (s *Syncer) applyWebSocketEvent(ctx context.Context, event websocketEvent) 
 			return err
 		}
 		s.markWebSocketEventAppliedLocked(event, eventAt)
-		return s.savePrivateState()
+		return s.persistWebSocketStateLocked(persist)
 	default:
-		return s.checkpointWebSocketEvent(event, eventAt)
+		return s.checkpointWebSocketEventWithPersistence(event, eventAt, persist)
 	}
 }
 
@@ -7720,12 +7861,13 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 		// Data-loss guard for root mounts: skip a top-level entry whose name
 		// collides with the mount directory's own basename. Non-root mounts map
 		// the same entry beneath remoteRoot, where it is a valid descendant.
-		if rel, relErr := filepath.Rel(s.localRoot, path); relErr == nil {
-			if isMountRuntimeRelativePath(rel) {
-				s.logMountControlPathSkipped(rel)
+		relativePath, relativeErr := filepath.Rel(s.localRoot, path)
+		if relativeErr == nil {
+			if isMountRuntimeRelativePath(relativePath) {
+				s.logMountControlPathSkipped(relativePath)
 				return nil
 			}
-			first := strings.SplitN(rel, string(os.PathSeparator), 2)[0]
+			first := strings.SplitN(relativePath, string(os.PathSeparator), 2)[0]
 			if reservedTopLevel(s.scopedChild, s.localRoot, first) || collidesWithMountRootBasename(s.localRoot, s.remoteRoot, first) {
 				if mountscope.IsInfrastructureTopLevelAt(s.localRoot, first) {
 					s.logLocalInfrastructureSkipped(first)
@@ -7744,14 +7886,19 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 		if !info.Mode().IsRegular() {
 			return nil
 		}
+		remotePath, err := s.localPathToRemotePath(path, githubPathIndex)
+		if err != nil {
+			return nil
+		}
+		if relativeErr == nil && isEphemeralAtomicSaveRelativePath(relativePath) {
+			if _, tracked := s.state.Files[remotePath]; !tracked {
+				return nil
+			}
+		}
 		// Writeback body size cap: an oversized local file must not be
 		// enqueued for writeback (it both stresses the cloud and was part
 		// of the clobber pathology). Surface it and skip.
 		if max := maxWritebackBytes(); max > 0 && info.Size() > max {
-			remotePath, err := s.localPathToRemotePath(path, githubPathIndex)
-			if err != nil {
-				return nil
-			}
 			logKey := fmt.Sprintf("%s:%d:%d", remotePath, info.Size(), max)
 			if s.oversizedLogged == nil {
 				s.oversizedLogged = map[string]struct{}{}
@@ -7767,10 +7914,6 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 			snapshot.SkipWriteback = true
 			results[remotePath] = snapshot
 			s.state.Counters.SkippedOversizeWriteback++
-			return nil
-		}
-		remotePath, err := s.localPathToRemotePath(path, githubPathIndex)
-		if err != nil {
 			return nil
 		}
 		snapshot, err := readLocalSnapshot(path, false)

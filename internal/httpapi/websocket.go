@@ -33,6 +33,13 @@ type fileEventMessage struct {
 // the ordinary authenticated file endpoint by the mount client.
 const maxWebSocketInlineContentBytes = 1 << 20
 
+// One coordinated multi-agent save can fan out several filesystem events per
+// path (temporary create/write, atomic rename, and final-path materialization).
+// Keep enough bounded headroom for a large burst while each connection drains
+// to its socket. Overflow remains explicit and cursor-recoverable; this is not
+// an unbounded queue.
+const webSocketLiveSubscriptionBuffer = 4096
+
 type websocketClientMessage struct {
 	Type string `json:"type"`
 }
@@ -81,7 +88,7 @@ func (s *Server) handleFileEventsWebSocket(w http.ResponseWriter, r *http.Reques
 	ctx := r.Context()
 
 	// Subscribe FIRST, then catch up, so no events are missed in between.
-	subscriptionCh := make(chan relayfile.Event, 256)
+	subscriptionCh := make(chan relayfile.Event, webSocketLiveSubscriptionBuffer)
 	overflowCh := make(chan struct{}, 1)
 	unsubscribe := s.store.SubscribeWithOverflow(workspaceID, subscriptionCh, overflowCh)
 	defer unsubscribe()

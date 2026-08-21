@@ -13,8 +13,20 @@ def read_file(path):
         return handle.read()
 
 
+def is_ephemeral_atomic_save_path(relative):
+    base = os.path.basename(relative).lower()
+    if base.startswith((".#", ".goutputstream-")):
+        return True
+    if base.startswith(".~lock.") and base.endswith("#"):
+        return True
+    if base.endswith(("___jb_tmp___", "___jb_old___", ".swp", ".swo", ".swx", ".tmp", "~")):
+        return True
+    return any(marker in base and base.rsplit(marker, 1)[1] for marker in (".tmp-", ".writer-tmp-"))
+
+
 def manifest(root):
     entries = []
+    ephemeral_atomic_save_paths = []
     total_bytes = 0
     for current, directories, files in os.walk(root):
         directories[:] = sorted(name for name in directories if name != ".relay")
@@ -25,11 +37,18 @@ def manifest(root):
             content = read_file(path)
             relative = os.path.relpath(path, root).replace(os.sep, "/")
             entries.append((relative, len(content), hashlib.sha256(content).hexdigest()))
+            if is_ephemeral_atomic_save_path(relative):
+                ephemeral_atomic_save_paths.append(relative)
             total_bytes += len(content)
     digest = hashlib.sha256()
     for relative, size, content_hash in entries:
         digest.update(f"{relative}\0{size}\0{content_hash}\n".encode())
-    return {"files": len(entries), "bytes": total_bytes, "manifest_sha256": digest.hexdigest()}
+    return {
+        "files": len(entries),
+        "bytes": total_bytes,
+        "manifest_sha256": digest.hexdigest(),
+        "ephemeral_atomic_save_paths": ephemeral_atomic_save_paths,
+    }
 
 
 def state(root, private_state):
@@ -40,7 +59,13 @@ def state(root, private_state):
         "status": public.get("status"),
         "last_applied_revision": public.get("lastAppliedRevision"),
         "event_listener": listener,
-        "cursor": private.get("eventCursor") or private.get("cursor") or public.get("eventCursor"),
+        "cursor": (
+            private.get("eventsCursor")
+            or private.get("eventCursor")
+            or private.get("cursor")
+            or public.get("eventsCursor")
+            or public.get("eventCursor")
+        ),
         "tracked_files": len(public.get("files", {})),
         "conflicts": sum(1 for value in public.get("files", {}).values() if value.get("status") == "conflict"),
     }

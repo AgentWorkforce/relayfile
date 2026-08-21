@@ -30,6 +30,45 @@ type blockingReceiptClient struct {
 	once    sync.Once
 }
 
+func TestUntrackedAtomicSaveStagingFileNeverWritesBack(t *testing.T) {
+	client := &fakeClient{files: map[string]RemoteFile{}}
+	localDir := t.TempDir()
+	relativePath := "src/main.go.writer-tmp-692"
+	localPath := filepath.Join(localDir, filepath.FromSlash(relativePath))
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("create staging parent: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte("transient bytes"), 0o644); err != nil {
+		t.Fatalf("write staging file: %v", err)
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_atomic_staging",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+		StateFile:   filepath.Join(t.TempDir(), "state.json"),
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+
+	if err := syncer.HandleLocalChange(context.Background(), relativePath, fsnotify.Create); err != nil {
+		t.Fatalf("handle staging create: %v", err)
+	}
+	if client.bulkWriteCalls != 0 || client.writeFileCalls != 0 {
+		t.Fatalf("staging path wrote remotely: bulk=%d single=%d", client.bulkWriteCalls, client.writeFileCalls)
+	}
+	if _, tracked := syncer.state.Files["/"+relativePath]; tracked {
+		t.Fatal("untracked staging path became tracked")
+	}
+	scanned, err := syncer.scanLocalFiles()
+	if err != nil {
+		t.Fatalf("scan local files: %v", err)
+	}
+	if _, found := scanned["/"+relativePath]; found {
+		t.Fatal("polling reconciliation admitted untracked staging path")
+	}
+}
+
 func (c *blockingReceiptClient) GetOperation(ctx context.Context, workspaceID, opID string) (OperationStatus, error) {
 	c.once.Do(func() { close(c.started) })
 	select {
@@ -137,6 +176,136 @@ func TestWebSocketInlineContentRejectsHashMismatchWithoutAdvancingCursor(t *test
 	}
 	if syncer.state.EventsCursor != "" {
 		t.Fatalf("cursor advanced past corrupt event: %q", syncer.state.EventsCursor)
+	}
+}
+
+func TestWebSocketSupersededCreateAppliesCurrentAbsenceAndAdvancesCursor(t *testing.T) {
+	client := &fakeClient{files: map[string]RemoteFile{}}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_superseded_create",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+
+	remotePath := "/shared/note.txt.writer-tmp-42"
+	localPath := filepath.Join(localDir, "shared", "note.txt.writer-tmp-42")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("mkdir local parent: %v", err)
+	}
+	oldContent := []byte("historical temporary content")
+	if err := os.WriteFile(localPath, oldContent, 0o644); err != nil {
+		t.Fatalf("write stale local file: %v", err)
+	}
+	syncer.state.Files[remotePath] = trackedFile{
+		Revision:    "rev_old",
+		ContentType: "text/plain",
+		Hash:        hashBytes(oldContent),
+	}
+
+	// The event is historical, but the authoritative current read is 404
+	// because a later atomic rename already deleted the temporary path.
+	if err := syncer.applyWebSocketEvent(context.Background(), websocketEvent{
+		EventID:  "evt_42",
+		Type:     "file.created",
+		Path:     remotePath,
+		Revision: "rev_created",
+	}); err != nil {
+		t.Fatalf("apply superseded websocket event: %v", err)
+	}
+	if _, err := os.Stat(localPath); !os.IsNotExist(err) {
+		t.Fatalf("superseded temporary path still exists: %v", err)
+	}
+	if _, ok := syncer.state.Files[remotePath]; ok {
+		t.Fatal("superseded temporary path remains tracked")
+	}
+	if got := syncer.state.EventsCursor; got != "evt_42" {
+		t.Fatalf("events cursor = %q, want evt_42", got)
+	}
+
+	reloaded, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_superseded_create",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("reload syncer: %v", err)
+	}
+	reloaded.mu.Lock()
+	err = reloaded.loadState()
+	reloaded.mu.Unlock()
+	if err != nil {
+		t.Fatalf("reload mount state: %v", err)
+	}
+	if got := reloaded.state.EventsCursor; got != "evt_42" {
+		t.Fatalf("persisted events cursor = %q, want evt_42", got)
+	}
+}
+
+func TestWebSocketBurstDefersWholeStateCheckpointBeyondLiveBuffer(t *testing.T) {
+	client := &fakeClient{files: map[string]RemoteFile{}}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_burst_checkpoint",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+
+	const eventCount = 300 // deliberately exceeds the server's 256-event live buffer
+	for index := 1; index <= eventCount; index++ {
+		content := fmt.Sprintf("agent burst %03d\n", index)
+		if err := syncer.applyWebSocketEventWithPersistence(context.Background(), websocketEvent{
+			EventID:       fmt.Sprintf("evt_%06d", index),
+			Type:          "file.created",
+			Path:          fmt.Sprintf("/shared/burst-%03d.txt", index),
+			Revision:      fmt.Sprintf("rev_%03d", index),
+			ContentHash:   hashString(content),
+			ContentType:   "text/plain",
+			Content:       content,
+			InlineContent: true,
+		}, false); err != nil {
+			t.Fatalf("apply deferred event %d: %v", index, err)
+		}
+	}
+	if got := syncer.state.EventsCursor; got != "evt_000300" {
+		t.Fatalf("in-memory events cursor = %q, want evt_000300", got)
+	}
+	if _, err := os.Stat(syncer.stateFile); !os.IsNotExist(err) {
+		t.Fatalf("deferred burst unexpectedly persisted per-event state: %v", err)
+	}
+
+	syncer.mu.Lock()
+	err = syncer.savePrivateState()
+	syncer.mu.Unlock()
+	if err != nil {
+		t.Fatalf("flush burst checkpoint: %v", err)
+	}
+
+	reloaded, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_burst_checkpoint",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("reload syncer: %v", err)
+	}
+	reloaded.mu.Lock()
+	err = reloaded.loadState()
+	reloaded.mu.Unlock()
+	if err != nil {
+		t.Fatalf("reload mount state: %v", err)
+	}
+	if got := reloaded.state.EventsCursor; got != "evt_000300" {
+		t.Fatalf("persisted events cursor = %q, want evt_000300", got)
+	}
+	if got := len(reloaded.state.Files); got != eventCount {
+		t.Fatalf("persisted tracked files = %d, want %d", got, eventCount)
 	}
 }
 

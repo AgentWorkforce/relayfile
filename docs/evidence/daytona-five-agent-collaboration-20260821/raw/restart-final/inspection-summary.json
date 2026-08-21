@@ -1,0 +1,46 @@
+{
+  "run_id": "conflict-final",
+  "agents_inspected": 5,
+  "identical_public_manifests": true,
+  "manifest": {
+    "files": 7996,
+    "bytes": 143488108,
+    "manifest_sha256": "0e33a6088df39c4660e58e779cd5c7afa8a83f95941a409e690ed73ad1c2b982"
+  },
+  "identical_cursors": true,
+  "cursor": "evt_19312",
+  "listeners_live": true,
+  "canonical_content": "conflict-final-agent-d-conflict",
+  "canonical_sha256": "8f6b8c2325001c74439716230955d5179b2fe3bb13133d8c071c0286e87492cb",
+  "losing_artifacts": [
+    {
+      "agent": "a",
+      "path": ".relay/conflicts/testdata/daytona-five-agent/conflict-final/conflict/shared.txt.unknown.local",
+      "content": "conflict-final-agent-a-conflict",
+      "sha256": "8e44e14e7b89a59595580bd874534f7a3cdc147ba715581390d47a75601c3966"
+    },
+    {
+      "agent": "b",
+      "path": ".relay/conflicts/testdata/daytona-five-agent/conflict-final/conflict/shared.txt.unknown.local",
+      "content": "conflict-final-agent-b-conflict",
+      "sha256": "f24c7dcd27ee63e75db116f1ea0b567fdb30c509a28f26b841974621c6356e25"
+    },
+    {
+      "agent": "c",
+      "path": ".relay/conflicts/testdata/daytona-five-agent/conflict-final/conflict/shared.txt.unknown.local",
+      "content": "conflict-final-agent-c-conflict",
+      "sha256": "94580cc008e81805e7d301714fbbf26776a3debafab747a893a553154bbb0757"
+    },
+    {
+      "agent": "e",
+      "path": ".relay/conflicts/testdata/daytona-five-agent/conflict-final/conflict/shared.txt.unknown.local",
+      "content": "conflict-final-agent-e-conflict",
+      "sha256": "e817c583638e008e61b7f7303aebc32fba0e109bc194d26e4748049c540c4fcd"
+    }
+  ],
+  "distinct_losing_contents": 4,
+  "all_contenders_accounted_for": true,
+  "ephemeral_atomic_save_paths": {},
+  "errors": [],
+  "status": "pass"
+}

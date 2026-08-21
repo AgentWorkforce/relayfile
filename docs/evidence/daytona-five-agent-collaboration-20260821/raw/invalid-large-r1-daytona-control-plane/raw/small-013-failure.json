@@ -1,0 +1,28 @@
+{
+  "shape": "small",
+  "trial": 13,
+  "results_retained": 0,
+  "all_visible": false,
+  "errors": [
+    {
+      "role": "a",
+      "error": "{\"role\": \"a\", \"returncode\": 1, \"parse_error\": \"no JSON object in output: \", \"stdout\": \"\", \"stderr\": \"time=\\\"2026-08-21T21:58:33+02:00\\\" level=warning msg=\\\"Version mismatch: Daytona CLI is on v0.205.1 and API is on v0.207.0.\\\\nMake sure the versions are aligned using 'brew upgrade daytonaio/cli/daytona' or by downloading the latest version from https://github.com/daytona/clients/releases.\\\"\\ntime=\\\"2026-08-21T21:59:03+02:00\\\" level=fatal msg=\\\"failed to execute request: Post \\\\\\\"https://proxy.app.daytona.io/toolbox/b5e5ecb0-0cab-415f-93b4-9215c2654552/process/execute\\\\\\\": dial tcp 44.215.148.60:443: i/o timeout\\\"\\n\"}"
+    },
+    {
+      "role": "b",
+      "error": "{\"role\": \"b\", \"returncode\": 1, \"parse_error\": \"no JSON object in output: \", \"stdout\": \"\", \"stderr\": \"time=\\\"2026-08-21T21:58:32+02:00\\\" level=warning msg=\\\"Version mismatch: Daytona CLI is on v0.205.1 and API is on v0.207.0.\\\\nMake sure the versions are aligned using 'brew upgrade daytonaio/cli/daytona' or by downloading the latest version from https://github.com/daytona/clients/releases.\\\"\\ntime=\\\"2026-08-21T21:59:02+02:00\\\" level=fatal msg=\\\"failed to execute request: Post \\\\\\\"https://proxy.app.daytona.io/toolbox/783ca48c-1339-4972-940a-7b3e4936f090/process/execute\\\\\\\": dial tcp 44.215.148.60:443: i/o timeout\\\"\\n\"}"
+    },
+    {
+      "role": "c",
+      "error": "{\"role\": \"c\", \"returncode\": 1, \"parse_error\": \"no JSON object in output: \", \"stdout\": \"\", \"stderr\": \"time=\\\"2026-08-21T21:58:33+02:00\\\" level=warning msg=\\\"Version mismatch: Daytona CLI is on v0.205.1 and API is on v0.207.0.\\\\nMake sure the versions are aligned using 'brew upgrade daytonaio/cli/daytona' or by downloading the latest version from https://github.com/daytona/clients/releases.\\\"\\ntime=\\\"2026-08-21T21:59:03+02:00\\\" level=fatal msg=\\\"failed to execute request: Post \\\\\\\"https://proxy.app.daytona.io/toolbox/ac4c45a9-7d9b-49ad-9bfe-319b1965adfd/process/execute\\\\\\\": dial tcp 44.215.148.60:443: i/o timeout\\\"\\n\"}"
+    },
+    {
+      "role": "d",
+      "error": "{\"role\": \"d\", \"returncode\": 1, \"parse_error\": \"no JSON object in output: \", \"stdout\": \"\", \"stderr\": \"time=\\\"2026-08-21T21:58:32+02:00\\\" level=warning msg=\\\"Version mismatch: Daytona CLI is on v0.205.1 and API is on v0.207.0.\\\\nMake sure the versions are aligned using 'brew upgrade daytonaio/cli/daytona' or by downloading the latest version from https://github.com/daytona/clients/releases.\\\"\\ntime=\\\"2026-08-21T21:59:02+02:00\\\" level=fatal msg=\\\"failed to execute request: Post \\\\\\\"https://proxy.app.daytona.io/toolbox/7721e2ac-0507-4baf-9c27-8cdb81fb9143/process/execute\\\\\\\": dial tcp 44.215.148.60:443: i/o timeout\\\"\\n\"}"
+    },
+    {
+      "role": "e",
+      "error": "{\"role\": \"e\", \"returncode\": 1, \"parse_error\": \"no JSON object in output: \", \"stdout\": \"\", \"stderr\": \"time=\\\"2026-08-21T21:58:33+02:00\\\" level=warning msg=\\\"Version mismatch: Daytona CLI is on v0.205.1 and API is on v0.207.0.\\\\nMake sure the versions are aligned using 'brew upgrade daytonaio/cli/daytona' or by downloading the latest version from https://github.com/daytona/clients/releases.\\\"\\ntime=\\\"2026-08-21T21:59:03+02:00\\\" level=fatal msg=\\\"failed to execute request: Post \\\\\\\"https://proxy.app.daytona.io/toolbox/e1679438-7844-4fd0-9fb2-2758118d4ada/process/execute\\\\\\\": dial tcp 44.215.148.60:443: i/o timeout\\\"\\n\"}"
+    }
+  ]
+}

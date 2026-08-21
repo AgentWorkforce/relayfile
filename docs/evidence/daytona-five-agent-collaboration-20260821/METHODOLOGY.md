@@ -1,7 +1,8 @@
 # Daytona five-agent real-time collaboration methodology
 
-Date: 2026-08-21  
-Status: acceptance contract frozen before Daytona provisioning
+Date: 2026-08-21
+Status: performance and correctness gates frozen before Daytona provisioning;
+instrumentation changes reset the consecutive-pass sequence
 
 ## Objective
 
@@ -25,16 +26,17 @@ Daytona resources are out of scope.
 The shared workspace grows through three pinned, tracked-only Git archives.
 Dirty or untracked working-tree content is excluded.
 
-| Stage | Repository | Pinned commit | Tracked blobs before extraction |
-| --- | --- | --- | ---: |
-| control | `relayfile` | `f89d152502d3bc15161e0673b96cb84f419cd30a` | 1,272 files / 11,321,811 bytes after extraction |
-| medium | `../relay` | `9cb8a5e0972f7013d035838c763fce4a50a92dd9` | 1,836 blobs / 21,022,834 bytes |
-| large | `../cloud` | `04392ad080d44573f3a4c32c1e02eb5f2a221a0e` | 4,097 blobs / 110,369,079 bytes |
+| Stage | Repository | Pinned commit | Source blobs | Extracted regular files / bytes |
+| --- | --- | --- | ---: | ---: |
+| control | `relayfile` | `f89d152502d3bc15161e0673b96cb84f419cd30a` | 1,272 | 1,272 / 11,321,811 |
+| medium | `../relay` | `9cb8a5e0972f7013d035838c763fce4a50a92dd9` | 1,836 | 1,830 / 21,022,674 |
+| large | `../cloud` | `04392ad080d44573f3a4c32c1e02eb5f2a221a0e` | 4,097 | 4,093 / 110,368,992 |
 
 Relayfile is extracted at the workspace root for comparison with the existing
 two-agent benchmark. Relay and Cloud are added under `/scale/relay` and
 `/scale/cloud`. Exact regular-file counts, byte counts, and manifests are
-recorded after extraction and after all five mounts converge.
+recorded after extraction and after all five mounts converge. The combined
+baseline is 7,195 regular files and 142,713,477 bytes.
 
 ## Timed workload
 
@@ -43,11 +45,25 @@ Each writer then atomically saves a unique path while the other four agents are
 active. A sender polls a hash probe on every peer over four persistent HTTPS
 connections. Each peer probe reads only its local materialized filesystem.
 
+The controller may retry a Daytona toolbox launch only when the CLI reports a
+DNS/TCP timeout reaching `/process/execute`, emits no remote stdout, and thus
+proves the agent process never started. These pre-execution retries and barrier
+waits occur before the local save. Once an agent process starts, its round is
+never retried; any barrier, write, delivery, hash, or observation failure is a
+retained failed sample and resets the consecutive-pass count.
+
 Latency is measured on the sender clock from completion of the local atomic
 save to completion of the first HTTP response proving every expected byte is
 hash-correct on that peer. No timestamps from different machines are
 subtracted. The metric therefore includes probe request/response time and is a
 conservative upper bound on filesystem visibility.
+
+Each individual preview-tunnel probe request has a one-second hard wall-clock
+deadline covering DNS, TLS, proxy, and response work, in addition to its socket
+timeout. A timed-out request is counted as a transport error and retried on a
+fresh connection while the original save-to-proof clock continues
+uninterrupted. This prevents one wedged HTTPS request from suppressing further
+observations; it does not discard, restart, or shorten the latency sample.
 
 Two save shapes are measured:
 
@@ -84,6 +100,8 @@ count.
   durable cursors.
 - After a quiet period, all five public trees excluding `.relay` must have the
   same file count, byte count, and manifest SHA-256.
+- No untracked editor/agent atomic-save staging path (for example
+  `*.writer-tmp-*`) may leak into the shared public tree.
 - A five-way same-path edit must converge to one canonical value on all five
   agents and preserve all four losing byte sequences under `.relay/conflicts`
   across the fleet; silent loss fails acceptance.

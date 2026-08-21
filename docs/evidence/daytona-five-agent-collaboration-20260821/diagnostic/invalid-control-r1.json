@@ -1,0 +1,43 @@
+{
+  "run_id": "control",
+  "status": "invalid_failed_run",
+  "reason": "repo trial 2 missed the 15 second all-peer convergence deadline",
+  "retained_raw_results": {
+    "files": 105,
+    "small": {
+      "saves": 100,
+      "visible_pairwise_deliveries": 400,
+      "expected_pairwise_deliveries": 400,
+      "max_ms": 1254.421052
+    },
+    "repo_trial_1": {
+      "saves": 5,
+      "visible_pairwise_deliveries": 20,
+      "expected_pairwise_deliveries": 20,
+      "max_ms": 2547.521026
+    }
+  },
+  "failure_capture_limitation": "The original orchestrator raised on a nonzero agent exit before retaining repo trial 2 JSON. The harness was repaired before rerun so every parseable result and a round failure record are now retained.",
+  "diagnosis": {
+    "path": "/testdata/daytona-five-agent/control-fixed/repo-002/e/src/module_00.go.writer-tmp-378",
+    "symptom": "A historical file.created event pointed at an atomic-save temporary path that current ReadFile correctly returned as absent. The mount retried that same event every two seconds instead of advancing its contiguous cursor.",
+    "first_observed_utc": "2026-08-21T18:43:59Z",
+    "last_observed_utc": "2026-08-21T18:44:35Z",
+    "repeated_failures_by_agent_at_capture": {
+      "a": 0,
+      "b": 4,
+      "c": 0,
+      "d": 4,
+      "e": 19
+    },
+    "event_tip": "evt_2974",
+    "agent_e_cursor_after_eventual_recovery": "evt_2974",
+    "agent_e_repo_trial_2_files_after_eventual_recovery": 55
+  },
+  "corrective_actions": [
+    "Treat a 404 current read for an ordered historical create/update as authoritative absence, apply deletion semantics, and durably advance the cursor.",
+    "Decouple WebSocket reads from filesystem materialization with a bounded 4096-event client queue.",
+    "Checkpoint the complete tracked-file state once per 64-event burst or after a 5 ms quiet window instead of once per event.",
+    "Raise the server's bounded live subscription headroom from 256 to 4096 events while preserving explicit overflow and cursor replay."
+  ]
+}

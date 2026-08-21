@@ -86,6 +86,34 @@ func TestWatcherBasenameGuardMatchesRemoteRootMapping(t *testing.T) {
 	}
 }
 
+func TestEphemeralAtomicSaveRelativePath(t *testing.T) {
+	for _, relativePath := range []string{
+		"src/main.go.writer-tmp-692",
+		"src/main.go.tmp-12345",
+		"src/.goutputstream-A1B2C3",
+		"src/.#main.go",
+		"src/.~lock.book.xlsx#",
+		"src/main.go___jb_tmp___",
+		"src/main.go.swp",
+		"src/main.go.tmp",
+		"src/main.go~",
+	} {
+		if !isEphemeralAtomicSaveRelativePath(relativePath) {
+			t.Errorf("expected ephemeral atomic-save path: %q", relativePath)
+		}
+	}
+	for _, relativePath := range []string{
+		"src/main.go",
+		"src/tmp-report.md",
+		"src/writer-tmp-notes.md",
+		"src/report.tmp.csv",
+	} {
+		if isEphemeralAtomicSaveRelativePath(relativePath) {
+			t.Errorf("unexpected ephemeral classification: %q", relativePath)
+		}
+	}
+}
+
 func startFileWatcher(t *testing.T, localDir string) (chan watcherEvent, context.CancelFunc, *FileWatcher) {
 	t.Helper()
 

@@ -7,6 +7,7 @@ import hashlib
 import http.client
 import json
 import os
+import threading
 import time
 import urllib.parse
 
@@ -14,6 +15,11 @@ import urllib.parse
 SMALL_BYTES = 300
 REPO_FILE_COUNT = 11
 REPO_TOTAL_BYTES = 14_000
+PROBE_REQUEST_TIMEOUT_S = 1.0
+
+
+class RequestDeadlineExceeded(TimeoutError):
+    """Raised when one observation request exceeds its wall-clock budget."""
 
 
 def trial_files(shape, run_id, path_set, role, trial):
@@ -78,6 +84,29 @@ class JSONConnection:
             self.connection.close()
 
 
+def request_with_deadline(connection, method, endpoint, payload, timeout_s):
+    """Bound DNS, TLS, proxy, and response work, not just socket operations."""
+    completed = threading.Event()
+    outcome = {}
+
+    def invoke():
+        try:
+            outcome["payload"] = connection.request(method, endpoint, payload)
+        except Exception as exc:  # Propagate the request error on the caller thread.
+            outcome["error"] = exc
+        finally:
+            completed.set()
+
+    worker = threading.Thread(target=invoke, daemon=True)
+    worker.start()
+    if not completed.wait(timeout_s):
+        connection.close()
+        raise RequestDeadlineExceeded(f"request exceeded {timeout_s:.3f}s")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["payload"]
+
+
 def atomic_save(root, files):
     started_ns = time.time_ns()
     for relative, content in files:
@@ -94,7 +123,12 @@ def atomic_save(root, files):
 
 
 def wait_for_receiver(receiver, base_url, expected, completed_ns, timeout_s, poll_s):
-    connection = JSONConnection(base_url)
+    # A signed Daytona preview tunnel can occasionally hold one HTTP request
+    # until the client's socket timeout even while the peer filesystem is
+    # already current. Bound one observation attempt and reconnect; the total
+    # save-to-proof clock keeps running, so this improves liveness without
+    # dropping or shortening the measured sample.
+    connection = None
     attempts = 0
     errors = 0
     deadline = time.monotonic() + timeout_s
@@ -108,7 +142,18 @@ def wait_for_receiver(receiver, base_url, expected, completed_ns, timeout_s, pol
         while time.monotonic() < deadline:
             attempts += 1
             try:
-                payload = connection.request("POST", "/probe-batch", request)
+                if connection is None:
+                    connection = JSONConnection(
+                        base_url,
+                        timeout_s=min(PROBE_REQUEST_TIMEOUT_S, timeout_s),
+                    )
+                payload = request_with_deadline(
+                    connection,
+                    "POST",
+                    "/probe-batch",
+                    request,
+                    min(PROBE_REQUEST_TIMEOUT_S, max(0.001, deadline - time.monotonic())),
+                )
                 observed_ns = time.time_ns()
                 if payload.get("all_match"):
                     return {
@@ -120,11 +165,15 @@ def wait_for_receiver(receiver, base_url, expected, completed_ns, timeout_s, pol
                         "observed_sender_ns": observed_ns,
                         "latency_ms": (observed_ns - completed_ns) / 1e6,
                     }
-            except (OSError, RuntimeError, http.client.HTTPException, json.JSONDecodeError):
+            except (OSError, RuntimeError, http.client.HTTPException, json.JSONDecodeError, RequestDeadlineExceeded):
                 errors += 1
+                if connection is not None:
+                    connection.close()
+                connection = None
             time.sleep(poll_s)
     finally:
-        connection.close()
+        if connection is not None:
+            connection.close()
     return {
         "receiver": receiver,
         "status": "timeout",
@@ -156,6 +205,7 @@ def main():
     parser.add_argument("--receiver", action="append", type=parse_receiver, default=[])
     parser.add_argument("--parties", type=int, default=5)
     parser.add_argument("--timeout-s", type=float, default=10)
+    parser.add_argument("--barrier-timeout-s", type=float, default=120)
     parser.add_argument("--poll-s", type=float, default=0.005)
     args = parser.parse_args()
     if len(args.receiver) != args.parties - 1:
@@ -163,14 +213,8 @@ def main():
 
     path_set = args.path_set or args.run_id
     expected = trial_files(args.shape, args.run_id, path_set, args.role, args.trial)
-    for _, url in args.receiver:
-        connection = JSONConnection(url)
-        try:
-            connection.request("GET", "/health")
-        finally:
-            connection.close()
 
-    barrier = JSONConnection(args.barrier_url, timeout_s=40)
+    barrier = JSONConnection(args.barrier_url, timeout_s=args.barrier_timeout_s + 10)
     barrier_started_ns = time.time_ns()
     try:
         release = barrier.request(
@@ -180,7 +224,7 @@ def main():
                 "key": f"{args.run_id}:{args.shape}:{args.trial:03d}",
                 "role": args.role,
                 "parties": args.parties,
-                "timeout_s": 30,
+                "timeout_s": args.barrier_timeout_s,
             },
         )
     finally:
