@@ -1,0 +1,6 @@
+Traceback (most recent call last):
+  File "/root/rfbench/harness/convergence-watch.py", line 51, in <module>
+    main()
+  File "/root/rfbench/harness/convergence-watch.py", line 47, in main
+    raise TimeoutError({"missing": sorted(set(expected) - set(first_match_ns))})
+TimeoutError: {'missing': ['testdata/daytona-sync-benchmark/clean-r2/concurrency/disjoint/b.txt']}

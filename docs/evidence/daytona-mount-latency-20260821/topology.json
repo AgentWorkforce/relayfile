@@ -1,0 +1,56 @@
+{
+  "date": "2026-08-21",
+  "region": "us",
+  "workspace_id": "ws_daytona_sync_clean_20260821",
+  "sandboxes": [
+    {
+      "role": "server",
+      "name": "rf-sync-bench-20260821-server",
+      "id": "254639a3-5df1-4cd1-88b3-d631ab9f942c",
+      "cpu": 2,
+      "memory_gib": 2,
+      "disk_gib": 5
+    },
+    {
+      "role": "agent-a",
+      "name": "rf-sync-bench-20260821-agent-a",
+      "id": "951e03f4-289a-41a2-aa36-191434dd33d9",
+      "cpu": 2,
+      "memory_gib": 2,
+      "disk_gib": 5
+    },
+    {
+      "role": "agent-b",
+      "name": "rf-sync-bench-20260821-agent-b",
+      "id": "315af61d-398a-46c1-8946-47ee780fd933",
+      "cpu": 2,
+      "memory_gib": 2,
+      "disk_gib": 5
+    }
+  ],
+  "relayfile": {
+    "server_commit": "f89d152502d3bc15161e0673b96cb84f419cd30a",
+    "server_sha256": "d737ca8db0ce54e71e82607a978574776091223c9976bd97ea5b8822fe126f5f",
+    "mount_version": "v0.10.45",
+    "mount_commit": "b3a06ffb3eea68fe27f7cedf0f90924efe61fa13",
+    "mount_sha256": "7c8283e3415a891c1c1ce72ec5f8bfbe0aee2e135e9d986392287f54de8e5dc4",
+    "mount_mode": "poll",
+    "sync_mode": "mirror",
+    "websocket_enabled": true,
+    "sync_interval_seconds": 30,
+    "sync_interval_jitter": 0.2,
+    "external_writeback": false
+  },
+  "seed": {
+    "tracked_entries": 1273,
+    "regular_files_seeded": 1272,
+    "bytes_seeded": 11321811,
+    "excluded_symlinks": 1,
+    "git_directory_seeded": false
+  },
+  "daytona_versions": {
+    "cli": "v0.183.0",
+    "api": "v0.207.0",
+    "sandbox_daemon": "v0.205.0-2"
+  }
+}

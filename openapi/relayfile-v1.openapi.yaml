@@ -117,16 +117,23 @@ paths:
         workspace in real time. Authentication is via a `token` query parameter
         containing a valid JWT (same format as the Bearer token).
 
-        The server sends JSON messages with `type`, `path`, `revision`, and
-        `timestamp` fields. The client may send `{"type":"ping"}` to keep the
-        connection alive; the server responds with `{"type":"pong"}`.
+        The server sends JSON messages with `eventId`, `type`, `path`,
+        `revision`, `contentHash`, and `timestamp` fields. Current create/update
+        events up to 1 MiB also carry `inlineContent: true`, `contentType`,
+        `content`, and optional `encoding`, allowing a mount to materialize the
+        revision without a follow-up read. Clients must validate `contentHash`
+        against decoded bytes before advancing their cursor. The client may
+        send `{"type":"ping"}` to keep the connection alive; the server
+        responds with `{"type":"pong"}`.
 
         Updated clients should pass `from=now` for live-only subscriptions, or
         an exclusive `cursor` event id to catch up only events after that
         cursor. Repeated `path` query parameters restrict both catch-up and
         live delivery to exact path/glob filters. Legacy clients that omit
         `from`, `cursor`, and `path` keep the historical recent-event catch-up
-        behavior.
+        behavior. If a live subscriber cannot keep up, the server closes with
+        WebSocket status 1013 at the first buffer gap; cursor-aware clients
+        reconnect using their last successfully applied `eventId`.
       security:
         - BearerAuth: [fs:read]
       parameters:

@@ -18,11 +18,20 @@ type fileEventMessage struct {
 	Path          string `json:"path,omitempty"`
 	Revision      string `json:"revision,omitempty"`
 	ContentHash   string `json:"contentHash,omitempty"`
+	ContentType   string `json:"contentType,omitempty"`
+	Content       string `json:"content,omitempty"`
+	Encoding      string `json:"encoding,omitempty"`
+	InlineContent bool   `json:"inlineContent,omitempty"`
 	Origin        string `json:"origin,omitempty"`
 	Provider      string `json:"provider,omitempty"`
 	CorrelationID string `json:"correlationId,omitempty"`
 	Timestamp     string `json:"timestamp,omitempty"`
 }
+
+// Keep live messages comfortably below common reverse-proxy WebSocket frame
+// limits. Larger files retain the metadata-only shape and are fetched through
+// the ordinary authenticated file endpoint by the mount client.
+const maxWebSocketInlineContentBytes = 1 << 20
 
 type websocketClientMessage struct {
 	Type string `json:"type"`
@@ -73,7 +82,8 @@ func (s *Server) handleFileEventsWebSocket(w http.ResponseWriter, r *http.Reques
 
 	// Subscribe FIRST, then catch up, so no events are missed in between.
 	subscriptionCh := make(chan relayfile.Event, 256)
-	unsubscribe := s.store.Subscribe(workspaceID, subscriptionCh)
+	overflowCh := make(chan struct{}, 1)
+	unsubscribe := s.store.SubscribeWithOverflow(workspaceID, subscriptionCh, overflowCh)
 	defer unsubscribe()
 
 	catchUp, err := s.webSocketCatchUpEvents(workspaceID, options)
@@ -90,7 +100,7 @@ func (s *Server) handleFileEventsWebSocket(w http.ResponseWriter, r *http.Reques
 		if !webSocketEventMatchesPaths(event, options.Paths) {
 			continue
 		}
-		if err := s.writeWebSocketEvent(ctx, conn, event); err != nil {
+		if err := s.writeWebSocketEvent(ctx, conn, workspaceID, event); err != nil {
 			return
 		}
 	}
@@ -109,6 +119,12 @@ func (s *Server) handleFileEventsWebSocket(w http.ResponseWriter, r *http.Reques
 				_ = conn.Close(websocket.StatusInternalError, "websocket read failed")
 			}
 			return
+		case <-overflowCh:
+			// The store latches this subscription at the first full-buffer gap,
+			// so every event sent before this close is a contiguous prefix. A
+			// cursor-aware client can reconnect without silent loss.
+			_ = conn.Close(websocket.StatusTryAgainLater, "event stream overflow; reconnect from cursor")
+			return
 		case msg := <-controlCh:
 			if err := wsjson.Write(ctx, conn, msg); err != nil {
 				return
@@ -124,7 +140,7 @@ func (s *Server) handleFileEventsWebSocket(w http.ResponseWriter, r *http.Reques
 					continue
 				}
 			}
-			if err := s.writeWebSocketEvent(ctx, conn, event); err != nil {
+			if err := s.writeWebSocketEvent(ctx, conn, workspaceID, event); err != nil {
 				return
 			}
 		}
@@ -142,7 +158,24 @@ func parseWebSocketSubscriptionOptions(r *http.Request) websocketSubscriptionOpt
 
 func (s *Server) webSocketCatchUpEvents(workspaceID string, options websocketSubscriptionOptions) ([]relayfile.Event, error) {
 	if options.Cursor != "" {
-		return s.store.GetEventsAfterCursor(workspaceID, options.Cursor, 100)
+		const pageSize = 100
+		cursor := options.Cursor
+		events := make([]relayfile.Event, 0, pageSize)
+		for {
+			page, err := s.store.GetEventsAfterCursor(workspaceID, cursor, pageSize)
+			if err != nil {
+				return nil, err
+			}
+			events = append(events, page...)
+			if len(page) < pageSize {
+				return events, nil
+			}
+			next := strings.TrimSpace(page[len(page)-1].EventID)
+			if next == "" || next == cursor {
+				return events, nil
+			}
+			cursor = next
+		}
 	}
 	if options.From == "now" {
 		return []relayfile.Event{}, nil
@@ -239,8 +272,8 @@ func (s *Server) readWebSocketMessages(ctx context.Context, conn *websocket.Conn
 	}
 }
 
-func (s *Server) writeWebSocketEvent(ctx context.Context, conn *websocket.Conn, event relayfile.Event) error {
-	return wsjson.Write(ctx, conn, fileEventMessage{
+func (s *Server) writeWebSocketEvent(ctx context.Context, conn *websocket.Conn, workspaceID string, event relayfile.Event) error {
+	message := fileEventMessage{
 		EventID:       event.EventID,
 		Type:          event.Type,
 		Path:          event.Path,
@@ -250,5 +283,18 @@ func (s *Server) writeWebSocketEvent(ctx context.Context, conn *websocket.Conn, 
 		Provider:      event.Provider,
 		CorrelationID: event.CorrelationID,
 		Timestamp:     event.Timestamp,
-	})
+	}
+	if event.Type == "file.created" || event.Type == "file.updated" {
+		if file, err := s.store.ReadFile(workspaceID, event.Path); err == nil &&
+			file.Revision == event.Revision && len(file.Content) <= maxWebSocketInlineContentBytes {
+			message.ContentType = file.ContentType
+			message.Content = file.Content
+			message.Encoding = file.Encoding
+			message.InlineContent = true
+			if strings.TrimSpace(file.ContentHash) != "" {
+				message.ContentHash = file.ContentHash
+			}
+		}
+	}
+	return wsjson.Write(ctx, conn, message)
 }

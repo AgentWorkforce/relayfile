@@ -1,0 +1,242 @@
+{
+  "small_300_bytes": {
+    "a_to_b": {
+      "samples": 100,
+      "min_ms": 133.922048,
+      "p50_ms": 147.100032,
+      "p95_ms": 172.7062528,
+      "p99_ms": 178.62968576000003,
+      "max_ms": 182.081792,
+      "threshold_counts": {
+        "lte_500_ms": 100,
+        "lte_1000_ms": 100,
+        "lte_2000_ms": 100,
+        "lte_10000_ms": 100,
+        "lte_30000_ms": 100,
+        "lte_60000_ms": 100
+      },
+      "slowest": [
+        {
+          "correlation_id": "clean-r5-a2b-small-077",
+          "save_to_visible_ms": 182.081792
+        },
+        {
+          "correlation_id": "clean-r5-a2b-small-068",
+          "save_to_visible_ms": 178.594816
+        },
+        {
+          "correlation_id": "clean-r5-a2b-small-051",
+          "save_to_visible_ms": 175.88352
+        },
+        {
+          "correlation_id": "clean-r5-a2b-small-097",
+          "save_to_visible_ms": 174.252032
+        },
+        {
+          "correlation_id": "clean-r5-a2b-small-031",
+          "save_to_visible_ms": 173.415424
+        }
+      ]
+    },
+    "b_to_a": {
+      "samples": 100,
+      "min_ms": 128.900608,
+      "p50_ms": 143.595392,
+      "p95_ms": 172.1337728,
+      "p99_ms": 179.60641280000036,
+      "max_ms": 252.9152,
+      "threshold_counts": {
+        "lte_500_ms": 100,
+        "lte_1000_ms": 100,
+        "lte_2000_ms": 100,
+        "lte_10000_ms": 100,
+        "lte_30000_ms": 100,
+        "lte_60000_ms": 100
+      },
+      "slowest": [
+        {
+          "correlation_id": "clean-r5-b2a-small-001",
+          "save_to_visible_ms": 252.9152
+        },
+        {
+          "correlation_id": "clean-r5-b2a-small-025",
+          "save_to_visible_ms": 178.86592
+        },
+        {
+          "correlation_id": "clean-r5-b2a-small-076",
+          "save_to_visible_ms": 177.471744
+        },
+        {
+          "correlation_id": "clean-r5-b2a-small-066",
+          "save_to_visible_ms": 176.961536
+        },
+        {
+          "correlation_id": "clean-r5-b2a-small-045",
+          "save_to_visible_ms": 174.933248
+        }
+      ]
+    },
+    "pooled": {
+      "samples": 200,
+      "min_ms": 128.900608,
+      "p50_ms": 145.356416,
+      "p95_ms": 172.7062528,
+      "p99_ms": 178.89807871999997,
+      "max_ms": 252.9152,
+      "threshold_counts": {
+        "lte_500_ms": 200,
+        "lte_1000_ms": 200,
+        "lte_2000_ms": 200,
+        "lte_10000_ms": 200,
+        "lte_30000_ms": 200,
+        "lte_60000_ms": 200
+      },
+      "slowest": [
+        {
+          "correlation_id": "clean-r5-b2a-small-001",
+          "save_to_visible_ms": 252.9152
+        },
+        {
+          "correlation_id": "clean-r5-a2b-small-077",
+          "save_to_visible_ms": 182.081792
+        },
+        {
+          "correlation_id": "clean-r5-b2a-small-025",
+          "save_to_visible_ms": 178.86592
+        },
+        {
+          "correlation_id": "clean-r5-a2b-small-068",
+          "save_to_visible_ms": 178.594816
+        },
+        {
+          "correlation_id": "clean-r5-b2a-small-076",
+          "save_to_visible_ms": 177.471744
+        }
+      ]
+    }
+  },
+  "repo_save_11_files_13992_bytes": {
+    "a_to_b": {
+      "samples": 30,
+      "min_ms": 235.908864,
+      "p50_ms": 416.037376,
+      "p95_ms": 753.7894143999999,
+      "p99_ms": 762.33347328,
+      "max_ms": 763.588352,
+      "threshold_counts": {
+        "lte_500_ms": 20,
+        "lte_1000_ms": 30,
+        "lte_2000_ms": 30,
+        "lte_10000_ms": 30,
+        "lte_30000_ms": 30,
+        "lte_60000_ms": 30
+      },
+      "slowest": [
+        {
+          "correlation_id": "clean-r5-a2b-repo-027",
+          "save_to_visible_ms": 763.588352
+        },
+        {
+          "correlation_id": "clean-r5-a2b-repo-030",
+          "save_to_visible_ms": 759.261184
+        },
+        {
+          "correlation_id": "clean-r5-a2b-repo-028",
+          "save_to_visible_ms": 747.101696
+        },
+        {
+          "correlation_id": "clean-r5-a2b-repo-017",
+          "save_to_visible_ms": 671.082752
+        },
+        {
+          "correlation_id": "clean-r5-a2b-repo-024",
+          "save_to_visible_ms": 663.813376
+        }
+      ]
+    },
+    "b_to_a": {
+      "samples": 30,
+      "min_ms": 186.460672,
+      "p50_ms": 467.197056,
+      "p95_ms": 619.5144063999999,
+      "p99_ms": 682.1832576,
+      "max_ms": 697.24544,
+      "threshold_counts": {
+        "lte_500_ms": 17,
+        "lte_1000_ms": 30,
+        "lte_2000_ms": 30,
+        "lte_10000_ms": 30,
+        "lte_30000_ms": 30,
+        "lte_60000_ms": 30
+      },
+      "slowest": [
+        {
+          "correlation_id": "clean-r5-b2a-repo-025",
+          "save_to_visible_ms": 697.24544
+        },
+        {
+          "correlation_id": "clean-r5-b2a-repo-029",
+          "save_to_visible_ms": 645.30688
+        },
+        {
+          "correlation_id": "clean-r5-b2a-repo-021",
+          "save_to_visible_ms": 587.990272
+        },
+        {
+          "correlation_id": "clean-r5-b2a-repo-016",
+          "save_to_visible_ms": 571.138048
+        },
+        {
+          "correlation_id": "clean-r5-b2a-repo-030",
+          "save_to_visible_ms": 570.27968
+        }
+      ]
+    },
+    "pooled": {
+      "samples": 60,
+      "min_ms": 186.460672,
+      "p50_ms": 438.436352,
+      "p95_ms": 699.7382527999998,
+      "p99_ms": 761.03532288,
+      "max_ms": 763.588352,
+      "threshold_counts": {
+        "lte_500_ms": 37,
+        "lte_1000_ms": 60,
+        "lte_2000_ms": 60,
+        "lte_10000_ms": 60,
+        "lte_30000_ms": 60,
+        "lte_60000_ms": 60
+      },
+      "slowest": [
+        {
+          "correlation_id": "clean-r5-a2b-repo-027",
+          "save_to_visible_ms": 763.588352
+        },
+        {
+          "correlation_id": "clean-r5-a2b-repo-030",
+          "save_to_visible_ms": 759.261184
+        },
+        {
+          "correlation_id": "clean-r5-a2b-repo-028",
+          "save_to_visible_ms": 747.101696
+        },
+        {
+          "correlation_id": "clean-r5-b2a-repo-025",
+          "save_to_visible_ms": 697.24544
+        },
+        {
+          "correlation_id": "clean-r5-a2b-repo-017",
+          "save_to_visible_ms": 671.082752
+        }
+      ]
+    }
+  },
+  "integrity": {
+    "trials_sent": 260,
+    "trials_complete": 260,
+    "incomplete": 0,
+    "ambiguous": 0,
+    "clock_negative": 0,
+    "extrapolated": 0
+  }
+}

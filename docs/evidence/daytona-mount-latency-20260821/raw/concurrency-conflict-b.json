@@ -1,0 +1,10 @@
+{
+  "role": "agent-b",
+  "relative_path": "testdata/daytona-sync-benchmark/concurrency-r1/conflict/shared.txt",
+  "target_ns": 1787319438279725000,
+  "write_started_ns": 1787319438279794497,
+  "write_completed_ns": 1787319438318291400,
+  "target_error_ms": 0.069497,
+  "write_ms": 38.496903,
+  "sha256": "a7628cdb83c8d5dda697f456ca104df6bf4e3c7dab031fcf4a307b52c3882822"
+}

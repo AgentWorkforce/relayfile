@@ -1,0 +1,359 @@
+package mountsync
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/agentworkforce/relayfile/internal/relayfile"
+	"github.com/fsnotify/fsnotify"
+)
+
+type delayedIncrementalReadClient struct {
+	*fakeClient
+	delay     time.Duration
+	active    atomic.Int32
+	maxActive atomic.Int32
+}
+
+type blockingReceiptClient struct {
+	*fakeClient
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (c *blockingReceiptClient) GetOperation(ctx context.Context, workspaceID, opID string) (OperationStatus, error) {
+	c.once.Do(func() { close(c.started) })
+	select {
+	case <-c.release:
+		return c.fakeClient.GetOperation(ctx, workspaceID, opID)
+	case <-ctx.Done():
+		return OperationStatus{}, ctx.Err()
+	}
+}
+
+func (c *delayedIncrementalReadClient) ReadFile(ctx context.Context, workspaceID, path string) (RemoteFile, error) {
+	active := c.active.Add(1)
+	defer c.active.Add(-1)
+	for {
+		maximum := c.maxActive.Load()
+		if active <= maximum || c.maxActive.CompareAndSwap(maximum, active) {
+			break
+		}
+	}
+	timer := time.NewTimer(c.delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return c.fakeClient.ReadFile(ctx, workspaceID, path)
+	case <-ctx.Done():
+		return RemoteFile{}, ctx.Err()
+	}
+}
+
+func TestWebSocketInlineContentAppliesWithoutReadAndPersistsCursor(t *testing.T) {
+	client := &fakeClient{files: map[string]RemoteFile{}}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_inline",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+
+	content := "agent edit\n"
+	if err := syncer.applyWebSocketEvent(context.Background(), websocketEvent{
+		EventID:       "evt_42",
+		Type:          "file.updated",
+		Path:          "/shared/note.txt",
+		Revision:      "rev_42",
+		ContentHash:   hashString(content),
+		ContentType:   "text/plain",
+		Content:       content,
+		InlineContent: true,
+		Timestamp:     "2026-08-21T12:00:00Z",
+	}); err != nil {
+		t.Fatalf("apply inline websocket event: %v", err)
+	}
+
+	if client.requestedReadCalls() != 0 {
+		t.Fatalf("inline event performed %d ReadFile calls, want 0", client.requestedReadCalls())
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "shared", "note.txt"), content)
+	if got := syncer.state.EventsCursor; got != "evt_42" {
+		t.Fatalf("events cursor = %q, want evt_42", got)
+	}
+
+	reloaded, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_inline",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("reload syncer: %v", err)
+	}
+	reloaded.mu.Lock()
+	err = reloaded.loadState()
+	reloaded.mu.Unlock()
+	if err != nil {
+		t.Fatalf("reload mount state: %v", err)
+	}
+	if got := reloaded.state.EventsCursor; got != "evt_42" {
+		t.Fatalf("persisted events cursor = %q, want evt_42", got)
+	}
+}
+
+func TestWebSocketInlineContentRejectsHashMismatchWithoutAdvancingCursor(t *testing.T) {
+	syncer, err := NewSyncer(&fakeClient{files: map[string]RemoteFile{}}, SyncerOptions{
+		WorkspaceID: "ws_inline_hash",
+		RemoteRoot:  "/",
+		LocalRoot:   t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	err = syncer.applyWebSocketEvent(context.Background(), websocketEvent{
+		EventID:       "evt_7",
+		Type:          "file.updated",
+		Path:          "/shared/note.txt",
+		Revision:      "rev_7",
+		ContentHash:   hashString("different"),
+		ContentType:   "text/plain",
+		Content:       "payload",
+		InlineContent: true,
+	})
+	if err == nil {
+		t.Fatal("expected inline content hash mismatch")
+	}
+	if syncer.state.EventsCursor != "" {
+		t.Fatalf("cursor advanced past corrupt event: %q", syncer.state.EventsCursor)
+	}
+}
+
+func TestHandleLocalChangesBatchesElevenFilesAndDefersPendingReceipts(t *testing.T) {
+	client := &blockingReceiptClient{
+		fakeClient: &fakeClient{
+			files:      map[string]RemoteFile{},
+			operations: map[string]OperationStatus{},
+		},
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	client.bulkWriteResponseFunc = func(_ context.Context, _ string, files []BulkWriteFile) (BulkWriteResponse, error) {
+		results := make([]BulkWriteResult, 0, len(files))
+		for i, file := range files {
+			results = append(results, BulkWriteResult{
+				Path:     file.Path,
+				Revision: fmt.Sprintf("rev_batch_%d", i),
+				OpID:     fmt.Sprintf("op_batch_%d", i),
+				Writeback: &relayfile.BulkWriteWritebackResult{
+					State: "pending",
+				},
+			})
+		}
+		return BulkWriteResponse{Written: len(files), Results: results, CorrelationID: "corr_batch"}, nil
+	}
+
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_batch",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	changes := make([]LocalChange, 0, 11)
+	for i := 0; i < 11; i++ {
+		relativePath := fmt.Sprintf("shared/%02d.txt", i)
+		localPath := filepath.Join(localDir, filepath.FromSlash(relativePath))
+		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+			t.Fatalf("mkdir %d: %v", i, err)
+		}
+		if err := os.WriteFile(localPath, []byte(fmt.Sprintf("edit-%02d", i)), 0o644); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+		changes = append(changes, LocalChange{RelativePath: relativePath, Op: fsnotify.Write})
+	}
+
+	if err := syncer.HandleLocalChanges(context.Background(), changes); err != nil {
+		t.Fatalf("handle local changes: %v", err)
+	}
+	if client.bulkWriteCalls != 1 {
+		t.Fatalf("bulk write calls = %d, want 1", client.bulkWriteCalls)
+	}
+	if got := len(client.bulkWriteBatches[0]); got != 11 {
+		t.Fatalf("bulk batch size = %d, want 11", got)
+	}
+	select {
+	case <-client.started:
+		// The receipt poll started, but HandleLocalChanges already returned
+		// without waiting for the deliberately blocked GET.
+	case <-time.After(time.Second):
+		t.Fatal("asynchronous receipt settlement did not start")
+	}
+	if client.getOperationCalls != 0 {
+		t.Fatalf("blocked receipt unexpectedly completed: calls=%d", client.getOperationCalls)
+	}
+	close(client.release)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		syncer.receiptMu.Lock()
+		active := len(syncer.receiptActive)
+		syncer.receiptMu.Unlock()
+		if active == 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestLocalChangeBatcherCoalescesBurst(t *testing.T) {
+	batches := make(chan []LocalChange, 2)
+	batcher := NewLocalChangeBatcher(5*time.Millisecond, func(changes []LocalChange) {
+		batches <- changes
+	})
+	defer batcher.Close()
+
+	for i := 0; i < 11; i++ {
+		batcher.Add(fmt.Sprintf("shared/%02d.txt", i), fsnotify.Write)
+	}
+	select {
+	case batch := <-batches:
+		if len(batch) != 11 {
+			t.Fatalf("batch size = %d, want 11", len(batch))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for local-change batch")
+	}
+}
+
+func TestLocalChangeBatcherUsesQuietWindowAcrossStaggeredSave(t *testing.T) {
+	batches := make(chan []LocalChange, 2)
+	batcher := NewLocalChangeBatcher(5*time.Millisecond, func(changes []LocalChange) {
+		batches <- changes
+	})
+	defer batcher.Close()
+
+	for i := 0; i < 5; i++ {
+		batcher.Add(fmt.Sprintf("shared/%02d.txt", i), fsnotify.Write)
+		time.Sleep(3 * time.Millisecond)
+	}
+	select {
+	case batch := <-batches:
+		if len(batch) != 5 {
+			t.Fatalf("staggered save split into a %d-file batch, want 5", len(batch))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for staggered local-change batch")
+	}
+	select {
+	case extra := <-batches:
+		t.Fatalf("staggered save produced an extra batch: %+v", extra)
+	case <-time.After(20 * time.Millisecond):
+	}
+}
+
+func TestIncrementalMaterializationUsesBoundedParallelReads(t *testing.T) {
+	files := make(map[string]RemoteFile, 50)
+	changed := make(map[string]FilesystemEvent, 50)
+	for i := 0; i < 50; i++ {
+		path := fmt.Sprintf("/shared/%02d.txt", i)
+		content := fmt.Sprintf("remote-%02d", i)
+		files[path] = RemoteFile{Path: path, Revision: fmt.Sprintf("rev_%02d", i), ContentType: "text/plain", Content: content}
+		changed[path] = FilesystemEvent{EventID: fmt.Sprintf("evt_%02d", i), Type: "file.updated", Path: path, Revision: fmt.Sprintf("rev_%02d", i)}
+	}
+	client := &delayedIncrementalReadClient{
+		fakeClient: &fakeClient{files: files},
+		delay:      25 * time.Millisecond,
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_incremental_parallel",
+		RemoteRoot:  "/",
+		LocalRoot:   t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+
+	started := time.Now()
+	if err := syncer.applyIncrementalChanges(context.Background(), changed, nil, nil, "evt_start", "evt_end", incrementalCheckpoint{}); err != nil {
+		t.Fatalf("apply incremental changes: %v", err)
+	}
+	elapsed := time.Since(started)
+	if elapsed >= 700*time.Millisecond {
+		t.Fatalf("50 delayed reads took %s; expected bounded parallel materialization", elapsed)
+	}
+	if maximum := client.maxActive.Load(); maximum <= 1 || maximum > defaultIncrementalReadWorkers {
+		t.Fatalf("max concurrent reads = %d, want 2..%d", maximum, defaultIncrementalReadWorkers)
+	}
+}
+
+func TestSaveStateWithoutLocalScanKeepsTrackedPublicFiles(t *testing.T) {
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(&fakeClient{files: map[string]RemoteFile{}}, SyncerOptions{
+		WorkspaceID: "ws_public_fast_state",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	syncer.state.Files["/shared/note.txt"] = trackedFile{
+		Revision:    "rev_9",
+		ContentType: "text/plain",
+		Hash:        hashString("note"),
+	}
+	if err := syncer.saveStateWithoutLocalScan(); err != nil {
+		t.Fatalf("save state without local scan: %v", err)
+	}
+	data, err := os.ReadFile(syncer.publicStatePath)
+	if err != nil {
+		t.Fatalf("read public state: %v", err)
+	}
+	var public publicState
+	if err := json.Unmarshal(data, &public); err != nil {
+		t.Fatalf("decode public state: %v", err)
+	}
+	tracked, ok := public.Files["/shared/note.txt"]
+	if !ok || tracked.Revision != "rev_9" || tracked.Status != "ready" {
+		t.Fatalf("tracked public file missing from no-scan refresh: %+v", tracked)
+	}
+}
+
+func TestWebSocketReconnectURLCarriesDurableCursor(t *testing.T) {
+	client := NewHTTPClient("https://relay.example", "secret", nil)
+	raw, err := client.websocketURL("ws_cursor", "evt_42")
+	if err != nil {
+		t.Fatalf("websocket url: %v", err)
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse websocket url: %v", err)
+	}
+	if got := parsed.Query().Get("cursor"); got != "evt_42" {
+		t.Fatalf("cursor query = %q, want evt_42", got)
+	}
+	if got := parsed.Query().Get("token"); got != "secret" {
+		t.Fatalf("token query = %q, want secret", got)
+	}
+}
+
+func TestAdvanceEventCursorNeverRegressesRelayfileOrdinal(t *testing.T) {
+	if got := advanceEventCursor("evt_42", "evt_7"); got != "evt_42" {
+		t.Fatalf("cursor regressed to %q", got)
+	}
+	if got := advanceEventCursor("evt_42", "evt_43"); got != "evt_43" {
+		t.Fatalf("cursor did not advance: %q", got)
+	}
+}

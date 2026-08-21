@@ -138,6 +138,7 @@ Queue backend precedence is:
 | `RELAYFILE_MOUNT_INTERVAL_JITTER` | float | `0.2` | No | Clamped into the `0..1` range |
 | `RELAYFILE_MOUNT_TIMEOUT` | duration | `15s` | No | Per-sync timeout |
 | `RELAYFILE_MOUNT_WEBSOCKET` | bool | `true` | No | Enables WebSocket streaming when available |
+| `RELAYFILE_INCREMENTAL_READ_CONCURRENCY` | int | `16` | No | Bounded parallel reads for cursor/poll recovery; clamped to 64 |
 | `RELAYFILE_BOOTSTRAP_STALL_CYCLES` | int | `20` | No | Consecutive checkpoint-stable bootstrap cycles before the mount fails terminally |
 | `RELAYFILE_BOOTSTRAP_MAX_DIRECTORIES` | int | `50000` | No | Maximum distinct bounded-tree directories; raise only after inspecting the stalled path for cyclic/expanding aliases |
 
@@ -167,6 +168,7 @@ the `workspace_id`/`wks` claim in the active token, then the default stored by
 | `RELAYFILE_MOUNT_INTERVAL_JITTER` | float | `0.2` | Mount command jitter default |
 | `RELAYFILE_MOUNT_TIMEOUT` | duration | `15s` | Mount command timeout default |
 | `RELAYFILE_MOUNT_WEBSOCKET` | bool | `true` | Mount command WebSocket default |
+| `RELAYFILE_INCREMENTAL_READ_CONCURRENCY` | int | `16` | Bounded parallel reads for cursor/poll recovery; clamped to 64 |
 | `RELAYFILE_BOOTSTRAP_STALL_CYCLES` | int | `20` | Consecutive checkpoint-stable bootstrap cycles before the CLI daemon exits non-zero |
 | `RELAYFILE_BOOTSTRAP_MAX_DIRECTORIES` | int | `50000` | Maximum distinct bootstrap traversal directories; raising it re-arms the persisted checkpoint after operator inspection |
 

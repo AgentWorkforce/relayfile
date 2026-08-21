@@ -104,18 +104,15 @@ func TestEnforcePollIntervalFloor(t *testing.T) {
 	}
 }
 
-func TestWebSocketMaintenanceDoesNotLowerReconcileCadence(t *testing.T) {
-	for cycle := 1; cycle < websocketReconcileEvery; cycle++ {
+func TestHealthyWebSocketAvoidsStopTheWorldReconcile(t *testing.T) {
+	for cycle := 1; cycle <= 100; cycle++ {
 		if shouldReconcileMountCycle(true, cycle) {
-			t.Fatalf("websocket-enabled cycle %d reconciled before cadence floor", cycle)
+			t.Fatalf("healthy real-time cycle %d unexpectedly reconciled", cycle)
 		}
 	}
-	if !shouldReconcileMountCycle(true, websocketReconcileEvery) {
-		t.Fatalf("expected websocket-enabled cycle %d to reconcile", websocketReconcileEvery)
-	}
-	for cycle := 1; cycle <= websocketReconcileEvery; cycle++ {
+	for cycle := 1; cycle <= 100; cycle++ {
 		if !shouldReconcileMountCycle(false, cycle) {
-			t.Fatalf("expected websocket-disabled cycle %d to reconcile", cycle)
+			t.Fatalf("unhealthy real-time cycle %d did not fall back to reconcile", cycle)
 		}
 	}
 }

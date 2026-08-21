@@ -1,0 +1,288 @@
+{
+  "run_id": "clean-a2b-r1",
+  "shape": "repo",
+  "trials_sent": 30,
+  "trials_complete": 30,
+  "trials_incomplete": 0,
+  "trials_ambiguous": 0,
+  "trials_clock_negative": 0,
+  "trials_extrapolated": [],
+  "clock": {
+    "offset_pre_ms": 2.286494,
+    "offset_post_ms": 2.096662,
+    "drift_ms": -0.189832,
+    "pre_min_rtt_ms": 20.55934,
+    "post_min_rtt_ms": 18.525676,
+    "anchor_uncertainty_ms": [
+      10.27967,
+      9.262838
+    ],
+    "model_error": "HTTPS path asymmetry and nonlinear clock change between anchors are unbounded"
+  },
+  "save_to_visible_ms": {
+    "min": 7444.01152,
+    "p50": 9122.668544,
+    "p95": 10150.564633599999,
+    "p99": 10379.619558400002,
+    "max": 10441.030144
+  },
+  "write_start_to_visible_ms": {
+    "min": 7499.647744,
+    "p50": 9129.076352,
+    "p95": 10161.932224,
+    "p99": 10390.31136512,
+    "max": 10449.798912
+  },
+  "local_write_ms": {
+    "min": 3.674337,
+    "p50": 7.849408499999999,
+    "p95": 48.82188509999999,
+    "p99": 53.971636000000004,
+    "max": 55.636178
+  },
+  "incomplete": [],
+  "ambiguous": [],
+  "clock_negative": [],
+  "per_trial": [
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-001",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 55.636178,
+      "save_to_visible_ms": 7444.01152,
+      "write_start_to_visible_ms": 7499.647744
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-002",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 7.720704,
+      "save_to_visible_ms": 8173.055232,
+      "write_start_to_visible_ms": 8180.775936
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-003",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 7.289745,
+      "save_to_visible_ms": 7787.994624,
+      "write_start_to_visible_ms": 7795.284224
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-004",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 8.218372,
+      "save_to_visible_ms": 8179.04384,
+      "write_start_to_visible_ms": 8187.262208
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-005",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 4.511205,
+      "save_to_visible_ms": 9422.26304,
+      "write_start_to_visible_ms": 9426.774272
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-006",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 6.474427,
+      "save_to_visible_ms": 8208.729856,
+      "write_start_to_visible_ms": 8215.204352
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-007",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 49.896378,
+      "save_to_visible_ms": 8331.104768,
+      "write_start_to_visible_ms": 8381.001216
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-008",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 9.228898,
+      "save_to_visible_ms": 9199.06048,
+      "write_start_to_visible_ms": 9208.28928
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-009",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 5.502791,
+      "save_to_visible_ms": 9117.76,
+      "write_start_to_visible_ms": 9123.26272
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-010",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 7.095896,
+      "save_to_visible_ms": 8369.140992,
+      "write_start_to_visible_ms": 8376.237056
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-011",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 6.357538,
+      "save_to_visible_ms": 8183.05664,
+      "write_start_to_visible_ms": 8189.414144
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-012",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 37.899689,
+      "save_to_visible_ms": 9430.594304,
+      "write_start_to_visible_ms": 9468.49408
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-013",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 4.382374,
+      "save_to_visible_ms": 10012.54912,
+      "write_start_to_visible_ms": 10016.931584
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-014",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 9.266458,
+      "save_to_visible_ms": 8593.729792,
+      "write_start_to_visible_ms": 8602.996224
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-015",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 6.899226,
+      "save_to_visible_ms": 9428.794624,
+      "write_start_to_visible_ms": 9435.693824
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-016",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 7.978113,
+      "save_to_visible_ms": 9337.4144,
+      "write_start_to_visible_ms": 9345.39264
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-017",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 15.399966,
+      "save_to_visible_ms": 10229.269504,
+      "write_start_to_visible_ms": 10244.66944
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-018",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 3.674337,
+      "save_to_visible_ms": 9033.97504,
+      "write_start_to_visible_ms": 9037.649408
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-019",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 6.604557,
+      "save_to_visible_ms": 8826.132224,
+      "write_start_to_visible_ms": 8832.736768
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-020",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 7.312814,
+      "save_to_visible_ms": 9127.577088,
+      "write_start_to_visible_ms": 9134.889984
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-021",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 8.160062,
+      "save_to_visible_ms": 9920.944384,
+      "write_start_to_visible_ms": 9929.104384
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-022",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 18.239156,
+      "save_to_visible_ms": 9738.91584,
+      "write_start_to_visible_ms": 9757.154816
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-023",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 6.439107,
+      "save_to_visible_ms": 10054.369792,
+      "write_start_to_visible_ms": 10060.80896
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-024",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 8.768899,
+      "save_to_visible_ms": 10441.030144,
+      "write_start_to_visible_ms": 10449.798912
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-025",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 15.219258,
+      "save_to_visible_ms": 9446.542336,
+      "write_start_to_visible_ms": 9461.761536
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-026",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 15.235988,
+      "save_to_visible_ms": 9620.87168,
+      "write_start_to_visible_ms": 9636.10752
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-027",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 27.588204,
+      "save_to_visible_ms": 9960.976128,
+      "write_start_to_visible_ms": 9988.564224
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-028",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 47.508616,
+      "save_to_visible_ms": 8420.799744,
+      "write_start_to_visible_ms": 8468.30848
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-029",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 6.202669,
+      "save_to_visible_ms": 8330.580736,
+      "write_start_to_visible_ms": 8336.78336
+    },
+    {
+      "correlation_id": "clean-a2b-r1-a-to-b-repo-030",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 3.682807,
+      "save_to_visible_ms": 8988.386816,
+      "write_start_to_visible_ms": 8992.069632
+    }
+  ]
+}

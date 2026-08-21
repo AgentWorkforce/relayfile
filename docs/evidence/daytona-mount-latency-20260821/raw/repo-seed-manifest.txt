@@ -1,0 +1,5 @@
+tracked_entries 1273
+seeded_regular_files 1272
+seeded_bytes 11321811
+excluded_symlinks 1
+git_directory_seeded false

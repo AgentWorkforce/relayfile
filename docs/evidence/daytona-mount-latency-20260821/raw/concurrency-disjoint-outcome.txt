@@ -1,0 +1,6 @@
+time="2026-08-21T15:38:04+02:00" level=warning msg="Version mismatch: Daytona CLI is on v0.183.0 and API is on v0.207.0.\nMake sure the versions are aligned using 'brew upgrade daytonaio/cli/daytona' or by downloading the latest version from https://github.com/daytonaio/daytona/releases."
+agent-a.txt=agent-a-disjoint-v1
+agent-b.txt=agent-b-disjoint-v1
+time="2026-08-21T15:38:05+02:00" level=warning msg="Version mismatch: Daytona CLI is on v0.183.0 and API is on v0.207.0.\nMake sure the versions are aligned using 'brew upgrade daytonaio/cli/daytona' or by downloading the latest version from https://github.com/daytonaio/daytona/releases."
+agent-a.txt=agent-a-disjoint-v1
+agent-b.txt=agent-b-disjoint-v1

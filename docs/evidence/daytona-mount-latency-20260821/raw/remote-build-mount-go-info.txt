@@ -1,0 +1,11 @@
+go_version go1.22.12
+path github.com/agentworkforce/relayfile/cmd/relayfile-mount
+module github.com/agentworkforce/relayfile (devel)
+ldflags -s -w -X main.version=v0.10.45
+CGO_ENABLED 0
+GOARCH amd64
+GOOS linux
+vcs git
+vcs_revision b3a06ffb3eea68fe27f7cedf0f90924efe61fa13
+vcs_time 2026-08-18T08:49:01Z
+vcs_modified false

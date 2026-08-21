@@ -1,0 +1,11 @@
+/home/daytona/relayfile-server: go1.19.8
+path github.com/agentworkforce/relayfile/cmd/relayfile
+mod github.com/agentworkforce/relayfile (devel)
+build CGO_ENABLED=0
+build GOARCH=amd64
+build GOOS=linux
+build GOAMD64=v1
+build vcs=git
+build vcs.revision=f89d152502d3bc15161e0673b96cb84f419cd30a
+build vcs.time=2026-08-18T08:53:45Z
+build vcs.modified=false

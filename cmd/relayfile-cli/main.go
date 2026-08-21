@@ -55,7 +55,6 @@ const (
 	minAgentRelayCLIVersion                   = "8.7.0"
 	messagingOnlyRelayfileWorkspaceNameSuffix = " (Relayfile)"
 	configDirName                             = ".relayfile"
-	websocketReconcileEvery                   = 10
 	defaultMountMode                          = "poll"
 	defaultMountInterval                      = 30 * time.Second
 	defaultEventSilenceThreshold              = 24 * time.Hour
@@ -14026,7 +14025,7 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 	// pushLocal scan, so writebacks remain correct without descriptor fan-out.
 	watcherActive := false
 	if !once {
-		watcher, err := syncer.NewFileWatcher(func(relativePath string, op fsnotify.Op) {
+		changeBatcher := mountsync.NewLocalChangeBatcher(5*time.Millisecond, func(changes []mountsync.LocalChange) {
 			if isDegraded() {
 				// Local edit observed while delegated credentials are unusable.
 				// Leave the dirty state in place so the next successful cycle
@@ -14035,7 +14034,7 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 				return
 			}
 			if err := withAuthRefresh(func(ctx context.Context) error {
-				return syncer.HandleLocalChange(ctx, relativePath, op)
+				return syncer.HandleLocalChanges(ctx, changes)
 			}); err != nil {
 				if isMountCredentialExpired(err) {
 					enterDegraded(err)
@@ -14047,16 +14046,22 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 			}
 			writeSnapshot()
 		})
+		watcher, err := syncer.NewFileWatcher(func(relativePath string, op fsnotify.Op) {
+			changeBatcher.Add(relativePath, op)
+		})
 		if err != nil {
+			changeBatcher.Close()
 			syncer.EnablePollingLocalChangeDetection()
 			log.Printf("file watcher unavailable; continuing with polling reconciliation: %v", err)
 		} else if err := watcher.Start(rootCtx); err != nil {
 			_ = watcher.Close()
+			changeBatcher.Close()
 			syncer.EnablePollingLocalChangeDetection()
 			log.Printf("file watcher disabled; continuing with polling reconciliation: %v", err)
 		} else {
 			watcherActive = true
 			defer watcher.Close()
+			defer changeBatcher.Close()
 		}
 	}
 
@@ -14091,11 +14096,14 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 			}
 		case <-timer.C:
 			cycle++
-			reconcile := shouldReconcileMountCycle(websocketEnabled && watcherActive, cycle)
+			realtimeHealthy := websocketEnabled && watcherActive && syncer.WebSocketConnected()
+			reconcile := shouldReconcileMountCycle(realtimeHealthy, cycle)
 			if reconcile {
 				if err := runCycle(true); mountsync.IsBootstrapTerminalError(err) {
 					return err
 				}
+			} else if err := syncer.RefreshRealtimeState(); err != nil {
+				log.Printf("real-time state refresh failed: %v", err)
 			}
 			if !isDegraded() && time.Since(lastSuccessAt()) >= 10*time.Minute {
 				if bs := readBootstrapStatus(localDir); bs != nil {
@@ -14121,8 +14129,8 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 	}
 }
 
-func shouldReconcileMountCycle(websocketEnabled bool, cycle int) bool {
-	return !websocketEnabled || cycle%websocketReconcileEvery == 0
+func shouldReconcileMountCycle(realtimeHealthy bool, _ int) bool {
+	return !realtimeHealthy
 }
 
 func correlationID() string {

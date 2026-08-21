@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,10 +18,133 @@ import (
 
 const defaultMaxWatchedDirs = 8192
 
+const defaultLocalChangeBatchWindow = 5 * time.Millisecond
+
 var (
 	ErrWatcherLimitExceeded   = errors.New("mount file watcher directory limit exceeded")
 	ErrRecursiveWatcherUnsafe = errors.New("recursive mount file watcher is unsafe on this platform")
 )
+
+// LocalChange is one coalesced filesystem-watcher observation. HandleLocalChanges
+// deliberately derives write/delete behavior from the current filesystem state;
+// Op is retained for diagnostics and compatibility with fsnotify callers.
+type LocalChange struct {
+	RelativePath string
+	Op           fsnotify.Op
+}
+
+// LocalChangeBatcher collapses the near-simultaneous per-path callbacks emitted
+// by FileWatcher into one ordered batch. The per-file debounce has already let
+// editor rename/write/chmod sequences settle; this short cross-file window is
+// what turns a multi-file agent save into a single /fs/bulk request.
+type LocalChangeBatcher struct {
+	mu      sync.Mutex
+	window  time.Duration
+	maxWait time.Duration
+	onBatch func([]LocalChange)
+	pending map[string]LocalChange
+	timer   *time.Timer
+	started time.Time
+	closed  bool
+	wg      sync.WaitGroup
+}
+
+func NewLocalChangeBatcher(window time.Duration, onBatch func([]LocalChange)) *LocalChangeBatcher {
+	if window <= 0 {
+		window = defaultLocalChangeBatchWindow
+	}
+	return &LocalChangeBatcher{
+		window:  window,
+		maxWait: 10 * window,
+		onBatch: onBatch,
+		pending: make(map[string]LocalChange),
+	}
+}
+
+func (b *LocalChangeBatcher) Add(relativePath string, op fsnotify.Op) {
+	if b == nil {
+		return
+	}
+	relativePath = filepath.ToSlash(strings.TrimSpace(relativePath))
+	if relativePath == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return
+	}
+	change := b.pending[relativePath]
+	change.RelativePath = relativePath
+	change.Op |= op
+	b.pending[relativePath] = change
+	if b.timer != nil {
+		// Flush after one quiet window so callbacks spread across a multi-file
+		// save stay in one bulk request. Cap the total wait so sustained churn
+		// cannot starve writeback indefinitely.
+		if b.timer.Stop() {
+			delay := b.window
+			if remaining := b.maxWait - time.Since(b.started); remaining < delay {
+				delay = remaining
+			}
+			if delay <= 0 {
+				delay = time.Nanosecond
+			}
+			b.timer.Reset(delay)
+		}
+		return
+	}
+	b.wg.Add(1)
+	b.started = time.Now()
+	b.timer = time.AfterFunc(b.window, b.flush)
+}
+
+func (b *LocalChangeBatcher) flush() {
+	defer b.wg.Done()
+	b.mu.Lock()
+	b.timer = nil
+	b.started = time.Time{}
+	if b.closed || len(b.pending) == 0 {
+		b.pending = make(map[string]LocalChange)
+		b.mu.Unlock()
+		return
+	}
+	paths := make([]string, 0, len(b.pending))
+	for path := range b.pending {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	changes := make([]LocalChange, 0, len(paths))
+	for _, path := range paths {
+		changes = append(changes, b.pending[path])
+	}
+	b.pending = make(map[string]LocalChange)
+	onBatch := b.onBatch
+	b.mu.Unlock()
+	if onBatch != nil {
+		onBatch(changes)
+	}
+}
+
+func (b *LocalChangeBatcher) Close() {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		b.wg.Wait()
+		return
+	}
+	b.closed = true
+	if b.timer != nil && b.timer.Stop() {
+		b.wg.Done()
+	}
+	b.timer = nil
+	b.pending = nil
+	b.mu.Unlock()
+	b.wg.Wait()
+}
 
 // FileWatcher watches a local directory for changes using OS-level
 // notifications. fsnotify uses inotify on Linux and kqueue on macOS. kqueue

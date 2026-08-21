@@ -26,15 +26,14 @@ import (
 )
 
 const (
-	mountModePoll           = "poll"
-	mountModeFuse           = "fuse"
-	localLayoutExact        = mountscope.LayoutExact
-	localLayoutScoped       = mountscope.LayoutScoped
-	syncModeMirror          = "mirror"
-	syncModePullOnly        = "pull-only"
-	syncModeWriteOnly       = "write-only"
-	websocketReconcileEvery = 10
-	minMountPollInterval    = 5 * time.Second
+	mountModePoll        = "poll"
+	mountModeFuse        = "fuse"
+	localLayoutExact     = mountscope.LayoutExact
+	localLayoutScoped    = mountscope.LayoutScoped
+	syncModeMirror       = "mirror"
+	syncModePullOnly     = "pull-only"
+	syncModeWriteOnly    = "write-only"
+	minMountPollInterval = 5 * time.Second
 )
 
 var errFuseModeUnavailable = errors.New("fuse mode is not available in this build")
@@ -517,21 +516,28 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 
 	var watcher *mountsync.FileWatcher
 	if mountWatchesLocalChanges(cfg) {
-		watcher, err = syncer.NewFileWatcher(func(relativePath string, op fsnotify.Op) {
+		changeBatcher := mountsync.NewLocalChangeBatcher(5*time.Millisecond, func(changes []mountsync.LocalChange) {
 			ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
 			defer cancel()
-			if err := syncer.HandleLocalChange(ctx, relativePath, op); err != nil {
+			if err := syncer.HandleLocalChanges(ctx, changes); err != nil {
 				log.Printf("mount local change failed: %v", err)
 			}
 		})
+		watcher, err = syncer.NewFileWatcher(func(relativePath string, op fsnotify.Op) {
+			changeBatcher.Add(relativePath, op)
+		})
 		if err != nil {
+			changeBatcher.Close()
 			syncer.EnablePollingLocalChangeDetection()
 			log.Printf("file watcher unavailable; continuing with polling sync: %v", err)
 		} else if err := watcher.Start(rootCtx); err != nil {
 			_ = watcher.Close()
+			changeBatcher.Close()
 			syncer.EnablePollingLocalChangeDetection()
 			log.Printf("file watcher disabled; continuing with polling sync: %v", err)
 			watcher = nil
+		} else {
+			defer changeBatcher.Close()
 		}
 	} else {
 		log.Printf("local change watcher disabled for %s sync", syncModePullOnly)
@@ -561,14 +567,14 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 			}
 		case <-timer.C:
 			cycle++
-			reconcile := shouldReconcileMountCycle(
-				mountReconcileUsesWebSocketCadence(cfg, watcher != nil),
-				cycle,
-			)
+			realtimeHealthy := mountReconcileUsesWebSocketCadence(cfg, watcher != nil) && syncer.WebSocketConnected()
+			reconcile := shouldReconcileMountCycle(realtimeHealthy, cycle)
 			if reconcile {
 				if err := run(true); err != nil {
 					return err
 				}
+			} else if err := syncer.RefreshRealtimeState(); err != nil {
+				log.Printf("real-time state refresh failed: %v", err)
 			}
 			timer.Reset(jitteredIntervalWithSample(cfg.interval, cfg.intervalJitter, rng.Float64()))
 		}
@@ -872,8 +878,8 @@ func normalizeTokenScopes(raw any) []string {
 	return values
 }
 
-func shouldReconcileMountCycle(websocketEnabled bool, cycle int) bool {
-	return !websocketEnabled || cycle%websocketReconcileEvery == 0
+func shouldReconcileMountCycle(realtimeHealthy bool, _ int) bool {
+	return !realtimeHealthy
 }
 
 func mountWebSocketEnabled(cfg mountConfig) bool {

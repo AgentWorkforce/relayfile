@@ -318,6 +318,70 @@ func TestStoreSubscribePublishesAndUnsubscribes(t *testing.T) {
 	}
 }
 
+func TestStoreSubscribeSignalsOverflowAndStopsAfterFirstGap(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	events := make(chan Event, 1)
+	overflow := make(chan struct{}, 1)
+	unsubscribe := store.SubscribeWithOverflow("ws_subscribe_overflow", events, overflow)
+	defer unsubscribe()
+
+	for i := 0; i < 3; i++ {
+		if _, err := store.WriteFile(WriteRequest{
+			WorkspaceID: "ws_subscribe_overflow",
+			Path:        fmt.Sprintf("/external/%d.md", i),
+			IfMatch:     "0",
+			ContentType: "text/markdown",
+			Content:     fmt.Sprintf("# %d", i),
+		}); err != nil {
+			t.Fatalf("write %d failed: %v", i, err)
+		}
+	}
+
+	select {
+	case <-overflow:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for subscriber overflow signal")
+	}
+
+	first := <-events
+	if first.Path != "/external/0.md" {
+		t.Fatalf("buffered event after overflow = %s, want first contiguous event", first.Path)
+	}
+	select {
+	case event := <-events:
+		t.Fatalf("subscriber accepted an event after the first gap: %+v", event)
+	default:
+	}
+}
+
+func TestStoreLegacySubscribeRemainsBestEffortAfterFullBuffer(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	events := make(chan Event, 1)
+	unsubscribe := store.Subscribe("ws_legacy_subscribe", events)
+	defer unsubscribe()
+
+	for i := 0; i < 2; i++ {
+		if _, err := store.WriteFile(WriteRequest{WorkspaceID: "ws_legacy_subscribe", Path: fmt.Sprintf("/%d", i), IfMatch: "0", Content: "x"}); err != nil {
+			t.Fatalf("seed write %d: %v", i, err)
+		}
+	}
+	<-events
+	if _, err := store.WriteFile(WriteRequest{WorkspaceID: "ws_legacy_subscribe", Path: "/2", IfMatch: "0", Content: "x"}); err != nil {
+		t.Fatalf("post-overflow write: %v", err)
+	}
+	select {
+	case event := <-events:
+		if event.Path != "/2" {
+			t.Fatalf("post-overflow event = %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("legacy subscriber stayed latched after its buffer drained")
+	}
+}
+
 func TestStoreWriteReadConflictDeleteLifecycle(t *testing.T) {
 	store := NewStore()
 	t.Cleanup(store.Close)

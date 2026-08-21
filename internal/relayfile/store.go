@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -519,6 +520,12 @@ type WebhookEnvelopeRequest struct {
 	CorrelationID string            `json:"correlationId"`
 }
 
+type eventSubscriber struct {
+	events     chan<- Event
+	overflow   chan<- struct{}
+	overflowed atomic.Bool
+}
+
 type Store struct {
 	mu                      sync.RWMutex
 	queueMu                 sync.Mutex
@@ -558,7 +565,7 @@ type Store struct {
 	// in-flight merge citing a pre-restart revision safely falls back to
 	// merge_base_unavailable, the same fail-closed behavior as any other
 	// provenance miss).
-	revisionProvenance map[string][]revisionProvenanceEntry
+	revisionProvenance      map[string][]revisionProvenanceEntry
 	backendProfile          string
 	maxAttempts             int
 	retryDelay              time.Duration
@@ -571,7 +578,7 @@ type Store struct {
 	providerMaxConcurrency  int
 	providerSemMu           sync.Mutex
 	providerSemaphores      map[string]chan struct{}
-	subscribers             map[string]map[uint64]chan<- Event
+	subscribers             map[string]map[uint64]*eventSubscriber
 	subscriberCounter       uint64
 	deleteStormThreshold    int
 	deleteStormWindow       time.Duration
@@ -980,7 +987,7 @@ func NewStoreWithOptions(opts StoreOptions) *Store {
 		maxStoredEnvelopes:      maxStoredEnvelopes,
 		providerMaxConcurrency:  providerMaxConcurrency,
 		providerSemaphores:      map[string]chan struct{}{},
-		subscribers:             map[string]map[uint64]chan<- Event{},
+		subscribers:             map[string]map[uint64]*eventSubscriber{},
 		deleteStormThreshold:    opts.DeleteStormThreshold,
 		deleteStormWindow:       opts.DeleteStormWindow,
 		deleteStormAdmissions:   map[string][]time.Time{},
@@ -1132,7 +1139,7 @@ func (s *Store) Close() {
 		s.forkTimers = map[string]*time.Timer{}
 		s.mu.Unlock()
 		s.subscriberMu.Lock()
-		s.subscribers = map[string]map[uint64]chan<- Event{}
+		s.subscribers = map[string]map[uint64]*eventSubscriber{}
 		s.subscriberMu.Unlock()
 		if s.queueCancel != nil {
 			s.queueCancel()
@@ -2483,6 +2490,15 @@ func parseEventIDOrdinal(eventID string) (uint64, bool) {
 }
 
 func (s *Store) Subscribe(workspaceID string, ch chan<- Event) func() {
+	return s.SubscribeWithOverflow(workspaceID, ch, nil)
+}
+
+// SubscribeWithOverflow registers a live event subscriber and signals the
+// supplied overflow channel exactly once if its event buffer fills. Once a
+// gap is observed the subscription is latched: no later event is admitted.
+// Consumers can therefore reconnect from their last contiguous event cursor
+// without accidentally advancing past the missing event.
+func (s *Store) SubscribeWithOverflow(workspaceID string, ch chan<- Event, overflow chan<- struct{}) func() {
 	workspaceID = strings.TrimSpace(workspaceID)
 	if workspaceID == "" || ch == nil {
 		return func() {}
@@ -2491,12 +2507,12 @@ func (s *Store) Subscribe(workspaceID string, ch chan<- Event) func() {
 	s.subscriberCounter++
 	subID := s.subscriberCounter
 	if s.subscribers == nil {
-		s.subscribers = map[string]map[uint64]chan<- Event{}
+		s.subscribers = map[string]map[uint64]*eventSubscriber{}
 	}
 	if s.subscribers[workspaceID] == nil {
-		s.subscribers[workspaceID] = map[uint64]chan<- Event{}
+		s.subscribers[workspaceID] = map[uint64]*eventSubscriber{}
 	}
-	s.subscribers[workspaceID][subID] = ch
+	s.subscribers[workspaceID][subID] = &eventSubscriber{events: ch, overflow: overflow}
 	s.subscriberMu.Unlock()
 
 	var once sync.Once
@@ -5758,15 +5774,36 @@ func (s *Store) publishEvent(workspaceID string, event Event) {
 		s.subscriberMu.RUnlock()
 		return
 	}
-	targets := make([]chan<- Event, 0, len(subscribers))
-	for _, ch := range subscribers {
-		targets = append(targets, ch)
+	targets := make([]*eventSubscriber, 0, len(subscribers))
+	for _, subscriber := range subscribers {
+		targets = append(targets, subscriber)
 	}
 	s.subscriberMu.RUnlock()
-	for _, ch := range targets {
+	for _, subscriber := range targets {
+		if subscriber == nil {
+			continue
+		}
+		if subscriber.overflow == nil {
+			// Preserve Subscribe's historical best-effort behavior for
+			// in-process consumers that did not opt into recovery signaling.
+			select {
+			case subscriber.events <- event:
+			default:
+			}
+			continue
+		}
+		if subscriber.overflowed.Load() {
+			continue
+		}
 		select {
-		case ch <- event:
+		case subscriber.events <- event:
 		default:
+			if subscriber.overflowed.CompareAndSwap(false, true) && subscriber.overflow != nil {
+				select {
+				case subscriber.overflow <- struct{}{}:
+				default:
+				}
+			}
 		}
 	}
 }

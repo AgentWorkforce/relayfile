@@ -1,0 +1,23 @@
+{
+  "status": "pass",
+  "directions": [
+    {
+      "direction": "a2b",
+      "saves": 130,
+      "payload_arrivals": 430,
+      "content_hashes_verified": 430,
+      "errors": []
+    },
+    {
+      "direction": "b2a",
+      "saves": 130,
+      "payload_arrivals": 430,
+      "content_hashes_verified": 430,
+      "errors": []
+    }
+  ],
+  "total_saves": 260,
+  "total_payload_arrivals": 860,
+  "total_content_hashes_verified": 860,
+  "concurrency": true
+}

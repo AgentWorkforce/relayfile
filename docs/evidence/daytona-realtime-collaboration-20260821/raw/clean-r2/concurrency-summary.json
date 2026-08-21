@@ -1,0 +1,39 @@
+{
+  "run_id": "clean-r2",
+  "disjoint": {
+    "a_to_b_ms": 271.433728,
+    "b_to_a_ms": 281.080576,
+    "max_ms": 281.080576,
+    "write_start_delta_ms": 0.00334,
+    "clock_fractions": [
+      0.5668956698716591,
+      0.5572481650899477
+    ],
+    "anchor_uncertainty_ms": {
+      "a_to_b": [
+        17.650341,
+        21.5826795
+      ],
+      "b_to_a": [
+        17.1137295,
+        17.3286745
+      ]
+    },
+    "both_hash_correct": true,
+    "pass": true
+  },
+  "same_path": {
+    "canonical": "clean-r2-agent-b-conflict",
+    "canonical_on_both": true,
+    "losing_content": "clean-r2-agent-a-conflict",
+    "loser_preserved_exactly_once": true,
+    "artifact": {
+      "path": ".relay/conflicts/testdata/daytona-sync-benchmark/clean-r2/concurrency/conflict/shared.txt.rev_2137.local",
+      "content": "clean-r2-agent-a-conflict",
+      "sha256": "2ba17ca085b2fbcfe35d6bfdf8b457121dd4e035589924e49e196327e0869784"
+    },
+    "silent_overwrite": false,
+    "pass": true
+  },
+  "pass": true
+}

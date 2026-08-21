@@ -70,6 +70,12 @@ func (e *SchemaValidationError) Is(target error) bool {
 
 const defaultBulkFlushThreshold = 256
 
+// The WebSocket server may inline file payloads up to 1 MiB. nhooyr's client
+// default is only 32 KiB, which would disconnect real-time mounts whenever a
+// larger inline event (including cursor catch-up) arrived. Leave envelope and
+// JSON-escaping headroom while retaining a finite defensive bound.
+const maxWebSocketMessageBytes int64 = 2 << 20
+
 const (
 	mountWritebackCreateDraftContentIdentityKind       = "mount-writeback-create-draft"
 	mountWritebackCreateDraftContentIdentityTTLSeconds = 2592000
@@ -143,6 +149,8 @@ const (
 	defaultCursorResolutionAttempts   = 3
 	defaultCursorRetryBaseDelay       = 250 * time.Millisecond
 	defaultBootstrapReadWorkers       = 16
+	defaultIncrementalReadWorkers     = 16
+	defaultReceiptSettlementWorkers   = 16
 	// fullTreeTraversalDepth bounds each tree request so the client can see and
 	// prune a reserved .relay directory before the server reaches deep
 	// outbox/acked/mountcmd_* leaves. Depth 3 also covers the common Slack
@@ -154,6 +162,7 @@ const (
 	defaultWebSocketReconnectBase    = 1 * time.Second
 	defaultWebSocketReconnectMax     = 60 * time.Second
 	defaultWebSocketReconnectJitter  = 200 * time.Millisecond
+	defaultWebSocketPingEvery        = 10 * time.Second
 	DefaultWebSocketMaintenanceEvery = 1 * time.Second
 )
 
@@ -1225,6 +1234,7 @@ type Syncer struct {
 	wsGeneration              int64
 	wsLastConnectedAt         time.Time
 	wsLastAttemptAt           time.Time
+	wsLastPingAt              time.Time
 	listenerHeartbeatAt       time.Time
 	bulkFlushThreshold        int
 	mode                      string
@@ -1286,6 +1296,9 @@ type Syncer struct {
 	// public state as credExpiresInSecs so operators get advance warning.
 	credExpiresAt string
 	mu            sync.Mutex
+	receiptMu     sync.Mutex
+	receiptActive map[string]struct{}
+	receiptSem    chan struct{}
 }
 
 // runFullPullIO temporarily releases the Syncer's state mutex around a remote
@@ -1622,10 +1635,16 @@ type pendingBulkWrite struct {
 }
 
 type websocketEvent struct {
-	Type      string `json:"type"`
-	Path      string `json:"path,omitempty"`
-	Revision  string `json:"revision,omitempty"`
-	Timestamp string `json:"timestamp,omitempty"`
+	EventID       string `json:"eventId,omitempty"`
+	Type          string `json:"type"`
+	Path          string `json:"path,omitempty"`
+	Revision      string `json:"revision,omitempty"`
+	ContentHash   string `json:"contentHash,omitempty"`
+	ContentType   string `json:"contentType,omitempty"`
+	Content       string `json:"content,omitempty"`
+	Encoding      string `json:"encoding,omitempty"`
+	InlineContent bool   `json:"inlineContent,omitempty"`
+	Timestamp     string `json:"timestamp,omitempty"`
 }
 
 type statusError struct {
@@ -2153,7 +2172,7 @@ func (s *Syncer) FlushOutboxOnce(ctx context.Context) error {
 	if err := s.loadState(); err != nil {
 		return err
 	}
-	if err := s.flushOutboxRecords(ctx, nil, true); err != nil {
+	if err := s.flushOutboxRecords(ctx, nil, true, true); err != nil {
 		s.markSyncError(err)
 		_ = s.saveStateWithoutLocalScan()
 		return err
@@ -2216,7 +2235,7 @@ func (s *Syncer) PushLocalAndFlushOnce(ctx context.Context) error {
 		_ = s.saveStateWithoutLocalScan()
 		return err
 	}
-	if err := s.flushOutboxRecords(ctx, conflicted, true); err != nil {
+	if err := s.flushOutboxRecords(ctx, conflicted, true, true); err != nil {
 		s.markSyncError(err)
 		_ = s.saveStateWithoutLocalScan()
 		return err
@@ -2262,23 +2281,55 @@ func (s *Syncer) PushLocalAndFlushOnce(ctx context.Context) error {
 // is no actual content change, so spurious events (Chmod-only on an
 // unmodified file) do not generate noise on the wire.
 func (s *Syncer) HandleLocalChange(ctx context.Context, relativePath string, op fsnotify.Op) error {
+	return s.handleLocalChanges(ctx, []LocalChange{{RelativePath: relativePath, Op: op}}, false)
+}
+
+// HandleLocalChanges admits a settled watcher burst under one state lock and
+// flushes every write/create in that burst through one durable bulk request.
+// Deletes and readonly reversions keep their existing per-path semantics.
+func (s *Syncer) HandleLocalChanges(ctx context.Context, changes []LocalChange) error {
+	return s.handleLocalChanges(ctx, changes, true)
+}
+
+func (s *Syncer) handleLocalChanges(ctx context.Context, changes []LocalChange, deferReceipts bool) error {
 	if s.pullOnly {
 		return nil
 	}
-	relativePath = filepath.ToSlash(strings.TrimSpace(filepath.Clean(relativePath)))
-	if relativePath == "" || relativePath == "." {
+	if len(changes) == 0 {
 		return nil
 	}
-	if isMountRuntimeRelativePath(relativePath) {
-		s.logMountControlPathSkipped(relativePath)
-		return nil
-	}
-	if first := strings.SplitN(relativePath, "/", 2)[0]; reservedTopLevel(s.scopedChild, s.localRoot, first) {
-		if mountscope.IsInfrastructureTopLevelAt(s.localRoot, first) {
-			s.logLocalInfrastructureSkipped(first)
+
+	// Coalesce duplicate path notifications before taking the state lock. The
+	// current on-disk file is authoritative, so OR-ing fsnotify flags is enough.
+	byPath := make(map[string]LocalChange, len(changes))
+	for _, change := range changes {
+		relativePath := filepath.ToSlash(strings.TrimSpace(filepath.Clean(change.RelativePath)))
+		if relativePath == "" || relativePath == "." {
+			continue
 		}
+		if isMountRuntimeRelativePath(relativePath) {
+			s.logMountControlPathSkipped(relativePath)
+			continue
+		}
+		if first := strings.SplitN(relativePath, "/", 2)[0]; reservedTopLevel(s.scopedChild, s.localRoot, first) {
+			if mountscope.IsInfrastructureTopLevelAt(s.localRoot, first) {
+				s.logLocalInfrastructureSkipped(first)
+			}
+			continue
+		}
+		coalesced := byPath[relativePath]
+		coalesced.RelativePath = relativePath
+		coalesced.Op |= change.Op
+		byPath[relativePath] = coalesced
+	}
+	if len(byPath) == 0 {
 		return nil
 	}
+	paths := make([]string, 0, len(byPath))
+	for relativePath := range byPath {
+		paths = append(paths, relativePath)
+	}
+	sort.Strings(paths)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2286,65 +2337,99 @@ func (s *Syncer) HandleLocalChange(ctx context.Context, relativePath string, op 
 	// under s.mu (runRollingDigestJobsLocked). It must run under the same
 	// lock to avoid races while the watcher is processing local churn.
 	if s.rollingCoalescer != nil {
-		s.rollingCoalescer.ObserveChange(relativePath)
+		for _, relativePath := range paths {
+			s.rollingCoalescer.ObserveChange(relativePath)
+		}
 	}
 	if err := s.loadState(); err != nil {
 		return err
 	}
 
-	remotePath := s.localRelativeToRemotePath(relativePath)
-	if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
-		return nil
+	persistState := s.saveState
+	if deferReceipts {
+		// The watcher already supplied the exact changed paths. Re-scanning and
+		// hashing the entire mount here makes every small edit O(tree) and causes
+		// latency to grow with workspace age. Preserve full private/public state
+		// without the redundant local scan; periodic fallback reconciliation is
+		// still responsible for discovering events missed by an unhealthy watcher.
+		persistState = s.saveStateWithoutLocalScan
 	}
-	localPath := filepath.Join(s.localDir, filepath.FromSlash(relativePath))
-
 	saveWithStatus := func(run func() error) error {
 		if err := run(); err != nil {
 			s.markSyncError(err)
-			_ = s.saveState()
+			_ = persistState()
 			return err
 		}
 		s.markSyncSuccess()
-		return s.saveState()
+		return persistState()
 	}
 
-	info, statErr := os.Stat(localPath)
-	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-		return statErr
-	}
-	fileExists := statErr == nil && !info.IsDir()
-	isDir := statErr == nil && info.IsDir()
-
-	if isDir {
-		return nil
-	}
-
-	if !fileExists {
-		// File is gone. If we tracked it (i.e. it once lived in the cloud),
-		// push the delete. If it never existed cloud-side, ignore — the
-		// event is from a transient file (e.g. an editor backup) we do not
-		// own. ReadOnly tracked files are reverted, not deleted.
-		tracked, exists := s.state.Files[remotePath]
-		if !exists {
-			return nil
-		}
-		if tracked.ReadOnly {
-			return saveWithStatus(func() error {
-				return s.revertReadonlyFile(ctx, remotePath, localPath, tracked, "")
-			})
-		}
-		return saveWithStatus(func() error {
-			return s.pushSingleDelete(ctx, remotePath, localPath)
-		})
-	}
-
-	// File exists. Treat any non-directory event as a potential update —
-	// `handleLocalWriteOrCreate` reads the file, hash-checks against the
-	// tracked snapshot, and short-circuits if nothing actually changed.
-	// This handles Write/Create/Rename(atomic-replace)/Chmod uniformly:
-	// the source of truth is the file's content, not the event flag.
 	return saveWithStatus(func() error {
-		return s.handleLocalWriteOrCreate(ctx, remotePath, localPath)
+		pendingWrites := make([]pendingBulkWrite, 0, len(paths))
+		for _, relativePath := range paths {
+			remotePath := s.localRelativeToRemotePath(relativePath)
+			if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
+				continue
+			}
+			localPath := filepath.Join(s.localDir, filepath.FromSlash(relativePath))
+			info, statErr := os.Stat(localPath)
+			if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+				return statErr
+			}
+			fileExists := statErr == nil && !info.IsDir()
+			if statErr == nil && info.IsDir() {
+				continue
+			}
+
+			if !fileExists {
+				// Untracked missing paths are transient editor files. Tracked
+				// readonly paths are restored; writable paths preserve the
+				// existing explicit-delete conflict behavior.
+				tracked, exists := s.state.Files[remotePath]
+				if !exists {
+					continue
+				}
+				if tracked.ReadOnly {
+					if err := s.revertReadonlyFile(ctx, remotePath, localPath, tracked, ""); err != nil {
+						return err
+					}
+					continue
+				}
+				if err := s.pushSingleDelete(ctx, remotePath, localPath); err != nil {
+					return err
+				}
+				continue
+			}
+
+			snapshot, err := readLocalSnapshot(localPath, true)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					if err := s.pushSingleDelete(ctx, remotePath, localPath); err != nil {
+						return err
+					}
+					continue
+				}
+				return err
+			}
+			tracked, exists := s.state.Files[remotePath]
+			if exists && tracked.ReadOnly {
+				if err := s.revertReadonlyFile(ctx, remotePath, localPath, tracked, snapshot.ContentType); err != nil {
+					return err
+				}
+				continue
+			}
+			pendingWrite, err := s.preparePendingBulkWrite(ctx, remotePath, localPath, snapshot, tracked, exists)
+			if err != nil {
+				return err
+			}
+			if pendingWrite != nil {
+				pendingWrites = append(pendingWrites, *pendingWrite)
+			}
+		}
+		if deferReceipts {
+			return s.flushPendingBulkWritesFast(ctx, pendingWrites, nil)
+		}
+		return s.flushPendingBulkWrites(ctx, pendingWrites, nil)
 	})
 }
 
@@ -2473,6 +2558,14 @@ func (s *Syncer) preparePendingBulkWrite(
 }
 
 func (s *Syncer) flushPendingBulkWrites(ctx context.Context, pending []pendingBulkWrite, conflicted map[string]struct{}) error {
+	return s.flushPendingBulkWritesWithReceiptMode(ctx, pending, conflicted, true)
+}
+
+func (s *Syncer) flushPendingBulkWritesFast(ctx context.Context, pending []pendingBulkWrite, conflicted map[string]struct{}) error {
+	return s.flushPendingBulkWritesWithReceiptMode(ctx, pending, conflicted, false)
+}
+
+func (s *Syncer) flushPendingBulkWritesWithReceiptMode(ctx context.Context, pending []pendingBulkWrite, conflicted map[string]struct{}, settleReceipts bool) error {
 	if len(pending) == 0 {
 		return nil
 	}
@@ -2488,14 +2581,14 @@ func (s *Syncer) flushPendingBulkWrites(ctx context.Context, pending []pendingBu
 			return err
 		}
 	}
-	return s.flushDueOutboxRecords(ctx, conflicted)
+	return s.flushOutboxRecords(ctx, conflicted, false, settleReceipts)
 }
 
 func (s *Syncer) flushDueOutboxRecords(ctx context.Context, conflicted map[string]struct{}) error {
-	return s.flushOutboxRecords(ctx, conflicted, false)
+	return s.flushOutboxRecords(ctx, conflicted, false, true)
 }
 
-func (s *Syncer) flushOutboxRecords(ctx context.Context, conflicted map[string]struct{}, forceDue bool) error {
+func (s *Syncer) flushOutboxRecords(ctx context.Context, conflicted map[string]struct{}, forceDue, settleReceipts bool) error {
 	if s.pullOnly {
 		return nil
 	}
@@ -2537,16 +2630,17 @@ func (s *Syncer) flushOutboxRecords(ctx context.Context, conflicted map[string]s
 	flushCtx, cancel := s.outboxContext(ctx)
 	defer cancel()
 	for _, chunk := range chunkOutboxRecords(due, maxWritebackBatchBytes()) {
-		if err := s.flushOutboxRecordChunk(flushCtx, chunk, conflicted); err != nil {
+		if err := s.flushOutboxRecordChunk(flushCtx, chunk, conflicted, settleReceipts); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRecord, conflicted map[string]struct{}) error {
+func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRecord, conflicted map[string]struct{}, settleReceipts bool) error {
 	var firstErr error
 	uploadRecords := make([]outboxRecord, 0, len(records))
+	deferredReceipts := make([]outboxRecord, 0, len(records))
 	for _, record := range records {
 		if isMountRuntimeRemotePath(record.RemotePath) {
 			s.logMountControlPathSkipped(strings.TrimPrefix(normalizeRemotePath(record.RemotePath), "/"))
@@ -2556,8 +2650,10 @@ func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRec
 			continue
 		}
 		if strings.TrimSpace(record.OpID) != "" {
-			if err := s.settleOutboxRecord(ctx, record); err != nil && firstErr == nil {
-				firstErr = err
+			if settleReceipts {
+				if err := s.settleOutboxRecord(ctx, record); err != nil && firstErr == nil {
+					firstErr = err
+				}
 			}
 			continue
 		}
@@ -2665,15 +2761,36 @@ func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRec
 			firstErr = err
 			continue
 		}
+		if !settleReceipts && isPendingWritebackState(record.DispatchStatus) {
+			// The content and its filesystem event are already committed. Keep
+			// the operation receipt durable and let the maintenance path settle
+			// it without adding one GET round trip per saved file here.
+			deferredReceipts = append(deferredReceipts, record)
+			continue
+		}
 		if err := s.settleOutboxRecord(ctx, record); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
+	s.scheduleOutboxReceiptSettlements(deferredReceipts)
 	return firstErr
+}
+
+func isPendingWritebackState(state string) bool {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "pending", "queued", "running":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Syncer) settleOutboxRecord(ctx context.Context, record outboxRecord) error {
 	op, err := s.client.GetOperation(ctx, s.workspace, record.OpID)
+	return s.applyOutboxOperationResult(record, op, err)
+}
+
+func (s *Syncer) applyOutboxOperationResult(record outboxRecord, op OperationStatus, err error) error {
 	if err != nil {
 		var httpErr *HTTPError
 		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
@@ -2722,6 +2839,80 @@ func (s *Syncer) settleOutboxRecord(ctx context.Context, record outboxRecord) er
 	default:
 		record.LastError = fmt.Sprintf("writeback op %s status %s", record.OpID, status)
 		return s.saveOutboxRecord(record)
+	}
+}
+
+// scheduleOutboxReceiptSettlements polls accepted operation receipts outside
+// the Syncer's state mutex. The visibility-critical bulk POST can therefore
+// return immediately, while receipt GETs run with bounded concurrency and only
+// take the state lock for their short durable ack/failure transition.
+func (s *Syncer) scheduleOutboxReceiptSettlements(records []outboxRecord) {
+	for _, record := range records {
+		record := record
+		opID := strings.TrimSpace(record.OpID)
+		if opID == "" {
+			continue
+		}
+		s.receiptMu.Lock()
+		if s.receiptActive == nil {
+			s.receiptActive = make(map[string]struct{})
+		}
+		if s.receiptSem == nil {
+			s.receiptSem = make(chan struct{}, defaultReceiptSettlementWorkers)
+		}
+		if _, active := s.receiptActive[opID]; active {
+			s.receiptMu.Unlock()
+			continue
+		}
+		s.receiptActive[opID] = struct{}{}
+		sem := s.receiptSem
+		s.receiptMu.Unlock()
+
+		go func() {
+			defer func() {
+				s.receiptMu.Lock()
+				delete(s.receiptActive, opID)
+				s.receiptMu.Unlock()
+			}()
+			root := s.rootCtx
+			if root == nil {
+				root = context.Background()
+			}
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-root.Done():
+				return
+			}
+			timeout := s.outboxFlushTimeout
+			if timeout <= 0 {
+				timeout = defaultOutboxFlushTimeout
+			}
+			ctx, cancel := context.WithTimeout(root, timeout)
+			op, opErr := s.client.GetOperation(ctx, s.workspace, opID)
+			cancel()
+
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			current, readErr := s.readOutboxRecord(s.pendingOutboxPath(record.CommandID))
+			if errors.Is(readErr, os.ErrNotExist) {
+				return
+			}
+			if readErr != nil {
+				s.logf("async writeback receipt reload failed for %s: %v", opID, readErr)
+				return
+			}
+			if strings.TrimSpace(current.OpID) != opID {
+				return
+			}
+			if err := s.applyOutboxOperationResult(current, op, opErr); err != nil {
+				s.markSyncError(err)
+				s.logf("async writeback receipt settlement failed for %s: %v", opID, err)
+			}
+			if err := s.saveStateWithoutLocalScan(); err != nil {
+				s.logf("async writeback receipt state save failed for %s: %v", opID, err)
+			}
+		}()
 	}
 }
 
@@ -3538,6 +3729,7 @@ func (s *Syncer) connectWebSocket(ctx context.Context) error {
 	s.wsConnecting = true
 	s.wsLastAttemptAt = time.Now().UTC()
 	generation := s.wsGeneration
+	cursor := strings.TrimSpace(s.state.EventsCursor)
 	s.mu.Unlock()
 
 	httpClient, ok := s.client.(*HTTPClient)
@@ -3546,7 +3738,7 @@ func (s *Syncer) connectWebSocket(ctx context.Context) error {
 		return nil
 	}
 
-	wsURL, err := httpClient.websocketURL(s.workspace)
+	wsURL, err := httpClient.websocketURL(s.workspace, cursor)
 	if err != nil {
 		s.finishWebSocketConnectFailure(generation, 0)
 		return err
@@ -3561,6 +3753,7 @@ func (s *Syncer) connectWebSocket(ctx context.Context) error {
 		s.finishWebSocketConnectFailure(generation, retryAfter)
 		return webSocketDialError{err: err, retryAfter: retryAfter}
 	}
+	conn.SetReadLimit(maxWebSocketMessageBytes)
 
 	readCtx, cancel := context.WithCancel(s.rootCtx)
 
@@ -3602,8 +3795,28 @@ func (s *Syncer) readWebSocketLoop(ctx context.Context, conn *websocket.Conn) {
 		}
 		if err := s.applyWebSocketEvent(ctx, event); err != nil {
 			s.logf("websocket event apply failed for %s: %v", strings.TrimSpace(event.Path), err)
+			// Cursor safety requires a contiguous applied prefix. Stop at the
+			// first failed event so reconnect catch-up starts from the last
+			// durable cursor instead of silently advancing around a gap.
+			return
 		}
 	}
+}
+
+func (s *Syncer) checkpointWebSocketEvent(event websocketEvent, eventAt string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.markWebSocketEventAppliedLocked(event, eventAt)
+	return s.savePrivateState()
+}
+
+func (s *Syncer) markWebSocketEventAppliedLocked(event websocketEvent, eventAt string) {
+	s.state.LastEventAt = eventAt
+	s.listenerHeartbeatAt = time.Now().UTC()
+	if eventID := strings.TrimSpace(event.EventID); eventID != "" {
+		s.state.EventsCursor = advanceEventCursor(s.state.EventsCursor, eventID)
+	}
+	s.markSyncSuccess()
 }
 
 func (s *Syncer) applyWebSocketEvent(ctx context.Context, event websocketEvent) error {
@@ -3617,7 +3830,31 @@ func (s *Syncer) applyWebSocketEvent(ctx context.Context, event websocketEvent) 
 	case "file.created", "file.updated":
 		remotePath := normalizeRemotePath(event.Path)
 		if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
-			return nil
+			return s.checkpointWebSocketEvent(event, eventAt)
+		}
+		if event.InlineContent {
+			file := RemoteFile{
+				Path:        remotePath,
+				Revision:    strings.TrimSpace(event.Revision),
+				ContentType: strings.TrimSpace(event.ContentType),
+				Content:     event.Content,
+				Encoding:    strings.TrimSpace(event.Encoding),
+				ContentHash: strings.TrimSpace(event.ContentHash),
+			}
+			content, err := decodeRemoteFileContent(file)
+			if err != nil {
+				return fmt.Errorf("decode inline websocket content for %s: %w", remotePath, err)
+			}
+			if file.ContentHash != "" && hashBytes(content) != file.ContentHash {
+				return fmt.Errorf("inline websocket content hash mismatch for %s", remotePath)
+			}
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if err := s.applyRemoteFile(remotePath, file, nil); err != nil {
+				return err
+			}
+			s.markWebSocketEventAppliedLocked(event, eventAt)
+			return s.savePrivateState()
 		}
 		// ReadFile intentionally runs without mu so local writeback is not
 		// blocked by remote I/O. Remember the path state before that read: a
@@ -3631,67 +3868,64 @@ func (s *Syncer) applyWebSocketEvent(ctx context.Context, event websocketEvent) 
 		if err != nil {
 			var httpErr *HTTPError
 			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
-				return nil
+				return fmt.Errorf("websocket file %s is not readable yet: %w", remotePath, err)
 			}
 			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
 				s.logf("skipping denied file: %s", remotePath)
+				s.mu.Lock()
+				defer s.mu.Unlock()
 				if markErr := s.markReadDenied(remotePath); markErr != nil {
 					return markErr
 				}
-				return nil
+				s.markWebSocketEventAppliedLocked(event, eventAt)
+				return s.savePrivateState()
 			}
 			return err
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		s.state.LastEventAt = eventAt
-		s.listenerHeartbeatAt = time.Now().UTC()
 		currentTracked, currentTrackedExists := s.state.Files[remotePath]
 		if currentTrackedExists != observedTrackedExists ||
 			(currentTrackedExists && currentTracked != observedTracked) {
 			s.logf("discarding stale websocket read for %s after tracked state advanced", remotePath)
-			s.markSyncSuccess()
-			return s.saveState()
+			s.markWebSocketEventAppliedLocked(event, eventAt)
+			return s.savePrivateState()
 		}
 		if err := s.applyRemoteFile(remotePath, file, nil); err != nil {
 			return err
 		}
-		s.markSyncSuccess()
-		return s.saveState()
+		s.markWebSocketEventAppliedLocked(event, eventAt)
+		return s.savePrivateState()
 	case "file.deleted":
 		remotePath := normalizeRemotePath(event.Path)
 		if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
-			return nil
+			return s.checkpointWebSocketEvent(event, eventAt)
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		s.state.LastEventAt = eventAt
-		s.listenerHeartbeatAt = time.Now().UTC()
 		if err := s.applyRemoteDelete(remotePath, nil); err != nil {
 			return err
 		}
-		s.markSyncSuccess()
-		return s.saveState()
+		s.markWebSocketEventAppliedLocked(event, eventAt)
+		return s.savePrivateState()
 	case "directory.created":
 		remotePath := normalizeRemotePath(event.Path)
 		if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
-			return nil
+			return s.checkpointWebSocketEvent(event, eventAt)
 		}
 		provider, _, ok := providerLayoutParts(s.remoteRoot, remotePath)
 		if !ok {
-			return nil
+			return s.checkpointWebSocketEvent(event, eventAt)
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		s.state.LastEventAt = eventAt
-		s.listenerHeartbeatAt = time.Now().UTC()
 		if err := s.ensureProviderLayout(provider); err != nil {
 			return err
 		}
-		s.markSyncSuccess()
-		return s.saveState()
+		s.markWebSocketEventAppliedLocked(event, eventAt)
+		return s.savePrivateState()
 	default:
-		return nil
+		return s.checkpointWebSocketEvent(event, eventAt)
 	}
 }
 
@@ -3721,6 +3955,7 @@ func (s *Syncer) ResetWebSocket() {
 	s.wsNextAttempt = time.Time{}
 	s.wsReconnectFailures = 0
 	s.wsConnecting = false
+	s.wsLastPingAt = time.Time{}
 	s.wsGeneration++
 	s.mu.Unlock()
 	if cancel != nil {
@@ -3733,6 +3968,21 @@ func (s *Syncer) ResetWebSocket() {
 
 func (s *Syncer) MaintainWebSocket(ctx context.Context) error {
 	s.mu.Lock()
+	conn := s.wsConn
+	if conn != nil && time.Since(s.wsLastPingAt) >= defaultWebSocketPingEvery {
+		s.wsLastPingAt = time.Now().UTC()
+		s.mu.Unlock()
+		if err := conn.Ping(ctx); err != nil {
+			s.ResetWebSocket()
+			return fmt.Errorf("websocket heartbeat failed: %w", err)
+		}
+		s.mu.Lock()
+		if s.wsConn == conn {
+			s.listenerHeartbeatAt = time.Now().UTC()
+		}
+		s.mu.Unlock()
+		return nil
+	}
 	needsWS := s.websocketConnectDueLocked(time.Now())
 	s.mu.Unlock()
 	if !needsWS {
@@ -3742,6 +3992,30 @@ func (s *Syncer) MaintainWebSocket(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// WebSocketConnected reports whether the real-time listener is currently
+// available. Mount loops use this to fall back to polling only when the stream
+// is absent, rather than pausing live event application for periodic O(tree)
+// safety scans. MaintainWebSocket actively probes established connections.
+func (s *Syncer) WebSocketConnected() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.wsConn != nil
+}
+
+// RefreshRealtimeState updates durable and operator-visible state without an
+// O(tree) local scan. It is the healthy WebSocket/watcher mount heartbeat;
+// unhealthy real-time transports still take the ordinary polling reconcile.
+func (s *Syncer) RefreshRealtimeState() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.loadState(); err != nil {
+		return err
+	}
+	s.listenerHeartbeatAt = time.Now().UTC()
+	s.markSyncSuccess()
+	return s.saveStateWithoutLocalScan()
 }
 
 func (s *Syncer) websocketConnectDueLocked(now time.Time) bool {
@@ -4136,11 +4410,11 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 
 		nextCursor, err := s.pullRemoteIncremental(ctx, conflicted, s.state.EventsCursor)
 		if err == nil {
-			s.state.EventsCursor = nextCursor
+			s.state.EventsCursor = advanceEventCursor(s.state.EventsCursor, nextCursor)
 			return nil
 		}
 		if strings.TrimSpace(nextCursor) != "" && nextCursor != s.state.EventsCursor {
-			s.state.EventsCursor = nextCursor
+			s.state.EventsCursor = advanceEventCursor(s.state.EventsCursor, nextCursor)
 		}
 		var notReadyErr *IncrementalReadNotReadyError
 		if errors.As(err, &notReadyErr) {
@@ -4214,7 +4488,7 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 			// old LastEventAt gate provided without reintroducing the
 			// rw_517d60b6 partial-mirror hazard (still gated on
 			// BootstrapComplete).
-			s.state.EventsCursor = cursor
+			s.state.EventsCursor = advanceEventCursor(s.state.EventsCursor, cursor)
 			s.state.IncrementalCheckpoint = nil
 			s.state.IncrementalBacklogDraining = false
 			s.logf("restart fast-path: seeded events cursor %q from %d tracked files; skipping bootstrap full pull", cursor, len(s.state.Files))
@@ -4281,7 +4555,7 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 		}
 		return err
 	}
-	s.state.EventsCursor = cursor
+	s.state.EventsCursor = advanceEventCursor(s.state.EventsCursor, cursor)
 	return nil
 }
 
@@ -4436,7 +4710,7 @@ func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubW
 	if s.snapshotDeleteUnsafe(len(remotePaths)) {
 		s.logf("skipping snapshot delete pass (github tar seed): fresh remote tree has %d files but %d are tracked locally (suspected partial/empty cloud listing); preserving local state", len(remotePaths), len(s.state.Files))
 		s.markBootstrapComplete()
-		s.state.EventsCursor = cursor
+		s.state.EventsCursor = advanceEventCursor(s.state.EventsCursor, cursor)
 		return true, nil
 	}
 	if err := s.applyRemoteSnapshotDeletesRev(remotePaths, conflicted, maxObservedRevision); err != nil {
@@ -4444,7 +4718,7 @@ func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubW
 	}
 	s.fullPullAuthoritative = true
 	s.markBootstrapComplete()
-	s.state.EventsCursor = cursor
+	s.state.EventsCursor = advanceEventCursor(s.state.EventsCursor, cursor)
 	s.state.IncrementalCheckpoint = nil
 	s.state.IncrementalBacklogDraining = false
 	s.logf("github tar seed complete for %s/%s at %s: %d files, events cursor %q", s.githubWorkingTree.Owner, s.githubWorkingTree.Repo, headSHA, len(remotePaths), cursor)
@@ -6268,9 +6542,9 @@ func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[strin
 			safeCursor = currentCursor
 		}
 		if resumeCursor != "" {
-			s.state.EventsCursor = resumeCursor
-			safeCursor = resumeCursor
-			madeProgress = resumeCursor != strings.TrimSpace(cursor)
+			s.state.EventsCursor = advanceEventCursor(s.state.EventsCursor, resumeCursor)
+			safeCursor = s.state.EventsCursor
+			madeProgress = safeCursor != strings.TrimSpace(cursor)
 		}
 		s.state.IncrementalBacklogDraining = hasMore
 		s.state.IncrementalCheckpoint = nil
@@ -6331,6 +6605,7 @@ func (s *Syncer) applyIncrementalChanges(
 		changedPaths = append(changedPaths, remotePath)
 	}
 	sort.Strings(changedPaths)
+	reads := make([]incrementalRead, 0, len(changedPaths))
 	for _, remotePath := range changedPaths {
 		event := changed[remotePath]
 		if checkpoint.Phase == "changed" && remotePath <= checkpoint.Path {
@@ -6341,7 +6616,7 @@ func (s *Syncer) applyIncrementalChanges(
 		}
 		if conflicted != nil {
 			if _, skip := conflicted[remotePath]; skip {
-				s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "changed", remotePath)
+				reads = append(reads, incrementalRead{remotePath: remotePath, event: event, skip: true})
 				continue
 			}
 		}
@@ -6350,11 +6625,40 @@ func (s *Syncer) applyIncrementalChanges(
 			return err
 		}
 		if skipped {
-			s.clearIncrementalReadNotReady(remotePath)
+			reads = append(reads, incrementalRead{remotePath: remotePath, event: event, skip: true, clearNotReady: true})
+			continue
+		}
+		observedTracked, observedExists := s.state.Files[remotePath]
+		reads = append(reads, incrementalRead{
+			remotePath:      remotePath,
+			event:           event,
+			observedTracked: observedTracked,
+			observedExists:  observedExists,
+		})
+	}
+
+	// Only remote I/O runs concurrently and outside the reserved sync lock.
+	// Results are still applied in lexical event order below, preserving the
+	// durable page checkpoint and all existing conflict/error semantics.
+	s.runReservedSyncIO(func() {
+		s.readIncrementalFiles(ctx, reads)
+	})
+	for _, read := range reads {
+		remotePath := read.remotePath
+		if read.skip {
+			if read.clearNotReady {
+				s.clearIncrementalReadNotReady(remotePath)
+			}
 			s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "changed", remotePath)
 			continue
 		}
-		file, err := s.client.ReadFile(ctx, s.workspace, remotePath)
+		currentTracked, currentExists := s.state.Files[remotePath]
+		if currentExists != read.observedExists || (currentExists && currentTracked != read.observedTracked) {
+			s.logf("discarding stale incremental read for %s after tracked state advanced", remotePath)
+			s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "changed", remotePath)
+			continue
+		}
+		file, err := read.file, read.err
 		if err != nil {
 			var httpErr *HTTPError
 			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
@@ -6448,6 +6752,91 @@ func (s *Syncer) applyIncrementalChanges(
 		s.markIncrementalCheckpoint(pageStartCursor, pageCursor, "deleted", remotePath)
 	}
 	return nil
+}
+
+type incrementalRead struct {
+	remotePath      string
+	event           FilesystemEvent
+	file            RemoteFile
+	err             error
+	skip            bool
+	clearNotReady   bool
+	observedTracked trackedFile
+	observedExists  bool
+}
+
+func (s *Syncer) readIncrementalFiles(ctx context.Context, reads []incrementalRead) {
+	jobs := make([]int, 0, len(reads))
+	for index := range reads {
+		if !reads[index].skip {
+			jobs = append(jobs, index)
+		}
+	}
+	if len(jobs) == 0 {
+		return
+	}
+	workers := incrementalReadWorkers()
+	if workers > len(jobs) {
+		workers = len(jobs)
+	}
+	jobCh := make(chan int, len(jobs))
+	for _, index := range jobs {
+		jobCh <- index
+	}
+	close(jobCh)
+	var wg sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobCh {
+				read := &reads[index]
+				read.file, read.err = s.client.ReadFile(ctx, s.workspace, read.remotePath)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func incrementalReadWorkers() int {
+	raw := strings.TrimSpace(os.Getenv("RELAYFILE_INCREMENTAL_READ_CONCURRENCY"))
+	if raw == "" {
+		return defaultIncrementalReadWorkers
+	}
+	workers, err := strconv.Atoi(raw)
+	if err != nil || workers <= 0 {
+		return defaultIncrementalReadWorkers
+	}
+	if workers > 64 {
+		return 64
+	}
+	return workers
+}
+
+func advanceEventCursor(current, candidate string) string {
+	current = strings.TrimSpace(current)
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		return current
+	}
+	if current == "" || current == candidate {
+		return candidate
+	}
+	currentOrdinal, currentOK := relayfileEventCursorOrdinal(current)
+	candidateOrdinal, candidateOK := relayfileEventCursorOrdinal(candidate)
+	if currentOK && candidateOK && candidateOrdinal < currentOrdinal {
+		return current
+	}
+	return candidate
+}
+
+func relayfileEventCursorOrdinal(cursor string) (uint64, bool) {
+	value := strings.TrimPrefix(strings.TrimSpace(cursor), "evt_")
+	if value == "" || value == cursor {
+		return 0, false
+	}
+	ordinal, err := strconv.ParseUint(value, 10, 64)
+	return ordinal, err == nil
 }
 
 func (s *Syncer) trySkipIncrementalRead(remotePath string, event FilesystemEvent) (bool, error) {
@@ -7819,16 +8208,16 @@ func (s *Syncer) saveStateWithoutLocalScan() error {
 	if err := s.savePrivateState(); err != nil {
 		return err
 	}
-	wasLowMemory := s.lowMemory
-	s.lowMemory = true
-	err := s.savePublicState()
-	s.lowMemory = wasLowMemory
-	return err
+	return s.savePublicStateWithLocalScan(false)
 }
 
 func (s *Syncer) savePublicState() error {
+	return s.savePublicStateWithLocalScan(!s.lowMemory)
+}
+
+func (s *Syncer) savePublicStateWithLocalScan(scanLocal bool) error {
 	currentFiles := map[string]localSnapshot{}
-	if !s.lowMemory {
+	if scanLocal && !s.lowMemory {
 		var err error
 		currentFiles, err = s.scanLocalFiles()
 		if err != nil {
@@ -7859,7 +8248,7 @@ func (s *Syncer) savePublicState() error {
 		case tracked.Dirty || tracked.DeletePending:
 			fileStatus = "writeback-pending"
 		}
-		if !s.lowMemory {
+		if scanLocal && !s.lowMemory {
 			if snapshot, ok := currentFiles[remotePath]; ok {
 				if snapshot.SkipWriteback && !tracked.Denied && !tracked.WriteDenied {
 					fileStatus = "writeback-skipped"
@@ -7887,7 +8276,7 @@ func (s *Syncer) savePublicState() error {
 			}
 		}
 	}
-	if !s.lowMemory {
+	if scanLocal && !s.lowMemory {
 		for remotePath, snapshot := range currentFiles {
 			if _, ok := files[remotePath]; ok {
 				continue
@@ -9004,7 +9393,7 @@ func correlationID() string {
 	return fmt.Sprintf("mount_%d", time.Now().UnixNano())
 }
 
-func (c *HTTPClient) websocketURL(workspaceID string) (string, error) {
+func (c *HTTPClient) websocketURL(workspaceID, cursor string) (string, error) {
 	base, err := url.Parse(c.baseURL)
 	if err != nil {
 		return "", err
@@ -9022,6 +9411,9 @@ func (c *HTTPClient) websocketURL(workspaceID string) (string, error) {
 	// TODO: Remove query-param token once server supports Authorization header on WS upgrade.
 	q := url.Values{}
 	q.Set("token", c.Token())
+	if cursor = strings.TrimSpace(cursor); cursor != "" {
+		q.Set("cursor", cursor)
+	}
 	base.RawQuery = q.Encode()
 	return base.String(), nil
 }

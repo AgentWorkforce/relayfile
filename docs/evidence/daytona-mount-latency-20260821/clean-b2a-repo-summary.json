@@ -1,0 +1,288 @@
+{
+  "run_id": "clean-b2a-r1",
+  "shape": "repo",
+  "trials_sent": 30,
+  "trials_complete": 30,
+  "trials_incomplete": 0,
+  "trials_ambiguous": 0,
+  "trials_clock_negative": 0,
+  "trials_extrapolated": [],
+  "clock": {
+    "offset_pre_ms": 1.713952,
+    "offset_post_ms": 2.032934,
+    "drift_ms": 0.318982,
+    "pre_min_rtt_ms": 17.667874,
+    "post_min_rtt_ms": 18.363099,
+    "anchor_uncertainty_ms": [
+      8.833937,
+      9.1815495
+    ],
+    "model_error": "HTTPS path asymmetry and nonlinear clock change between anchors are unbounded"
+  },
+  "save_to_visible_ms": {
+    "min": 7861.197568,
+    "p50": 9624.088447999999,
+    "p95": 10549.678822399997,
+    "p99": 51720.72423168005,
+    "max": 68448.844288
+  },
+  "write_start_to_visible_ms": {
+    "min": 7868.072192,
+    "p50": 9638.050176,
+    "p95": 10564.7400704,
+    "p99": 51726.069278720046,
+    "max": 68454.284288
+  },
+  "local_write_ms": {
+    "min": 4.520186,
+    "p50": 5.977873,
+    "p95": 49.50327019999999,
+    "p99": 54.84568139,
+    "max": 56.014355
+  },
+  "incomplete": [],
+  "ambiguous": [],
+  "clock_negative": [],
+  "per_trial": [
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-001",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 4.809976,
+      "save_to_visible_ms": 8963.863808,
+      "write_start_to_visible_ms": 8968.673792
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-002",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 5.761548,
+      "save_to_visible_ms": 9560.062464,
+      "write_start_to_visible_ms": 9565.824
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-003",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 46.470722,
+      "save_to_visible_ms": 8844.792832,
+      "write_start_to_visible_ms": 8891.263488
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-004",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 6.266129,
+      "save_to_visible_ms": 8640.153088,
+      "write_start_to_visible_ms": 8646.4192
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-005",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 30.961021,
+      "save_to_visible_ms": 9448.1536,
+      "write_start_to_visible_ms": 9479.114752
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-006",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 5.921848,
+      "save_to_visible_ms": 9725.295616,
+      "write_start_to_visible_ms": 9731.217408
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-007",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 5.842798,
+      "save_to_visible_ms": 9856.851712,
+      "write_start_to_visible_ms": 9862.6944
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-008",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 4.520186,
+      "save_to_visible_ms": 10229.354496,
+      "write_start_to_visible_ms": 10233.874688
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-009",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 4.605206,
+      "save_to_visible_ms": 9534.286848,
+      "write_start_to_visible_ms": 9538.892032
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-010",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 4.822467,
+      "save_to_visible_ms": 9585.492992,
+      "write_start_to_visible_ms": 9590.315264
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-011",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 5.440107,
+      "save_to_visible_ms": 68448.844288,
+      "write_start_to_visible_ms": 68454.284288
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-012",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 7.414251,
+      "save_to_visible_ms": 9825.770496,
+      "write_start_to_visible_ms": 9833.184768
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-013",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 51.984446,
+      "save_to_visible_ms": 9556.797184,
+      "write_start_to_visible_ms": 9608.781824
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-014",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 6.033898,
+      "save_to_visible_ms": 8634.147328,
+      "write_start_to_visible_ms": 8640.181248
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-015",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 6.87441,
+      "save_to_visible_ms": 7861.197568,
+      "write_start_to_visible_ms": 7868.072192
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-016",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 5.162908,
+      "save_to_visible_ms": 8361.910784,
+      "write_start_to_visible_ms": 8367.073792
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-017",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 6.89106,
+      "save_to_visible_ms": 8955.391232,
+      "write_start_to_visible_ms": 8962.28224
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-018",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 8.865943,
+      "save_to_visible_ms": 9361.318144,
+      "write_start_to_visible_ms": 9370.183936
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-019",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 5.125767,
+      "save_to_visible_ms": 10076.107776,
+      "write_start_to_visible_ms": 10081.233408
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-020",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 9.483414,
+      "save_to_visible_ms": 10149.545984,
+      "write_start_to_visible_ms": 10159.029504
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-021",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 25.380199,
+      "save_to_visible_ms": 10285.687552,
+      "write_start_to_visible_ms": 10311.067904
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-022",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 56.014355,
+      "save_to_visible_ms": 10256.893952,
+      "write_start_to_visible_ms": 10312.908288
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-023",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 6.074849,
+      "save_to_visible_ms": 10033.32864,
+      "write_start_to_visible_ms": 10039.40352
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-024",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 5.112558,
+      "save_to_visible_ms": 10765.67168,
+      "write_start_to_visible_ms": 10770.784256
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-025",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 4.975008,
+      "save_to_visible_ms": 9763.233024,
+      "write_start_to_visible_ms": 9768.208128
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-026",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 5.132728,
+      "save_to_visible_ms": 10174.191104,
+      "write_start_to_visible_ms": 10179.323904
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-027",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 5.177388,
+      "save_to_visible_ms": 9413.522688,
+      "write_start_to_visible_ms": 9418.700288
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-028",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 6.111879,
+      "save_to_visible_ms": 10114.056448,
+      "write_start_to_visible_ms": 10120.168192
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-029",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 6.721771,
+      "save_to_visible_ms": 9025.59488,
+      "write_start_to_visible_ms": 9032.316672
+    },
+    {
+      "correlation_id": "clean-b2a-r1-b-to-a-repo-030",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 4.634648,
+      "save_to_visible_ms": 9662.683904,
+      "write_start_to_visible_ms": 9667.318528
+    }
+  ]
+}

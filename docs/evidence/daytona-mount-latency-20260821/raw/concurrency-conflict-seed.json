@@ -1,0 +1,10 @@
+{
+  "role": "seed",
+  "relative_path": "testdata/daytona-sync-benchmark/concurrency-r1/conflict/shared.txt",
+  "write_started_ns": 1787319415923663997,
+  "write_completed_ns": 1787319415925052692,
+  "write_ms": 1.388695,
+  "sha256": "6a9ac230b6eeced5892f11f34abff13a29bb7528d19c56a81e4e35aef25c0976",
+  "receiver_probe_observed_ns": 1787319416330031000,
+  "receiver_probe_size": 7
+}

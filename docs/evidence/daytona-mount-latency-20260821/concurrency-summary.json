@@ -1,0 +1,21 @@
+{
+  "disjoint_paths": {
+    "write_start_delta_ms": 7.119997,
+    "a_to_b_probe_upper_bound_ms": 91863.840471,
+    "b_to_a_probe_upper_bound_ms": 46646.725054,
+    "converged": true,
+    "same_content_on_both_mounts": true,
+    "conflict_artifacts": 0
+  },
+  "same_path": {
+    "write_start_delta_ms": 0.00386,
+    "canonical_content": "agent-a-conflict-v1",
+    "canonical_on_both_mounts": true,
+    "losing_content": "agent-b-conflict-v1",
+    "losing_content_preserved": true,
+    "loser_conflict_artifact": ".relay/conflicts/testdata/daytona-sync-benchmark/concurrency-r1/conflict/shared.txt.rev_2135.local",
+    "loser_mount_status": "conflict",
+    "loser_pending_conflicts": 1,
+    "silent_overwrite": false
+  }
+}

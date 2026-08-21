@@ -1,0 +1,1 @@
+{"role": "base", "relative_path": "testdata/daytona-sync-benchmark/clean-r3/concurrency/conflict/shared.txt", "target_ns": 1787327617326000000, "write_started_ns": 1787327617326057919, "write_completed_ns": 1787327617340561049, "target_error_ms": 0.057919, "write_ms": 14.50313, "sha256": "5be4dc24870fb13557eb10f92984b60814eb641c5eafafd6f685d50abdb7f601"}
