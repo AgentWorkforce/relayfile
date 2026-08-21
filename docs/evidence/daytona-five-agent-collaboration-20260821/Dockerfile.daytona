@@ -1,0 +1,14 @@
+FROM debian:12-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl procps python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY relayfile /usr/local/bin/relayfile
+COPY relayfile-mount /usr/local/bin/relayfile-mount
+COPY benchmark /opt/relayfile-benchmark
+COPY auth /opt/relayfile-benchmark/auth
+COPY repo-seeds /opt/relayfile-benchmark/repo-seeds
+
+RUN chmod 0755 /usr/local/bin/relayfile /usr/local/bin/relayfile-mount \
+    && find /opt/relayfile-benchmark -maxdepth 1 -name '*.py' -exec chmod 0755 {} \;
