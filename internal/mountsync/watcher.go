@@ -20,6 +20,22 @@ const defaultMaxWatchedDirs = 8192
 
 const defaultLocalChangeBatchWindow = 5 * time.Millisecond
 
+const (
+	// DefaultFileChangeSettleDelay protects editors that stream a save through
+	// several in-place write/chmod notifications before the bytes are stable.
+	DefaultFileChangeSettleDelay = 100 * time.Millisecond
+	// DefaultAtomicSaveSettleDelay is intentionally short: a destination-only
+	// create/rename/remove notification is already the commit point of an
+	// atomic save, so making every agent wait the in-place editor window only
+	// adds coordination latency.
+	DefaultAtomicSaveSettleDelay = time.Millisecond
+	// atomicRenameCorrelationWindow is only a classifier window, not an added
+	// debounce. fsnotify reports an atomic temp-file rename as a Rename for the
+	// source followed by a Create for the committed destination. A bare Create
+	// can also be the start of a streaming write and must use the safe delay.
+	atomicRenameCorrelationWindow = 50 * time.Millisecond
+)
+
 var (
 	ErrWatcherLimitExceeded   = errors.New("mount file watcher directory limit exceeded")
 	ErrRecursiveWatcherUnsafe = errors.New("recursive mount file watcher is unsafe on this platform")
@@ -151,17 +167,31 @@ func (b *LocalChangeBatcher) Close() {
 // opens a descriptor for every watched file, so production mount loops disable
 // this recursive watcher on macOS by default and retain polling reconciliation.
 type FileWatcher struct {
-	watcher     *fsnotify.Watcher
-	localDir    string
-	remoteRoot  string
-	scopedChild bool
-	onChange    func(relativePath string, op fsnotify.Op)
-	maxDirs     int
-	watchedDirs int
-	mu          sync.Mutex
-	debounce    map[string]*time.Timer // debounce rapid events per file
-	closed      bool
-	wg          sync.WaitGroup
+	watcher            *fsnotify.Watcher
+	localDir           string
+	remoteRoot         string
+	scopedChild        bool
+	onChange           func(relativePath string, op fsnotify.Op)
+	maxDirs            int
+	watchedDirs        int
+	settleDelay        time.Duration
+	atomicSettleDelay  time.Duration
+	mu                 sync.Mutex
+	debounce           map[string]*time.Timer // debounce rapid events per file
+	pendingOps         map[string]fsnotify.Op
+	debounceVersion    map[string]uint64
+	recentRenameDirs   map[string]time.Time
+	atomicDestinations map[string]bool
+	closed             bool
+	wg                 sync.WaitGroup
+}
+
+// FileWatcherTimings controls the two correctness-aware watcher paths. Zero
+// values select the production defaults. In-place writes use SettleDelay;
+// atomic destination events use AtomicSettleDelay.
+type FileWatcherTimings struct {
+	SettleDelay       time.Duration
+	AtomicSettleDelay time.Duration
 }
 
 // recursiveWatcherAllowed reports whether a production Syncer may attach the
@@ -203,18 +233,39 @@ func NewFileWatcherForRemoteRoot(localDir, remoteRoot string, onChange func(stri
 // scoped children can share a remote root while requiring different treatment
 // of catalog-only artifacts.
 func NewFileWatcherForTopology(localDir, remoteRoot string, scopedChild bool, onChange func(string, fsnotify.Op)) (*FileWatcher, error) {
+	return NewFileWatcherForTopologyWithTimings(localDir, remoteRoot, scopedChild, FileWatcherTimings{}, onChange)
+}
+
+// NewFileWatcherForTopologyWithTimings is the configurable form used by the
+// mount daemon and latency certification harnesses. Existing constructors keep
+// the safe defaults above.
+func NewFileWatcherForTopologyWithTimings(localDir, remoteRoot string, scopedChild bool, timings FileWatcherTimings, onChange func(string, fsnotify.Op)) (*FileWatcher, error) {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
 	}
+	settleDelay := timings.SettleDelay
+	if settleDelay <= 0 {
+		settleDelay = DefaultFileChangeSettleDelay
+	}
+	atomicSettleDelay := timings.AtomicSettleDelay
+	if atomicSettleDelay <= 0 {
+		atomicSettleDelay = DefaultAtomicSaveSettleDelay
+	}
 	return &FileWatcher{
-		watcher:     w,
-		localDir:    localDir,
-		remoteRoot:  normalizeRemotePath(remoteRoot),
-		scopedChild: scopedChild,
-		onChange:    onChange,
-		maxDirs:     watcherMaxDirsFromEnv(),
-		debounce:    make(map[string]*time.Timer),
+		watcher:            w,
+		localDir:           localDir,
+		remoteRoot:         normalizeRemotePath(remoteRoot),
+		scopedChild:        scopedChild,
+		onChange:           onChange,
+		maxDirs:            watcherMaxDirsFromEnv(),
+		settleDelay:        settleDelay,
+		atomicSettleDelay:  atomicSettleDelay,
+		debounce:           make(map[string]*time.Timer),
+		pendingOps:         make(map[string]fsnotify.Op),
+		debounceVersion:    make(map[string]uint64),
+		recentRenameDirs:   make(map[string]time.Time),
+		atomicDestinations: make(map[string]bool),
 	}, nil
 }
 
@@ -262,8 +313,8 @@ func (fw *FileWatcher) Start(ctx context.Context) error {
 					}
 				}
 
-				// Debounce: wait 100ms for rapid events on same file to settle
-				// (editors often do write + chmod + rename in quick succession).
+				// In-place editor writes get a conservative settle window. Atomic
+				// destination events are already committed and take the fast path.
 				fw.queueChange(rel, event.Op)
 
 			case _, ok := <-fw.watcher.Errors:
@@ -361,24 +412,70 @@ func (fw *FileWatcher) queueChange(rel string, op fsnotify.Op) {
 		fw.mu.Unlock()
 		return
 	}
+	fw.pendingOps[rel] |= op
+	now := time.Now()
+	for dir, renamedAt := range fw.recentRenameDirs {
+		if now.Sub(renamedAt) > atomicRenameCorrelationWindow {
+			delete(fw.recentRenameDirs, dir)
+		}
+	}
+	parent := filepath.Dir(filepath.Clean(rel))
+	if op&fsnotify.Rename != 0 && isEphemeralAtomicSaveRelativePath(rel) {
+		fw.recentRenameDirs[parent] = now
+	}
+	fw.debounceVersion[rel]++
+	version := fw.debounceVersion[rel]
 	if t, ok := fw.debounce[rel]; ok {
 		if t.Stop() {
 			fw.wg.Done()
 		}
 	}
+	delay := fw.settleDelay
+	combinedOp := fw.pendingOps[rel]
+	atomicDestination := combinedOp&(fsnotify.Rename|fsnotify.Remove) != 0
+	if combinedOp&fsnotify.Create != 0 && op&fsnotify.Rename == 0 {
+		if renamedAt, ok := fw.recentRenameDirs[parent]; ok && now.Sub(renamedAt) <= atomicRenameCorrelationWindow {
+			atomicDestination = true
+			fw.atomicDestinations[rel] = true
+			delete(fw.recentRenameDirs, parent)
+		}
+	}
+	if fw.atomicDestinations[rel] {
+		atomicDestination = true
+	}
+	if (fw.atomicDestinations[rel] || combinedOp&(fsnotify.Write|fsnotify.Chmod) == 0) &&
+		atomicDestination {
+		delay = fw.atomicSettleDelay
+	}
 	fw.wg.Add(1)
-	fw.debounce[rel] = time.AfterFunc(100*time.Millisecond, func() {
+	fw.debounce[rel] = time.AfterFunc(delay, func() {
 		defer fw.wg.Done()
 
 		fw.mu.Lock()
 		if fw.closed {
-			delete(fw.debounce, rel)
+			if fw.debounceVersion[rel] == version {
+				delete(fw.debounce, rel)
+				delete(fw.pendingOps, rel)
+				delete(fw.debounceVersion, rel)
+				delete(fw.atomicDestinations, rel)
+			}
 			fw.mu.Unlock()
 			return
 		}
+		// A stopped timer may already have entered its callback. Only the
+		// newest generation may consume the coalesced operation or delete the
+		// replacement timer.
+		if fw.debounceVersion[rel] != version {
+			fw.mu.Unlock()
+			return
+		}
+		combinedOp := fw.pendingOps[rel]
 		delete(fw.debounce, rel)
+		delete(fw.pendingOps, rel)
+		delete(fw.debounceVersion, rel)
+		delete(fw.atomicDestinations, rel)
 		fw.mu.Unlock()
-		fw.onChange(rel, op)
+		fw.onChange(rel, combinedOp)
 	})
 	fw.mu.Unlock()
 }
@@ -482,7 +579,12 @@ func (fw *FileWatcher) Close() error {
 			fw.wg.Done()
 		}
 		delete(fw.debounce, rel)
+		delete(fw.pendingOps, rel)
+		delete(fw.debounceVersion, rel)
+		delete(fw.atomicDestinations, rel)
 	}
+	fw.recentRenameDirs = nil
+	fw.atomicDestinations = nil
 	fw.mu.Unlock()
 
 	err := fw.watcher.Close()

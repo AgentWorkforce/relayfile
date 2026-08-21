@@ -1,0 +1,30 @@
+{
+  "run_id": "core-qualifying-r1",
+  "saves": 100,
+  "shape": {
+    "files": 1,
+    "bytes": 300
+  },
+  "visibility": {
+    "count": 100,
+    "p50_ms": 3.3150825,
+    "p95_ms": 3.4027114000000003,
+    "p99_ms": 4.449294000000001,
+    "max_ms": 4.554729,
+    "mean_ms": 3.2103807399999997
+  },
+  "local_write": {
+    "count": 100,
+    "p50_ms": 0.025412,
+    "p95_ms": 0.06534184999999999,
+    "p99_ms": 0.09527132000000046,
+    "max_ms": 0.184007,
+    "mean_ms": 0.030040670000000002
+  },
+  "gates": {
+    "all_hashes_visible": true,
+    "visibility_p95_le_9_ms": true
+  },
+  "status": "pass",
+  "scope": "controlled same-host core path; not cross-provider Internet latency"
+}

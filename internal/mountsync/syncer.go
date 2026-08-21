@@ -82,9 +82,11 @@ const maxWebSocketMessageBytes int64 = 2 << 20
 // its complete state document, the server's bounded live subscription can
 // overflow even though the mount is otherwise healthy.
 const (
-	webSocketApplyQueueSize      = 4096
-	webSocketCheckpointBatchSize = 64
-	webSocketCheckpointQuietTime = 5 * time.Millisecond
+	webSocketApplyQueueSize       = 4096
+	webSocketCheckpointBatchSize  = 64
+	webSocketCheckpointQuietTime  = 5 * time.Millisecond
+	localWriteCheckpointQuietTime = 25 * time.Millisecond
+	localWriteCheckpointMaxWait   = 250 * time.Millisecond
 )
 
 const (
@@ -1305,11 +1307,18 @@ type Syncer struct {
 	// credExpiresAt is the RFC3339 expiry of the delegated access token,
 	// set by the CLI layer via SetCredentialExpiry and included in the
 	// public state as credExpiresInSecs so operators get advance warning.
-	credExpiresAt string
-	mu            sync.Mutex
-	receiptMu     sync.Mutex
-	receiptActive map[string]struct{}
-	receiptSem    chan struct{}
+	credExpiresAt     string
+	mu                sync.Mutex
+	receiptMu         sync.Mutex
+	receiptActive     map[string]struct{}
+	receiptSem        chan struct{}
+	outboxIndexMu     sync.Mutex
+	outboxIndexLoaded bool
+	outboxByPath      map[string]map[string]outboxRecord
+	checkpointMu      sync.Mutex
+	checkpointTimer   *time.Timer
+	checkpointStarted time.Time
+	checkpointVersion uint64
 }
 
 // runFullPullIO temporarily releases the Syncer's state mutex around a remote
@@ -2077,10 +2086,16 @@ func (s *Syncer) SetCredentialExpiry(expiresAt string) {
 // NewFileWatcher creates a watcher with the same local/remote mapping as this
 // Syncer so path-collision guards cannot diverge between event and scan paths.
 func (s *Syncer) NewFileWatcher(onChange func(string, fsnotify.Op)) (*FileWatcher, error) {
+	return s.NewFileWatcherWithTimings(FileWatcherTimings{}, onChange)
+}
+
+// NewFileWatcherWithTimings creates the same topology-safe watcher while
+// allowing the mount daemon and certification harnesses to tune settle delays.
+func (s *Syncer) NewFileWatcherWithTimings(timings FileWatcherTimings, onChange func(string, fsnotify.Op)) (*FileWatcher, error) {
 	if !recursiveWatcherAllowed() {
 		return nil, fmt.Errorf("%w: fsnotify uses descriptor-per-file kqueue on macOS; continuing with polling reconciliation (set RELAYFILE_MOUNT_FORCE_RECURSIVE_WATCHER=1 only for a deliberately small mirror)", ErrRecursiveWatcherUnsafe)
 	}
-	return NewFileWatcherForTopology(s.localRoot, s.remoteRoot, s.scopedChild, onChange)
+	return NewFileWatcherForTopologyWithTimings(s.localRoot, s.remoteRoot, s.scopedChild, timings, onChange)
 }
 
 // EnablePollingLocalChangeDetection makes each existing local-tree scan treat
@@ -2303,6 +2318,7 @@ func (s *Syncer) HandleLocalChanges(ctx context.Context, changes []LocalChange) 
 }
 
 func (s *Syncer) handleLocalChanges(ctx context.Context, changes []LocalChange, deferReceipts bool) error {
+	traceStarted := time.Now()
 	if s.pullOnly {
 		return nil
 	}
@@ -2355,6 +2371,7 @@ func (s *Syncer) handleLocalChanges(ctx context.Context, changes []LocalChange, 
 	if err := s.loadState(); err != nil {
 		return err
 	}
+	s.traceLatency("local_change_state_loaded", traceStarted, "paths", len(paths))
 
 	persistState := s.saveState
 	if deferReceipts {
@@ -2372,6 +2389,14 @@ func (s *Syncer) handleLocalChanges(ctx context.Context, changes []LocalChange, 
 			return err
 		}
 		s.markSyncSuccess()
+		if deferReceipts {
+			// The durable outbox was written before upload and the accepted
+			// receipt is persisted by the flush. Private/public mount state is
+			// derived recovery/observability data, so checkpoint it after the
+			// visibility-critical path and coalesce bursts of agent saves.
+			s.scheduleLocalWriteCheckpoint()
+			return nil
+		}
 		return persistState()
 	}
 
@@ -2442,8 +2467,11 @@ func (s *Syncer) handleLocalChanges(ctx context.Context, changes []LocalChange, 
 				pendingWrites = append(pendingWrites, *pendingWrite)
 			}
 		}
+		s.traceLatency("local_change_prepared", traceStarted, "paths", len(paths), "writes", len(pendingWrites))
 		if deferReceipts {
-			return s.flushPendingBulkWritesFast(ctx, pendingWrites, nil)
+			err := s.flushPendingBulkWritesFast(ctx, pendingWrites, nil)
+			s.traceLatency("local_change_flushed", traceStarted, "paths", len(paths), "writes", len(pendingWrites))
+			return err
 		}
 		return s.flushPendingBulkWrites(ctx, pendingWrites, nil)
 	})
@@ -2582,6 +2610,7 @@ func (s *Syncer) flushPendingBulkWritesFast(ctx context.Context, pending []pendi
 }
 
 func (s *Syncer) flushPendingBulkWritesWithReceiptMode(ctx context.Context, pending []pendingBulkWrite, conflicted map[string]struct{}, settleReceipts bool) error {
+	traceStarted := time.Now()
 	if len(pending) == 0 {
 		return nil
 	}
@@ -2592,12 +2621,55 @@ func (s *Syncer) flushPendingBulkWritesWithReceiptMode(ctx context.Context, pend
 		s.logf("writeback flush refused: cloud-error circuit breaker is open; %d file(s) remain pending", len(pending))
 		return nil
 	}
+	records := make([]outboxRecord, 0, len(pending))
 	for _, pendingWrite := range pending {
-		if _, err := s.ensureOutboxRecord(pendingWrite); err != nil {
+		record, err := s.ensureOutboxRecord(pendingWrite)
+		if err != nil {
+			return err
+		}
+		records = append(records, record)
+	}
+	s.traceLatency("outbox_ensured", traceStarted, "writes", len(pending))
+	// The watcher just persisted these exact records. Dispatch them directly
+	// instead of re-reading every unrelated pending receipt in the mount's
+	// durable outbox. The maintenance/restart path still scans the whole
+	// outbox; the visibility-critical save path is O(changed files), not
+	// O(workspace history).
+	err := s.flushSelectedOutboxRecords(ctx, records, conflicted, settleReceipts)
+	s.traceLatency("outbox_flushed", traceStarted, "writes", len(pending))
+	return err
+}
+
+func (s *Syncer) flushSelectedOutboxRecords(ctx context.Context, records []outboxRecord, conflicted map[string]struct{}, settleReceipts bool) error {
+	now := s.now().UTC()
+	due := make([]outboxRecord, 0, len(records))
+	for _, record := range records {
+		if migrateLegacyMissingReceipt(&record) {
+			if err := s.saveOutboxRecord(record); err != nil {
+				return err
+			}
+		}
+		if record.AttemptCount >= s.maxOutboxAttemptsValue() && !record.NeedsAttention {
+			record.NeedsAttention = true
+			if err := s.saveOutboxRecord(record); err != nil {
+				return err
+			}
+		}
+		if s.outboxDue(record, now) {
+			due = append(due, record)
+		}
+	}
+	if len(due) == 0 {
+		return nil
+	}
+	flushCtx, cancel := s.outboxContext(ctx)
+	defer cancel()
+	for _, chunk := range chunkOutboxRecords(due, maxWritebackBatchBytes()) {
+		if err := s.flushOutboxRecordChunk(flushCtx, chunk, conflicted, settleReceipts); err != nil {
 			return err
 		}
 	}
-	return s.flushOutboxRecords(ctx, conflicted, false, settleReceipts)
+	return nil
 }
 
 func (s *Syncer) flushDueOutboxRecords(ctx context.Context, conflicted map[string]struct{}) error {
@@ -2654,6 +2726,7 @@ func (s *Syncer) flushOutboxRecords(ctx context.Context, conflicted map[string]s
 }
 
 func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRecord, conflicted map[string]struct{}, settleReceipts bool) error {
+	traceStarted := time.Now()
 	var firstErr error
 	uploadRecords := make([]outboxRecord, 0, len(records))
 	deferredReceipts := make([]outboxRecord, 0, len(records))
@@ -2681,6 +2754,7 @@ func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRec
 
 	files := outboxRecordsAsBulkFiles(uploadRecords)
 	response, err := s.client.WriteFilesBulk(ctx, s.workspace, files)
+	s.traceLatency("bulk_response", traceStarted, "records", len(uploadRecords))
 	if err != nil {
 		s.recordCloudFailure(err)
 		for _, record := range uploadRecords {
@@ -2909,27 +2983,74 @@ func (s *Syncer) scheduleOutboxReceiptSettlements(records []outboxRecord) {
 			cancel()
 
 			s.mu.Lock()
-			defer s.mu.Unlock()
 			current, readErr := s.readOutboxRecord(s.pendingOutboxPath(record.CommandID))
 			if errors.Is(readErr, os.ErrNotExist) {
+				s.mu.Unlock()
 				return
 			}
 			if readErr != nil {
 				s.logf("async writeback receipt reload failed for %s: %v", opID, readErr)
+				s.mu.Unlock()
 				return
 			}
 			if strings.TrimSpace(current.OpID) != opID {
+				s.mu.Unlock()
 				return
 			}
 			if err := s.applyOutboxOperationResult(current, op, opErr); err != nil {
 				s.markSyncError(err)
 				s.logf("async writeback receipt settlement failed for %s: %v", opID, err)
 			}
-			if err := s.saveStateWithoutLocalScan(); err != nil {
-				s.logf("async writeback receipt state save failed for %s: %v", opID, err)
-			}
+			s.mu.Unlock()
+			// The outbox record above is the durable receipt. Coalesce the
+			// derived state document instead of making every receipt worker hold
+			// the main state mutex through a full outbox summary scan.
+			s.scheduleLocalWriteCheckpoint()
 		}()
 	}
+}
+
+func (s *Syncer) scheduleLocalWriteCheckpoint() {
+	s.checkpointMu.Lock()
+	defer s.checkpointMu.Unlock()
+
+	now := time.Now()
+	if s.checkpointStarted.IsZero() {
+		s.checkpointStarted = now
+	}
+	s.checkpointVersion++
+	version := s.checkpointVersion
+	delay := localWriteCheckpointQuietTime
+	if remaining := localWriteCheckpointMaxWait - now.Sub(s.checkpointStarted); remaining < delay {
+		delay = remaining
+	}
+	if delay <= 0 {
+		delay = time.Nanosecond
+	}
+	if s.checkpointTimer != nil {
+		s.checkpointTimer.Stop()
+	}
+	s.checkpointTimer = time.AfterFunc(delay, func() {
+		s.checkpointMu.Lock()
+		if s.checkpointVersion != version {
+			s.checkpointMu.Unlock()
+			return
+		}
+		s.checkpointTimer = nil
+		s.checkpointStarted = time.Time{}
+		s.checkpointMu.Unlock()
+
+		s.mu.Lock()
+		// Match the WebSocket checkpoint contract: persist only the private
+		// recovery cursor/state on the burst path. The public .relay/state.json
+		// document is derived observability data and is refreshed by the next
+		// normal reconcile instead of scanning the complete outbox here.
+		err := s.savePrivateState()
+		s.mu.Unlock()
+		if err != nil {
+			s.logf("coalesced local-write checkpoint failed: %v", err)
+		}
+	})
 }
 
 func chunkOutboxRecords(records []outboxRecord, maxBytes int64) [][]outboxRecord {
@@ -8962,6 +9083,23 @@ func (s *Syncer) logf(format string, args ...any) {
 		return
 	}
 	s.logger.Printf("%s", redactSensitiveLogQueryValues(fmt.Sprintf(format, args...)))
+}
+
+func (s *Syncer) traceLatency(stage string, started time.Time, fields ...any) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_LATENCY_TRACE"))) {
+	case "1", "true", "yes", "on":
+	default:
+		return
+	}
+	parts := []string{
+		"mount_latency",
+		"stage=" + strings.TrimSpace(stage),
+		fmt.Sprintf("elapsed_ms=%.3f", time.Since(started).Seconds()*1000),
+	}
+	for index := 0; index+1 < len(fields); index += 2 {
+		parts = append(parts, fmt.Sprintf("%v=%v", fields[index], fields[index+1]))
+	}
+	s.logf("%s", strings.Join(parts, " "))
 }
 
 // redactSensitiveLogQueryValues removes bearer/API credentials embedded in

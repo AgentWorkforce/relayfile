@@ -149,7 +149,11 @@ func (s *Syncer) saveOutboxRecord(record outboxRecord) error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(s.pendingOutboxPath(record.CommandID), data, 0o644)
+	if err := writeFileAtomic(s.pendingOutboxPath(record.CommandID), data, 0o644); err != nil {
+		return err
+	}
+	s.cachePendingOutboxRecord(record)
+	return nil
 }
 
 func (s *Syncer) readOutboxRecord(path string) (outboxRecord, error) {
@@ -213,18 +217,82 @@ func (s *Syncer) listPendingOutboxRecords() ([]outboxRecord, error) {
 }
 
 func (s *Syncer) findPendingOutboxByPath(remotePath string) ([]outboxRecord, error) {
-	records, err := s.listPendingOutboxRecords()
-	if err != nil {
+	remotePath = normalizeRemotePath(remotePath)
+	if err := s.ensurePendingOutboxIndex(); err != nil {
 		return nil, err
 	}
-	remotePath = normalizeRemotePath(remotePath)
-	matched := make([]outboxRecord, 0, 1)
-	for _, record := range records {
-		if record.RemotePath == remotePath {
-			matched = append(matched, record)
-		}
+	s.outboxIndexMu.Lock()
+	byCommand := s.outboxByPath[remotePath]
+	matched := make([]outboxRecord, 0, len(byCommand))
+	for _, record := range byCommand {
+		matched = append(matched, record)
 	}
+	s.outboxIndexMu.Unlock()
+	sortOutboxRecords(matched)
 	return matched, nil
+}
+
+func (s *Syncer) ensurePendingOutboxIndex() error {
+	s.outboxIndexMu.Lock()
+	defer s.outboxIndexMu.Unlock()
+	if s.outboxIndexLoaded {
+		return nil
+	}
+	records, err := s.listPendingOutboxRecords()
+	if err != nil {
+		return err
+	}
+	if s.outboxByPath == nil {
+		s.outboxByPath = make(map[string]map[string]outboxRecord)
+	}
+	for _, record := range records {
+		s.cachePendingOutboxRecordLocked(record)
+	}
+	s.outboxIndexLoaded = true
+	return nil
+}
+
+func (s *Syncer) cachePendingOutboxRecord(record outboxRecord) {
+	s.outboxIndexMu.Lock()
+	defer s.outboxIndexMu.Unlock()
+	s.cachePendingOutboxRecordLocked(record)
+}
+
+func (s *Syncer) cachePendingOutboxRecordLocked(record outboxRecord) {
+	remotePath := normalizeRemotePath(record.RemotePath)
+	commandID := strings.TrimSpace(record.CommandID)
+	if remotePath == "/" || commandID == "" {
+		return
+	}
+	if s.outboxByPath == nil {
+		s.outboxByPath = make(map[string]map[string]outboxRecord)
+	}
+	if s.outboxByPath[remotePath] == nil {
+		s.outboxByPath[remotePath] = make(map[string]outboxRecord)
+	}
+	record.RemotePath = remotePath
+	record.CommandID = commandID
+	s.outboxByPath[remotePath][commandID] = record
+}
+
+func (s *Syncer) removePendingOutboxRecordFromCache(record outboxRecord) {
+	s.outboxIndexMu.Lock()
+	defer s.outboxIndexMu.Unlock()
+	remotePath := normalizeRemotePath(record.RemotePath)
+	byCommand := s.outboxByPath[remotePath]
+	delete(byCommand, strings.TrimSpace(record.CommandID))
+	if len(byCommand) == 0 {
+		delete(s.outboxByPath, remotePath)
+	}
+}
+
+func sortOutboxRecords(records []outboxRecord) {
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].FirstSeenAt == records[j].FirstSeenAt {
+			return records[i].CommandID < records[j].CommandID
+		}
+		return records[i].FirstSeenAt < records[j].FirstSeenAt
+	})
 }
 
 func (s *Syncer) ensureOutboxRecord(pending pendingBulkWrite) (outboxRecord, error) {
@@ -389,6 +457,7 @@ func (s *Syncer) ackOutboxRecord(record outboxRecord, revision, correlationID st
 	if err := os.Remove(s.pendingOutboxPath(record.CommandID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	s.removePendingOutboxRecordFromCache(record)
 	if err := os.Remove(s.outboxAttentionPath(record.CommandID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -418,6 +487,7 @@ func (s *Syncer) skipOutboxRecord(record outboxRecord, reason string) error {
 	if err := os.Remove(s.pendingOutboxPath(record.CommandID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	s.removePendingOutboxRecordFromCache(record)
 	if err := os.Remove(s.outboxAttentionPath(record.CommandID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -461,6 +531,7 @@ func (s *Syncer) saveFailedOutboxRecord(record outboxRecord, reason string) erro
 	if err := os.Remove(s.pendingOutboxPath(record.CommandID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	s.removePendingOutboxRecordFromCache(record)
 	return nil
 }
 

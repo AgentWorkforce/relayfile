@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -825,6 +826,138 @@ func TestWatcherDebounce(t *testing.T) {
 	case extra := <-events:
 		t.Fatalf("expected one debounced event, got extra event: %s %s", extra.path, extra.op.String())
 	case <-time.After(250 * time.Millisecond):
+	}
+}
+
+func TestWatcherAtomicDestinationUsesFastSettleDelay(t *testing.T) {
+	localDir := t.TempDir()
+	events := make(chan watcherEvent, 1)
+	watcher, err := NewFileWatcherForTopologyWithTimings(localDir, "/", false, FileWatcherTimings{
+		SettleDelay:       200 * time.Millisecond,
+		AtomicSettleDelay: 5 * time.Millisecond,
+	}, func(path string, op fsnotify.Op) {
+		if path == "atomic.txt" {
+			events <- watcherEvent{path: path, op: op}
+		}
+	})
+	if err != nil {
+		t.Fatalf("new watcher: %v", err)
+	}
+	t.Cleanup(func() { _ = watcher.Close() })
+
+	started := time.Now()
+	watcher.queueChange(".atomic.txt.tmp-1", fsnotify.Rename)
+	watcher.queueChange("atomic.txt", fsnotify.Create)
+	watcher.queueChange("atomic.txt", fsnotify.Write)
+	ev, ok := waitForWatcherEvent(t, events, 100*time.Millisecond)
+	if !ok {
+		t.Fatal("atomic destination event waited for the in-place settle window")
+	}
+	if elapsed := time.Since(started); elapsed >= 100*time.Millisecond {
+		t.Fatalf("atomic destination event took %s, want fast path", elapsed)
+	}
+	if ev.op&(fsnotify.Create|fsnotify.Write) != fsnotify.Create|fsnotify.Write {
+		t.Fatalf("atomic destination op = %s, want Create|Write", ev.op)
+	}
+}
+
+func TestWatcherRealAtomicRenameUsesFastSettleDelay(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("kqueue does not report the transient source rename; production uses polling on macOS")
+	}
+	localDir := t.TempDir()
+	parent := filepath.Join(localDir, "existing")
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		t.Fatalf("create watched parent: %v", err)
+	}
+	events := make(chan watcherEvent, 4)
+	watcher, err := NewFileWatcherForTopologyWithTimings(localDir, "/", false, FileWatcherTimings{
+		SettleDelay:       200 * time.Millisecond,
+		AtomicSettleDelay: 5 * time.Millisecond,
+	}, func(path string, op fsnotify.Op) {
+		if path == "existing/atomic.txt" {
+			events <- watcherEvent{path: path, op: op}
+		}
+	})
+	if err != nil {
+		t.Fatalf("new watcher: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		_ = watcher.Close()
+	})
+	if err := watcher.Start(ctx); err != nil {
+		t.Fatalf("start watcher: %v", err)
+	}
+
+	temporary := filepath.Join(parent, "atomic.txt.writer-tmp-1")
+	if err := os.WriteFile(temporary, []byte("committed"), 0o644); err != nil {
+		t.Fatalf("write staging file: %v", err)
+	}
+	started := time.Now()
+	if err := os.Rename(temporary, filepath.Join(parent, "atomic.txt")); err != nil {
+		t.Fatalf("commit staging file: %v", err)
+	}
+	if _, ok := waitForWatcherEvent(t, events, 100*time.Millisecond); !ok {
+		t.Fatal("real atomic rename waited for the in-place settle window")
+	}
+	if elapsed := time.Since(started); elapsed >= 100*time.Millisecond {
+		t.Fatalf("real atomic rename took %s, want fast path", elapsed)
+	}
+}
+
+func TestWatcherInPlaceWriteKeepsConservativeSettleDelay(t *testing.T) {
+	localDir := t.TempDir()
+	events := make(chan watcherEvent, 1)
+	watcher, err := NewFileWatcherForTopologyWithTimings(localDir, "/", false, FileWatcherTimings{
+		SettleDelay:       80 * time.Millisecond,
+		AtomicSettleDelay: time.Millisecond,
+	}, func(path string, op fsnotify.Op) {
+		events <- watcherEvent{path: path, op: op}
+	})
+	if err != nil {
+		t.Fatalf("new watcher: %v", err)
+	}
+	t.Cleanup(func() { _ = watcher.Close() })
+
+	watcher.queueChange("streamed.txt", fsnotify.Write)
+	if _, ok := waitForWatcherEvent(t, events, 30*time.Millisecond); ok {
+		t.Fatal("in-place write escaped before its conservative settle window")
+	}
+	if ev, ok := waitForWatcherEvent(t, events, 150*time.Millisecond); !ok {
+		t.Fatal("in-place write did not arrive after its settle window")
+	} else if ev.op&fsnotify.Write == 0 {
+		t.Fatalf("in-place op = %s, want Write", ev.op)
+	}
+}
+
+func TestWatcherCoalescesOperationsAndFallsBackToSafeDelay(t *testing.T) {
+	localDir := t.TempDir()
+	events := make(chan watcherEvent, 1)
+	watcher, err := NewFileWatcherForTopologyWithTimings(localDir, "/", false, FileWatcherTimings{
+		SettleDelay:       80 * time.Millisecond,
+		AtomicSettleDelay: time.Millisecond,
+	}, func(path string, op fsnotify.Op) {
+		events <- watcherEvent{path: path, op: op}
+	})
+	if err != nil {
+		t.Fatalf("new watcher: %v", err)
+	}
+	t.Cleanup(func() { _ = watcher.Close() })
+
+	watcher.queueChange("mixed.txt", fsnotify.Create)
+	time.Sleep(5 * time.Millisecond)
+	watcher.queueChange("mixed.txt", fsnotify.Write)
+	if _, ok := waitForWatcherEvent(t, events, 30*time.Millisecond); ok {
+		t.Fatal("create+write burst incorrectly used the atomic fast path")
+	}
+	ev, ok := waitForWatcherEvent(t, events, 150*time.Millisecond)
+	if !ok {
+		t.Fatal("coalesced event not received")
+	}
+	if ev.op&(fsnotify.Create|fsnotify.Write) != fsnotify.Create|fsnotify.Write {
+		t.Fatalf("coalesced op = %s, want Create|Write", ev.op)
 	}
 }
 

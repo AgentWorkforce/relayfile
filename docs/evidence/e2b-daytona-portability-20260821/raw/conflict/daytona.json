@@ -1,0 +1,12 @@
+{
+  "host": "daytona",
+  "canonical": "cross-provider-conflict-r2-agent-e2b-conflict",
+  "canonical_sha256": "4451817e03df7c310f3c625776a1fbcb0da062bc7a0fecd6e2d2d930d563367b",
+  "artifacts": [
+    {
+      "path": ".relay/conflicts/testdata/cross-provider/cross-provider-conflict-r2/conflict/shared.txt.unknown.local",
+      "content": "cross-provider-conflict-r2-agent-daytona-conflict",
+      "sha256": "46d25b0f808bbc9502039f4ddf2769f64876677be5a55152050f7f0548b671b2"
+    }
+  ]
+}

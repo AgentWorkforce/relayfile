@@ -677,3 +677,47 @@ func TestWritebackE2E_SchemaViolationFailsAndQuarantines(t *testing.T) {
 		t.Fatalf("expected a schema-invalid artifact under %s", conflictsDir)
 	}
 }
+
+func TestPendingOutboxPathIndexAvoidsHistoryRescanAndTracksRemoval(t *testing.T) {
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(&fakeClient{files: map[string]RemoteFile{}}, SyncerOptions{
+		WorkspaceID: "ws_outbox_path_index",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	record := outboxRecord{
+		CommandID:   "mountcmd_indexed",
+		WorkspaceID: "ws_outbox_path_index",
+		RemotePath:  "/shared/indexed.txt",
+		ContentType: "text/plain",
+		Content:     "indexed",
+		Hash:        hashBytes([]byte("indexed")),
+		Status:      outboxStatusPending,
+		FirstSeenAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if err := syncer.saveOutboxRecord(record); err != nil {
+		t.Fatalf("save indexed record: %v", err)
+	}
+	if records, err := syncer.findPendingOutboxByPath(record.RemotePath); err != nil || len(records) != 1 {
+		t.Fatalf("load path index: records=%+v err=%v", records, err)
+	}
+
+	// A corrupt unrelated history record would break a whole-directory scan.
+	// Once the startup index is loaded, a hot-path lookup must remain scoped to
+	// the edited path instead of making latency/correctness depend on history.
+	if err := os.WriteFile(filepath.Join(syncer.outboxPendingDir(), "unrelated-corrupt.json"), []byte("{"), 0o644); err != nil {
+		t.Fatalf("seed unrelated corrupt record: %v", err)
+	}
+	if records, err := syncer.findPendingOutboxByPath(record.RemotePath); err != nil || len(records) != 1 {
+		t.Fatalf("indexed lookup rescanned unrelated history: records=%+v err=%v", records, err)
+	}
+	if err := syncer.ackOutboxRecord(record, "rev_indexed", "corr_indexed"); err != nil {
+		t.Fatalf("ack indexed record: %v", err)
+	}
+	if records, err := syncer.findPendingOutboxByPath(record.RemotePath); err != nil || len(records) != 0 {
+		t.Fatalf("terminal record remained in path index: records=%+v err=%v", records, err)
+	}
+}

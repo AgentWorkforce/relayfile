@@ -1,0 +1,10 @@
+{
+  "returncode": 0,
+  "payload": {
+    "host": "e2b",
+    "canonical": "final-conflict-r1-agent-e2b-conflict",
+    "canonical_sha256": "8cee2db31e7328588132b9e4f1e3968e575ff5aa52bbfe2b8362e147a43d9b5b",
+    "artifacts": []
+  },
+  "stderr_tail": ""
+}

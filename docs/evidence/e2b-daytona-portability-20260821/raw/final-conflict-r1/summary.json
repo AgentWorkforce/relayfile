@@ -1,0 +1,19 @@
+{
+  "run_id": "release-conflict-r1",
+  "writer_hashes": [
+    "4957f642774b566202a8d5f0c872203abb01f5167f6b4ba1c048056496c3c734",
+    "6bf3f96ba5bb3c39ea1bcb33cd26f45bea90c7a52090fd7efcf850b50ffa3bb3"
+  ],
+  "canonical_hashes": [
+    "6bf3f96ba5bb3c39ea1bcb33cd26f45bea90c7a52090fd7efcf850b50ffa3bb3"
+  ],
+  "artifact_hashes": [
+    "4957f642774b566202a8d5f0c872203abb01f5167f6b4ba1c048056496c3c734"
+  ],
+  "one_barrier_release": true,
+  "writers_succeeded": true,
+  "captures_succeeded": true,
+  "canonical_converged": true,
+  "losing_bytes_preserved": true,
+  "status": "pass"
+}

@@ -1,0 +1,30 @@
+{
+  "run_id": "volatile-core-qualifying-r3",
+  "saves": 100,
+  "shape": {
+    "files": 1,
+    "bytes": 300
+  },
+  "visibility": {
+    "count": 100,
+    "p50_ms": 2.1872385000000003,
+    "p95_ms": 2.2302485,
+    "p99_ms": 3.205632500000001,
+    "max_ms": 3.356855,
+    "mean_ms": 2.16883925
+  },
+  "local_write": {
+    "count": 100,
+    "p50_ms": 0.07339,
+    "p95_ms": 0.103249,
+    "p99_ms": 0.12917620000000005,
+    "max_ms": 0.13474,
+    "mean_ms": 0.06480941
+  },
+  "gates": {
+    "all_hashes_visible": true,
+    "visibility_p95_le_9_ms": true
+  },
+  "status": "pass",
+  "scope": "controlled same-host core path; not cross-provider Internet latency"
+}

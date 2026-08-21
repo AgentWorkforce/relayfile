@@ -1,0 +1,18 @@
+{
+  "manifests_identical": true,
+  "cursors_identical": true,
+  "listeners_connected": true,
+  "canonical_identical": true,
+  "ephemeral_paths": {
+    "e2b": [],
+    "daytona": []
+  },
+  "manifest": {
+    "files": 327,
+    "bytes": 310661,
+    "manifest_sha256": "a772417caa5ab590714a787046ec324f9e72001006a4426a9bb09126ff92d1cd",
+    "ephemeral_atomic_save_paths": []
+  },
+  "cursor": "evt_1984",
+  "status": "pass"
+}

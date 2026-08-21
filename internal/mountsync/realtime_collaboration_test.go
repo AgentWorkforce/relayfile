@@ -433,6 +433,52 @@ func TestLocalChangeBatcherUsesQuietWindowAcrossStaggeredSave(t *testing.T) {
 	}
 }
 
+func TestWatcherBatchCheckpointsPrivateStateAfterVisibilityPath(t *testing.T) {
+	client := &fakeClient{files: map[string]RemoteFile{}}
+	client.bulkWriteResponseFunc = func(_ context.Context, _ string, files []BulkWriteFile) (BulkWriteResponse, error) {
+		results := make([]BulkWriteResult, 0, len(files))
+		for _, file := range files {
+			results = append(results, BulkWriteResult{Path: file.Path, Revision: "rev_checkpoint"})
+		}
+		return BulkWriteResponse{Written: len(files), Results: results}, nil
+	}
+	localDir := t.TempDir()
+	localPath := filepath.Join(localDir, "shared", "checkpoint.txt")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("mkdir local file: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte("checkpointed"), 0o644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_local_checkpoint",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	if err := syncer.HandleLocalChanges(context.Background(), []LocalChange{{
+		RelativePath: "shared/checkpoint.txt",
+		Op:           fsnotify.Create,
+	}}); err != nil {
+		t.Fatalf("handle watcher batch: %v", err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		data, readErr := os.ReadFile(syncer.stateFile)
+		if readErr == nil {
+			var state mountState
+			if json.Unmarshal(data, &state) == nil && state.Files["/shared/checkpoint.txt"].Revision == "rev_checkpoint" {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("coalesced checkpoint did not persist accepted revision to %s", syncer.stateFile)
+}
+
 func TestIncrementalMaterializationUsesBoundedParallelReads(t *testing.T) {
 	files := make(map[string]RemoteFile, 50)
 	changed := make(map[string]FilesystemEvent, 50)

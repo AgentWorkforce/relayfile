@@ -1,0 +1,15 @@
+{
+  "provider": "daytona",
+  "mount_process_stopped": true,
+  "cursor_before_stop": "evt_1978",
+  "offline_write": {
+    "path": "testdata/cross-provider/reconnect/from-e2b.txt",
+    "sha256": "9e26e2c1909c8b75313f0495fe5ff3bdc9e3222e64721d8e7a4c257f0793ba1f"
+  },
+  "mount_process_restarted": true,
+  "peer_bytes_visible": true,
+  "first_retained_observation_wait_ms": 407.188417,
+  "cursor_after_restart": "evt_1980",
+  "cursor_advanced": true,
+  "status": "pass"
+}

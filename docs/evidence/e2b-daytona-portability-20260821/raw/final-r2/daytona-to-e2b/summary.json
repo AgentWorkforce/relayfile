@@ -1,0 +1,55 @@
+{
+  "run_id": "release-r2-daytona",
+  "path_set": "release-r2-daytona",
+  "role": "daytona",
+  "receiver": "e2b",
+  "saves": 60,
+  "shapes": {
+    "small": {
+      "saves": 50,
+      "visibility": {
+        "count": 50,
+        "p50_ms": 184.040999,
+        "p95_ms": 343.9559711,
+        "p99_ms": 365.39910299999997,
+        "max_ms": 380.800097,
+        "mean_ms": 212.2237191
+      },
+      "local_write": {
+        "count": 50,
+        "p50_ms": 0.9059855,
+        "p95_ms": 2.0675894999999995,
+        "p99_ms": 8.949568579999976,
+        "max_ms": 15.022559,
+        "mean_ms": 1.30527616
+      },
+      "transport_errors": 0
+    },
+    "repo": {
+      "saves": 10,
+      "visibility": {
+        "count": 10,
+        "p50_ms": 228.6600165,
+        "p95_ms": 376.63864664999994,
+        "p99_ms": 384.19057653,
+        "max_ms": 386.078559,
+        "mean_ms": 258.7605284
+      },
+      "local_write": {
+        "count": 10,
+        "p50_ms": 4.6278775,
+        "p95_ms": 21.090843199999988,
+        "p99_ms": 24.04824464,
+        "max_ms": 24.787595,
+        "mean_ms": 7.9949668
+      },
+      "transport_errors": 0
+    }
+  },
+  "gates": {
+    "all_saves_visible": true,
+    "small_p95_le_1500_ms": true,
+    "repo_p95_le_4000_ms": true
+  },
+  "status": "pass"
+}

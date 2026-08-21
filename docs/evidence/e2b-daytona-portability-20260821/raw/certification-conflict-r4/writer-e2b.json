@@ -1,0 +1,15 @@
+{
+  "returncode": 0,
+  "payload": {
+    "run_id": "cross-provider-conflict-r4",
+    "role": "e2b",
+    "relative_path": "testdata/cross-provider/cross-provider-conflict-r4/conflict/shared.txt",
+    "content": "cross-provider-conflict-r4-agent-e2b-conflict",
+    "sha256": "e610e46c09aae6da99cc65918d491209736a7c447b3f4d525e3b1db63348ef61",
+    "barrier_released_ns": 1787347062522880872,
+    "rename_started_ns": 1787347062526545982,
+    "rename_completed_ns": 1787347062526812946,
+    "atomic_rename_ms": 0.266964
+  },
+  "stderr_tail": ""
+}
