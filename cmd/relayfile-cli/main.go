@@ -14102,8 +14102,13 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 				if err := runCycle(true); mountsync.IsBootstrapTerminalError(err) {
 					return err
 				}
-			} else if err := syncer.RefreshRealtimeState(); err != nil {
-				log.Printf("real-time state refresh failed: %v", err)
+			} else {
+				ctx, cancel := context.WithTimeout(rootCtx, timeout)
+				err := syncer.RefreshRealtimeStateWithContext(ctx)
+				cancel()
+				if err != nil {
+					log.Printf("real-time state refresh failed: %v", err)
+				}
 			}
 			if !isDegraded() && time.Since(lastSuccessAt()) >= 10*time.Minute {
 				if bs := readBootstrapStatus(localDir); bs != nil {

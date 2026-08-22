@@ -586,8 +586,13 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 				if err := run(true); err != nil {
 					return err
 				}
-			} else if err := syncer.RefreshRealtimeState(); err != nil {
-				log.Printf("real-time state refresh failed: %v", err)
+			} else {
+				ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
+				err := syncer.RefreshRealtimeStateWithContext(ctx)
+				cancel()
+				if err != nil {
+					log.Printf("real-time state refresh failed: %v", err)
+				}
 			}
 			timer.Reset(jitteredIntervalWithSample(cfg.interval, cfg.intervalJitter, rng.Float64()))
 		}

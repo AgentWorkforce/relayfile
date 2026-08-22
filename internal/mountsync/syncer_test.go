@@ -3757,9 +3757,11 @@ func TestOutboxAcksOnlyAfterWritebackOperationSucceeded(t *testing.T) {
 		Provider: "slack",
 		Status:   "succeeded",
 	}
-	forcePendingOutboxDueForTest(t, localDir)
-	if err := syncer.SyncOnce(context.Background()); err != nil {
-		t.Fatalf("sync after op success failed: %v", err)
+	// A healthy WebSocket/watcher mount skips full reconciliation. Its
+	// lightweight heartbeat must still poll this durable receipt to terminal
+	// state instead of leaving writeback-pending indefinitely.
+	if err := syncer.RefreshRealtimeStateWithContext(context.Background()); err != nil {
+		t.Fatalf("real-time heartbeat after op success failed: %v", err)
 	}
 	if client.bulkWriteCalls != 1 {
 		t.Fatalf("expected success polling to avoid re-upload, got %d bulk calls", client.bulkWriteCalls)

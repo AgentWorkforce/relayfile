@@ -4271,13 +4271,31 @@ func (s *Syncer) WebSocketConnected() bool {
 // RefreshRealtimeState updates durable and operator-visible state without an
 // O(tree) local scan. It is the healthy WebSocket/watcher mount heartbeat;
 // unhealthy real-time transports still take the ordinary polling reconcile.
+//
+// Deprecated: mount loops should use RefreshRealtimeStateWithContext so
+// provider receipt polling remains bounded by their normal cycle timeout.
 func (s *Syncer) RefreshRealtimeState() error {
+	return s.RefreshRealtimeStateWithContext(context.Background())
+}
+
+// RefreshRealtimeStateWithContext performs the lightweight real-time
+// heartbeat and settles any due durable writeback receipts. Healthy
+// WebSocket/watcher mounts skip the O(tree) reconciliation path, but accepted
+// provider operations must still be polled until they reach terminal state.
+func (s *Syncer) RefreshRealtimeStateWithContext(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.loadState(); err != nil {
 		return err
 	}
 	s.listenerHeartbeatAt = time.Now().UTC()
+	if !s.pullOnly {
+		if err := s.flushDueOutboxRecords(ctx, nil); err != nil {
+			s.markSyncError(err)
+			_ = s.saveStateWithoutLocalScan()
+			return err
+		}
+	}
 	s.markSyncSuccess()
 	return s.saveStateWithoutLocalScan()
 }
