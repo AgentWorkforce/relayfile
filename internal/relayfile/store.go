@@ -2497,11 +2497,17 @@ func (s *Store) Subscribe(workspaceID string, ch chan<- Event) func() {
 // supplied overflow channel exactly once if its event buffer fills. Once a
 // gap is observed the subscription is latched: no later event is admitted.
 // Consumers can therefore reconnect from their last contiguous event cursor
-// without accidentally advancing past the missing event.
+// without accidentally advancing past the missing event. The overflow channel
+// is producer-owned and must be empty and buffered with capacity of at least
+// one; the caller must not send to or close it. This guarantees the single
+// latched signal cannot itself be dropped.
 func (s *Store) SubscribeWithOverflow(workspaceID string, ch chan<- Event, overflow chan<- struct{}) func() {
 	workspaceID = strings.TrimSpace(workspaceID)
 	if workspaceID == "" || ch == nil {
 		return func() {}
+	}
+	if overflow != nil && (cap(overflow) < 1 || len(overflow) != 0) {
+		panic("relayfile: overflow signal channel must be empty and buffered")
 	}
 	s.subscriberMu.Lock()
 	s.subscriberCounter++
@@ -5843,10 +5849,7 @@ func (s *Store) publishEvent(workspaceID string, event Event) {
 		case subscriber.events <- event:
 		default:
 			if subscriber.overflowed.CompareAndSwap(false, true) && subscriber.overflow != nil {
-				select {
-				case subscriber.overflow <- struct{}{}:
-				default:
-				}
+				subscriber.overflow <- struct{}{}
 			}
 		}
 	}

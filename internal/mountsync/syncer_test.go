@@ -6500,10 +6500,19 @@ func TestSyncOnceUsesWebSocketForRealtimeUpdatesAndSkipsPollingWhileConnected(t 
 	if err != nil {
 		t.Fatalf("read seeded remote file failed: %v", err)
 	}
-	// Exceed nhooyr's 32 KiB default message limit so this exercises the
-	// production read limit required by Relayfile's 1 MiB inline event contract.
-	websocketContent := "# A websocket\n" + strings.Repeat("x", 64<<10)
-	writeMountsyncRemoteFile(t, api.Client(), api.URL, token, workspaceID, "/notion/Docs/A.md", remoteFile.Revision, websocketContent)
+	// Use the maximum inline file size with bytes that encoding/json expands to
+	// six-byte escapes. This exceeds 2 MiB on the wire and pins the transport
+	// limit to the server's encoded 1 MiB inline-content contract.
+	websocketContent := strings.Repeat("<", 1<<20)
+	if _, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: workspaceID,
+		Path:        "/notion/Docs/A.md",
+		IfMatch:     remoteFile.Revision,
+		ContentType: "text/markdown",
+		Content:     websocketContent,
+	}); err != nil {
+		t.Fatalf("write maximum escaped inline event: %v", err)
+	}
 	waitForLocalContent(t, filepath.Join(localDir, "Docs", "A.md"), websocketContent)
 
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)

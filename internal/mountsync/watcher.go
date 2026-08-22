@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/agentworkforce/relayfile/internal/mountscope"
@@ -183,6 +184,7 @@ type FileWatcher struct {
 	recentRenameDirs   map[string]time.Time
 	atomicDestinations map[string]bool
 	closed             bool
+	healthy            atomic.Bool
 	wg                 sync.WaitGroup
 }
 
@@ -278,9 +280,11 @@ func (fw *FileWatcher) Start(ctx context.Context) error {
 	if err := fw.addDirRecursive(fw.localDir); err != nil {
 		return err
 	}
+	fw.healthy.Store(true)
 
 	// Event loop
 	go func() {
+		defer fw.healthy.Store(false)
 		for {
 			select {
 			case <-ctx.Done():
@@ -308,7 +312,9 @@ func (fw *FileWatcher) Start(ctx context.Context) error {
 				// and any subsequent edits to files inside them silent.
 				if event.Op&fsnotify.Create != 0 {
 					if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
-						_ = fw.addDirRecursive(event.Name)
+						if err := fw.addDirRecursive(event.Name); err != nil {
+							return
+						}
 						fw.emitExistingFileEvents(event.Name)
 					}
 				}
@@ -321,12 +327,22 @@ func (fw *FileWatcher) Start(ctx context.Context) error {
 				if !ok {
 					return
 				}
-				// Log but don't crash on watcher errors
+				// Any asynchronous watcher error means event continuity can no
+				// longer be guaranteed. Mark this watcher unhealthy by exiting so
+				// the mount loop resumes its correctness-first polling reconcile.
+				return
 			}
 		}
 	}()
 
 	return nil
+}
+
+// Healthy reports whether the watcher event loop is actively preserving a
+// contiguous local-change stream. Mount loops must fall back to polling when
+// this becomes false, even if the WebSocket remains connected.
+func (fw *FileWatcher) Healthy() bool {
+	return fw != nil && fw.healthy.Load()
 }
 
 func (fw *FileWatcher) shouldSkip(rel string) bool {
@@ -572,6 +588,7 @@ func (fw *FileWatcher) isTopLevelReservedDir(path, name string) bool {
 }
 
 func (fw *FileWatcher) Close() error {
+	fw.healthy.Store(false)
 	fw.mu.Lock()
 	fw.closed = true
 	for rel, timer := range fw.debounce {

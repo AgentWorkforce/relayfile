@@ -191,12 +191,70 @@ func TestWatcherCloseCancelsPendingDebounce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create file watcher: %v", err)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := watcher.Start(ctx); err != nil {
+		t.Fatalf("start watcher: %v", err)
+	}
+	if !watcher.Healthy() {
+		t.Fatal("started watcher should report healthy")
+	}
 
 	watcher.queueChange("notes.md", fsnotify.Write)
 	if err := watcher.Close(); err != nil {
 		t.Fatalf("close watcher: %v", err)
 	}
+	if watcher.Healthy() {
+		t.Fatal("closed watcher should report unhealthy")
+	}
 	assertNoWatcherEvents(t, events, 150*time.Millisecond)
+}
+
+func TestWatcherContextCancellationMarksWatcherUnhealthy(t *testing.T) {
+	localDir := t.TempDir()
+	watcher, err := NewFileWatcher(localDir, func(string, fsnotify.Op) {})
+	if err != nil {
+		t.Fatalf("create file watcher: %v", err)
+	}
+	defer watcher.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := watcher.Start(ctx); err != nil {
+		t.Fatalf("start watcher: %v", err)
+	}
+	if !watcher.Healthy() {
+		t.Fatal("started watcher should report healthy")
+	}
+	cancel()
+	deadline := time.Now().Add(time.Second)
+	for watcher.Healthy() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if watcher.Healthy() {
+		t.Fatal("canceled watcher stayed healthy")
+	}
+}
+
+func TestWatcherBackendClosureMarksWatcherUnhealthy(t *testing.T) {
+	localDir := t.TempDir()
+	watcher, err := NewFileWatcher(localDir, func(string, fsnotify.Op) {})
+	if err != nil {
+		t.Fatalf("create file watcher: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := watcher.Start(ctx); err != nil {
+		t.Fatalf("start watcher: %v", err)
+	}
+	if err := watcher.watcher.Close(); err != nil {
+		t.Fatalf("close watcher backend: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for watcher.Healthy() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if watcher.Healthy() {
+		t.Fatal("watcher stayed healthy after backend channel closure")
+	}
 }
 
 func TestWatcherStartReturnsLimitExceededWhenDirectoryBudgetExceeded(t *testing.T) {

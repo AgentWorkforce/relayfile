@@ -16,8 +16,9 @@ import (
 
 const (
 	// maxWSReadLimit caps the maximum WebSocket message size to prevent OOM
-	// from oversized frames.
-	maxWSReadLimit = 1 << 20 // 1 MiB
+	// from oversized frames. It also accommodates a 1 MiB inline file after
+	// encoding/json's worst-case six-byte escaping plus the event envelope.
+	maxWSReadLimit = 8 << 20 // 8 MiB
 
 	// maxConsecutiveWSFailures is the maximum number of consecutive connection
 	// failures before giving up. Resets on a successful connection.

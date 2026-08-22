@@ -579,7 +579,8 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 			}
 		case <-timer.C:
 			cycle++
-			realtimeHealthy := mountReconcileUsesWebSocketCadence(cfg, watcher != nil) && syncer.WebSocketConnected()
+			watcherHealthy := watcher != nil && watcher.Healthy()
+			realtimeHealthy := mountReconcileUsesWebSocketCadence(cfg, watcherHealthy) && syncer.WebSocketConnected()
 			reconcile := shouldReconcileMountCycle(realtimeHealthy, cycle)
 			if reconcile {
 				if err := run(true); err != nil {

@@ -14023,7 +14023,8 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 	// immediately. When the platform or directory budget makes a recursive
 	// watcher unsafe, retain polling reconciliation: every poll performs the same
 	// pushLocal scan, so writebacks remain correct without descriptor fan-out.
-	watcherActive := false
+	var watcher *mountsync.FileWatcher
+	var watcherErr error
 	if !once {
 		changeBatcher := mountsync.NewLocalChangeBatcher(5*time.Millisecond, func(changes []mountsync.LocalChange) {
 			if isDegraded() {
@@ -14046,20 +14047,19 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 			}
 			writeSnapshot()
 		})
-		watcher, err := syncer.NewFileWatcher(func(relativePath string, op fsnotify.Op) {
+		watcher, watcherErr = syncer.NewFileWatcher(func(relativePath string, op fsnotify.Op) {
 			changeBatcher.Add(relativePath, op)
 		})
-		if err != nil {
+		if watcherErr != nil {
 			changeBatcher.Close()
 			syncer.EnablePollingLocalChangeDetection()
-			log.Printf("file watcher unavailable; continuing with polling reconciliation: %v", err)
+			log.Printf("file watcher unavailable; continuing with polling reconciliation: %v", watcherErr)
 		} else if err := watcher.Start(rootCtx); err != nil {
 			_ = watcher.Close()
 			changeBatcher.Close()
 			syncer.EnablePollingLocalChangeDetection()
 			log.Printf("file watcher disabled; continuing with polling reconciliation: %v", err)
 		} else {
-			watcherActive = true
 			defer watcher.Close()
 			defer changeBatcher.Close()
 		}
@@ -14096,7 +14096,7 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 			}
 		case <-timer.C:
 			cycle++
-			realtimeHealthy := websocketEnabled && watcherActive && syncer.WebSocketConnected()
+			realtimeHealthy := websocketEnabled && watcher != nil && watcher.Healthy() && syncer.WebSocketConnected()
 			reconcile := shouldReconcileMountCycle(realtimeHealthy, cycle)
 			if reconcile {
 				if err := runCycle(true); mountsync.IsBootstrapTerminalError(err) {

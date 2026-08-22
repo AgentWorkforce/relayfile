@@ -349,11 +349,30 @@ func TestStoreSubscribeSignalsOverflowAndStopsAfterFirstGap(t *testing.T) {
 	if first.Path != "/external/0.md" {
 		t.Fatalf("buffered event after overflow = %s, want first contiguous event", first.Path)
 	}
+	if _, err := store.WriteFile(WriteRequest{
+		WorkspaceID: "ws_subscribe_overflow",
+		Path:        "/external/3.md",
+		IfMatch:     "0",
+		Content:     "# 3",
+	}); err != nil {
+		t.Fatalf("post-overflow write: %v", err)
+	}
 	select {
 	case event := <-events:
 		t.Fatalf("subscriber accepted an event after the first gap: %+v", event)
 	default:
 	}
+}
+
+func TestStoreSubscribeWithOverflowRequiresBufferedSignalChannel(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	defer func() {
+		if recovered := recover(); recovered == nil {
+			t.Fatal("expected unbuffered overflow channel to panic")
+		}
+	}()
+	store.SubscribeWithOverflow("ws_unbuffered_overflow", make(chan Event, 1), make(chan struct{}))
 }
 
 func TestStoreLegacySubscribeRemainsBestEffortAfterFullBuffer(t *testing.T) {

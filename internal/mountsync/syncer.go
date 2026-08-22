@@ -72,9 +72,11 @@ const defaultBulkFlushThreshold = 256
 
 // The WebSocket server may inline file payloads up to 1 MiB. nhooyr's client
 // default is only 32 KiB, which would disconnect real-time mounts whenever a
-// larger inline event (including cursor catch-up) arrived. Leave envelope and
-// JSON-escaping headroom while retaining a finite defensive bound.
-const maxWebSocketMessageBytes int64 = 2 << 20
+// larger inline event (including cursor catch-up) arrived. A 1 MiB inline file
+// can expand to six bytes per source byte when encoding/json escapes control or
+// HTML-sensitive characters. Leave envelope headroom while retaining a finite
+// defensive bound.
+const maxWebSocketMessageBytes int64 = 8 << 20
 
 // The socket read pump is intentionally decoupled from materialization. A
 // synchronized agent fleet can emit hundreds of events in one save burst; if
