@@ -11,9 +11,17 @@ def main():
     if len(sys.argv) != 3:
         raise SystemExit("usage: mirror-manifest.py MOUNT OUTPUT")
     mount, output = map(os.path.realpath, sys.argv[1:])
+    if os.path.commonpath([mount, output]) == mount:
+        raise SystemExit("output must be outside the mount")
     files = []
-    for current, directories, names in os.walk(mount):
-        directories[:] = sorted(name for name in directories if name != ".relay")
+    def fail_walk(error):
+        raise error
+
+    for current, directories, names in os.walk(mount, onerror=fail_walk):
+        if os.path.realpath(current) == mount:
+            directories[:] = sorted(name for name in directories if name != ".relay")
+        else:
+            directories.sort()
         for name in sorted(names):
             path = os.path.join(current, name)
             if os.path.islink(path):

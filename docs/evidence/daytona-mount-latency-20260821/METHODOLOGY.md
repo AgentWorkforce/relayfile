@@ -82,11 +82,14 @@ cost and effective loop period are recorded.
 
 Sender and receiver clocks are not assumed equal. Before and after each trial
 block, an NTP-style four-timestamp exchange runs over a warmed persistent HTTPS
-connection to an in-box receiver clock endpoint. The minimum-delay observation
-from each anchor is selected and the offset is linearly interpolated to each
-trial. Residual uncertainty is at least half the minimum round-trip delay; path
-asymmetry and nonlinear clock changes between anchors remain unbounded and are
-disclosed.
+connection to an in-box receiver clock endpoint. Each anchor uses the median
+of all observed offsets, not the offset attached to one minimum-delay sample,
+and that robust offset is linearly interpolated to each trial. Every raw anchor
+reports its full offset range and median absolute deviation. Residual
+uncertainty is the largest of half the minimum round-trip delay or the distance
+from the median to either observed offset extreme, so bimodal routing regimes
+are visible and bounded rather than collapsed. HTTPS path asymmetry and
+nonlinear clock changes between anchors remain unbounded and are disclosed.
 
 Preflight rejected two alternatives before any timed edit trial: new HTTPS
 connections had a minimum 54.8 ms round trip (at least +/-27.4 ms uncertainty),

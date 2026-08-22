@@ -6,11 +6,17 @@ import os
 import sys
 
 
+def integer_median(values):
+    values = sorted(values)
+    middle = len(values) // 2
+    if len(values) % 2:
+        return values[middle]
+    return (values[middle - 1] + values[middle]) // 2
+
+
 def load_json(path):
     with open(path) as handle:
-        raw = handle.read().strip()
-    value, _ = json.JSONDecoder().raw_decode(raw)
-    return value
+        return json.loads(handle.read())
 
 
 def load_jsonl(path):
@@ -20,11 +26,19 @@ def load_jsonl(path):
 
 def anchor(path):
     samples = [row for row in load_jsonl(path) if "t0_client_ns" in row]
-    best = min(samples, key=lambda row: row["delay_ns"])
+    if not samples:
+        raise ValueError(f"clock anchor has no samples: {path}")
+    offsets = [row["offset_ns"] for row in samples]
+    delays = [row["delay_ns"] for row in samples]
+    offset = integer_median(offsets)
     return {
-        "midpoint_ns": (best["t0_client_ns"] + best["t3_client_ns"]) // 2,
-        "offset_ns": best["offset_ns"],
-        "uncertainty_ms": best["delay_ns"] / 2e6,
+        "midpoint_ns": integer_median([(row["t0_client_ns"] + row["t3_client_ns"]) // 2 for row in samples]),
+        "offset_ns": offset,
+        "uncertainty_ms": max(
+            min(delays) // 2,
+            abs(min(offsets) - offset),
+            abs(max(offsets) - offset),
+        ) / 1e6,
     }
 
 
@@ -59,11 +73,11 @@ def main():
     b_path = f"{path_root}/b.txt"
     a2b_ms, a2b_fraction = corrected_latency(a_write, b_visible, a_path, a2b_pre, a2b_post)
     b2a_ms, b2a_fraction = corrected_latency(b_write, a_visible, b_path, b2a_pre, b2a_post)
-    disjoint_hashes_correct = (
-        a_path in a_visible["first_match_ns"]
-        and a_path in b_visible["first_match_ns"]
-        and b_path in a_visible["first_match_ns"]
-        and b_path in b_visible["first_match_ns"]
+    expected_hashes = {a_path: a_write["sha256"], b_path: b_write["sha256"]}
+    disjoint_hashes_correct = all(
+        visible.get("matched_sha256", {}).get(path) == digest
+        for visible in (a_visible, b_visible)
+        for path, digest in expected_hashes.items()
     )
     disjoint_pass = (
         0 <= a2b_fraction <= 1
@@ -77,16 +91,19 @@ def main():
         read(f"{conflict_prefix}-a-outcome.json"),
         read(f"{conflict_prefix}-b-outcome.json"),
     ]
-    canonical_values = {outcome["canonical"] for outcome in outcomes}
+    canonical_values = {outcome["canonical_sha256"] for outcome in outcomes}
     canonical_on_both = len(canonical_values) == 1
     canonical = next(iter(canonical_values)) if canonical_on_both else None
-    contenders = {f"{run_id}-agent-a-conflict", f"{run_id}-agent-b-conflict"}
+    contenders = {
+        __import__("hashlib").sha256(f"{run_id}-agent-a-conflict".encode()).hexdigest(),
+        __import__("hashlib").sha256(f"{run_id}-agent-b-conflict".encode()).hexdigest(),
+    }
     losing = next(iter(contenders - {canonical}), None) if canonical in contenders else None
     losing_artifacts = [
         artifact
         for outcome in outcomes
         for artifact in outcome["artifacts"]
-        if artifact["content"] == losing
+        if artifact["sha256"] == losing
     ]
     all_artifacts = [artifact for outcome in outcomes for artifact in outcome["artifacts"]]
     loser_once = len(losing_artifacts) == 1 and len(all_artifacts) == 1

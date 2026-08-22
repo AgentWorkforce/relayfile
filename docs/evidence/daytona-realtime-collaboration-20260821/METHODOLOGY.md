@@ -50,8 +50,10 @@ a 1 ms target interval and records content size and SHA-256.
 The latency boundary is completion of the atomic save on the sender to the
 first complete, hash-correct read on the receiver. Sender and receiver
 `CLOCK_REALTIME` values are corrected with the same warmed persistent HTTPS
-four-timestamp anchors used by the baseline. Raw clock uncertainty and watcher
-scan overhead remain part of the evidence.
+four-timestamp anchors used by the baseline. Each anchor uses the median of all
+offset samples and reports the full observed offset range; uncertainty expands
+to cover both range extremes when the proxy path is bimodal. Raw clock
+uncertainty and watcher scan overhead remain part of the evidence.
 
 ## Required performance gates
 

@@ -4,6 +4,7 @@
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 
@@ -14,10 +15,15 @@ def main():
             "usage: scheduled-write.py MOUNT RELATIVE_PATH CONTENT ROLE TARGET_NS"
         )
     mount, relative_path, content, role, target_raw = sys.argv[1:]
-    if relative_path.startswith("/") or ".." in relative_path.split("/"):
+    if relative_path.startswith("/") or ".." in relative_path.replace("\\", "/").split("/"):
         raise SystemExit("relative path must stay within the mount")
+    if role in {".", ".."} or not re.fullmatch(r"[A-Za-z0-9._-]+", role):
+        raise SystemExit("unsafe role")
     target_ns = int(target_raw)
-    destination = os.path.join(mount, relative_path)
+    mount = os.path.realpath(mount)
+    destination = os.path.realpath(os.path.join(mount, relative_path))
+    if os.path.commonpath([mount, destination]) != mount:
+        raise SystemExit("relative path resolves outside the mount")
     os.makedirs(os.path.dirname(destination), exist_ok=True)
     while True:
         remaining_ns = target_ns - time.time_ns()

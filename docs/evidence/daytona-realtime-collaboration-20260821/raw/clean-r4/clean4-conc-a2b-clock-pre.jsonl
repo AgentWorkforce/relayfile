@@ -28,4 +28,4 @@
 {"sample": 28, "t0_client_ns": 1787328773409212881, "t1_server_recv_ns": 1787328773420680754, "t2_server_send_ns": 1787328773420699444, "t3_client_ns": 1787328773469592197, "delay_ns": 60360626, "offset_ns": -18712440}
 {"sample": 29, "t0_client_ns": 1787328773479700803, "t1_server_recv_ns": 1787328773491632907, "t2_server_send_ns": 1787328773491660437, "t3_client_ns": 1787328773540804741, "delay_ns": 61076408, "offset_ns": -18606100}
 {"sample": 30, "t0_client_ns": 1787328773553265818, "t1_server_recv_ns": 1787328773567435432, "t2_server_send_ns": 1787328773567447623, "t3_client_ns": 1787328773617142589, "delay_ns": 63864580, "offset_ns": -17762676}
-{"kind": "clock_offset_summary", "samples": 30, "offset_ms": 10.464787, "min_delay_ms": 36.678927, "uncertainty_ms": 18.3394635}
+{"kind": "clock_offset_summary", "samples": 30, "estimator": "median_offset", "offset_ms": -17.98677, "offset_min_ms": -19.71249, "offset_max_ms": 24.826883, "offset_mad_ms": 1.074674, "min_delay_ms": 36.678927, "uncertainty_ms": 42.813653}

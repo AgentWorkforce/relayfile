@@ -2,11 +2,11 @@
   "small_300_bytes": {
     "a_to_b": {
       "samples": 100,
-      "min_ms": 138.044928,
-      "p50_ms": 146.83635199999998,
-      "p95_ms": 182.33288959999982,
-      "p99_ms": 311.11489280000063,
-      "max_ms": 433.869824,
+      "min_ms": 159.792128,
+      "p50_ms": 167.761536,
+      "p95_ms": 205.74801919999985,
+      "p99_ms": 333.28284416000065,
+      "max_ms": 453.112064,
       "threshold_counts": {
         "lte_500_ms": 100,
         "lte_1000_ms": 100,
@@ -18,33 +18,33 @@
       "slowest": [
         {
           "correlation_id": "clean-r4-a2b-small-097",
-          "save_to_visible_ms": 433.869824
+          "save_to_visible_ms": 453.112064
         },
         {
           "correlation_id": "clean-r4-a2b-small-035",
-          "save_to_visible_ms": 309.874944
+          "save_to_visible_ms": 332.072448
         },
         {
           "correlation_id": "clean-r4-a2b-small-034",
-          "save_to_visible_ms": 260.461056
+          "save_to_visible_ms": 282.719744
         },
         {
           "correlation_id": "clean-r4-a2b-small-081",
-          "save_to_visible_ms": 244.282368
+          "save_to_visible_ms": 264.25984
         },
         {
           "correlation_id": "clean-r4-a2b-small-098",
-          "save_to_visible_ms": 242.4512
+          "save_to_visible_ms": 261.529344
         }
       ]
     },
     "b_to_a": {
       "samples": 100,
-      "min_ms": 130.671104,
-      "p50_ms": 142.9536,
-      "p95_ms": 194.30050559999992,
-      "p99_ms": 304.6029184000019,
-      "max_ms": 666.088192,
+      "min_ms": 160.837888,
+      "p50_ms": 173.092864,
+      "p95_ms": 224.32263679999994,
+      "p99_ms": 334.67093504000184,
+      "max_ms": 696.161024,
       "threshold_counts": {
         "lte_500_ms": 99,
         "lte_1000_ms": 100,
@@ -56,33 +56,33 @@
       "slowest": [
         {
           "correlation_id": "clean-r4-b2a-small-028",
-          "save_to_visible_ms": 666.088192
+          "save_to_visible_ms": 696.161024
         },
         {
           "correlation_id": "clean-r4-b2a-small-026",
-          "save_to_visible_ms": 300.951552
+          "save_to_visible_ms": 331.01952
         },
         {
           "correlation_id": "clean-r4-b2a-small-035",
-          "save_to_visible_ms": 224.616704
+          "save_to_visible_ms": 254.706688
         },
         {
           "correlation_id": "clean-r4-b2a-small-030",
-          "save_to_visible_ms": 219.082752
+          "save_to_visible_ms": 249.163008
         },
         {
           "correlation_id": "clean-r4-b2a-small-025",
-          "save_to_visible_ms": 216.608512
+          "save_to_visible_ms": 246.674176
         }
       ]
     },
     "pooled": {
       "samples": 200,
-      "min_ms": 130.671104,
-      "p50_ms": 145.429376,
-      "p95_ms": 194.3005055999996,
-      "p99_ms": 311.1148927999989,
-      "max_ms": 666.088192,
+      "min_ms": 159.792128,
+      "p50_ms": 170.060288,
+      "p95_ms": 224.32263679999963,
+      "p99_ms": 333.28284415999894,
+      "max_ms": 696.161024,
       "threshold_counts": {
         "lte_500_ms": 199,
         "lte_1000_ms": 200,
@@ -94,23 +94,23 @@
       "slowest": [
         {
           "correlation_id": "clean-r4-b2a-small-028",
-          "save_to_visible_ms": 666.088192
+          "save_to_visible_ms": 696.161024
         },
         {
           "correlation_id": "clean-r4-a2b-small-097",
-          "save_to_visible_ms": 433.869824
+          "save_to_visible_ms": 453.112064
         },
         {
           "correlation_id": "clean-r4-a2b-small-035",
-          "save_to_visible_ms": 309.874944
+          "save_to_visible_ms": 332.072448
         },
         {
           "correlation_id": "clean-r4-b2a-small-026",
-          "save_to_visible_ms": 300.951552
+          "save_to_visible_ms": 331.01952
         },
         {
           "correlation_id": "clean-r4-a2b-small-034",
-          "save_to_visible_ms": 260.461056
+          "save_to_visible_ms": 282.719744
         }
       ]
     }
@@ -118,13 +118,13 @@
   "repo_save_11_files_13992_bytes": {
     "a_to_b": {
       "samples": 30,
-      "min_ms": 195.90016,
-      "p50_ms": 352.46553600000004,
-      "p95_ms": 654.7349119999997,
-      "p99_ms": 1001.6549324800004,
-      "max_ms": 1116.155136,
+      "min_ms": 213.213184,
+      "p50_ms": 369.37152000000003,
+      "p95_ms": 670.1558015999996,
+      "p99_ms": 1018.9584307200004,
+      "max_ms": 1134.07104,
       "threshold_counts": {
-        "lte_500_ms": 23,
+        "lte_500_ms": 22,
         "lte_1000_ms": 29,
         "lte_2000_ms": 30,
         "lte_10000_ms": 30,
@@ -134,33 +134,33 @@
       "slowest": [
         {
           "correlation_id": "clean-r4-a2b-repo-007",
-          "save_to_visible_ms": 1116.155136
+          "save_to_visible_ms": 1134.07104
         },
         {
           "correlation_id": "clean-r4-a2b-repo-020",
-          "save_to_visible_ms": 721.326848
+          "save_to_visible_ms": 737.131008
         },
         {
           "correlation_id": "clean-r4-a2b-repo-025",
-          "save_to_visible_ms": 573.344768
+          "save_to_visible_ms": 588.297216
         },
         {
           "correlation_id": "clean-r4-a2b-repo-030",
-          "save_to_visible_ms": 561.360128
+          "save_to_visible_ms": 575.426048
         },
         {
           "correlation_id": "clean-r4-a2b-repo-028",
-          "save_to_visible_ms": 515.977472
+          "save_to_visible_ms": 530.399488
         }
       ]
     },
     "b_to_a": {
       "samples": 30,
-      "min_ms": 232.032768,
-      "p50_ms": 484.068608,
-      "p95_ms": 771.299072,
-      "p99_ms": 805.1424076800001,
-      "max_ms": 815.598592,
+      "min_ms": 262.320896,
+      "p50_ms": 514.36032,
+      "p95_ms": 801.6976639999999,
+      "p99_ms": 835.53674752,
+      "max_ms": 845.997312,
       "threshold_counts": {
         "lte_500_ms": 15,
         "lte_1000_ms": 30,
@@ -172,35 +172,35 @@
       "slowest": [
         {
           "correlation_id": "clean-r4-b2a-repo-027",
-          "save_to_visible_ms": 815.598592
+          "save_to_visible_ms": 845.997312
         },
         {
           "correlation_id": "clean-r4-b2a-repo-025",
-          "save_to_visible_ms": 779.542784
+          "save_to_visible_ms": 809.9264
         },
         {
           "correlation_id": "clean-r4-b2a-repo-029",
-          "save_to_visible_ms": 761.223424
+          "save_to_visible_ms": 791.64032
         },
         {
           "correlation_id": "clean-r4-b2a-repo-019",
-          "save_to_visible_ms": 741.16992
+          "save_to_visible_ms": 771.5072
         },
         {
           "correlation_id": "clean-r4-b2a-repo-028",
-          "save_to_visible_ms": 729.674496
+          "save_to_visible_ms": 760.082176
         }
       ]
     },
     "pooled": {
       "samples": 60,
-      "min_ms": 195.90016,
-      "p50_ms": 439.984128,
-      "p95_ms": 762.1393919999999,
-      "p99_ms": 938.8267750399991,
-      "max_ms": 1116.155136,
+      "min_ms": 213.213184,
+      "p50_ms": 467.88390400000003,
+      "p95_ms": 792.5546239999999,
+      "p99_ms": 964.107540479999,
+      "max_ms": 1134.07104,
       "threshold_counts": {
-        "lte_500_ms": 38,
+        "lte_500_ms": 37,
         "lte_1000_ms": 59,
         "lte_2000_ms": 60,
         "lte_10000_ms": 60,
@@ -210,23 +210,23 @@
       "slowest": [
         {
           "correlation_id": "clean-r4-a2b-repo-007",
-          "save_to_visible_ms": 1116.155136
+          "save_to_visible_ms": 1134.07104
         },
         {
           "correlation_id": "clean-r4-b2a-repo-027",
-          "save_to_visible_ms": 815.598592
+          "save_to_visible_ms": 845.997312
         },
         {
           "correlation_id": "clean-r4-b2a-repo-025",
-          "save_to_visible_ms": 779.542784
+          "save_to_visible_ms": 809.9264
         },
         {
           "correlation_id": "clean-r4-b2a-repo-029",
-          "save_to_visible_ms": 761.223424
+          "save_to_visible_ms": 791.64032
         },
         {
           "correlation_id": "clean-r4-b2a-repo-019",
-          "save_to_visible_ms": 741.16992
+          "save_to_visible_ms": 771.5072
         }
       ]
     }

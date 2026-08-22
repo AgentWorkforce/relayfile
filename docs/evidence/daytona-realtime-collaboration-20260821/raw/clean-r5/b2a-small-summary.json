@@ -8,30 +8,30 @@
   "trials_clock_negative": 0,
   "trials_extrapolated": [],
   "clock": {
-    "offset_pre_ms": 10.933068,
-    "offset_post_ms": 14.327526,
-    "drift_ms": 3.394458,
+    "offset_pre_ms": -18.132888,
+    "offset_post_ms": -18.268951,
+    "drift_ms": -0.136063,
     "pre_min_rtt_ms": 35.765956,
     "post_min_rtt_ms": 44.77284,
     "anchor_uncertainty_ms": [
-      17.882978,
-      22.38642
+      31.991118,
+      32.596477
     ],
     "model_error": "HTTPS path asymmetry and nonlinear clock change between anchors are unbounded"
   },
   "save_to_visible_ms": {
-    "min": 128.900608,
-    "p50": 143.595392,
-    "p95": 172.1337728,
-    "p99": 179.60641280000036,
-    "max": 252.9152
+    "min": 160.027904,
+    "p50": 174.724608,
+    "p95": 203.5273344,
+    "p99": 210.73898752000036,
+    "max": 283.88608
   },
   "write_start_to_visible_ms": {
-    "min": 129.441792,
-    "p50": 144.61260800000002,
-    "p95": 175.4166912,
-    "p99": 182.31542272000038,
-    "max": 253.801216
+    "min": 160.569088,
+    "p50": 176.031104,
+    "p95": 206.4447232,
+    "p99": 213.78101760000038,
+    "max": 284.772096
   },
   "local_write_ms": {
     "min": 0.323821,
@@ -49,800 +49,800 @@
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.885964,
-      "save_to_visible_ms": 252.9152,
-      "write_start_to_visible_ms": 253.801216
+      "save_to_visible_ms": 283.88608,
+      "write_start_to_visible_ms": 284.772096
     },
     {
       "correlation_id": "clean-r5-b2a-small-002",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.770523,
-      "save_to_visible_ms": 165.79968,
-      "write_start_to_visible_ms": 166.57024
+      "save_to_visible_ms": 196.780544,
+      "write_start_to_visible_ms": 197.551104
     },
     {
       "correlation_id": "clean-r5-b2a-small-003",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.323821,
-      "save_to_visible_ms": 163.023104,
-      "write_start_to_visible_ms": 163.346944
+      "save_to_visible_ms": 194.011904,
+      "write_start_to_visible_ms": 194.335744
     },
     {
       "correlation_id": "clean-r5-b2a-small-004",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.600612,
-      "save_to_visible_ms": 171.892224,
-      "write_start_to_visible_ms": 172.4928
+      "save_to_visible_ms": 202.888192,
+      "write_start_to_visible_ms": 203.488768
     },
     {
       "correlation_id": "clean-r5-b2a-small-005",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.682143,
-      "save_to_visible_ms": 168.652544,
-      "write_start_to_visible_ms": 169.334784
+      "save_to_visible_ms": 199.655168,
+      "write_start_to_visible_ms": 200.337408
     },
     {
       "correlation_id": "clean-r5-b2a-small-006",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.706823,
-      "save_to_visible_ms": 150.360064,
-      "write_start_to_visible_ms": 151.06688
+      "save_to_visible_ms": 181.369856,
+      "write_start_to_visible_ms": 182.076672
     },
     {
       "correlation_id": "clean-r5-b2a-small-007",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 6.019586,
-      "save_to_visible_ms": 169.388544,
-      "write_start_to_visible_ms": 175.408128
+      "save_to_visible_ms": 200.403968,
+      "write_start_to_visible_ms": 206.423552
     },
     {
       "correlation_id": "clean-r5-b2a-small-008",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.880784,
-      "save_to_visible_ms": 143.662336,
-      "write_start_to_visible_ms": 144.542976
+      "save_to_visible_ms": 174.684928,
+      "write_start_to_visible_ms": 175.565568
     },
     {
       "correlation_id": "clean-r5-b2a-small-009",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.610712,
-      "save_to_visible_ms": 140.162816,
-      "write_start_to_visible_ms": 140.773376
+      "save_to_visible_ms": 171.190784,
+      "write_start_to_visible_ms": 171.801344
     },
     {
       "correlation_id": "clean-r5-b2a-small-010",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.814083,
-      "save_to_visible_ms": 143.528448,
-      "write_start_to_visible_ms": 144.342528
+      "save_to_visible_ms": 174.563328,
+      "write_start_to_visible_ms": 175.377408
     },
     {
       "correlation_id": "clean-r5-b2a-small-011",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.535482,
-      "save_to_visible_ms": 163.122176,
-      "write_start_to_visible_ms": 163.657728
+      "save_to_visible_ms": 194.162176,
+      "write_start_to_visible_ms": 194.697728
     },
     {
       "correlation_id": "clean-r5-b2a-small-012",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.530752,
-      "save_to_visible_ms": 151.22816,
-      "write_start_to_visible_ms": 151.758848
+      "save_to_visible_ms": 182.275584,
+      "write_start_to_visible_ms": 182.806272
     },
     {
       "correlation_id": "clean-r5-b2a-small-013",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.839324,
-      "save_to_visible_ms": 149.42464,
-      "write_start_to_visible_ms": 150.264064
+      "save_to_visible_ms": 180.47872,
+      "write_start_to_visible_ms": 181.318144
     },
     {
       "correlation_id": "clean-r5-b2a-small-014",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.810183,
-      "save_to_visible_ms": 139.648,
-      "write_start_to_visible_ms": 140.457984
+      "save_to_visible_ms": 170.7072,
+      "write_start_to_visible_ms": 171.517184
     },
     {
       "correlation_id": "clean-r5-b2a-small-015",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.759984,
-      "save_to_visible_ms": 137.846016,
-      "write_start_to_visible_ms": 138.605824
+      "save_to_visible_ms": 168.91264,
+      "write_start_to_visible_ms": 169.672448
     },
     {
       "correlation_id": "clean-r5-b2a-small-016",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.880954,
-      "save_to_visible_ms": 135.503872,
-      "write_start_to_visible_ms": 136.384768
+      "save_to_visible_ms": 166.577408,
+      "write_start_to_visible_ms": 167.458304
     },
     {
       "correlation_id": "clean-r5-b2a-small-017",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.553832,
-      "save_to_visible_ms": 140.018944,
-      "write_start_to_visible_ms": 140.572672
+      "save_to_visible_ms": 171.099904,
+      "write_start_to_visible_ms": 171.653632
     },
     {
       "correlation_id": "clean-r5-b2a-small-018",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.510272,
-      "save_to_visible_ms": 130.328832,
-      "write_start_to_visible_ms": 130.83904
+      "save_to_visible_ms": 161.416192,
+      "write_start_to_visible_ms": 161.9264
     },
     {
       "correlation_id": "clean-r5-b2a-small-019",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.705703,
-      "save_to_visible_ms": 158.818304,
-      "write_start_to_visible_ms": 159.524096
+      "save_to_visible_ms": 189.91232,
+      "write_start_to_visible_ms": 190.618112
     },
     {
       "correlation_id": "clean-r5-b2a-small-020",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.745443,
-      "save_to_visible_ms": 147.846656,
-      "write_start_to_visible_ms": 148.592128
+      "save_to_visible_ms": 178.947328,
+      "write_start_to_visible_ms": 179.6928
     },
     {
       "correlation_id": "clean-r5-b2a-small-021",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.496992,
-      "save_to_visible_ms": 167.848704,
-      "write_start_to_visible_ms": 168.3456
+      "save_to_visible_ms": 198.954752,
+      "write_start_to_visible_ms": 199.451648
     },
     {
       "correlation_id": "clean-r5-b2a-small-022",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.686563,
-      "save_to_visible_ms": 161.4144,
-      "write_start_to_visible_ms": 162.100992
+      "save_to_visible_ms": 192.526848,
+      "write_start_to_visible_ms": 193.21344
     },
     {
       "correlation_id": "clean-r5-b2a-small-023",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.382441,
-      "save_to_visible_ms": 169.47328,
-      "write_start_to_visible_ms": 169.855744
+      "save_to_visible_ms": 200.593408,
+      "write_start_to_visible_ms": 200.975872
     },
     {
       "correlation_id": "clean-r5-b2a-small-024",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.541242,
-      "save_to_visible_ms": 128.900608,
-      "write_start_to_visible_ms": 129.441792
+      "save_to_visible_ms": 160.027904,
+      "write_start_to_visible_ms": 160.569088
     },
     {
       "correlation_id": "clean-r5-b2a-small-025",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.844563,
-      "save_to_visible_ms": 178.86592,
-      "write_start_to_visible_ms": 179.710464
+      "save_to_visible_ms": 210.000128,
+      "write_start_to_visible_ms": 210.844672
     },
     {
       "correlation_id": "clean-r5-b2a-small-026",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.579743,
-      "save_to_visible_ms": 136.52608,
-      "write_start_to_visible_ms": 137.10592
+      "save_to_visible_ms": 167.667456,
+      "write_start_to_visible_ms": 168.247296
     },
     {
       "correlation_id": "clean-r5-b2a-small-027",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.755323,
-      "save_to_visible_ms": 168.463104,
-      "write_start_to_visible_ms": 169.218304
+      "save_to_visible_ms": 199.61088,
+      "write_start_to_visible_ms": 200.36608
     },
     {
       "correlation_id": "clean-r5-b2a-small-028",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.571093,
-      "save_to_visible_ms": 153.700864,
-      "write_start_to_visible_ms": 154.272
+      "save_to_visible_ms": 184.855296,
+      "write_start_to_visible_ms": 185.426432
     },
     {
       "correlation_id": "clean-r5-b2a-small-029",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.465492,
-      "save_to_visible_ms": 169.103616,
-      "write_start_to_visible_ms": 169.569024
+      "save_to_visible_ms": 200.26496,
+      "write_start_to_visible_ms": 200.730368
     },
     {
       "correlation_id": "clean-r5-b2a-small-030",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.610952,
-      "save_to_visible_ms": 169.710848,
-      "write_start_to_visible_ms": 170.32192
+      "save_to_visible_ms": 200.878592,
+      "write_start_to_visible_ms": 201.489664
     },
     {
       "correlation_id": "clean-r5-b2a-small-031",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.660443,
-      "save_to_visible_ms": 137.4208,
-      "write_start_to_visible_ms": 138.08128
+      "save_to_visible_ms": 168.59648,
+      "write_start_to_visible_ms": 169.25696
     },
     {
       "correlation_id": "clean-r5-b2a-small-032",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.856374,
-      "save_to_visible_ms": 135.547136,
-      "write_start_to_visible_ms": 136.403456
+      "save_to_visible_ms": 166.728192,
+      "write_start_to_visible_ms": 167.584512
     },
     {
       "correlation_id": "clean-r5-b2a-small-033",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.637853,
-      "save_to_visible_ms": 165.021696,
-      "write_start_to_visible_ms": 165.659392
+      "save_to_visible_ms": 196.20864,
+      "write_start_to_visible_ms": 196.846336
     },
     {
       "correlation_id": "clean-r5-b2a-small-034",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.938264,
-      "save_to_visible_ms": 167.080192,
-      "write_start_to_visible_ms": 168.018432
+      "save_to_visible_ms": 198.273792,
+      "write_start_to_visible_ms": 199.212032
     },
     {
       "correlation_id": "clean-r5-b2a-small-035",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 1.397566,
-      "save_to_visible_ms": 139.010816,
-      "write_start_to_visible_ms": 140.40832
+      "save_to_visible_ms": 170.21184,
+      "write_start_to_visible_ms": 171.609344
     },
     {
       "correlation_id": "clean-r5-b2a-small-036",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.725923,
-      "save_to_visible_ms": 140.065536,
-      "write_start_to_visible_ms": 140.791552
+      "save_to_visible_ms": 171.27296,
+      "write_start_to_visible_ms": 171.998976
     },
     {
       "correlation_id": "clean-r5-b2a-small-037",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.590923,
-      "save_to_visible_ms": 155.95008,
-      "write_start_to_visible_ms": 156.540928
+      "save_to_visible_ms": 187.163904,
+      "write_start_to_visible_ms": 187.754752
     },
     {
       "correlation_id": "clean-r5-b2a-small-038",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.670993,
-      "save_to_visible_ms": 148.98048,
-      "write_start_to_visible_ms": 149.651456
+      "save_to_visible_ms": 180.20096,
+      "write_start_to_visible_ms": 180.871936
     },
     {
       "correlation_id": "clean-r5-b2a-small-039",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.430812,
-      "save_to_visible_ms": 145.971712,
-      "write_start_to_visible_ms": 146.40256
+      "save_to_visible_ms": 177.198848,
+      "write_start_to_visible_ms": 177.629696
     },
     {
       "correlation_id": "clean-r5-b2a-small-040",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.766763,
-      "save_to_visible_ms": 135.362816,
-      "write_start_to_visible_ms": 136.129536
+      "save_to_visible_ms": 166.596352,
+      "write_start_to_visible_ms": 167.363072
     },
     {
       "correlation_id": "clean-r5-b2a-small-041",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 1.142015,
-      "save_to_visible_ms": 139.272448,
-      "write_start_to_visible_ms": 140.414464
+      "save_to_visible_ms": 170.51264,
+      "write_start_to_visible_ms": 171.654656
     },
     {
       "correlation_id": "clean-r5-b2a-small-042",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 1.321926,
-      "save_to_visible_ms": 142.024448,
-      "write_start_to_visible_ms": 143.346432
+      "save_to_visible_ms": 173.271296,
+      "write_start_to_visible_ms": 174.59328
     },
     {
       "correlation_id": "clean-r5-b2a-small-043",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.756033,
-      "save_to_visible_ms": 168.448512,
-      "write_start_to_visible_ms": 169.20448
+      "save_to_visible_ms": 199.702272,
+      "write_start_to_visible_ms": 200.45824
     },
     {
       "correlation_id": "clean-r5-b2a-small-044",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.907164,
-      "save_to_visible_ms": 146.369536,
-      "write_start_to_visible_ms": 147.276544
+      "save_to_visible_ms": 177.631488,
+      "write_start_to_visible_ms": 178.538496
     },
     {
       "correlation_id": "clean-r5-b2a-small-045",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.646263,
-      "save_to_visible_ms": 174.933248,
-      "write_start_to_visible_ms": 175.579392
+      "save_to_visible_ms": 206.200832,
+      "write_start_to_visible_ms": 206.846976
     },
     {
       "correlation_id": "clean-r5-b2a-small-046",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.906194,
-      "save_to_visible_ms": 144.715776,
-      "write_start_to_visible_ms": 145.622016
+      "save_to_visible_ms": 175.99104,
+      "write_start_to_visible_ms": 176.89728
     },
     {
       "correlation_id": "clean-r5-b2a-small-047",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 2.726322,
-      "save_to_visible_ms": 143.481344,
-      "write_start_to_visible_ms": 146.207488
+      "save_to_visible_ms": 174.764288,
+      "write_start_to_visible_ms": 177.490432
     },
     {
       "correlation_id": "clean-r5-b2a-small-048",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 8.745268,
-      "save_to_visible_ms": 145.744128,
-      "write_start_to_visible_ms": 154.4896
+      "save_to_visible_ms": 177.033472,
+      "write_start_to_visible_ms": 185.778944
     },
     {
       "correlation_id": "clean-r5-b2a-small-049",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.562952,
-      "save_to_visible_ms": 144.433408,
-      "write_start_to_visible_ms": 144.996352
+      "save_to_visible_ms": 175.729664,
+      "write_start_to_visible_ms": 176.292608
     },
     {
       "correlation_id": "clean-r5-b2a-small-050",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.516812,
-      "save_to_visible_ms": 163.878144,
-      "write_start_to_visible_ms": 164.395008
+      "save_to_visible_ms": 195.1808,
+      "write_start_to_visible_ms": 195.697664
     },
     {
       "correlation_id": "clean-r5-b2a-small-051",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.355842,
-      "save_to_visible_ms": 157.11104,
-      "write_start_to_visible_ms": 157.46688
+      "save_to_visible_ms": 188.420352,
+      "write_start_to_visible_ms": 188.776192
     },
     {
       "correlation_id": "clean-r5-b2a-small-052",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.371922,
-      "save_to_visible_ms": 138.957056,
-      "write_start_to_visible_ms": 139.329024
+      "save_to_visible_ms": 170.27328,
+      "write_start_to_visible_ms": 170.645248
     },
     {
       "correlation_id": "clean-r5-b2a-small-053",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 1.671887,
-      "save_to_visible_ms": 140.931072,
-      "write_start_to_visible_ms": 142.602752
+      "save_to_visible_ms": 172.253952,
+      "write_start_to_visible_ms": 173.925632
     },
     {
       "correlation_id": "clean-r5-b2a-small-054",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.763724,
-      "save_to_visible_ms": 146.195456,
-      "write_start_to_visible_ms": 146.959104
+      "save_to_visible_ms": 177.524736,
+      "write_start_to_visible_ms": 178.288384
     },
     {
       "correlation_id": "clean-r5-b2a-small-055",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 2.758162,
-      "save_to_visible_ms": 140.44544,
-      "write_start_to_visible_ms": 143.203584
+      "save_to_visible_ms": 171.781632,
+      "write_start_to_visible_ms": 174.539776
     },
     {
       "correlation_id": "clean-r5-b2a-small-056",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 3.745326,
-      "save_to_visible_ms": 146.601984,
-      "write_start_to_visible_ms": 150.347264
+      "save_to_visible_ms": 177.943296,
+      "write_start_to_visible_ms": 181.688576
     },
     {
       "correlation_id": "clean-r5-b2a-small-057",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 1.384646,
-      "save_to_visible_ms": 138.640896,
-      "write_start_to_visible_ms": 140.0256
+      "save_to_visible_ms": 169.98912,
+      "write_start_to_visible_ms": 171.373824
     },
     {
       "correlation_id": "clean-r5-b2a-small-058",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 1.057494,
-      "save_to_visible_ms": 131.1936,
-      "write_start_to_visible_ms": 132.251136
+      "save_to_visible_ms": 162.548224,
+      "write_start_to_visible_ms": 163.60576
     },
     {
       "correlation_id": "clean-r5-b2a-small-059",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.510893,
-      "save_to_visible_ms": 141.90464,
-      "write_start_to_visible_ms": 142.415616
+      "save_to_visible_ms": 173.265664,
+      "write_start_to_visible_ms": 173.77664
     },
     {
       "correlation_id": "clean-r5-b2a-small-060",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.645633,
-      "save_to_visible_ms": 132.249856,
-      "write_start_to_visible_ms": 132.895488
+      "save_to_visible_ms": 163.617536,
+      "write_start_to_visible_ms": 164.263168
     },
     {
       "correlation_id": "clean-r5-b2a-small-061",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 1.920629,
-      "save_to_visible_ms": 161.447168,
-      "write_start_to_visible_ms": 163.36768
+      "save_to_visible_ms": 192.820992,
+      "write_start_to_visible_ms": 194.741504
     },
     {
       "correlation_id": "clean-r5-b2a-small-062",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.507383,
-      "save_to_visible_ms": 131.836416,
-      "write_start_to_visible_ms": 132.343808
+      "save_to_visible_ms": 163.217152,
+      "write_start_to_visible_ms": 163.724544
     },
     {
       "correlation_id": "clean-r5-b2a-small-063",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.922444,
-      "save_to_visible_ms": 135.889408,
-      "write_start_to_visible_ms": 136.811776
+      "save_to_visible_ms": 167.274752,
+      "write_start_to_visible_ms": 168.19712
     },
     {
       "correlation_id": "clean-r5-b2a-small-064",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.561092,
-      "save_to_visible_ms": 164.484608,
-      "write_start_to_visible_ms": 165.04576
+      "save_to_visible_ms": 195.876864,
+      "write_start_to_visible_ms": 196.438016
     },
     {
       "correlation_id": "clean-r5-b2a-small-065",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.674493,
-      "save_to_visible_ms": 171.986432,
-      "write_start_to_visible_ms": 172.660992
+      "save_to_visible_ms": 203.386624,
+      "write_start_to_visible_ms": 204.061184
     },
     {
       "correlation_id": "clean-r5-b2a-small-066",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.659153,
-      "save_to_visible_ms": 176.961536,
-      "write_start_to_visible_ms": 177.620736
+      "save_to_visible_ms": 208.368896,
+      "write_start_to_visible_ms": 209.028096
     },
     {
       "correlation_id": "clean-r5-b2a-small-067",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.724284,
-      "save_to_visible_ms": 143.101952,
-      "write_start_to_visible_ms": 143.826176
+      "save_to_visible_ms": 174.515968,
+      "write_start_to_visible_ms": 175.240192
     },
     {
       "correlation_id": "clean-r5-b2a-small-068",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.588393,
-      "save_to_visible_ms": 151.012608,
-      "write_start_to_visible_ms": 151.601152
+      "save_to_visible_ms": 182.433536,
+      "write_start_to_visible_ms": 183.02208
     },
     {
       "correlation_id": "clean-r5-b2a-small-069",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.722943,
-      "save_to_visible_ms": 138.15424,
-      "write_start_to_visible_ms": 138.877184
+      "save_to_visible_ms": 169.581824,
+      "write_start_to_visible_ms": 170.304768
     },
     {
       "correlation_id": "clean-r5-b2a-small-070",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.588523,
-      "save_to_visible_ms": 145.68192,
-      "write_start_to_visible_ms": 146.270464
+      "save_to_visible_ms": 177.114624,
+      "write_start_to_visible_ms": 177.703168
     },
     {
       "correlation_id": "clean-r5-b2a-small-071",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.531702,
-      "save_to_visible_ms": 151.729664,
-      "write_start_to_visible_ms": 152.261376
+      "save_to_visible_ms": 183.16928,
+      "write_start_to_visible_ms": 183.700992
     },
     {
       "correlation_id": "clean-r5-b2a-small-072",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.656793,
-      "save_to_visible_ms": 138.066688,
-      "write_start_to_visible_ms": 138.723328
+      "save_to_visible_ms": 169.513216,
+      "write_start_to_visible_ms": 170.169856
     },
     {
       "correlation_id": "clean-r5-b2a-small-073",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.443282,
-      "save_to_visible_ms": 140.576256,
-      "write_start_to_visible_ms": 141.019648
+      "save_to_visible_ms": 172.02944,
+      "write_start_to_visible_ms": 172.472832
     },
     {
       "correlation_id": "clean-r5-b2a-small-074",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.884563,
-      "save_to_visible_ms": 142.786048,
-      "write_start_to_visible_ms": 143.670528
+      "save_to_visible_ms": 174.245632,
+      "write_start_to_visible_ms": 175.130112
     },
     {
       "correlation_id": "clean-r5-b2a-small-075",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.819763,
-      "save_to_visible_ms": 137.993216,
-      "write_start_to_visible_ms": 138.813184
+      "save_to_visible_ms": 169.458688,
+      "write_start_to_visible_ms": 170.278656
     },
     {
       "correlation_id": "clean-r5-b2a-small-076",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 4.121658,
-      "save_to_visible_ms": 177.471744,
-      "write_start_to_visible_ms": 181.593344
+      "save_to_visible_ms": 208.942336,
+      "write_start_to_visible_ms": 213.063936
     },
     {
       "correlation_id": "clean-r5-b2a-small-077",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.519712,
-      "save_to_visible_ms": 140.231424,
-      "write_start_to_visible_ms": 140.751104
+      "save_to_visible_ms": 171.708416,
+      "write_start_to_visible_ms": 172.228096
     },
     {
       "correlation_id": "clean-r5-b2a-small-078",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.683763,
-      "save_to_visible_ms": 139.77856,
-      "write_start_to_visible_ms": 140.462336
+      "save_to_visible_ms": 171.261952,
+      "write_start_to_visible_ms": 171.945728
     },
     {
       "correlation_id": "clean-r5-b2a-small-079",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.599962,
-      "save_to_visible_ms": 136.667392,
-      "write_start_to_visible_ms": 137.267456
+      "save_to_visible_ms": 168.15744,
+      "write_start_to_visible_ms": 168.757504
     },
     {
       "correlation_id": "clean-r5-b2a-small-080",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.697583,
-      "save_to_visible_ms": 140.644864,
-      "write_start_to_visible_ms": 141.342464
+      "save_to_visible_ms": 172.140032,
+      "write_start_to_visible_ms": 172.837632
     },
     {
       "correlation_id": "clean-r5-b2a-small-081",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.679083,
-      "save_to_visible_ms": 145.33248,
-      "write_start_to_visible_ms": 146.011648
+      "save_to_visible_ms": 176.834304,
+      "write_start_to_visible_ms": 177.513472
     },
     {
       "correlation_id": "clean-r5-b2a-small-082",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.839234,
-      "save_to_visible_ms": 149.819648,
-      "write_start_to_visible_ms": 150.659072
+      "save_to_visible_ms": 181.327872,
+      "write_start_to_visible_ms": 182.167296
     },
     {
       "correlation_id": "clean-r5-b2a-small-083",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.855453,
-      "save_to_visible_ms": 137.830656,
-      "write_start_to_visible_ms": 138.686208
+      "save_to_visible_ms": 169.344512,
+      "write_start_to_visible_ms": 170.200064
     },
     {
       "correlation_id": "clean-r5-b2a-small-084",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 2.646141,
-      "save_to_visible_ms": 137.85216,
-      "write_start_to_visible_ms": 140.498176
+      "save_to_visible_ms": 169.372672,
+      "write_start_to_visible_ms": 172.018688
     },
     {
       "correlation_id": "clean-r5-b2a-small-085",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.513132,
-      "save_to_visible_ms": 140.808704,
-      "write_start_to_visible_ms": 141.321728
+      "save_to_visible_ms": 172.335616,
+      "write_start_to_visible_ms": 172.84864
     },
     {
       "correlation_id": "clean-r5-b2a-small-086",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 1.932648,
-      "save_to_visible_ms": 160.97024,
-      "write_start_to_visible_ms": 162.902784
+      "save_to_visible_ms": 192.503808,
+      "write_start_to_visible_ms": 194.436352
     },
     {
       "correlation_id": "clean-r5-b2a-small-087",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.484072,
-      "save_to_visible_ms": 144.198144,
-      "write_start_to_visible_ms": 144.68224
+      "save_to_visible_ms": 175.738368,
+      "write_start_to_visible_ms": 176.222464
     },
     {
       "correlation_id": "clean-r5-b2a-small-088",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.660123,
-      "save_to_visible_ms": 138.49216,
-      "write_start_to_visible_ms": 139.152384
+      "save_to_visible_ms": 170.037248,
+      "write_start_to_visible_ms": 170.697472
     },
     {
       "correlation_id": "clean-r5-b2a-small-089",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.733823,
-      "save_to_visible_ms": 140.588032,
-      "write_start_to_visible_ms": 141.321984
+      "save_to_visible_ms": 172.13952,
+      "write_start_to_visible_ms": 172.873472
     },
     {
       "correlation_id": "clean-r5-b2a-small-090",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 1.084454,
-      "save_to_visible_ms": 136.725248,
-      "write_start_to_visible_ms": 137.80992
+      "save_to_visible_ms": 168.283136,
+      "write_start_to_visible_ms": 169.367808
     },
     {
       "correlation_id": "clean-r5-b2a-small-091",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 1.107464,
-      "save_to_visible_ms": 139.74272,
-      "write_start_to_visible_ms": 140.850176
+      "save_to_visible_ms": 171.30752,
+      "write_start_to_visible_ms": 172.414976
     },
     {
       "correlation_id": "clean-r5-b2a-small-092",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.711693,
-      "save_to_visible_ms": 140.327424,
-      "write_start_to_visible_ms": 141.039104
+      "save_to_visible_ms": 171.898624,
+      "write_start_to_visible_ms": 172.610304
     },
     {
       "correlation_id": "clean-r5-b2a-small-093",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 10.143373,
-      "save_to_visible_ms": 134.118656,
-      "write_start_to_visible_ms": 144.262144
+      "save_to_visible_ms": 165.696256,
+      "write_start_to_visible_ms": 175.839744
     },
     {
       "correlation_id": "clean-r5-b2a-small-094",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 2.138739,
-      "save_to_visible_ms": 140.002048,
-      "write_start_to_visible_ms": 142.140672
+      "save_to_visible_ms": 171.58656,
+      "write_start_to_visible_ms": 173.725184
     },
     {
       "correlation_id": "clean-r5-b2a-small-095",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.668443,
-      "save_to_visible_ms": 149.61664,
-      "write_start_to_visible_ms": 150.285056
+      "save_to_visible_ms": 181.207552,
+      "write_start_to_visible_ms": 181.875968
     },
     {
       "correlation_id": "clean-r5-b2a-small-096",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 0.705243,
-      "save_to_visible_ms": 140.793344,
-      "write_start_to_visible_ms": 141.498368
+      "save_to_visible_ms": 172.3904,
+      "write_start_to_visible_ms": 173.095424
     },
     {
       "correlation_id": "clean-r5-b2a-small-097",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 1.914188,
-      "save_to_visible_ms": 136.604416,
-      "write_start_to_visible_ms": 138.518528
+      "save_to_visible_ms": 168.207872,
+      "write_start_to_visible_ms": 170.121984
     },
     {
       "correlation_id": "clean-r5-b2a-small-098",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 2.020389,
-      "save_to_visible_ms": 141.444352,
-      "write_start_to_visible_ms": 143.464704
+      "save_to_visible_ms": 173.054208,
+      "write_start_to_visible_ms": 175.07456
     },
     {
       "correlation_id": "clean-r5-b2a-small-099",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 1.878328,
-      "save_to_visible_ms": 140.641536,
-      "write_start_to_visible_ms": 142.520064
+      "save_to_visible_ms": 172.25728,
+      "write_start_to_visible_ms": 174.135808
     },
     {
       "correlation_id": "clean-r5-b2a-small-100",
       "files": 1,
       "bytes": 300,
       "local_write_ms": 15.708617,
-      "save_to_visible_ms": 145.423616,
-      "write_start_to_visible_ms": 161.132032
+      "save_to_visible_ms": 177.046528,
+      "write_start_to_visible_ms": 192.754944
     }
   ]
 }

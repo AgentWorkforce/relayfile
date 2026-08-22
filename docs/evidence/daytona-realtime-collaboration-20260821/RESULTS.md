@@ -12,14 +12,14 @@ and same-path loser preservation.
 
 | Run | 300 B A→B p95 / p99 / max | 300 B B→A p95 / p99 / max | 11-file A→B p95 / max | 11-file B→A p95 / max | Disjoint max | Same-path loser |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| clean-r3 | 174.90 / 176.56 / 202.41 ms | 197.10 / 206.60 / 209.48 ms | 720.54 / 756.16 ms | 922.82 / 981.01 ms | 470.22 ms | preserved once |
-| clean-r4 | 182.33 / 311.11 / 433.87 ms | 194.30 / 304.60 / 666.09 ms | 654.73 / 1,116.16 ms | 771.30 / 815.60 ms | 544.00 ms | preserved once |
-| clean-r5 | 172.71 / 178.63 / 182.08 ms | 172.13 / 179.61 / 252.92 ms | 753.79 / 763.59 ms | 619.51 / 697.25 ms | 405.88 ms | preserved once |
+| clean-r3 | 199.77 / 204.11 / 230.01 ms | 208.52 / 216.29 / 221.70 ms | 736.67 / 773.17 ms | 925.00 / 983.35 ms | 500.34 ms | preserved once |
+| clean-r4 | 205.75 / 333.28 / 453.11 ms | 224.32 / 334.67 / 696.16 ms | 670.16 / 1,134.07 ms | 801.70 / 846.00 ms | 549.51 ms | preserved once |
+| clean-r5 | 200.80 / 206.61 / 210.03 ms | 203.53 / 210.74 / 283.89 ms | 781.33 / 791.16 ms | 651.71 / 729.43 ms | 412.35 ms | preserved once |
 
 Across all qualifying runs, the pooled 300-byte population (600 samples) was
-p50 151.04 ms, p95 193.13 ms, p99 244.37 ms, max 666.09 ms. The pooled
-11-file/13,992-byte population (180 samples) was p50 474.08 ms, p95 764.39 ms,
-p99 952.12 ms, max 1,116.16 ms.
+p50 176.83 ms, p95 205.53 ms, p99 264.44 ms, max 696.16 ms. The pooled
+11-file/13,992-byte population (180 samples) was p50 492.44 ms, p95 792.55 ms,
+p99 954.06 ms, max 1,134.07 ms.
 
 The final materializations each contained 2,135 non-Relay metadata files and
 12,221,406 bytes. Their complete path/size/content manifests were byte-identical
@@ -29,11 +29,11 @@ and the same durable cursor, `evt_4272`.
 
 ## Improvement from the original baseline
 
-The original two-agent Daytona baseline had pooled 300-byte p95 909.55 ms and
-pooled 11-file p95 10,293.45 ms, with a 68,448.84 ms repo-save maximum and a
-127,050.41 ms small-save maximum. The qualifying repaired runs reduced pooled
-p95 to 193.13 ms (4.7×) and 764.39 ms (13.5×), while reducing the respective
-maxima to 666.09 ms and 1,116.16 ms.
+The original two-agent Daytona baseline had pooled 300-byte p95 929.52 ms and
+pooled 11-file p95 10,313.53 ms, with a 68,468.89 ms repo-save maximum and a
+127,070.39 ms small-save maximum. The qualifying repaired runs reduced pooled
+p95 to 205.53 ms (4.5×) and 792.55 ms (13.0×), while reducing the respective
+maxima to 696.16 ms and 1,134.07 ms.
 
 The implementation removes the measured causes rather than tuning the harness:
 
@@ -77,3 +77,8 @@ Daytona topology. It is not an Excel semantic-merge result, a FUSE benchmark,
 a listener-capacity ceiling, or a public-Internet SLA. Same-path edits preserve
 the loser as a conflict artifact; they do not semantically merge arbitrary file
 formats.
+
+All clock-dependent tables above were regenerated with the robust median-offset
+estimator described in `METHODOLOGY.md`. The previous single minimum-delay
+estimator selected minority proxy-routing regimes in several anchors; those
+superseded figures are not used here.

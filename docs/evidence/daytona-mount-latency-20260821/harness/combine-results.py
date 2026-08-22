@@ -16,6 +16,8 @@ def percentile(values, fraction):
 
 def distribution(rows):
     values = [row["save_to_visible_ms"] for row in rows]
+    if not values:
+        return None
     thresholds = [500, 1000, 2000, 10000, 30000, 60000]
     return {
         "samples": len(values),

@@ -30,8 +30,8 @@ def scan(root, seen, output):
                     continue
                 try:
                     with open(path, "rb") as handle:
+                        observed_ns = time.time_ns()
                         content = handle.read()
-                    observed_ns = time.time_ns()
                 except OSError:
                     continue
                 seen.add(path)
@@ -84,6 +84,7 @@ def main():
         started = time.monotonic()
         while time.monotonic() - started < duration:
             if stop_file and os.path.exists(stop_file):
+                scans.append(scan(root, seen, output))
                 break
             scans.append(scan(root, seen, output))
             time.sleep(poll)

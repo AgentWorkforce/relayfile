@@ -5,6 +5,14 @@ import json
 import sys
 
 
+def integer_median(values):
+    values = sorted(values)
+    middle = len(values) // 2
+    if len(values) % 2:
+        return values[middle]
+    return (values[middle - 1] + values[middle]) // 2
+
+
 def load(path):
     with open(path) as handle:
         return [json.loads(line) for line in handle if line.strip()]
@@ -23,9 +31,18 @@ def percentile(values, fraction):
 
 def anchor(path):
     samples = [row for row in load(path) if "t0_client_ns" in row]
-    best = min(samples, key=lambda row: row["delay_ns"])
-    midpoint = (best["t0_client_ns"] + best["t3_client_ns"]) // 2
-    return midpoint, best["offset_ns"], best["delay_ns"]
+    if not samples:
+        raise ValueError(f"clock anchor has no samples: {path}")
+    midpoint = integer_median([(row["t0_client_ns"] + row["t3_client_ns"]) // 2 for row in samples])
+    offset = integer_median([row["offset_ns"] for row in samples])
+    delays = [row["delay_ns"] for row in samples]
+    offsets = [row["offset_ns"] for row in samples]
+    uncertainty = max(
+        min(delays) // 2,
+        abs(min(offsets) - offset),
+        abs(max(offsets) - offset),
+    )
+    return midpoint, offset, min(delays), uncertainty
 
 
 def summary(values):
@@ -49,8 +66,11 @@ def main():
             arrivals.setdefault(row["path"], []).append(row)
     completed, incomplete, ambiguous, negative, extrapolated = [], [], [], [], []
     for send in sends:
+        if len(send["paths"]) != len(set(send["paths"])):
+            ambiguous.append({"correlation_id": send["correlation_id"], "paths": send["paths"], "reason": "duplicate send path"})
+            continue
         missing = [path for path in send["paths"] if path not in arrivals]
-        duplicate = [path for path in send["paths"] if len(arrivals.get(path, [])) != 1]
+        duplicate = [path for path in send["paths"] if path in arrivals and len(arrivals[path]) > 1]
         if missing:
             incomplete.append({"correlation_id": send["correlation_id"], "missing": missing})
             continue
@@ -61,6 +81,7 @@ def main():
         fraction = (t_send - pre[0]) / (post[0] - pre[0]) if post[0] != pre[0] else 0
         if fraction < 0 or fraction > 1:
             extrapolated.append(send["correlation_id"])
+            continue
         offset = pre[1] + (post[1] - pre[1]) * fraction
         observed = max(arrivals[path][0]["observed_ns"] for path in send["paths"])
         save_ms = (observed - offset - send["write_completed_ns"]) / 1e6
@@ -93,7 +114,7 @@ def main():
             "drift_ms": (post[1] - pre[1]) / 1e6,
             "pre_min_rtt_ms": pre[2] / 1e6,
             "post_min_rtt_ms": post[2] / 1e6,
-            "anchor_uncertainty_ms": [pre[2] / 2e6, post[2] / 2e6],
+            "anchor_uncertainty_ms": [pre[3] / 1e6, post[3] / 1e6],
             "model_error": "HTTPS path asymmetry and nonlinear clock change between anchors are unbounded",
         },
         "save_to_visible_ms": summary([row["save_to_visible_ms"] for row in completed]),

@@ -10,6 +10,14 @@ import time
 import urllib.parse
 
 
+def integer_median(values):
+    values = sorted(values)
+    middle = len(values) // 2
+    if len(values) % 2:
+        return values[middle]
+    return (values[middle - 1] + values[middle]) // 2
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     mirror_root = None
@@ -31,6 +39,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if parsed.path != "/clock":
             self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
             self.end_headers()
             return
         sent = time.time_ns()
@@ -46,9 +56,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 def measure(url, samples, output):
+    if samples <= 0:
+        raise ValueError("samples must be positive")
     parsed = urllib.parse.urlparse(url)
     connection_type = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
-    connection = connection_type(parsed.netloc, timeout=10)
+    if not parsed.hostname:
+        raise ValueError("measurement URL must include a hostname")
+    connection = connection_type(parsed.hostname, port=parsed.port, timeout=10)
     path = (parsed.path.rstrip("/") if parsed.path else "") + "/clock"
     # Establish and warm the persistent proxy connection before measuring it.
     for _ in range(5):
@@ -76,20 +90,35 @@ def measure(url, samples, output):
             observations.append(record)
             raw.write(json.dumps(record) + "\n")
             time.sleep(0.01)
-        best = min(observations, key=lambda item: item["delay_ns"])
+        offsets = [item["offset_ns"] for item in observations]
+        delays = [item["delay_ns"] for item in observations]
+        offset_ns = integer_median(offsets)
+        median_absolute_deviation_ns = integer_median(
+            [abs(value - offset_ns) for value in offsets]
+        )
+        min_delay_ns = min(delays)
+        uncertainty_ns = max(
+            min_delay_ns // 2,
+            abs(min(offsets) - offset_ns),
+            abs(max(offsets) - offset_ns),
+        )
         raw.write(
             json.dumps(
                 {
                     "kind": "clock_offset_summary",
                     "samples": samples,
-                    "offset_ms": best["offset_ns"] / 1e6,
-                    "min_delay_ms": best["delay_ns"] / 1e6,
-                    "uncertainty_ms": best["delay_ns"] / 2e6,
+                    "estimator": "median_offset",
+                    "offset_ms": offset_ns / 1e6,
+                    "offset_min_ms": min(offsets) / 1e6,
+                    "offset_max_ms": max(offsets) / 1e6,
+                    "offset_mad_ms": median_absolute_deviation_ns / 1e6,
+                    "min_delay_ms": min_delay_ns / 1e6,
+                    "uncertainty_ms": uncertainty_ns / 1e6,
                 }
             )
             + "\n"
         )
-    print(json.dumps({"offset_ms": best["offset_ns"] / 1e6, "min_delay_ms": best["delay_ns"] / 1e6}))
+    print(json.dumps({"offset_ms": offset_ns / 1e6, "min_delay_ms": min_delay_ns / 1e6}))
     connection.close()
 
 

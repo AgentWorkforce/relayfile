@@ -10,8 +10,8 @@ preserved a simultaneous same-path loser as an explicit conflict artifact.
 That is a credible collaboration baseline.
 
 It is not yet consistently real time in this topology. The normal single-file
-path was about 0.6 seconds, but recovery tails reached 17.01 and 127.05 seconds;
-an 11-file save normally took roughly 9–10 seconds and reached 68.45 seconds.
+path was about 0.6 seconds, but recovery tails reached 17.03 and 127.07 seconds;
+an 11-file save normally took roughly 9–10 seconds and reached 68.47 seconds.
 Prospect-facing claims should say "sub-second in the normal single-file path,
 with eventual cursor recovery" rather than promise continuously real-time
 coauthoring.
@@ -25,17 +25,17 @@ no tail samples were discarded.
 
 | Save shape | Direction | n | p50 | p95 | p99 | max |
 |---|---:|---:|---:|---:|---:|---:|
-| 300-byte file | A to B | 100 | 569.61 | 751.99 | 811.16 | 841.27 |
-| 300-byte file | B to A | 100 | 611.70 | 1,060.75 | 18,111.12 | 127,050.41 |
-| 300-byte file | pooled | 200 | 585.40 | 909.55 | 1,333.81 | 127,050.41 |
-| 11 files / 13,992 bytes | A to B | 30 | 9,122.67 | 10,150.56 | 10,379.62 | 10,441.03 |
-| 11 files / 13,992 bytes | B to A | 30 | 9,624.09 | 10,549.68 | 51,720.72 | 68,448.84 |
-| 11 files / 13,992 bytes | pooled | 60 | 9,429.69 | 10,293.45 | 34,415.77 | 68,448.84 |
+| 300-byte file | A to B | 100 | 589.81 | 772.19 | 831.36 | 861.48 |
+| 300-byte file | B to A | 100 | 631.69 | 1,080.72 | 18,131.09 | 127,070.39 |
+| 300-byte file | pooled | 200 | 605.60 | 929.52 | 1,353.78 | 127,070.39 |
+| 11 files / 13,992 bytes | A to B | 30 | 9,142.88 | 10,170.78 | 10,399.84 | 10,461.25 |
+| 11 files / 13,992 bytes | B to A | 30 | 9,644.15 | 10,569.75 | 51,740.78 | 68,468.89 |
+| 11 files / 13,992 bytes | pooled | 60 | 9,449.91 | 10,313.53 | 34,435.84 | 68,468.89 |
 
 Of 200 single-file saves, 194 (97%) were visible within one second, 198 (99%)
-within two seconds, one took 17.01 seconds, and one took 127.05 seconds. Of 60
+within two seconds, one took 17.03 seconds, and one took 127.07 seconds. Of 60
 multi-file saves, 46 (76.7%) completed within ten seconds, 59 within 30 seconds,
-and one took 68.45 seconds. The exact per-trial values are in the directional
+and one took 68.47 seconds. The exact per-trial values are in the directional
 summary JSON files and `combined-summary.json`.
 
 ## Concurrency and correctness
@@ -58,11 +58,12 @@ overwrite.
 - All 860 receiver sizes and SHA-256 content hashes match deterministic expected
   content; there were no missing, duplicate, ambiguous, clock-negative, or
   extrapolated trials.
-- Clock offsets were estimated before and after each direction over warmed HTTPS.
-  Minimum round trips were 18.53–20.56 ms A to B and 17.67–18.36 ms B to A,
-  implying approximately +/-9–10 ms minimum one-way uncertainty. HTTPS path
-  asymmetry remains unbounded, so the printed fractional milliseconds are
-  reproducible estimates, not claims of sub-millisecond physical accuracy.
+- Clock offsets were estimated before and after each direction over warmed HTTPS
+  using the median of every anchor's samples. The observed proxy routes were
+  bimodal, so the committed uncertainty expands to cover the full offset range:
+  30.60–55.45 ms across the four anchors. HTTPS path asymmetry remains
+  unbounded, so the printed fractional milliseconds are reproducible estimates,
+  not claims of sub-millisecond physical accuracy.
 - Receiver scan overhead was included. The watcher scan median/p95 was
   6.12/54.49 ms on Agent B and 8.05/57.40 ms on Agent A.
 

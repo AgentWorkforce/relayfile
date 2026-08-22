@@ -8,30 +8,30 @@
   "trials_clock_negative": 0,
   "trials_extrapolated": [],
   "clock": {
-    "offset_pre_ms": 8.022049,
-    "offset_post_ms": -18.44816,
-    "drift_ms": -26.470209,
+    "offset_pre_ms": -17.932357,
+    "offset_post_ms": -18.139384,
+    "drift_ms": -0.207027,
     "pre_min_rtt_ms": 30.98051,
     "post_min_rtt_ms": 57.396294,
     "anchor_uncertainty_ms": [
-      15.490255,
+      293.21601,
       28.698147
     ],
     "model_error": "HTTPS path asymmetry and nonlinear clock change between anchors are unbounded"
   },
   "save_to_visible_ms": {
-    "min": 195.90016,
-    "p50": 352.46553600000004,
-    "p95": 654.7349119999997,
-    "p99": 1001.6549324800004,
-    "max": 1116.155136
+    "min": 213.213184,
+    "p50": 369.37152000000003,
+    "p95": 670.1558015999996,
+    "p99": 1018.9584307200004,
+    "max": 1134.07104
   },
   "write_start_to_visible_ms": {
-    "min": 198.482176,
-    "p50": 386.84403199999997,
-    "p95": 942.2441343999988,
-    "p99": 1129.0659404799999,
-    "max": 1132.382464
+    "min": 215.7952,
+    "p50": 402.205824,
+    "p95": 959.209753599999,
+    "p99": 1147.18196224,
+    "max": 1150.580224
   },
   "local_write_ms": {
     "min": 1.800088,
@@ -49,240 +49,240 @@
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 2.290271,
-      "save_to_visible_ms": 317.696,
-      "write_start_to_visible_ms": 319.986176
+      "save_to_visible_ms": 336.626176,
+      "write_start_to_visible_ms": 338.916352
     },
     {
       "correlation_id": "clean-r4-a2b-repo-002",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 2.590713,
-      "save_to_visible_ms": 237.077504,
-      "write_start_to_visible_ms": 239.668224
+      "save_to_visible_ms": 255.86304,
+      "write_start_to_visible_ms": 258.45376
     },
     {
       "correlation_id": "clean-r4-a2b-repo-003",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 2.248981,
-      "save_to_visible_ms": 230.758912,
-      "write_start_to_visible_ms": 233.007872
+      "save_to_visible_ms": 249.403648,
+      "write_start_to_visible_ms": 251.652608
     },
     {
       "correlation_id": "clean-r4-a2b-repo-004",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 4.808993,
-      "save_to_visible_ms": 272.419584,
-      "write_start_to_visible_ms": 277.228544
+      "save_to_visible_ms": 290.917376,
+      "write_start_to_visible_ms": 295.726336
     },
     {
       "correlation_id": "clean-r4-a2b-repo-005",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 804.420625,
-      "save_to_visible_ms": 327.961856,
-      "write_start_to_visible_ms": 1132.382464
+      "save_to_visible_ms": 346.159616,
+      "write_start_to_visible_ms": 1150.580224
     },
     {
       "correlation_id": "clean-r4-a2b-repo-006",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 2.519412,
-      "save_to_visible_ms": 304.052736,
-      "write_start_to_visible_ms": 306.572032
+      "save_to_visible_ms": 322.136576,
+      "write_start_to_visible_ms": 324.655872
     },
     {
       "correlation_id": "clean-r4-a2b-repo-007",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 4.790983,
-      "save_to_visible_ms": 1116.155136,
-      "write_start_to_visible_ms": 1120.946176
+      "save_to_visible_ms": 1134.07104,
+      "write_start_to_visible_ms": 1138.86208
     },
     {
       "correlation_id": "clean-r4-a2b-repo-008",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 2.712073,
-      "save_to_visible_ms": 300.246272,
-      "write_start_to_visible_ms": 302.958336
+      "save_to_visible_ms": 317.843712,
+      "write_start_to_visible_ms": 320.555776
     },
     {
       "correlation_id": "clean-r4-a2b-repo-009",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 2.364112,
-      "save_to_visible_ms": 306.981376,
-      "write_start_to_visible_ms": 309.345536
+      "save_to_visible_ms": 324.437504,
+      "write_start_to_visible_ms": 326.801664
     },
     {
       "correlation_id": "clean-r4-a2b-repo-010",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 2.582063,
-      "save_to_visible_ms": 195.90016,
-      "write_start_to_visible_ms": 198.482176
+      "save_to_visible_ms": 213.213184,
+      "write_start_to_visible_ms": 215.7952
     },
     {
       "correlation_id": "clean-r4-a2b-repo-011",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 2.0572,
-      "save_to_visible_ms": 286.29504,
-      "write_start_to_visible_ms": 288.352256
+      "save_to_visible_ms": 303.462656,
+      "write_start_to_visible_ms": 305.519872
     },
     {
       "correlation_id": "clean-r4-a2b-repo-012",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 2.214271,
-      "save_to_visible_ms": 307.778304,
-      "write_start_to_visible_ms": 309.992704
+      "save_to_visible_ms": 324.799488,
+      "write_start_to_visible_ms": 327.013888
     },
     {
       "correlation_id": "clean-r4-a2b-repo-013",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 1.992909,
-      "save_to_visible_ms": 264.39296,
-      "write_start_to_visible_ms": 266.38592
+      "save_to_visible_ms": 281.271552,
+      "write_start_to_visible_ms": 283.264512
     },
     {
       "correlation_id": "clean-r4-a2b-repo-014",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 2.371331,
-      "save_to_visible_ms": 247.943936,
-      "write_start_to_visible_ms": 250.315264
+      "save_to_visible_ms": 264.669184,
+      "write_start_to_visible_ms": 267.040512
     },
     {
       "correlation_id": "clean-r4-a2b-repo-015",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 2.03383,
-      "save_to_visible_ms": 231.241472,
-      "write_start_to_visible_ms": 233.275392
+      "save_to_visible_ms": 247.821824,
+      "write_start_to_visible_ms": 249.855744
     },
     {
       "correlation_id": "clean-r4-a2b-repo-016",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 3.067495,
-      "save_to_visible_ms": 304.441088,
-      "write_start_to_visible_ms": 307.50848
+      "save_to_visible_ms": 320.882688,
+      "write_start_to_visible_ms": 323.95008
     },
     {
       "correlation_id": "clean-r4-a2b-repo-017",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 2.07995,
-      "save_to_visible_ms": 408.607232,
-      "write_start_to_visible_ms": 410.686976
+      "save_to_visible_ms": 424.898304,
+      "write_start_to_visible_ms": 426.978048
     },
     {
       "correlation_id": "clean-r4-a2b-repo-018",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 22.598708,
-      "save_to_visible_ms": 453.070336,
-      "write_start_to_visible_ms": 475.668992
+      "save_to_visible_ms": 469.20576,
+      "write_start_to_visible_ms": 491.804416
     },
     {
       "correlation_id": "clean-r4-a2b-repo-019",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 17.562804,
-      "save_to_visible_ms": 461.644288,
-      "write_start_to_visible_ms": 479.207168
+      "save_to_visible_ms": 477.615616,
+      "write_start_to_visible_ms": 495.178496
     },
     {
       "correlation_id": "clean-r4-a2b-repo-020",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 2.503592,
-      "save_to_visible_ms": 721.326848,
-      "write_start_to_visible_ms": 723.830528
+      "save_to_visible_ms": 737.131008,
+      "write_start_to_visible_ms": 739.634688
     },
     {
       "correlation_id": "clean-r4-a2b-repo-021",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 3.168705,
-      "save_to_visible_ms": 376.969216,
-      "write_start_to_visible_ms": 380.137728
+      "save_to_visible_ms": 392.583424,
+      "write_start_to_visible_ms": 395.751936
     },
     {
       "correlation_id": "clean-r4-a2b-repo-022",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 2.609913,
-      "save_to_visible_ms": 493.411072,
-      "write_start_to_visible_ms": 496.020992
+      "save_to_visible_ms": 508.862464,
+      "write_start_to_visible_ms": 511.472384
     },
     {
       "correlation_id": "clean-r4-a2b-repo-023",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 1.801418,
-      "save_to_visible_ms": 434.495744,
-      "write_start_to_visible_ms": 436.297216
+      "save_to_visible_ms": 449.772288,
+      "write_start_to_visible_ms": 451.57376
     },
     {
       "correlation_id": "clean-r4-a2b-repo-024",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 2.14643,
-      "save_to_visible_ms": 391.404032,
-      "write_start_to_visible_ms": 393.550336
+      "save_to_visible_ms": 406.513408,
+      "write_start_to_visible_ms": 408.659712
     },
     {
       "correlation_id": "clean-r4-a2b-repo-025",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 1.877109,
-      "save_to_visible_ms": 573.344768,
-      "write_start_to_visible_ms": 575.22176
+      "save_to_visible_ms": 588.297216,
+      "write_start_to_visible_ms": 590.174208
     },
     {
       "correlation_id": "clean-r4-a2b-repo-026",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 8.694511,
-      "save_to_visible_ms": 421.05216,
-      "write_start_to_visible_ms": 429.746688
+      "save_to_visible_ms": 435.815936,
+      "write_start_to_visible_ms": 444.510464
     },
     {
       "correlation_id": "clean-r4-a2b-repo-027",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 1.800088,
-      "save_to_visible_ms": 508.245248,
-      "write_start_to_visible_ms": 510.04544
+      "save_to_visible_ms": 522.839808,
+      "write_start_to_visible_ms": 524.64
     },
     {
       "correlation_id": "clean-r4-a2b-repo-028",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 2.17386,
-      "save_to_visible_ms": 515.977472,
-      "write_start_to_visible_ms": 518.151168
+      "save_to_visible_ms": 530.399488,
+      "write_start_to_visible_ms": 532.573184
     },
     {
       "correlation_id": "clean-r4-a2b-repo-029",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 3.053445,
-      "save_to_visible_ms": 512.283648,
-      "write_start_to_visible_ms": 515.33696
+      "save_to_visible_ms": 526.523392,
+      "write_start_to_visible_ms": 529.576704
     },
     {
       "correlation_id": "clean-r4-a2b-repo-030",
       "files": 11,
       "bytes": 13992,
       "local_write_ms": 1.891189,
-      "save_to_visible_ms": 561.360128,
-      "write_start_to_visible_ms": 563.251456
+      "save_to_visible_ms": 575.426048,
+      "write_start_to_visible_ms": 577.317376
     }
   ]
 }

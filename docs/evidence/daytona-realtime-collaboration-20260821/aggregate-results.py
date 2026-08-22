@@ -95,9 +95,12 @@ def main():
         )
 
     directions = ("a_to_b", "b_to_a")
+    consecutive_clean_runs = 0
+    for row in rows:
+        consecutive_clean_runs = consecutive_clean_runs + 1 if row["pass"] else 0
     result = {
         "status": "pass" if all(row["pass"] for row in rows) else "fail",
-        "consecutive_clean_runs": sum(row["pass"] for row in rows),
+        "consecutive_clean_runs": consecutive_clean_runs,
         "runs": rows,
         "cross_run": {
             "total_saves_verified": sum(row["saves_verified"] for row in rows),

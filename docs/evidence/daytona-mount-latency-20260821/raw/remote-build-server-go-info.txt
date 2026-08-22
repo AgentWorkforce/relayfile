@@ -1,4 +1,4 @@
-/home/daytona/relayfile-server: go1.19.8
+<relayfile-server-binary>: go1.19.8
 path github.com/agentworkforce/relayfile/cmd/relayfile
 mod github.com/agentworkforce/relayfile (devel)
 build CGO_ENABLED=0

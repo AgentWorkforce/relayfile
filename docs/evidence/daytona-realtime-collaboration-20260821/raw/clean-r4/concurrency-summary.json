@@ -1,31 +1,31 @@
 {
   "run_id": "clean-r4",
   "disjoint": {
-    "a_to_b_ms": 540.90368,
-    "b_to_a_ms": 544.004352,
-    "max_ms": 544.004352,
+    "a_to_b_ms": 546.487808,
+    "b_to_a_ms": 549.51424,
+    "max_ms": 549.51424,
     "write_start_delta_ms": 0.00186,
     "clock_fractions": [
-      0.7815370620228723,
-      0.7763229010956166
+      0.7596935623340061,
+      0.7644393091080313
     ],
     "anchor_uncertainty_ms": {
       "a_to_b": [
-        18.3394635,
-        28.9657305
+        42.813653,
+        28.96573
       ],
       "b_to_a": [
-        18.5008845,
-        17.451289
+        36.111563,
+        31.767933
       ]
     },
     "both_hash_correct": true,
     "pass": true
   },
   "same_path": {
-    "canonical": "clean-r4-agent-a-conflict",
+    "canonical": "799bf7347d0d61d9a208fd2f5f709d51287e766e180cb2aa32669c847c0c4214",
     "canonical_on_both": true,
-    "losing_content": "clean-r4-agent-b-conflict",
+    "losing_content": "a5373ad3559f8cd2d8fb8ee783cac88b4ac62fa3a47cda319069fce735fbb94e",
     "loser_preserved_exactly_once": true,
     "artifact": {
       "path": ".relay/conflicts/testdata/daytona-sync-benchmark/clean-r4/concurrency/conflict/shared.txt.rev_2135.local",

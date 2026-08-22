@@ -14,7 +14,20 @@ def main():
             "usage: convergence-watch.py ROOT OUTPUT TIMEOUT_S PATH SHA256 [PATH SHA256 ...]"
         )
     root, output, timeout_raw = sys.argv[1:4]
-    expected = dict(zip(sys.argv[4::2], sys.argv[5::2]))
+    root = os.path.realpath(root)
+    pairs = list(zip(sys.argv[4::2], sys.argv[5::2]))
+    paths = [relative for relative, _ in pairs]
+    if len(paths) != len(set(paths)):
+        raise SystemExit("expected paths must be unique")
+    expected = {}
+    for relative, digest in pairs:
+        normalized = relative.replace("\\", "/")
+        if normalized.startswith("/") or ".." in normalized.split("/"):
+            raise SystemExit("expected path must stay within the root")
+        candidate = os.path.realpath(os.path.join(root, relative))
+        if os.path.commonpath([root, candidate]) != root:
+            raise SystemExit("expected path resolves outside the root")
+        expected[relative] = digest
     started_ns = time.time_ns()
     deadline = time.monotonic() + float(timeout_raw)
     first_match_ns = {}
@@ -22,7 +35,9 @@ def main():
         for relative, expected_hash in expected.items():
             if relative in first_match_ns:
                 continue
-            path = os.path.join(root, relative)
+            path = os.path.realpath(os.path.join(root, relative))
+            if os.path.commonpath([root, path]) != root:
+                raise RuntimeError("expected path resolved outside the root while watching")
             try:
                 with open(path, "rb") as handle:
                     content = handle.read()
@@ -34,6 +49,7 @@ def main():
             record = {
                 "started_ns": started_ns,
                 "first_match_ns": first_match_ns,
+                "matched_sha256": expected,
                 "all_visible_ns": max(first_match_ns.values()),
                 "paths": sorted(expected),
                 "clock": "CLOCK_REALTIME",

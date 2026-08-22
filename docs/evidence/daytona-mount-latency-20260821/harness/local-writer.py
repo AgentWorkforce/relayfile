@@ -49,15 +49,14 @@ def main():
             "usage: local-writer.py MOUNT SHAPE RUN_ID DIRECTION COUNT SPACING_S OUTPUT HOST [RECEIVER_URL] [START_TRIAL]"
         )
     mount, shape, run_id, direction, count, spacing, output, host = sys.argv[1:9]
-    receiver_url = sys.argv[9].rstrip("/") if len(sys.argv) == 10 else ""
-    if len(sys.argv) >= 10:
-        receiver_url = sys.argv[9].rstrip("/")
+    receiver_url = sys.argv[9].rstrip("/") if len(sys.argv) >= 10 else ""
     start_trial = int(sys.argv[10]) if len(sys.argv) == 11 else 1
-    if not re.fullmatch(r"[A-Za-z0-9._-]+", run_id):
+    if run_id in {".", ".."} or not re.fullmatch(r"[A-Za-z0-9._-]+", run_id):
         raise SystemExit("unsafe run id")
-    if not re.fullmatch(r"[A-Za-z0-9._-]+", direction):
+    if direction in {".", ".."} or not re.fullmatch(r"[A-Za-z0-9._-]+", direction):
         raise SystemExit("unsafe direction")
     count, spacing = int(count), float(spacing)
+    end_trial = start_trial + count - 1
     with open(output, "a", buffering=1) as raw:
         for trial in range(start_trial, start_trial + count):
             files = trial_files(shape, run_id, direction, trial)
@@ -101,13 +100,13 @@ def main():
                     if all_visible:
                         break
                     if time.monotonic() >= deadline:
-                        raise TimeoutError(f"receiver did not expose {record['correlation_id']} within 30s")
+                        raise TimeoutError(f"receiver did not expose {record['correlation_id']} within 120s")
                     time.sleep(0.02)
             print(
                 f"{direction} {shape} {trial}/{count} local_write={record['local_write_ms']:.3f}ms",
                 flush=True,
             )
-            if trial < count:
+            if trial < end_trial:
                 time.sleep(spacing)
 
 
