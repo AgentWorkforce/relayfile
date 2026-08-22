@@ -1,0 +1,54 @@
+{
+  "run_id": "cloud-native-rate-limit-conflict-1",
+  "measurement": "five clock-scheduled atomic saves to one mounted path",
+  "release_epoch_ms": 1787416506243.0,
+  "write_completion_spread_ms": 54.966796875,
+  "max_clock_uncertainty_ms": 4.801391,
+  "max_clock_offset_delta_ms": 0.634765625,
+  "canonical_content": "cloud-native-rate-limit-conflict-1-agent-e-conflict",
+  "identical_canonical": true,
+  "identical_public_manifests": true,
+  "listeners_live": true,
+  "distinct_losing_contents": 4,
+  "losing_artifacts": [
+    {
+      "agent": "a",
+      "path": ".relay/conflicts/benchmark/corpus/testdata/cloud-five-agent/cloud-native-rate-limit-conflict-1/conflict/shared.txt.unknown.local",
+      "content": "cloud-native-rate-limit-conflict-1-agent-a-conflict",
+      "sha256": "1fa0786499218db019805d41d76d9bfa342f1a012c41d5fd2166f75f04408a5f"
+    },
+    {
+      "agent": "b",
+      "path": ".relay/conflicts/benchmark/corpus/testdata/cloud-five-agent/cloud-native-rate-limit-conflict-1/conflict/shared.txt.unknown.local",
+      "content": "cloud-native-rate-limit-conflict-1-agent-b-conflict",
+      "sha256": "ce3c90507a8edc0e9b2e2c5475f33298a66113d37adeec8ee98a3d00a7c87767"
+    },
+    {
+      "agent": "c",
+      "path": ".relay/conflicts/benchmark/corpus/testdata/cloud-five-agent/cloud-native-rate-limit-conflict-1/conflict/shared.txt.unknown.local",
+      "content": "cloud-native-rate-limit-conflict-1-agent-c-conflict",
+      "sha256": "ad8e2eee7fc840c08c5370250805caaecf9728bc2741ef72920275417a301740"
+    },
+    {
+      "agent": "d",
+      "path": ".relay/conflicts/benchmark/corpus/testdata/cloud-five-agent/cloud-native-rate-limit-conflict-1/conflict/shared.txt.unknown.local",
+      "content": "cloud-native-rate-limit-conflict-1-agent-d-conflict",
+      "sha256": "ec2ea37b0a07c9bf3c26237b18984793ffbc8cac2f2947e8218cc30c44439d13"
+    }
+  ],
+  "all_contenders_accounted_for": true,
+  "ephemeral_atomic_save_paths": {},
+  "gates": {
+    "five_distinct_contenders": true,
+    "simultaneous_write_spread_le_15_ms": false,
+    "clock_uncertainty_le_15_ms": true,
+    "clock_offset_delta_le_3_ms": true,
+    "one_canonical_everywhere": true,
+    "four_losing_contents_preserved": true,
+    "all_contenders_accounted_for": true,
+    "identical_public_manifests": true,
+    "listeners_live": true,
+    "no_ephemeral_paths": true
+  },
+  "qualified": false
+}

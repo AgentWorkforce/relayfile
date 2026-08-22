@@ -3,6 +3,7 @@ package mountsync
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -384,6 +385,338 @@ func TestHandleLocalChangesBatchesElevenFilesAndDefersPendingReceipts(t *testing
 			break
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestWatcherBulkUploadDoesNotBlockInlinePeerEvent(t *testing.T) {
+	bulkStarted := make(chan struct{})
+	bulkRelease := make(chan struct{})
+	client := &fakeClient{files: map[string]RemoteFile{}}
+	client.bulkWriteResponseFunc = func(_ context.Context, _ string, files []BulkWriteFile) (BulkWriteResponse, error) {
+		close(bulkStarted)
+		<-bulkRelease
+		return BulkWriteResponse{
+			Written: len(files),
+			Results: []BulkWriteResult{{Path: files[0].Path, Revision: "rev_10"}},
+		}, nil
+	}
+
+	localDir := t.TempDir()
+	localPath := filepath.Join(localDir, "shared", "local.txt")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("mkdir local file: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte("local edit"), 0o644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_nonblocking_upload",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- syncer.HandleLocalChanges(context.Background(), []LocalChange{{
+			RelativePath: "shared/local.txt",
+			Op:           fsnotify.Create,
+		}})
+	}()
+	select {
+	case <-bulkStarted:
+	case <-time.After(time.Second):
+		t.Fatal("bulk write did not start")
+	}
+
+	peerContent := "peer edit"
+	eventDone := make(chan error, 1)
+	go func() {
+		eventDone <- syncer.applyWebSocketEvent(context.Background(), websocketEvent{
+			Type:          "file.created",
+			Path:          "/shared/peer.txt",
+			Revision:      "rev_11",
+			ContentType:   "text/plain",
+			Content:       peerContent,
+			Encoding:      "utf-8",
+			ContentHash:   hashBytes([]byte(peerContent)),
+			InlineContent: true,
+			EventID:       "evt_11",
+		})
+	}()
+	select {
+	case err := <-eventDone:
+		if err != nil {
+			t.Fatalf("apply peer event while upload blocked: %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("inline peer event waited for the local bulk network response")
+	}
+	if got, err := os.ReadFile(filepath.Join(localDir, "shared", "peer.txt")); err != nil || string(got) != peerContent {
+		t.Fatalf("peer file = %q, err=%v", got, err)
+	}
+
+	close(bulkRelease)
+	if err := <-writeDone; err != nil {
+		t.Fatalf("handle local changes: %v", err)
+	}
+}
+
+func TestDuplicateWatcherBurstSkipsIdenticalInflightOutbox(t *testing.T) {
+	bulkStarted := make(chan struct{})
+	bulkRelease := make(chan struct{})
+	client := &fakeClient{files: map[string]RemoteFile{}}
+	client.bulkWriteResponseFunc = func(_ context.Context, _ string, files []BulkWriteFile) (BulkWriteResponse, error) {
+		close(bulkStarted)
+		<-bulkRelease
+		return BulkWriteResponse{
+			Written: len(files),
+			Results: []BulkWriteResult{{Path: files[0].Path, Revision: "rev_10"}},
+		}, nil
+	}
+
+	localDir := t.TempDir()
+	localPath := filepath.Join(localDir, "shared", "local.txt")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("mkdir local file: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte("local edit"), 0o644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_duplicate_watcher",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- syncer.HandleLocalChanges(context.Background(), []LocalChange{{
+			RelativePath: "shared/local.txt",
+			Op:           fsnotify.Create,
+		}})
+	}()
+	select {
+	case <-bulkStarted:
+	case <-time.After(time.Second):
+		t.Fatal("bulk write did not start")
+	}
+
+	duplicateDone := make(chan error, 1)
+	go func() {
+		duplicateDone <- syncer.HandleLocalChanges(context.Background(), []LocalChange{{
+			RelativePath: "shared/local.txt",
+			Op:           fsnotify.Write,
+		}})
+	}()
+	select {
+	case duplicateErr := <-duplicateDone:
+		t.Fatalf("duplicate watcher burst overtook the in-flight save: %v", duplicateErr)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if client.bulkWriteCalls != 1 {
+		t.Fatalf("bulk write calls = %d, want 1", client.bulkWriteCalls)
+	}
+	if client.requestedReadCalls() != 0 {
+		t.Fatalf("duplicate watcher burst performed %d remote reads, want 0", client.requestedReadCalls())
+	}
+
+	close(bulkRelease)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first local change: %v", err)
+	}
+	if err := <-duplicateDone; err != nil {
+		t.Fatalf("duplicate watcher burst: %v", err)
+	}
+	if client.bulkWriteCalls != 1 {
+		t.Fatalf("bulk write calls after duplicate settled = %d, want 1", client.bulkWriteCalls)
+	}
+}
+
+func TestRapidWatcherSavesPreserveObservedOrder(t *testing.T) {
+	firstStarted := make(chan struct{})
+	firstRelease := make(chan struct{})
+	var (
+		callsMu sync.Mutex
+		batches [][]BulkWriteFile
+	)
+	client := &fakeClient{
+		files:                          map[string]RemoteFile{},
+		bulkWriteResponseFuncOwnsWrite: true,
+	}
+	client.bulkWriteResponseFunc = func(_ context.Context, _ string, files []BulkWriteFile) (BulkWriteResponse, error) {
+		callsMu.Lock()
+		call := len(batches) + 1
+		batches = append(batches, append([]BulkWriteFile(nil), files...))
+		callsMu.Unlock()
+		if call == 1 {
+			close(firstStarted)
+			<-firstRelease
+		}
+		return BulkWriteResponse{
+			Written: len(files),
+			Results: []BulkWriteResult{{Path: files[0].Path, Revision: fmt.Sprintf("rev_%d", call)}},
+		}, nil
+	}
+
+	localDir := t.TempDir()
+	localPath := filepath.Join(localDir, "shared", "ordered.txt")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("mkdir local file: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte("first"), 0o644); err != nil {
+		t.Fatalf("write first content: %v", err)
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_ordered_watcher",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- syncer.HandleLocalChanges(context.Background(), []LocalChange{{
+			RelativePath: "shared/ordered.txt",
+			Op:           fsnotify.Create,
+		}})
+	}()
+	select {
+	case <-firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first save did not start")
+	}
+	if err := os.WriteFile(localPath, []byte("second"), 0o644); err != nil {
+		t.Fatalf("write second content: %v", err)
+	}
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- syncer.HandleLocalChanges(context.Background(), []LocalChange{{
+			RelativePath: "shared/ordered.txt",
+			Op:           fsnotify.Write,
+		}})
+	}()
+	select {
+	case err := <-secondDone:
+		t.Fatalf("second save overtook the first: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	callsMu.Lock()
+	callsBeforeRelease := len(batches)
+	callsMu.Unlock()
+	if callsBeforeRelease != 1 {
+		t.Fatalf("bulk writes before first release = %d, want 1", callsBeforeRelease)
+	}
+
+	close(firstRelease)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first save: %v", err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second save: %v", err)
+	}
+	callsMu.Lock()
+	defer callsMu.Unlock()
+	if len(batches) != 2 {
+		t.Fatalf("bulk writes = %d, want 2", len(batches))
+	}
+	if got := batches[0][0].Content; got != "first" {
+		t.Fatalf("first bulk content = %q", got)
+	}
+	if got := batches[1][0].Content; got != "second" {
+		t.Fatalf("second bulk content = %q", got)
+	}
+	if got := batches[1][0].IfMatch; got != "rev_1" {
+		t.Fatalf("second save ifMatch = %q, want rev_1", got)
+	}
+}
+
+func TestBackgroundLocalTreeHashDoesNotBlockInlinePeerEvent(t *testing.T) {
+	client := &fakeClient{files: map[string]RemoteFile{}}
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, "scan.txt"), []byte("scan me"), 0o644); err != nil {
+		t.Fatalf("write scan fixture: %v", err)
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_nonblocking_scan",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+
+	scanStarted := make(chan struct{})
+	scanRelease := make(chan struct{})
+	var startOnce sync.Once
+	syncer.readLocalSnapshotFn = func(path string, includeContent bool) (localSnapshot, error) {
+		startOnce.Do(func() { close(scanStarted) })
+		<-scanRelease
+		return readLocalSnapshot(path, includeContent)
+	}
+	scanDone := make(chan error, 1)
+	syncer.mu.Lock()
+	syncer.syncActive = true
+	go func() {
+		_, scanErr := syncer.scanLocalFiles()
+		syncer.syncActive = false
+		syncer.mu.Unlock()
+		scanDone <- scanErr
+	}()
+	select {
+	case <-scanStarted:
+	case <-time.After(time.Second):
+		t.Fatal("background scan did not reach the hash barrier")
+	}
+
+	peerContent := "peer edit during scan"
+	eventDone := make(chan error, 1)
+	go func() {
+		eventDone <- syncer.applyWebSocketEvent(context.Background(), websocketEvent{
+			Type:          "file.created",
+			Path:          "/peer.txt",
+			Revision:      "rev_peer",
+			ContentType:   "text/plain",
+			Content:       peerContent,
+			Encoding:      "utf-8",
+			ContentHash:   hashBytes([]byte(peerContent)),
+			InlineContent: true,
+			EventID:       "evt_peer",
+		})
+	}()
+	select {
+	case eventErr := <-eventDone:
+		if eventErr != nil {
+			t.Fatalf("apply peer event while scan blocked: %v", eventErr)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("inline peer event waited for background file hashing")
+	}
+	if got, readErr := os.ReadFile(filepath.Join(localDir, "peer.txt")); readErr != nil || string(got) != peerContent {
+		t.Fatalf("peer file = %q, err=%v", got, readErr)
+	}
+
+	close(scanRelease)
+	if scanErr := <-scanDone; scanErr != nil {
+		t.Fatalf("background scan: %v", scanErr)
+	}
+}
+
+func TestBulkRevisionConflictUsesConflictRecovery(t *testing.T) {
+	err := bulkWriteErrorAsError(BulkWriteError{
+		Path:    "/shared/file.txt",
+		Code:    "revision_conflict",
+		Message: "revision conflict",
+	})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("bulk revision_conflict = %v, want ErrConflict", err)
 	}
 }
 

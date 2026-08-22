@@ -32,7 +32,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
-        if not parsed.path.rstrip("/").endswith("/probe-batch"):
+        endpoint = parsed.path.rstrip("/")
+        if not (
+            endpoint.endswith("/probe-batch")
+            or endpoint.endswith("/await-batch")
+        ):
             self.send_json(404, {"error": "not found"})
             return
         try:
@@ -43,16 +47,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
             files = payload["files"]
             if not isinstance(files, list) or not files or len(files) > 100:
                 raise ValueError("files must contain 1..100 entries")
-            results = [self.inspect(item) for item in files]
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             self.send_json(400, {"error": str(exc)})
             return
+
+        timeout_s = 0.0
+        poll_s = 0.005
+        if endpoint.endswith("/await-batch"):
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                timeout_s = min(120.0, max(0.001, float(query.get("timeout_s", ["10"])[0])))
+                poll_s = min(1.0, max(0.001, float(query.get("poll_s", ["0.005"])[0])))
+            except (TypeError, ValueError):
+                self.send_json(400, {"error": "invalid timeout_s or poll_s"})
+                return
+
+        attempts = 0
+        deadline = time.monotonic() + timeout_s
+        while True:
+            attempts += 1
+            results = [self.inspect(item) for item in files]
+            if all(item["match"] for item in results):
+                break
+            if timeout_s <= 0 or time.monotonic() >= deadline:
+                break
+            time.sleep(min(poll_s, max(0.0, deadline - time.monotonic())))
         self.send_json(
             200,
             {
                 "all_match": all(item["match"] for item in results),
                 "matches": sum(1 for item in results if item["match"]),
                 "files": results,
+                "attempts": attempts,
                 "observed_ns": time.time_ns(),
             },
         )

@@ -1237,8 +1237,14 @@ type Syncer struct {
 	// signals. pollLocalChanges is enabled only when the watcher is unavailable;
 	// it deliberately promotes hash drift and missing tracked files found by the
 	// existing scan to those explicit signals.
-	recoverStartupDrift       bool
-	pollLocalChanges          bool
+	recoverStartupDrift bool
+	pollLocalChanges    bool
+	localWatcherActive  bool
+	// localMutationMu preserves the filesystem watcher's observed save order
+	// while handleLocalChanges deliberately releases mu during cloud I/O. Peer
+	// WebSocket events still apply concurrently through mu; only local mutation
+	// batches from this mount are serialized.
+	localMutationMu           sync.Mutex
 	websocket                 bool
 	rootCtx                   context.Context
 	wsConn                    *websocket.Conn
@@ -1306,6 +1312,9 @@ type Syncer struct {
 	circuit               *CloudErrorCircuit
 	maxOutboxAttempts     int
 	nowFn                 func() time.Time
+	// Test seam for proving that background local-tree hashing yields the
+	// real-time state lock. Production uses readLocalSnapshot directly.
+	readLocalSnapshotFn func(string, bool) (localSnapshot, error)
 	// credExpiresAt is the RFC3339 expiry of the delegated access token,
 	// set by the CLI layer via SetCredentialExpiry and included in the
 	// public state as credExpiresInSecs so operators get advance warning.
@@ -1389,6 +1398,13 @@ func (s *Syncer) now() time.Time {
 		return s.nowFn()
 	}
 	return time.Now()
+}
+
+func (s *Syncer) readLocalSnapshot(path string, includeContent bool) (localSnapshot, error) {
+	if s.readLocalSnapshotFn != nil {
+		return s.readLocalSnapshotFn(path, includeContent)
+	}
+	return readLocalSnapshot(path, includeContent)
 }
 
 type mountState struct {
@@ -2097,7 +2113,14 @@ func (s *Syncer) NewFileWatcherWithTimings(timings FileWatcherTimings, onChange 
 	if !recursiveWatcherAllowed() {
 		return nil, fmt.Errorf("%w: fsnotify uses descriptor-per-file kqueue on macOS; continuing with polling reconciliation (set RELAYFILE_MOUNT_FORCE_RECURSIVE_WATCHER=1 only for a deliberately small mirror)", ErrRecursiveWatcherUnsafe)
 	}
-	return NewFileWatcherForTopologyWithTimings(s.localRoot, s.remoteRoot, s.scopedChild, timings, onChange)
+	watcher, err := NewFileWatcherForTopologyWithTimings(s.localRoot, s.remoteRoot, s.scopedChild, timings, onChange)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	s.localWatcherActive = true
+	s.mu.Unlock()
+	return watcher, nil
 }
 
 // EnablePollingLocalChangeDetection makes each existing local-tree scan treat
@@ -2320,6 +2343,9 @@ func (s *Syncer) HandleLocalChanges(ctx context.Context, changes []LocalChange) 
 }
 
 func (s *Syncer) handleLocalChanges(ctx context.Context, changes []LocalChange, deferReceipts bool) error {
+	s.localMutationMu.Lock()
+	defer s.localMutationMu.Unlock()
+
 	traceStarted := time.Now()
 	if s.pullOnly {
 		return nil
@@ -2564,6 +2590,21 @@ func (s *Syncer) preparePendingBulkWrite(
 	}
 
 	if exists && tracked.Dirty {
+		// Atomic saves commonly produce a second fsnotify burst after the first
+		// watcher batch has already persisted and dispatched its durable outbox
+		// command. Treat an identical pending command as proof that this content
+		// is already in flight. Re-reading the remote file here would hold the
+		// Syncer state mutex for a network round trip and prevent peer WebSocket
+		// events (and the original upload response) from being applied.
+		pendingRecords, outboxErr := s.findPendingOutboxByPath(remotePath)
+		if outboxErr != nil {
+			return nil, outboxErr
+		}
+		for _, record := range pendingRecords {
+			if record.Hash == snapshot.Hash {
+				return nil, nil
+			}
+		}
 		remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
 		if readErr == nil {
 			remoteBytes, decodeErr := decodeRemoteFileContent(remoteFile)
@@ -2604,14 +2645,14 @@ func (s *Syncer) preparePendingBulkWrite(
 }
 
 func (s *Syncer) flushPendingBulkWrites(ctx context.Context, pending []pendingBulkWrite, conflicted map[string]struct{}) error {
-	return s.flushPendingBulkWritesWithReceiptMode(ctx, pending, conflicted, true)
+	return s.flushPendingBulkWritesWithReceiptMode(ctx, pending, conflicted, true, false)
 }
 
 func (s *Syncer) flushPendingBulkWritesFast(ctx context.Context, pending []pendingBulkWrite, conflicted map[string]struct{}) error {
-	return s.flushPendingBulkWritesWithReceiptMode(ctx, pending, conflicted, false)
+	return s.flushPendingBulkWritesWithReceiptMode(ctx, pending, conflicted, false, true)
 }
 
-func (s *Syncer) flushPendingBulkWritesWithReceiptMode(ctx context.Context, pending []pendingBulkWrite, conflicted map[string]struct{}, settleReceipts bool) error {
+func (s *Syncer) flushPendingBulkWritesWithReceiptMode(ctx context.Context, pending []pendingBulkWrite, conflicted map[string]struct{}, settleReceipts, unlockDuringUpload bool) error {
 	traceStarted := time.Now()
 	if len(pending) == 0 {
 		return nil
@@ -2637,12 +2678,12 @@ func (s *Syncer) flushPendingBulkWritesWithReceiptMode(ctx context.Context, pend
 	// durable outbox. The maintenance/restart path still scans the whole
 	// outbox; the visibility-critical save path is O(changed files), not
 	// O(workspace history).
-	err := s.flushSelectedOutboxRecords(ctx, records, conflicted, settleReceipts)
+	err := s.flushSelectedOutboxRecords(ctx, records, conflicted, settleReceipts, unlockDuringUpload)
 	s.traceLatency("outbox_flushed", traceStarted, "writes", len(pending))
 	return err
 }
 
-func (s *Syncer) flushSelectedOutboxRecords(ctx context.Context, records []outboxRecord, conflicted map[string]struct{}, settleReceipts bool) error {
+func (s *Syncer) flushSelectedOutboxRecords(ctx context.Context, records []outboxRecord, conflicted map[string]struct{}, settleReceipts, unlockDuringUpload bool) error {
 	now := s.now().UTC()
 	due := make([]outboxRecord, 0, len(records))
 	for _, record := range records {
@@ -2667,7 +2708,7 @@ func (s *Syncer) flushSelectedOutboxRecords(ctx context.Context, records []outbo
 	flushCtx, cancel := s.outboxContext(ctx)
 	defer cancel()
 	for _, chunk := range chunkOutboxRecords(due, maxWritebackBatchBytes()) {
-		if err := s.flushOutboxRecordChunk(flushCtx, chunk, conflicted, settleReceipts); err != nil {
+		if err := s.flushOutboxRecordChunk(flushCtx, chunk, conflicted, settleReceipts, unlockDuringUpload); err != nil {
 			return err
 		}
 	}
@@ -2720,14 +2761,14 @@ func (s *Syncer) flushOutboxRecords(ctx context.Context, conflicted map[string]s
 	flushCtx, cancel := s.outboxContext(ctx)
 	defer cancel()
 	for _, chunk := range chunkOutboxRecords(due, maxWritebackBatchBytes()) {
-		if err := s.flushOutboxRecordChunk(flushCtx, chunk, conflicted, settleReceipts); err != nil {
+		if err := s.flushOutboxRecordChunk(flushCtx, chunk, conflicted, settleReceipts, false); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRecord, conflicted map[string]struct{}, settleReceipts bool) error {
+func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRecord, conflicted map[string]struct{}, settleReceipts, unlockDuringUpload bool) error {
 	traceStarted := time.Now()
 	var firstErr error
 	uploadRecords := make([]outboxRecord, 0, len(records))
@@ -2755,7 +2796,19 @@ func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRec
 	}
 
 	files := outboxRecordsAsBulkFiles(uploadRecords)
-	response, err := s.client.WriteFilesBulk(ctx, s.workspace, files)
+	var response BulkWriteResponse
+	var err error
+	if unlockDuringUpload {
+		// The watcher has already persisted immutable outbox records, so the
+		// network wait no longer needs exclusive access to mount state. Let the
+		// WebSocket apply loop materialize peer edits while our own POST is in
+		// flight; reacquire before interpreting the response or mutating state.
+		s.mu.Unlock()
+		response, err = s.client.WriteFilesBulk(ctx, s.workspace, files)
+		s.mu.Lock()
+	} else {
+		response, err = s.client.WriteFilesBulk(ctx, s.workspace, files)
+	}
 	s.traceLatency("bulk_response", traceStarted, "records", len(uploadRecords))
 	if err != nil {
 		s.recordCloudFailure(err)
@@ -3216,6 +3269,15 @@ func (s *Syncer) reconcileBulkWrite(ctx context.Context, pendingWrite pendingBul
 			contentType = strings.TrimSpace(remoteFile.ContentType)
 		}
 	}
+	// The realtime watcher path deliberately releases s.mu while the bulk POST
+	// is in flight. A later WebSocket revision can therefore be applied before
+	// this acknowledgement is processed. Never let the older ACK rewind the
+	// tracked revision/hash (or the working tree) after that advancement.
+	if current, ok := s.state.Files[pendingWrite.remotePath]; ok &&
+		current.Revision != "" && current.Revision != revision &&
+		current.Revision != pendingWrite.tracked.Revision {
+		return nil
+	}
 	tracked.ContentType = contentType
 	s.state.Files[pendingWrite.remotePath] = trackedFile{
 		Revision:          revision,
@@ -3525,7 +3587,7 @@ func bulkWriteErrorAsError(writeErr BulkWriteError) error {
 		statusCode = http.StatusNotFound
 	case "precondition_failed":
 		statusCode = http.StatusPreconditionFailed
-	case "conflict":
+	case "conflict", "revision_conflict":
 		return &ConflictError{Path: normalizeRemotePath(writeErr.Path)}
 	case "schema_validation_failed", "validation_error":
 		return &SchemaValidationError{
@@ -3664,6 +3726,7 @@ func (s *Syncer) sync(ctx context.Context, forcePoll bool) error {
 }
 
 func (s *Syncer) syncReserved(ctx context.Context, forcePoll bool) error {
+	traceStarted := time.Now()
 	// Top-of-cycle invariant: the mount root must exist and be a
 	// directory. If a previous cycle, an external process, or a cloud
 	// clobber wiped it out, refuse to continue rather than recreating
@@ -3677,6 +3740,7 @@ func (s *Syncer) syncReserved(ctx context.Context, forcePoll bool) error {
 		s.mu.Unlock()
 		return err
 	}
+	s.traceLatency("sync_state_loaded", traceStarted)
 	// Write-only mounts never run the read-side bootstrap traversal (below,
 	// they call markBootstrapComplete unconditionally), so a bootstrap
 	// terminal error persisted before a mount was reconfigured write-only
@@ -3709,6 +3773,7 @@ func (s *Syncer) syncReserved(ctx context.Context, forcePoll bool) error {
 			s.logf("websocket unavailable; using polling sync: %v", err)
 		}
 	}
+	s.traceLatency("sync_websocket_maintained", traceStarted)
 
 	// Re-acquire lock for the remainder of the sync operation.
 	s.mu.Lock()
@@ -3728,6 +3793,7 @@ func (s *Syncer) syncReserved(ctx context.Context, forcePoll bool) error {
 			return err
 		}
 	}
+	s.traceLatency("sync_digest_jobs_completed", traceStarted)
 
 	conflicted := map[string]struct{}{}
 	if !s.pullOnly {
@@ -3737,6 +3803,7 @@ func (s *Syncer) syncReserved(ctx context.Context, forcePoll bool) error {
 			return err
 		}
 	}
+	s.traceLatency("sync_outbox_flushed", traceStarted)
 	didPoll := false
 	if s.writeOnly {
 		if !s.state.BootstrapComplete {
@@ -3770,6 +3837,7 @@ func (s *Syncer) syncReserved(ctx context.Context, forcePoll bool) error {
 			return err
 		}
 	}
+	s.traceLatency("sync_local_push_completed", traceStarted)
 
 	shouldPoll := !didPoll && (forcePoll || !s.bootstrapped || s.wsConn == nil)
 	if shouldPoll && !s.writeOnly {
@@ -3780,8 +3848,21 @@ func (s *Syncer) syncReserved(ctx context.Context, forcePoll bool) error {
 		}
 		s.bootstrapped = true
 	}
+	s.traceLatency("sync_remote_pull_completed", traceStarted)
 	s.markSyncSuccess()
-	return s.saveState()
+	// A recursive watcher already maintains Dirty/DeletePending plus the
+	// durable outbox. Re-walking and hashing a large repository solely to build
+	// the public status document can monopolize the real-time state lane for an
+	// entire polling interval. The first startup-recovery scan still ran in
+	// pushLocal above; watcherless mounts retain the scan on every cycle.
+	if !s.pullOnly && s.localWatcherActive && !s.pollLocalChanges {
+		err := s.saveStateWithoutLocalScan()
+		s.traceLatency("sync_state_saved", traceStarted)
+		return err
+	}
+	err := s.saveState()
+	s.traceLatency("sync_state_saved", traceStarted)
+	return err
 }
 
 func (s *Syncer) persistedBootstrapTerminalError() error {
@@ -4002,6 +4083,7 @@ func (s *Syncer) readWebSocketLoop(ctx context.Context, conn *websocket.Conn) {
 				return
 			}
 		case event := <-eventCh:
+			eventApplyStarted := time.Now()
 			if err := s.applyWebSocketEventWithPersistence(ctx, event, false); err != nil {
 				if flushErr := flushCheckpoint(); flushErr != nil {
 					s.logf("websocket checkpoint flush failed after apply error: %v", flushErr)
@@ -4012,6 +4094,12 @@ func (s *Syncer) readWebSocketLoop(ctx context.Context, conn *websocket.Conn) {
 				// durable cursor instead of silently advancing around a gap.
 				return
 			}
+			s.traceLatency(
+				"websocket_event_applied",
+				eventApplyStarted,
+				"event_id", strings.TrimSpace(event.EventID),
+				"inline", event.InlineContent,
+			)
 			if websocketEventNeedsCheckpoint(event) {
 				pendingCheckpoint++
 				if pendingCheckpoint >= webSocketCheckpointBatchSize {
@@ -7720,6 +7808,14 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 		return map[string]struct{}{}, nil
 	}
 	conflicted := map[string]struct{}{}
+	// After the one startup-drift recovery pass, the recursive watcher is the
+	// authoritative local mutation source. Its changes are already durable in
+	// the outbox and were flushed at the top of this sync cycle. Re-hashing the
+	// complete repository every 30 seconds adds no correctness in watcher mode
+	// and can starve WebSocket application on large trees.
+	if !s.recoverStartupDrift && s.localWatcherActive && !s.pollLocalChanges {
+		return conflicted, nil
+	}
 	localFiles, err := s.scanLocalFiles()
 	if err != nil {
 		return nil, err
@@ -8048,8 +8144,14 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 				s.logf("skipping oversized local file %s (%d bytes > %d byte writeback cap); not enqueued", path, info.Size(), max)
 				s.oversizedLogged[logKey] = struct{}{}
 			}
-			snapshot, err := readLocalSnapshot(path, false)
+			var snapshot localSnapshot
+			s.runReservedSyncIO(func() {
+				snapshot, err = s.readLocalSnapshot(path, false)
+			})
 			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					return nil
+				}
 				return err
 			}
 			snapshot.SkipWriteback = true
@@ -8057,8 +8159,14 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 			s.state.Counters.SkippedOversizeWriteback++
 			return nil
 		}
-		snapshot, err := readLocalSnapshot(path, false)
+		var snapshot localSnapshot
+		s.runReservedSyncIO(func() {
+			snapshot, err = s.readLocalSnapshot(path, false)
+		})
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
 			return err
 		}
 		if s.shouldSkipLazyUntrackedPush(remotePath) {
@@ -8854,11 +8962,24 @@ func (s *Syncer) refreshShadowContentFromDisk(remotePath, revision, localPath st
 	if !mountRolloutMergeEligible(remotePath) {
 		return
 	}
-	if _, ok := s.readShadowContent(remotePath, revision); ok {
+	var (
+		content []byte
+		err     error
+		cached  bool
+	)
+	s.runReservedSyncIO(func() {
+		_, cached = s.readShadowContent(remotePath, revision)
+		if !cached {
+			content, err = os.ReadFile(localPath)
+		}
+	})
+	if cached || err != nil {
 		return
 	}
-	content, err := os.ReadFile(localPath)
-	if err != nil {
+	// A live event may have advanced this path while the disk read ran without
+	// mu. Never install that now-stale revision as the merge base.
+	tracked, ok := s.state.Files[normalizeRemotePath(remotePath)]
+	if !ok || tracked.Revision != revision || tracked.Dirty {
 		return
 	}
 	s.recordShadowContent(remotePath, revision, content)

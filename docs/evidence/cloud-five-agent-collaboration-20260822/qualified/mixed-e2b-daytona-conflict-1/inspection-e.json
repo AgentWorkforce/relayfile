@@ -1,0 +1,31 @@
+{
+  "role": "e",
+  "manifest": {
+    "scope": "testdata/cloud-five-agent/mixed-e2b-daytona-conflict-1",
+    "files": 1,
+    "bytes": 45,
+    "sha256": "b3a21bfc1738d02f1707c4a845d7d7bce65fb864ded074f4c584b5ed1c4895be",
+    "ephemeral_atomic_save_paths": []
+  },
+  "state": {
+    "status": "ready",
+    "pendingWriteback": 0,
+    "pendingConflicts": 0,
+    "eventListener": {
+      "mode": "websocket",
+      "status": "listening",
+      "heartbeatAt": "2026-08-22T16:02:50.993922353Z",
+      "lastConnectedAt": "2026-08-22T16:00:50.649288889Z",
+      "lastAttemptAt": "2026-08-22T16:00:50.242986956Z"
+    }
+  },
+  "conflict": {
+    "canonical": "mixed-e2b-daytona-conflict-1-agent-e-conflict",
+    "canonical_sha256": "d4a565922650e9611276be95aaad09ea791cfe5f1d5a26be2d67a546f4d36e88",
+    "artifacts": []
+  },
+  "execution": {
+    "daytona_returncode": 0,
+    "stderr_tail": "time=\"2026-08-22T18:03:16+02:00\" level=warning msg=\"Version mismatch: Daytona CLI is on v0.205.1 and API is on v0.207.0.\\nMake sure the versions are aligned using 'brew upgrade daytonaio/cli/daytona' or by downloading the latest version from https://github.com/daytona/clients/releases.\"\n"
+  }
+}

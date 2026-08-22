@@ -9,7 +9,7 @@ import os
 from orchestrate import parse_json_output, run_daytona_command
 
 
-def run_agent(agent, barrier_url, run_id):
+def run_agent(agent, barrier_url, run_id, conflict_script, mount_root):
     command = [
         "daytona",
         "sandbox",
@@ -19,9 +19,9 @@ def run_agent(agent, barrier_url, run_id):
         "180",
         "--",
         "python3",
-        "/opt/relayfile-benchmark/conflict_write.py",
+        conflict_script,
         "--root",
-        "/root/shared-repo",
+        mount_root,
         "--run-id",
         run_id,
         "--role",
@@ -61,6 +61,10 @@ def main():
     with open(args.config) as handle:
         config = json.load(handle)
     agents = config["agents"]
+    conflict_script = config.get(
+        "conflict_script", "/opt/relayfile-benchmark/conflict_write.py"
+    )
+    mount_root = config.get("mount_root", "/root/shared-repo")
     if len(agents) != 5 or len({item["role"] for item in agents}) != 5:
         raise SystemExit("config must contain five uniquely named agents")
     os.makedirs(args.output, exist_ok=True)
@@ -69,7 +73,14 @@ def main():
     errors = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
         futures = {
-            agent["role"]: pool.submit(run_agent, agent, config["barrier_url"], args.run_id)
+            agent["role"]: pool.submit(
+                run_agent,
+                agent,
+                config["barrier_url"],
+                args.run_id,
+                conflict_script,
+                mount_root,
+            )
             for agent in agents
         }
         for role, future in futures.items():

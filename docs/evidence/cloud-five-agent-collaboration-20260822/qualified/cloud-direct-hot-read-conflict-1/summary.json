@@ -1,0 +1,54 @@
+{
+  "run_id": "cloud-direct-hot-read-conflict-1",
+  "measurement": "five clock-scheduled atomic saves to one mounted path",
+  "release_epoch_ms": 1787413819805.0,
+  "write_completion_spread_ms": 2.83642578125,
+  "max_clock_uncertainty_ms": 4.7728485,
+  "max_clock_offset_delta_ms": 0.713134765625,
+  "canonical_content": "cloud-direct-hot-read-conflict-1-agent-b-conflict",
+  "identical_canonical": true,
+  "identical_public_manifests": true,
+  "listeners_live": true,
+  "distinct_losing_contents": 4,
+  "losing_artifacts": [
+    {
+      "agent": "a",
+      "path": ".relay/conflicts/benchmark/corpus/testdata/cloud-five-agent/cloud-direct-hot-read-conflict-1/conflict/shared.txt.unknown.local",
+      "content": "cloud-direct-hot-read-conflict-1-agent-a-conflict",
+      "sha256": "f1684111237d03f3387fcccf0261db5b3ccab28a4a451f3d8473c9d7840a954a"
+    },
+    {
+      "agent": "c",
+      "path": ".relay/conflicts/benchmark/corpus/testdata/cloud-five-agent/cloud-direct-hot-read-conflict-1/conflict/shared.txt.unknown.local",
+      "content": "cloud-direct-hot-read-conflict-1-agent-c-conflict",
+      "sha256": "06fdba93e6815dcdc6cf6e1fd7af2258a31c1012bd00e34e39ac3e175fc1c59b"
+    },
+    {
+      "agent": "d",
+      "path": ".relay/conflicts/benchmark/corpus/testdata/cloud-five-agent/cloud-direct-hot-read-conflict-1/conflict/shared.txt.unknown.local",
+      "content": "cloud-direct-hot-read-conflict-1-agent-d-conflict",
+      "sha256": "4123fcec5d6d311d35cb8f698b531f91b5231edf68fcd12695effea51304d338"
+    },
+    {
+      "agent": "e",
+      "path": ".relay/conflicts/benchmark/corpus/testdata/cloud-five-agent/cloud-direct-hot-read-conflict-1/conflict/shared.txt.unknown.local",
+      "content": "cloud-direct-hot-read-conflict-1-agent-e-conflict",
+      "sha256": "8359f038fcba44397ea2cf141b4ec4ecfc3e5a6992c262eca910897baf643328"
+    }
+  ],
+  "all_contenders_accounted_for": true,
+  "ephemeral_atomic_save_paths": {},
+  "gates": {
+    "five_distinct_contenders": true,
+    "simultaneous_write_spread_le_15_ms": true,
+    "clock_uncertainty_le_15_ms": true,
+    "clock_offset_delta_le_3_ms": true,
+    "one_canonical_everywhere": true,
+    "four_losing_contents_preserved": true,
+    "all_contenders_accounted_for": true,
+    "identical_public_manifests": true,
+    "listeners_live": true,
+    "no_ephemeral_paths": true
+  },
+  "qualified": true
+}
