@@ -661,7 +661,9 @@ func installCredsFileRefresh(client *mountsync.HTTPClient, cfg mountConfig) {
 			// mount may be able to reach Relayfile while provider egress policy
 			// temporarily blocks the separate RelayAuth hostname.
 			fileToken := strings.TrimSpace(bundle.BearerToken())
-			if fileToken != "" && fileToken != strings.TrimSpace(currentToken) {
+			if fileToken != "" &&
+				fileToken != strings.TrimSpace(currentToken) &&
+				delegatedBearerUsable(bundle, time.Now()) {
 				return fileToken, true, nil
 			}
 		}
@@ -681,6 +683,18 @@ func installCredsFileRefresh(client *mountsync.HTTPClient, cfg mountConfig) {
 		changed := token != strings.TrimSpace(currentToken)
 		return token, changed, nil
 	})
+}
+
+func delegatedBearerUsable(bundle delegatedauth.Bundle, now time.Time) bool {
+	expiresAt := strings.TrimSpace(bundle.BearerExpiresAt())
+	if expiresAt == "" {
+		// Preserve compatibility with older static credential files that never
+		// carried an expiry. If an expiry is present, however, an invalid or
+		// elapsed value must never consume HTTPClient's one unauthorized retry.
+		return true
+	}
+	expires, err := time.Parse(time.RFC3339, expiresAt)
+	return err == nil && expires.After(now)
 }
 
 type repeatedStringFlag = mountscope.StringListFlag

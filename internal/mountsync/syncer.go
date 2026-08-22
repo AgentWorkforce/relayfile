@@ -178,6 +178,11 @@ const (
 	defaultWebSocketReconnectMax     = 60 * time.Second
 	defaultWebSocketReconnectJitter  = 200 * time.Millisecond
 	defaultWebSocketPingEvery        = 10 * time.Second
+	// A same-path remote event must not advance the durable cursor while a
+	// local CAS write/delete is unresolved. The event loop waits briefly for
+	// the upload acknowledgement or conflict recovery, then reconnects from the
+	// last durable cursor if the mutation is still pending.
+	webSocketLocalMutationWait       = 2 * time.Second
 	DefaultWebSocketMaintenanceEvery = 1 * time.Second
 )
 
@@ -1632,8 +1637,13 @@ type trackedFile struct {
 	// shorten it. Remote-origin names still use deterministic shortening.
 	LocalRelativePath string `json:"localRelativePath,omitempty"`
 	// DeletePending is set only by an observed local delete. A missing file
-	// during a scan is not enough evidence to delete cloud state.
+	// during one scan is not enough evidence to delete cloud state.
 	DeletePending bool `json:"deletePending,omitempty"`
+	// MissingPolls counts consecutive watcherless scans that did not observe a
+	// tracked local file. Requiring a second observation prevents the gap
+	// between an editor's atomic rename and replacement from becoming a remote
+	// delete. It resets as soon as the file is observed again.
+	MissingPolls int `json:"missingPolls,omitempty"`
 	// Denied — the server denied reading this path. The local copy (if any)
 	// has been removed and future syncs ignore it.
 	Denied bool `json:"denied,omitempty"`
@@ -4151,6 +4161,38 @@ func (s *Syncer) applyWebSocketEvent(ctx context.Context, event websocketEvent) 
 	return s.applyWebSocketEventWithPersistence(ctx, event, true)
 }
 
+func localMutationPending(tracked trackedFile, ok bool) bool {
+	return ok && (tracked.Dirty || tracked.DeletePending)
+}
+
+func localMutationPendingError(remotePath string) error {
+	return fmt.Errorf("same-path local mutation still pending for %s", remotePath)
+}
+
+func (s *Syncer) waitForLocalMutationToSettle(ctx context.Context, remotePath string) error {
+	deadline := time.NewTimer(webSocketLocalMutationWait)
+	defer deadline.Stop()
+	ticker := time.NewTicker(2 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		s.mu.Lock()
+		tracked, ok := s.state.Files[remotePath]
+		pending := localMutationPending(tracked, ok)
+		s.mu.Unlock()
+		if !pending {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return localMutationPendingError(remotePath)
+		case <-ticker.C:
+		}
+	}
+}
+
 func (s *Syncer) applyWebSocketEventWithPersistence(ctx context.Context, event websocketEvent, persist bool) error {
 	eventAt := strings.TrimSpace(event.Timestamp)
 	if eventAt == "" {
@@ -4163,6 +4205,13 @@ func (s *Syncer) applyWebSocketEventWithPersistence(ctx context.Context, event w
 		remotePath := normalizeRemotePath(event.Path)
 		if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
 			return s.checkpointWebSocketEventWithPersistence(event, eventAt, persist)
+		}
+		// The writeback path releases s.mu around cloud I/O. Preserve ordered
+		// event semantics by waiting without the lock until the same path's local
+		// mutation either commits or completes conflict recovery. On timeout the
+		// read loop reconnects from the previous cursor, replaying this event.
+		if err := s.waitForLocalMutationToSettle(ctx, remotePath); err != nil {
+			return err
 		}
 		if event.InlineContent {
 			file := RemoteFile{
@@ -4182,6 +4231,9 @@ func (s *Syncer) applyWebSocketEventWithPersistence(ctx context.Context, event w
 			}
 			s.mu.Lock()
 			defer s.mu.Unlock()
+			if tracked, ok := s.state.Files[remotePath]; localMutationPending(tracked, ok) {
+				return localMutationPendingError(remotePath)
+			}
 			if err := s.applyRemoteFile(remotePath, file, nil); err != nil {
 				return err
 			}
@@ -4203,6 +4255,9 @@ func (s *Syncer) applyWebSocketEventWithPersistence(ctx context.Context, event w
 				s.mu.Lock()
 				defer s.mu.Unlock()
 				currentTracked, currentTrackedExists := s.state.Files[remotePath]
+				if localMutationPending(currentTracked, currentTrackedExists) {
+					return localMutationPendingError(remotePath)
+				}
 				if currentTrackedExists != observedTrackedExists ||
 					(currentTrackedExists && currentTracked != observedTracked) {
 					s.logf("discarding stale websocket absence for %s after tracked state advanced", remotePath)
@@ -4226,6 +4281,9 @@ func (s *Syncer) applyWebSocketEventWithPersistence(ctx context.Context, event w
 				s.logf("skipping denied file: %s", remotePath)
 				s.mu.Lock()
 				defer s.mu.Unlock()
+				if tracked, ok := s.state.Files[remotePath]; localMutationPending(tracked, ok) {
+					return localMutationPendingError(remotePath)
+				}
 				if markErr := s.markReadDenied(remotePath); markErr != nil {
 					return markErr
 				}
@@ -4237,6 +4295,9 @@ func (s *Syncer) applyWebSocketEventWithPersistence(ctx context.Context, event w
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		currentTracked, currentTrackedExists := s.state.Files[remotePath]
+		if localMutationPending(currentTracked, currentTrackedExists) {
+			return localMutationPendingError(remotePath)
+		}
 		if currentTrackedExists != observedTrackedExists ||
 			(currentTrackedExists && currentTracked != observedTracked) {
 			s.logf("discarding stale websocket read for %s after tracked state advanced", remotePath)
@@ -4253,8 +4314,14 @@ func (s *Syncer) applyWebSocketEventWithPersistence(ctx context.Context, event w
 		if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
 			return s.checkpointWebSocketEventWithPersistence(event, eventAt, persist)
 		}
+		if err := s.waitForLocalMutationToSettle(ctx, remotePath); err != nil {
+			return err
+		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		if tracked, ok := s.state.Files[remotePath]; localMutationPending(tracked, ok) {
+			return localMutationPendingError(remotePath)
+		}
 		if err := s.applyRemoteDelete(remotePath, nil); err != nil {
 			return err
 		}
@@ -7442,6 +7509,21 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	canWrite := s.canWritePath(remotePath)
 	tracked.ReadOnly = !canWrite
 	tracked.Denied = false
+	if tracked.MissingPolls > 0 {
+		// A watcherless poll has observed this path missing once, but has not
+		// confirmed a deletion yet. Do not let the down-path in the same cycle
+		// recreate a genuinely deleted file and make a second confirming scan
+		// impossible. If the file already reappeared (the normal atomic-rename
+		// case), clear the candidate and reconcile it normally.
+		if _, statErr := os.Lstat(localPath); errors.Is(statErr, os.ErrNotExist) {
+			s.state.Files[remotePath] = tracked
+			return nil
+		} else if statErr != nil {
+			return statErr
+		}
+		tracked.MissingPolls = 0
+		s.state.Files[remotePath] = tracked
+	}
 	if tracked.Dirty {
 		tracked.LocalRelativePath = s.state.Files[remotePath].LocalRelativePath
 		if err := s.assertNotMountRoot(localPath); err != nil {
@@ -7841,6 +7923,10 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 		}
 		canWrite := s.canWritePath(remotePath)
 		tracked.ReadOnly = !canWrite
+		if exists && tracked.MissingPolls != 0 {
+			tracked.MissingPolls = 0
+			s.state.Files[remotePath] = tracked
+		}
 		if (s.recoverStartupDrift || s.pollLocalChanges) &&
 			exists &&
 			canWrite &&
@@ -8000,10 +8086,16 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 			continue
 		}
 		if s.pollLocalChanges && !tracked.DeletePending {
+			tracked.MissingPolls++
+			if tracked.MissingPolls < 2 {
+				s.state.Files[remotePath] = tracked
+				s.logf("deferring watcherless deletion until a second missing scan confirms it: %s", remotePath)
+				continue
+			}
 			tracked.DeletePending = true
 			tracked.Dirty = false
 			s.state.Files[remotePath] = tracked
-			s.logf("recovering local deletion not observed by the watcher: %s", remotePath)
+			s.logf("recovering local deletion confirmed by consecutive watcherless scans: %s", remotePath)
 		}
 		if !tracked.DeletePending {
 			s.state.Files[remotePath] = tracked
@@ -8020,6 +8112,13 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 				s.logf("conflict deleting %s; remote changed", remotePath)
 				remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
 				if readErr == nil {
+					// The newer remote revision wins the failed delete CAS. Clear
+					// the local-delete candidate so applyRemoteFile can restore it
+					// instead of preserving a now-stale missing-poll marker.
+					current := s.state.Files[remotePath]
+					current.DeletePending = false
+					current.MissingPolls = 0
+					s.state.Files[remotePath] = current
 					if applyErr := s.applyRemoteFile(remotePath, remoteFile, nil); applyErr != nil {
 						return nil, applyErr
 					}

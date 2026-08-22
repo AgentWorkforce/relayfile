@@ -180,6 +180,104 @@ func TestWebSocketInlineContentRejectsHashMismatchWithoutAdvancingCursor(t *test
 	}
 }
 
+func TestWebSocketSamePathEventWaitsForLocalUploadBeforeCheckpoint(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	client := &fakeClient{
+		files:                          map[string]RemoteFile{},
+		bulkWriteResponseFuncOwnsWrite: true,
+	}
+	client.bulkWriteResponseFunc = func(ctx context.Context, _ string, files []BulkWriteFile) (BulkWriteResponse, error) {
+		once.Do(func() { close(started) })
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return BulkWriteResponse{}, ctx.Err()
+		}
+		return BulkWriteResponse{
+			Written: len(files),
+			Results: []BulkWriteResult{{Path: files[0].Path, Revision: "rev_local"}},
+		}, nil
+	}
+
+	localDir := t.TempDir()
+	localPath := filepath.Join(localDir, "shared", "same.txt")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("mkdir local file: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte("local pending"), 0o644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_same_path_pending",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+
+	uploadDone := make(chan error, 1)
+	go func() {
+		uploadDone <- syncer.HandleLocalChanges(context.Background(), []LocalChange{{
+			RelativePath: "shared/same.txt",
+			Op:           fsnotify.Create,
+		}})
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("local upload did not reach blocking response")
+	}
+
+	peerContent := "peer committed while local upload was in flight"
+	eventDone := make(chan error, 1)
+	go func() {
+		eventDone <- syncer.applyWebSocketEvent(context.Background(), websocketEvent{
+			EventID:       "evt_peer",
+			Type:          "file.updated",
+			Path:          "/shared/same.txt",
+			Revision:      "rev_peer",
+			ContentType:   "text/plain",
+			Content:       peerContent,
+			ContentHash:   hashString(peerContent),
+			InlineContent: true,
+		})
+	}()
+	select {
+	case err := <-eventDone:
+		t.Fatalf("same-path event checkpointed before upload settled: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	syncer.mu.Lock()
+	if got := syncer.state.EventsCursor; got != "" {
+		syncer.mu.Unlock()
+		t.Fatalf("cursor advanced while local upload was pending: %q", got)
+	}
+	syncer.mu.Unlock()
+
+	close(release)
+	if err := <-uploadDone; err != nil {
+		t.Fatalf("local upload: %v", err)
+	}
+	select {
+	case err := <-eventDone:
+		if err != nil {
+			t.Fatalf("apply retained same-path event: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("same-path event did not resume after upload settled")
+	}
+	assertLocalFileContent(t, localPath, peerContent)
+	if tracked := syncer.state.Files["/shared/same.txt"]; tracked.Revision != "rev_peer" || tracked.Dirty {
+		t.Fatalf("tracked same-path state = %+v, want clean rev_peer", tracked)
+	}
+	if got := syncer.state.EventsCursor; got != "evt_peer" {
+		t.Fatalf("events cursor = %q, want evt_peer", got)
+	}
+}
+
 func TestWebSocketSupersededCreateAppliesCurrentAbsenceAndAdvancesCursor(t *testing.T) {
 	client := &fakeClient{files: map[string]RemoteFile{}}
 	localDir := t.TempDir()
