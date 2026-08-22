@@ -1,0 +1,93 @@
+{
+  "run_id": "mixed-e2b-daytona-qualifier-1",
+  "path_set": "mixed-e2b-daytona-qualifier-1",
+  "role": "a",
+  "shape": "repo",
+  "trial": 5,
+  "release_epoch_ms": 1787414554248.0,
+  "ready_lead_ms": 1889.175537109375,
+  "write": {
+    "started_local_ns": 1787414554247217871,
+    "completed_local_ns": 1787414554260974513,
+    "started_epoch_ms": 1787414554247.794,
+    "completed_epoch_ms": 1787414554261.5508,
+    "duration_ms": 13.756642,
+    "files": 11,
+    "bytes": 13992
+  },
+  "observations": [
+    {
+      "source": "b",
+      "observed_local_ns": 1787414554532970958,
+      "hashes_verified": 11,
+      "attempts": 233,
+      "observed_epoch_ms": 1787414554533.5469
+    },
+    {
+      "source": "c",
+      "observed_local_ns": 1787414554521137077,
+      "hashes_verified": 11,
+      "attempts": 225,
+      "observed_epoch_ms": 1787414554521.7134
+    },
+    {
+      "source": "d",
+      "observed_local_ns": 1787414554523511557,
+      "hashes_verified": 11,
+      "attempts": 226,
+      "observed_epoch_ms": 1787414554524.0874
+    },
+    {
+      "source": "e",
+      "observed_local_ns": 1787414554469337625,
+      "hashes_verified": 11,
+      "attempts": 186,
+      "observed_epoch_ms": 1787414554469.9136
+    }
+  ],
+  "all_visible": true,
+  "clock": {
+    "source": "https://relayfile-clock-bench-20260822.agent-workforce.workers.dev/time",
+    "pre": {
+      "samples": 15,
+      "retained": 7,
+      "min_rtt_ms": 14.916999,
+      "median_rtt_ms": 16.504737,
+      "offset_ms": 0.987548828125,
+      "uncertainty_ms": 7.9584995,
+      "best_rtt_ms": [
+        14.916999,
+        15.50853,
+        15.517014,
+        15.639091,
+        15.769019,
+        15.797971,
+        16.448006
+      ]
+    },
+    "post": {
+      "samples": 15,
+      "retained": 7,
+      "min_rtt_ms": 12.470658,
+      "median_rtt_ms": 13.494166,
+      "offset_ms": 0.16455078125,
+      "uncertainty_ms": 6.735329,
+      "best_rtt_ms": [
+        12.470658,
+        12.629865,
+        12.643088,
+        12.683937,
+        13.001684,
+        13.153757,
+        13.375934
+      ]
+    },
+    "midpoint_offset_ms": 0.5760498046875,
+    "offset_delta_ms": -0.822998046875,
+    "uncertainty_ms": 7.9584995
+  },
+  "execution": {
+    "daytona_returncode": 0,
+    "stderr_tail": ""
+  }
+}

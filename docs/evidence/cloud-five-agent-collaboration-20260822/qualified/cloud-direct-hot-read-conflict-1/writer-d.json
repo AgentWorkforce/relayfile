@@ -1,0 +1,53 @@
+{
+  "run_id": "cloud-direct-hot-read-conflict-1",
+  "role": "d",
+  "relative_path": "testdata/cloud-five-agent/cloud-direct-hot-read-conflict-1/conflict/shared.txt",
+  "content": "cloud-direct-hot-read-conflict-1-agent-d-conflict",
+  "sha256": "4123fcec5d6d311d35cb8f698b531f91b5231edf68fcd12695effea51304d338",
+  "ready_lead_ms": 1925.05078125,
+  "write_started_epoch_ms": 1787413819805.2417,
+  "write_completed_epoch_ms": 1787413819806.178,
+  "local_write_ms": 0.936127,
+  "clock": {
+    "pre": {
+      "samples": 15,
+      "retained": 7,
+      "min_rtt_ms": 6.017707,
+      "median_rtt_ms": 6.398547,
+      "offset_ms": -0.0859375,
+      "uncertainty_ms": 3.5088535,
+      "best_rtt_ms": [
+        6.017707,
+        6.053618,
+        6.176187,
+        6.248927,
+        6.290157,
+        6.348137,
+        6.365247
+      ]
+    },
+    "post": {
+      "samples": 15,
+      "retained": 7,
+      "min_rtt_ms": 5.48384,
+      "median_rtt_ms": 6.613576,
+      "offset_ms": -0.19140625,
+      "uncertainty_ms": 3.24192,
+      "best_rtt_ms": [
+        5.48384,
+        6.171877,
+        6.249217,
+        6.344487,
+        6.451327,
+        6.467076,
+        6.552896
+      ]
+    },
+    "offset_delta_ms": -0.10546875,
+    "uncertainty_ms": 3.5088535
+  },
+  "execution": {
+    "daytona_returncode": 0,
+    "stderr_tail": "time=\"2026-08-22T17:50:17+02:00\" level=warning msg=\"Version mismatch: Daytona CLI is on v0.205.1 and API is on v0.207.0.\\nMake sure the versions are aligned using 'brew upgrade daytonaio/cli/daytona' or by downloading the latest version from https://github.com/daytona/clients/releases.\"\n"
+  }
+}

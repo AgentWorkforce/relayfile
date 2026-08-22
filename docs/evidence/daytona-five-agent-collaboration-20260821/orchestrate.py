@@ -59,7 +59,18 @@ def run_daytona_command(command, timeout_s):
         time.sleep(0.25)
 
 
-def run_agent(agent, agents, barrier_url, run_id, path_set, shape, trial, timeout_s):
+def run_agent(
+    agent,
+    agents,
+    barrier_url,
+    run_id,
+    path_set,
+    shape,
+    trial,
+    timeout_s,
+    trial_script,
+    mount_root,
+):
     command = [
         "daytona",
         "sandbox",
@@ -69,9 +80,9 @@ def run_agent(agent, agents, barrier_url, run_id, path_set, shape, trial, timeou
         str(int(timeout_s + 150)),
         "--",
         "python3",
-        "/opt/relayfile-benchmark/fanout_trial.py",
+        trial_script,
         "--root",
-        "/root/shared-repo",
+        mount_root,
         "--run-id",
         run_id,
         "--path-set",
@@ -139,6 +150,10 @@ def main():
     with open(args.config) as handle:
         config = json.load(handle)
     agents = config["agents"]
+    trial_script = config.get(
+        "trial_script", "/opt/relayfile-benchmark/fanout_trial.py"
+    )
+    mount_root = config.get("mount_root", "/root/shared-repo")
     path_set = args.path_set or args.run_id
     if len(agents) != 5 or len({item["role"] for item in agents}) != 5:
         raise SystemExit("config must contain five uniquely named agents")
@@ -163,6 +178,8 @@ def main():
                         shape,
                         trial,
                         timeout_s,
+                        trial_script,
+                        mount_root,
                     )
                     for agent in agents
                 }

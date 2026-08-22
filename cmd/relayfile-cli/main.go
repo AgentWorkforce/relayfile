@@ -14096,7 +14096,13 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 			}
 		case <-timer.C:
 			cycle++
-			realtimeHealthy := websocketEnabled && watcher != nil && watcher.Healthy() && syncer.WebSocketConnected()
+			watcherHealthy := watcher != nil && watcher.Healthy()
+			if watcher != nil && !watcherHealthy {
+				syncer.EnablePollingLocalChangeDetection()
+				log.Printf("file watcher became unhealthy; continuing with polling reconciliation")
+				watcher = nil
+			}
+			realtimeHealthy := websocketEnabled && watcherHealthy && syncer.WebSocketConnected()
 			reconcile := shouldReconcileMountCycle(realtimeHealthy, cycle)
 			if reconcile {
 				if err := runCycle(true); mountsync.IsBootstrapTerminalError(err) {

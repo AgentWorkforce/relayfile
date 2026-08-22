@@ -5915,6 +5915,89 @@ func TestMissingTrackedFileRequiresDeletePending(t *testing.T) {
 	}
 }
 
+func TestPollingDeleteRequiresTwoConsecutiveMissingScans(t *testing.T) {
+	remotePath := "/notion/Docs/A.md"
+	content := []byte("# A")
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			remotePath: {
+				Path:        remotePath,
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     string(content),
+			},
+		},
+		revisionCounter: 1,
+	}
+	localDir := t.TempDir()
+	localPath := filepath.Join(localDir, "Docs", "A.md")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("mkdir local file: %v", err)
+	}
+	if err := os.WriteFile(localPath, content, 0o644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_polling_confirm_delete",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	syncer.recoverStartupDrift = false
+	syncer.EnablePollingLocalChangeDetection()
+	syncer.state.Files[remotePath] = trackedFile{
+		Revision:    "rev_1",
+		ContentType: "text/markdown",
+		Hash:        hashBytes(content),
+	}
+
+	var disappearOnce atomic.Bool
+	disappearOnce.Store(true)
+	syncer.readLocalSnapshotFn = func(path string, includeContent bool) (localSnapshot, error) {
+		if path == localPath && disappearOnce.CompareAndSwap(true, false) {
+			return localSnapshot{}, os.ErrNotExist
+		}
+		return readLocalSnapshot(path, includeContent)
+	}
+	if _, err := syncer.pushLocal(context.Background()); err != nil {
+		t.Fatalf("poll through transient disappearance: %v", err)
+	}
+	if len(client.deleteCalls) != 0 {
+		t.Fatalf("transient read disappearance deleted remote file: %+v", client.deleteCalls)
+	}
+	if got := syncer.state.Files[remotePath].MissingPolls; got != 1 {
+		t.Fatalf("missing polls after transient disappearance = %d, want 1", got)
+	}
+
+	if _, err := syncer.pushLocal(context.Background()); err != nil {
+		t.Fatalf("poll after replacement appeared: %v", err)
+	}
+	if got := syncer.state.Files[remotePath].MissingPolls; got != 0 {
+		t.Fatalf("missing polls after file reappeared = %d, want 0", got)
+	}
+	if len(client.deleteCalls) != 0 {
+		t.Fatalf("replacement recovery deleted remote file: %+v", client.deleteCalls)
+	}
+
+	if err := os.Remove(localPath); err != nil {
+		t.Fatalf("remove local file: %v", err)
+	}
+	if _, err := syncer.pushLocal(context.Background()); err != nil {
+		t.Fatalf("first confirmed-missing poll: %v", err)
+	}
+	if len(client.deleteCalls) != 0 {
+		t.Fatalf("first missing poll deleted remote file: %+v", client.deleteCalls)
+	}
+	if _, err := syncer.pushLocal(context.Background()); err != nil {
+		t.Fatalf("second confirmed-missing poll: %v", err)
+	}
+	if len(client.deleteCalls) != 1 || client.deleteCalls[0].Path != remotePath {
+		t.Fatalf("consecutive missing scans did not produce one delete: %+v", client.deleteCalls)
+	}
+}
+
 func TestPollingLocalChangeDetectionPushesHashDrift(t *testing.T) {
 	client := &fakeClient{
 		files: map[string]RemoteFile{
@@ -5989,7 +6072,13 @@ func TestPollingLocalChangeDetectionPushesDeletion(t *testing.T) {
 		t.Fatalf("remove local file failed: %v", err)
 	}
 	if err := syncer.SyncOnce(context.Background()); err != nil {
-		t.Fatalf("polling sync failed: %v", err)
+		t.Fatalf("first polling sync failed: %v", err)
+	}
+	if len(client.deleteCalls) != 0 {
+		t.Fatalf("first missing scan must defer deletion, got %+v", client.deleteCalls)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("second polling sync failed: %v", err)
 	}
 
 	if len(client.deleteCalls) != 1 || client.deleteCalls[0].Path != "/notion/Docs/A.md" {

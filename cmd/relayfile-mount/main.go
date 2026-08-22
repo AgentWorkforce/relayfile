@@ -580,6 +580,14 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 		case <-timer.C:
 			cycle++
 			watcherHealthy := watcher != nil && watcher.Healthy()
+			if watcher != nil && !watcherHealthy {
+				// An asynchronous fsnotify failure breaks event continuity. Switch
+				// permanently to the correctness-first scan path for this process;
+				// keeping the stale watcher marker would skip local drift detection.
+				syncer.EnablePollingLocalChangeDetection()
+				log.Printf("file watcher became unhealthy; continuing with polling reconciliation")
+				watcher = nil
+			}
 			realtimeHealthy := mountReconcileUsesWebSocketCadence(cfg, watcherHealthy) && syncer.WebSocketConnected()
 			reconcile := shouldReconcileMountCycle(realtimeHealthy, cycle)
 			if reconcile {
@@ -647,6 +655,18 @@ func installCredsFileRefresh(client *mountsync.HTTPClient, cfg mountConfig) {
 	}
 	client.SetTokenRefreshFunc(func(currentToken string) (string, bool, error) {
 		bundle, loadErr := delegatedauth.Load(credsFile)
+		if loadErr == nil {
+			// A credential supervisor may have already rotated the shared file.
+			// Prefer that newer bearer before making a refresh-token request: the
+			// mount may be able to reach Relayfile while provider egress policy
+			// temporarily blocks the separate RelayAuth hostname.
+			fileToken := strings.TrimSpace(bundle.BearerToken())
+			if fileToken != "" &&
+				fileToken != strings.TrimSpace(currentToken) &&
+				delegatedBearerUsable(bundle, time.Now()) {
+				return fileToken, true, nil
+			}
+		}
 		if loadErr == nil && bundle.RotationToken() != "" {
 			renewed, changed, err := delegatedauth.RenewFile(context.Background(), nil, credsFile, delegatedauth.DefaultRefreshTimeout)
 			if err != nil {
@@ -663,6 +683,18 @@ func installCredsFileRefresh(client *mountsync.HTTPClient, cfg mountConfig) {
 		changed := token != strings.TrimSpace(currentToken)
 		return token, changed, nil
 	})
+}
+
+func delegatedBearerUsable(bundle delegatedauth.Bundle, now time.Time) bool {
+	expiresAt := strings.TrimSpace(bundle.BearerExpiresAt())
+	if expiresAt == "" {
+		// Preserve compatibility with older static credential files that never
+		// carried an expiry. If an expiry is present, however, an invalid or
+		// elapsed value must never consume HTTPClient's one unauthorized retry.
+		return true
+	}
+	expires, err := time.Parse(time.RFC3339, expiresAt)
+	return err == nil && expires.After(now)
 }
 
 type repeatedStringFlag = mountscope.StringListFlag

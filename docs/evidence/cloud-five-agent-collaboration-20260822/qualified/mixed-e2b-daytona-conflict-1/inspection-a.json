@@ -1,0 +1,37 @@
+{
+  "role": "a",
+  "manifest": {
+    "scope": "testdata/cloud-five-agent/mixed-e2b-daytona-conflict-1",
+    "files": 1,
+    "bytes": 45,
+    "sha256": "b3a21bfc1738d02f1707c4a845d7d7bce65fb864ded074f4c584b5ed1c4895be",
+    "ephemeral_atomic_save_paths": []
+  },
+  "state": {
+    "status": "ready",
+    "pendingWriteback": 0,
+    "pendingConflicts": 0,
+    "eventListener": {
+      "mode": "websocket",
+      "status": "listening",
+      "heartbeatAt": "2026-08-22T16:02:51.307268918Z",
+      "lastConnectedAt": "2026-08-22T16:00:50.608571169Z",
+      "lastAttemptAt": "2026-08-22T16:00:50.045231468Z"
+    }
+  },
+  "conflict": {
+    "canonical": "mixed-e2b-daytona-conflict-1-agent-e-conflict",
+    "canonical_sha256": "d4a565922650e9611276be95aaad09ea791cfe5f1d5a26be2d67a546f4d36e88",
+    "artifacts": [
+      {
+        "path": ".relay/conflicts/benchmark/mixed/testdata/cloud-five-agent/mixed-e2b-daytona-conflict-1/conflict/shared.txt.unknown.local",
+        "content": "mixed-e2b-daytona-conflict-1-agent-a-conflict",
+        "sha256": "f01659e4be4b5be2f1e3ed7dd4ff96d52df7b282406368cd52a20a9e6836623e"
+      }
+    ]
+  },
+  "execution": {
+    "daytona_returncode": 0,
+    "stderr_tail": ""
+  }
+}

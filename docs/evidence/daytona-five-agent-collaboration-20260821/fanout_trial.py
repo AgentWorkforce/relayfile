@@ -184,6 +184,58 @@ def wait_for_receiver(receiver, base_url, expected, completed_ns, timeout_s, pol
     }
 
 
+def await_receiver(receiver, base_url, expected, completed_ns, timeout_s, poll_s):
+    connection = JSONConnection(base_url, timeout_s=timeout_s + 2.0)
+    request = {
+        "files": [
+            {"path": relative, "sha256": hashlib.sha256(content).hexdigest()}
+            for relative, content in expected
+        ]
+    }
+    try:
+        endpoint = (
+            "/await-batch?"
+            + urllib.parse.urlencode({"timeout_s": timeout_s, "poll_s": poll_s})
+        )
+        payload = request_with_deadline(
+            connection,
+            "POST",
+            endpoint,
+            request,
+            timeout_s + 2.0,
+        )
+        observed_ns = time.time_ns()
+        if payload.get("all_match"):
+            return {
+                "receiver": receiver,
+                "status": "visible",
+                "hashes_verified": len(expected),
+                "attempts": int(payload.get("attempts", 1)),
+                "transport_errors": 0,
+                "observed_receiver_ns": payload.get("observed_ns"),
+                "observed_sender_ns": observed_ns,
+                "latency_ms": (observed_ns - completed_ns) / 1e6,
+            }
+    except (
+        OSError,
+        RuntimeError,
+        http.client.HTTPException,
+        json.JSONDecodeError,
+        RequestDeadlineExceeded,
+    ):
+        pass
+    finally:
+        connection.close()
+    return {
+        "receiver": receiver,
+        "status": "timeout",
+        "hashes_verified": 0,
+        "attempts": 1,
+        "transport_errors": 1,
+        "latency_ms": None,
+    }
+
+
 def parse_receiver(raw):
     if "=" not in raw:
         raise argparse.ArgumentTypeError("receiver must be ROLE=URL")
@@ -207,6 +259,7 @@ def main():
     parser.add_argument("--timeout-s", type=float, default=10)
     parser.add_argument("--barrier-timeout-s", type=float, default=120)
     parser.add_argument("--poll-s", type=float, default=0.005)
+    parser.add_argument("--probe-mode", choices=("poll", "await"), default="poll")
     args = parser.parse_args()
     if len(args.receiver) != args.parties - 1:
         raise SystemExit(f"expected {args.parties - 1} receivers, got {len(args.receiver)}")
@@ -235,7 +288,7 @@ def main():
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(args.receiver)) as pool:
         futures = [
             pool.submit(
-                wait_for_receiver,
+                await_receiver if args.probe_mode == "await" else wait_for_receiver,
                 receiver,
                 url,
                 expected,
