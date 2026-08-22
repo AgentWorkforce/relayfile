@@ -1,0 +1,15 @@
+{
+  "returncode": 0,
+  "payload": {
+    "run_id": "optimized-conflict-r1",
+    "role": "daytona",
+    "relative_path": "testdata/cross-provider/optimized-conflict-r1/conflict/shared.txt",
+    "content": "optimized-conflict-r1-agent-daytona-conflict",
+    "sha256": "6e96ef599a305bce1e3ab08a2b964369df2451e4ff774b35f3bb47285b997996",
+    "barrier_released_ns": 1787350290868551833,
+    "rename_started_ns": 1787350290909937874,
+    "rename_completed_ns": 1787350290910001584,
+    "atomic_rename_ms": 0.06371
+  },
+  "stderr_tail": "time=\"2026-08-22T00:11:30+02:00\" level=warning msg=\"Version mismatch: Daytona CLI is on v0.205.1 and API is on v0.207.0.\\nMake sure the versions are aligned using 'brew upgrade daytonaio/cli/daytona' or by downloading the latest version from https://github.com/daytona/clients/releases.\"\n"
+}

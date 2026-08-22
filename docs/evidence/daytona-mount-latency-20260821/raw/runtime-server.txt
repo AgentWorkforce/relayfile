@@ -1,0 +1,26 @@
+time="2026-08-21T15:38:21+02:00" level=warning msg="Version mismatch: Daytona CLI is on v0.183.0 and API is on v0.207.0.\nMake sure the versions are aligned using 'brew upgrade daytonaio/cli/daytona' or by downloading the latest version from https://github.com/daytonaio/daytona/releases."
+role=server
+Linux 254639a3-5df1-4cd1-88b3-d631ab9f942c 6.17.0-35-generic #35~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 19:30:42 UTC 2 x86_64 GNU/Linux
+PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"
+VERSION_ID="12"
+model name	: AMD EPYC 9254 24-Core Processor
+MemTotal:       395740784 kB
+MemAvailable:   307040520 kB
+pid=2799
+Name:	relayfile-serve
+Pid:	2799
+PPid:	1
+VmPeak:	 1062680 kB
+VmSize:	 1062680 kB
+VmHWM:	  330856 kB
+VmRSS:	  151272 kB
+Threads:	41
+voluntary_ctxt_switches:	3639
+nonvoluntary_ctxt_switches:	184
+41601538	<benchmark-workdir>
+auth.log 54 bytes
+token-http.log 268 bytes
+seed.log 33256 bytes
+preflight-server-1787317852.log 49 bytes
+server.log 49 bytes
+seed-clean.log 33256 bytes

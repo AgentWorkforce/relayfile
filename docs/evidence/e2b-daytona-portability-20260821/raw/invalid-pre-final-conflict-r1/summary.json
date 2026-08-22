@@ -1,0 +1,19 @@
+{
+  "run_id": "optimized-conflict-r1",
+  "writer_hashes": [
+    "4595f854a04584cbc815604e31aab10440bb0cfe70fbfbed95a4f8301f83f71b",
+    "6e96ef599a305bce1e3ab08a2b964369df2451e4ff774b35f3bb47285b997996"
+  ],
+  "canonical_hashes": [
+    "4595f854a04584cbc815604e31aab10440bb0cfe70fbfbed95a4f8301f83f71b"
+  ],
+  "artifact_hashes": [
+    "6e96ef599a305bce1e3ab08a2b964369df2451e4ff774b35f3bb47285b997996"
+  ],
+  "one_barrier_release": true,
+  "writers_succeeded": true,
+  "captures_succeeded": true,
+  "canonical_converged": true,
+  "losing_bytes_preserved": true,
+  "status": "pass"
+}

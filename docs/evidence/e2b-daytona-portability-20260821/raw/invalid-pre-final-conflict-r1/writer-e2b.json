@@ -1,0 +1,15 @@
+{
+  "returncode": 0,
+  "payload": {
+    "run_id": "optimized-conflict-r1",
+    "role": "e2b",
+    "relative_path": "testdata/cross-provider/optimized-conflict-r1/conflict/shared.txt",
+    "content": "optimized-conflict-r1-agent-e2b-conflict",
+    "sha256": "4595f854a04584cbc815604e31aab10440bb0cfe70fbfbed95a4f8301f83f71b",
+    "barrier_released_ns": 1787350290868551833,
+    "rename_started_ns": 1787350290871616031,
+    "rename_completed_ns": 1787350290871682307,
+    "atomic_rename_ms": 0.066276
+  },
+  "stderr_tail": ""
+}

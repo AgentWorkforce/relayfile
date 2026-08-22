@@ -1,0 +1,1 @@
+{"role": "agent-a", "relative_path": "testdata/daytona-sync-benchmark/clean-r2/concurrency/disjoint-v2/a.txt", "target_ns": 1787326674890000000, "write_started_ns": 1787326674890059828, "write_completed_ns": 1787326674890453469, "target_error_ms": 0.059828, "write_ms": 0.393641, "sha256": "6ef2bf4f2fb47ad497e9c982d9019eb9e5c02f9b56853ea4d87799de089c1591"}

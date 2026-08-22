@@ -1,0 +1,82 @@
+{
+  "run_id": "large-r2",
+  "path_set": "large-fixed",
+  "role": "c",
+  "shape": "repo",
+  "trial": 5,
+  "paths": [
+    "testdata/daytona-five-agent/large-fixed/repo-005/c/src/module_00.go",
+    "testdata/daytona-five-agent/large-fixed/repo-005/c/src/module_01.go",
+    "testdata/daytona-five-agent/large-fixed/repo-005/c/src/module_02.go",
+    "testdata/daytona-five-agent/large-fixed/repo-005/c/src/module_03.go",
+    "testdata/daytona-five-agent/large-fixed/repo-005/c/src/module_04.go",
+    "testdata/daytona-five-agent/large-fixed/repo-005/c/src/module_05.go",
+    "testdata/daytona-five-agent/large-fixed/repo-005/c/src/module_06.go",
+    "testdata/daytona-five-agent/large-fixed/repo-005/c/src/module_07.go",
+    "testdata/daytona-five-agent/large-fixed/repo-005/c/src/module_08.go",
+    "testdata/daytona-five-agent/large-fixed/repo-005/c/src/module_09.go",
+    "testdata/daytona-five-agent/large-fixed/repo-005/c/src/module_10.go"
+  ],
+  "expected_bytes": 13992,
+  "expected_hashes": 11,
+  "barrier": {
+    "released_ns": 1787343961114062649,
+    "roles": [
+      "a",
+      "b",
+      "c",
+      "d",
+      "e"
+    ],
+    "round_trip_ms": 383.785812
+  },
+  "write_started_ns": 1787343961156917484,
+  "write_completed_ns": 1787343961161260125,
+  "local_write_ms": 4.342641,
+  "receivers": [
+    {
+      "receiver": "a",
+      "status": "visible",
+      "hashes_verified": 11,
+      "attempts": 5,
+      "transport_errors": 0,
+      "observed_sender_ns": 1787343961828693606,
+      "latency_ms": 667.433481
+    },
+    {
+      "receiver": "b",
+      "status": "visible",
+      "hashes_verified": 11,
+      "attempts": 15,
+      "transport_errors": 0,
+      "observed_sender_ns": 1787343962233368056,
+      "latency_ms": 1072.107931
+    },
+    {
+      "receiver": "d",
+      "status": "visible",
+      "hashes_verified": 11,
+      "attempts": 9,
+      "transport_errors": 0,
+      "observed_sender_ns": 1787343961801555915,
+      "latency_ms": 640.29579
+    },
+    {
+      "receiver": "e",
+      "status": "visible",
+      "hashes_verified": 11,
+      "attempts": 12,
+      "transport_errors": 0,
+      "observed_sender_ns": 1787343961969993728,
+      "latency_ms": 808.733603
+    }
+  ],
+  "all_visible": true,
+  "all_peer_latency_ms": 1072.107931,
+  "clock": "sender CLOCK_REALTIME; no cross-host subtraction",
+  "execution": {
+    "daytona_returncode": 0,
+    "control_plane_attempts": 1,
+    "stderr_tail": "time=\"2026-08-21T22:26:00+02:00\" level=warning msg=\"Version mismatch: Daytona CLI is on v0.205.1 and API is on v0.207.0.\\nMake sure the versions are aligned using 'brew upgrade daytonaio/cli/daytona' or by downloading the latest version from https://github.com/daytona/clients/releases.\"\n"
+  }
+}

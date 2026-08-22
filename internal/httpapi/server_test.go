@@ -114,6 +114,12 @@ func TestFileEventsWebSocketCatchUpAndPingPong(t *testing.T) {
 	if catchUp["path"] != "/notion/Docs/One.md" {
 		t.Fatalf("unexpected catch-up path: %v", catchUp["path"])
 	}
+	if catchUp["inlineContent"] != true || catchUp["content"] != "# one" {
+		t.Fatalf("catch-up event did not inline current file content: %+v", catchUp)
+	}
+	if catchUp["contentType"] != "text/markdown" || catchUp["contentHash"] == "" {
+		t.Fatalf("catch-up event did not carry content metadata: %+v", catchUp)
+	}
 
 	if err := wsjson.Write(ctx, conn, map[string]any{"type": "ping"}); err != nil {
 		t.Fatalf("write ping failed: %v", err)
@@ -149,6 +155,73 @@ func TestFileEventsWebSocketCatchUpAndPingPong(t *testing.T) {
 	}
 	if live["origin"] != "agent_write" {
 		t.Fatalf("expected live write event origin=agent_write, got %v", live["origin"])
+	}
+	if live["inlineContent"] != true || live["content"] != "# two" {
+		t.Fatalf("live event did not inline current file content: %+v", live)
+	}
+}
+
+func TestFileEventsWebSocketCursorCatchUpDrainsMoreThanOnePage(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+
+	if _, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: "ws_socket_cursor_pages",
+		Path:        "/docs/anchor.md",
+		IfMatch:     "0",
+		ContentType: "text/markdown",
+		Content:     "anchor",
+	}); err != nil {
+		t.Fatalf("seed anchor failed: %v", err)
+	}
+	feed, err := store.GetEvents("ws_socket_cursor_pages", "", "", 1)
+	if err != nil || len(feed.Events) != 1 {
+		t.Fatalf("get anchor event: feed=%+v err=%v", feed, err)
+	}
+	anchor := feed.Events[0].EventID
+	for i := 0; i < 205; i++ {
+		if _, err := store.WriteFile(relayfile.WriteRequest{
+			WorkspaceID: "ws_socket_cursor_pages",
+			Path:        fmt.Sprintf("/docs/%03d.md", i),
+			IfMatch:     "0",
+			ContentType: "text/markdown",
+			Content:     fmt.Sprintf("doc-%03d", i),
+		}); err != nil {
+			t.Fatalf("seed event %d failed: %v", i, err)
+		}
+	}
+
+	server := httptest.NewServer(NewServer(store))
+	defer server.Close()
+	token := mustTestJWT(t, "dev-secret", "ws_socket_cursor_pages", "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/workspaces/ws_socket_cursor_pages/fs/ws?token=" + token + "&cursor=" + url.QueryEscape(anchor)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("websocket dial failed: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	for i := 0; i < 205; i++ {
+		var event map[string]any
+		if err := wsjson.Read(ctx, conn, &event); err != nil {
+			t.Fatalf("read catch-up event %d failed: %v", i, err)
+		}
+		wantPath := fmt.Sprintf("/docs/%03d.md", i)
+		if event["path"] != wantPath || event["content"] != fmt.Sprintf("doc-%03d", i) {
+			t.Fatalf("catch-up event %d = %+v, want path %s with inline content", i, event, wantPath)
+		}
+	}
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "ping"}); err != nil {
+		t.Fatalf("write ping failed: %v", err)
+	}
+	var pong map[string]any
+	if err := wsjson.Read(ctx, conn, &pong); err != nil {
+		t.Fatalf("read pong failed: %v", err)
+	}
+	if pong["type"] != "pong" {
+		t.Fatalf("unexpected event remained after paginated catch-up: %+v", pong)
 	}
 }
 

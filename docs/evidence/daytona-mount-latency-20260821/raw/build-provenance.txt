@@ -1,0 +1,9 @@
+repository_commit f89d152502d3bc15161e0673b96cb84f419cd30a
+repository_describe v0.10.45
+server_commit f89d152502d3bc15161e0673b96cb84f419cd30a
+server_sha256 d737ca8db0ce54e71e82607a978574776091223c9976bd97ea5b8822fe126f5f
+server_go_version go1.19.8
+mount_version v0.10.45
+mount_commit b3a06ffb3eea68fe27f7cedf0f90924efe61fa13
+mount_sha256 7c8283e3415a891c1c1ce72ec5f8bfbe0aee2e135e9d986392287f54de8e5dc4
+mount_go_version go1.22.12

@@ -1,0 +1,34 @@
+{
+  "role": "daytona",
+  "manifest": {
+    "files": 327,
+    "bytes": 310661,
+    "manifest_sha256": "a772417caa5ab590714a787046ec324f9e72001006a4426a9bb09126ff92d1cd",
+    "ephemeral_atomic_save_paths": []
+  },
+  "state": {
+    "status": "conflict",
+    "last_applied_revision": null,
+    "event_listener": {
+      "mode": "websocket",
+      "status": "listening",
+      "heartbeatAt": "2026-08-21T21:18:09.061029999Z",
+      "lastConnectedAt": "2026-08-21T21:15:08.540096802Z",
+      "lastAttemptAt": "2026-08-21T21:15:08.341384869Z"
+    },
+    "cursor": "evt_1984",
+    "tracked_files": 327,
+    "conflicts": 3
+  },
+  "conflict": {
+    "canonical": "cross-provider-conflict-r4-agent-e2b-conflict",
+    "canonical_sha256": "e610e46c09aae6da99cc65918d491209736a7c447b3f4d525e3b1db63348ef61",
+    "artifacts": [
+      {
+        "path": ".relay/conflicts/testdata/cross-provider/cross-provider-conflict-r4/conflict/shared.txt.unknown.local",
+        "content": "cross-provider-conflict-r4-agent-daytona-conflict",
+        "sha256": "7bb8bc30836af0b1eb7f1c58cfc3d79ebe004cef6c80133edaeb00c5d936a595"
+      }
+    ]
+  }
+}

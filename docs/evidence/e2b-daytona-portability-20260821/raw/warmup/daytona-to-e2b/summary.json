@@ -1,0 +1,55 @@
+{
+  "run_id": "warmup-daytona-e2b",
+  "path_set": "acceptance",
+  "role": "daytona",
+  "receiver": "e2b",
+  "saves": 2,
+  "shapes": {
+    "small": {
+      "saves": 1,
+      "visibility": {
+        "count": 1,
+        "p50_ms": 258.670183,
+        "p95_ms": 258.670183,
+        "p99_ms": 258.670183,
+        "max_ms": 258.670183,
+        "mean_ms": 258.670183
+      },
+      "local_write": {
+        "count": 1,
+        "p50_ms": 1.8915,
+        "p95_ms": 1.8915,
+        "p99_ms": 1.8915,
+        "max_ms": 1.8915,
+        "mean_ms": 1.8915
+      },
+      "transport_errors": 0
+    },
+    "repo": {
+      "saves": 1,
+      "visibility": {
+        "count": 1,
+        "p50_ms": 437.689369,
+        "p95_ms": 437.689369,
+        "p99_ms": 437.689369,
+        "max_ms": 437.689369,
+        "mean_ms": 437.689369
+      },
+      "local_write": {
+        "count": 1,
+        "p50_ms": 4.055981,
+        "p95_ms": 4.055981,
+        "p99_ms": 4.055981,
+        "max_ms": 4.055981,
+        "mean_ms": 4.055981
+      },
+      "transport_errors": 0
+    }
+  },
+  "gates": {
+    "all_saves_visible": true,
+    "small_p95_le_1500_ms": true,
+    "repo_p95_le_4000_ms": true
+  },
+  "status": "pass"
+}

@@ -1,0 +1,39 @@
+{
+  "date": "2026-08-21",
+  "snapshot": "rf-five-agent-20260821-fix6",
+  "topology": {
+    "region": "us",
+    "sandbox_count": 6,
+    "agent_count": 5,
+    "cpu_per_sandbox": 2,
+    "memory_gib_per_sandbox": 2,
+    "disk_gib_per_sandbox": 5
+  },
+  "baseline": {
+    "files": 7195,
+    "bytes": 142713477
+  },
+  "final": {
+    "files_per_agent": 7996,
+    "bytes_per_agent": 143488108,
+    "manifest_sha256": "0e33a6088df39c4660e58e779cd5c7afa8a83f95941a409e690ed73ad1c2b982",
+    "cursor": "evt_19312",
+    "ephemeral_atomic_save_paths": 0
+  },
+  "segmented_backend": {
+    "version": 2,
+    "committed_generation": 1468,
+    "revision_counter": 9656,
+    "operation_counter": 9656,
+    "event_counter": 19312,
+    "content_blobs": 9656,
+    "generation_directories": 1468,
+    "metadata_bytes": 364,
+    "total_bytes": 167013637
+  },
+  "binaries": {
+    "relayfile_sha256": "00e6748db66541a78dd467f655cf48fa88977d92ba7050d5abe84dc4a38af66e",
+    "relayfile_mount_sha256": "9e1ab85bb7174aa809a93f214d03ec9c5cfe824e2b85ad09004b044f3782f8c6"
+  },
+  "restart_inspection": "pass"
+}

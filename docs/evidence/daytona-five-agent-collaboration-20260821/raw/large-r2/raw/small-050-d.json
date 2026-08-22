@@ -1,0 +1,72 @@
+{
+  "run_id": "large-r2",
+  "path_set": "large-fixed",
+  "role": "d",
+  "shape": "small",
+  "trial": 50,
+  "paths": [
+    "testdata/daytona-five-agent/large-fixed/small-050/d/probe.txt"
+  ],
+  "expected_bytes": 300,
+  "expected_hashes": 1,
+  "barrier": {
+    "released_ns": 1787343950142295259,
+    "roles": [
+      "a",
+      "b",
+      "c",
+      "d",
+      "e"
+    ],
+    "round_trip_ms": 407.324596
+  },
+  "write_started_ns": 1787343950181615325,
+  "write_completed_ns": 1787343950187268427,
+  "local_write_ms": 5.653102,
+  "receivers": [
+    {
+      "receiver": "a",
+      "status": "visible",
+      "hashes_verified": 1,
+      "attempts": 4,
+      "transport_errors": 0,
+      "observed_sender_ns": 1787343950780535730,
+      "latency_ms": 593.267303
+    },
+    {
+      "receiver": "b",
+      "status": "visible",
+      "hashes_verified": 1,
+      "attempts": 6,
+      "transport_errors": 0,
+      "observed_sender_ns": 1787343950640737388,
+      "latency_ms": 453.468961
+    },
+    {
+      "receiver": "c",
+      "status": "visible",
+      "hashes_verified": 1,
+      "attempts": 7,
+      "transport_errors": 0,
+      "observed_sender_ns": 1787343950748111358,
+      "latency_ms": 560.842931
+    },
+    {
+      "receiver": "e",
+      "status": "visible",
+      "hashes_verified": 1,
+      "attempts": 6,
+      "transport_errors": 0,
+      "observed_sender_ns": 1787343950641674675,
+      "latency_ms": 454.406248
+    }
+  ],
+  "all_visible": true,
+  "all_peer_latency_ms": 593.267303,
+  "clock": "sender CLOCK_REALTIME; no cross-host subtraction",
+  "execution": {
+    "daytona_returncode": 0,
+    "control_plane_attempts": 1,
+    "stderr_tail": "time=\"2026-08-21T22:25:49+02:00\" level=warning msg=\"Version mismatch: Daytona CLI is on v0.205.1 and API is on v0.207.0.\\nMake sure the versions are aligned using 'brew upgrade daytonaio/cli/daytona' or by downloading the latest version from https://github.com/daytona/clients/releases.\"\n"
+  }
+}

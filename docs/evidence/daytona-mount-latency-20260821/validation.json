@@ -1,0 +1,19 @@
+{
+  "status": "pass",
+  "directions": [
+    {
+      "direction": "a-to-b",
+      "saves": 130,
+      "payload_arrivals": 430,
+      "content_hashes_verified": 430
+    },
+    {
+      "direction": "b-to-a",
+      "saves": 130,
+      "payload_arrivals": 430,
+      "content_hashes_verified": 430
+    }
+  ],
+  "total_saves": 260,
+  "total_payload_arrivals": 860
+}

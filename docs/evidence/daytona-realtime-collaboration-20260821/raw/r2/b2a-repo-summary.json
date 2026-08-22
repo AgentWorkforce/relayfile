@@ -1,0 +1,288 @@
+{
+  "run_id": "acceptance-r2",
+  "shape": "repo",
+  "trials_sent": 30,
+  "trials_complete": 30,
+  "trials_incomplete": 0,
+  "trials_ambiguous": 0,
+  "trials_clock_negative": 0,
+  "trials_extrapolated": [],
+  "clock": {
+    "offset_pre_ms": -18.327392,
+    "offset_post_ms": -18.064893,
+    "drift_ms": 0.262499,
+    "pre_min_rtt_ms": 56.94451,
+    "post_min_rtt_ms": 57.583341,
+    "anchor_uncertainty_ms": [
+      28.472255,
+      28.79167
+    ],
+    "model_error": "HTTPS path asymmetry and nonlinear clock change between anchors are unbounded"
+  },
+  "save_to_visible_ms": {
+    "min": 314.149632,
+    "p50": 2441.9176960000004,
+    "p95": 3791.1532031999986,
+    "p99": 3983.56077312,
+    "max": 3986.562816
+  },
+  "write_start_to_visible_ms": {
+    "min": 317.25568,
+    "p50": 2455.106304,
+    "p95": 3804.6796799999984,
+    "p99": 3986.7016012800004,
+    "max": 3990.2208
+  },
+  "local_write_ms": {
+    "min": 1.744626,
+    "p50": 7.2916875,
+    "p95": 42.07134344999993,
+    "p99": 66.30444845000002,
+    "max": 71.537323
+  },
+  "incomplete": [],
+  "ambiguous": [],
+  "clock_negative": [],
+  "per_trial": [
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-001",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 4.926225,
+      "save_to_visible_ms": 2255.422464,
+      "write_start_to_visible_ms": 2260.348672
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-002",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 17.130133,
+      "save_to_visible_ms": 2624.65152,
+      "write_start_to_visible_ms": 2641.78176
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-003",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 3.658061,
+      "save_to_visible_ms": 3986.562816,
+      "write_start_to_visible_ms": 3990.2208
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-004",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 3.724462,
+      "save_to_visible_ms": 1824.306176,
+      "write_start_to_visible_ms": 1828.03072
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-005",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 1.874745,
+      "save_to_visible_ms": 3976.210944,
+      "write_start_to_visible_ms": 3978.085632
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-006",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 2.551148,
+      "save_to_visible_ms": 3090.715136,
+      "write_start_to_visible_ms": 3093.266432
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-007",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 7.563014,
+      "save_to_visible_ms": 552.475904,
+      "write_start_to_visible_ms": 560.038912
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-008",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 4.230993,
+      "save_to_visible_ms": 3310.715136,
+      "write_start_to_visible_ms": 3314.946304
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-009",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 18.702978,
+      "save_to_visible_ms": 2318.510336,
+      "write_start_to_visible_ms": 2337.213184
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-010",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 3.106009,
+      "save_to_visible_ms": 314.149632,
+      "write_start_to_visible_ms": 317.25568
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-011",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 17.794826,
+      "save_to_visible_ms": 1269.45792,
+      "write_start_to_visible_ms": 1287.252736
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-012",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 27.767406,
+      "save_to_visible_ms": 3564.97152,
+      "write_start_to_visible_ms": 3592.739072
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-013",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 71.537323,
+      "save_to_visible_ms": 3504.06784,
+      "write_start_to_visible_ms": 3575.605248
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-014",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 2.446237,
+      "save_to_visible_ms": 2339.122944,
+      "write_start_to_visible_ms": 2341.56928
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-015",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 2.435628,
+      "save_to_visible_ms": 2524.455424,
+      "write_start_to_visible_ms": 2526.891264
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-016",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 22.58908,
+      "save_to_visible_ms": 2720.902144,
+      "write_start_to_visible_ms": 2743.491328
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-017",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 3.730592,
+      "save_to_visible_ms": 2251.6736,
+      "write_start_to_visible_ms": 2255.404288
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-018",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 1.744626,
+      "save_to_visible_ms": 2882.08256,
+      "write_start_to_visible_ms": 2883.8272
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-019",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 1.864726,
+      "save_to_visible_ms": 2304.626944,
+      "write_start_to_visible_ms": 2306.491648
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-020",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 20.355534,
+      "save_to_visible_ms": 2891.132928,
+      "write_start_to_visible_ms": 2911.488512
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-021",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 7.020361,
+      "save_to_visible_ms": 2272.989184,
+      "write_start_to_visible_ms": 2280.009472
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-022",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 18.484568,
+      "save_to_visible_ms": 1015.918848,
+      "write_start_to_visible_ms": 1034.403584
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-023",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 23.941165,
+      "save_to_visible_ms": 2359.379968,
+      "write_start_to_visible_ms": 2383.321344
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-024",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 4.943106,
+      "save_to_visible_ms": 1636.261376,
+      "write_start_to_visible_ms": 1641.20448
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-025",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 14.030824,
+      "save_to_visible_ms": 2177.147392,
+      "write_start_to_visible_ms": 2191.17824
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-026",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 21.054265,
+      "save_to_visible_ms": 2207.90272,
+      "write_start_to_visible_ms": 2228.956928
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-027",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 3.2793,
+      "save_to_visible_ms": 3492.22144,
+      "write_start_to_visible_ms": 3495.5008
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-028",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 23.689454,
+      "save_to_visible_ms": 2958.772992,
+      "write_start_to_visible_ms": 2982.462464
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-029",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 53.492928,
+      "save_to_visible_ms": 3113.186304,
+      "write_start_to_visible_ms": 3166.67904
+    },
+    {
+      "correlation_id": "acceptance-r2-b2a-repo-030",
+      "files": 11,
+      "bytes": 13992,
+      "local_write_ms": 28.111629,
+      "save_to_visible_ms": 3431.51872,
+      "write_start_to_visible_ms": 3459.630336
+    }
+  ]
+}

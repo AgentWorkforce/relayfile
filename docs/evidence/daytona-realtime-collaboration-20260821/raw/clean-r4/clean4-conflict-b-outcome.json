@@ -1,0 +1,12 @@
+{
+  "host": "b",
+  "canonical": "clean-r4-agent-a-conflict",
+  "canonical_sha256": "799bf7347d0d61d9a208fd2f5f709d51287e766e180cb2aa32669c847c0c4214",
+  "artifacts": [
+    {
+      "path": ".relay/conflicts/testdata/daytona-sync-benchmark/clean-r4/concurrency/conflict/shared.txt.rev_2135.local",
+      "content": "clean-r4-agent-b-conflict",
+      "sha256": "a5373ad3559f8cd2d8fb8ee783cac88b4ac62fa3a47cda319069fce735fbb94e"
+    }
+  ]
+}

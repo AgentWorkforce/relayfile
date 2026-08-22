@@ -1,0 +1,100 @@
+{
+  "qualifying_runs": [
+    {
+      "run_id": "large-r1",
+      "status": "pass",
+      "saves": 300,
+      "pairwise_deliveries": 1200,
+      "content_hashes_verified": 3200,
+      "small_pairwise_p95_ms": 603.4747591,
+      "small_all_peer_p95_ms": 669.6243344999999,
+      "repo_pairwise_p95_ms": 1195.4824048499997,
+      "repo_all_peer_p95_ms": 1315.42352915
+    },
+    {
+      "run_id": "large-r2",
+      "status": "pass",
+      "saves": 300,
+      "pairwise_deliveries": 1200,
+      "content_hashes_verified": 3200,
+      "small_pairwise_p95_ms": 624.8314076,
+      "small_all_peer_p95_ms": 665.7177932499999,
+      "repo_pairwise_p95_ms": 1295.7045403499997,
+      "repo_all_peer_p95_ms": 1381.56416785
+    },
+    {
+      "run_id": "large-r3",
+      "status": "pass",
+      "saves": 300,
+      "pairwise_deliveries": 1200,
+      "content_hashes_verified": 3200,
+      "small_pairwise_p95_ms": 667.0294988,
+      "small_all_peer_p95_ms": 707.98600915,
+      "repo_pairwise_p95_ms": 1365.2333081499999,
+      "repo_all_peer_p95_ms": 1504.0293068
+    }
+  ],
+  "runs_passed": 3,
+  "saves": 900,
+  "pairwise_deliveries": 3600,
+  "content_hashes_verified": 9600,
+  "probe_transport_errors": 1,
+  "pre_execution_control_plane_retries": 0,
+  "shapes": {
+    "small": {
+      "saves": 750,
+      "pairwise_deliveries": {
+        "count": 3000,
+        "p50_ms": 504.03076599999997,
+        "p95_ms": 635.6359369999999,
+        "p99_ms": 699.7418651899999,
+        "max_ms": 1238.829917,
+        "mean_ms": 503.860557369
+      },
+      "all_peer_convergence": {
+        "count": 750,
+        "p50_ms": 584.9241175,
+        "p95_ms": 695.7329397999999,
+        "p99_ms": 759.07253869,
+        "max_ms": 1238.829917,
+        "mean_ms": 591.7707348373334
+      },
+      "local_write": {
+        "count": 750,
+        "p50_ms": 1.389402,
+        "p95_ms": 8.973404499999978,
+        "p99_ms": 105.79573617999996,
+        "max_ms": 320.928679,
+        "mean_ms": 4.937529070666667
+      }
+    },
+    "repo": {
+      "saves": 150,
+      "pairwise_deliveries": {
+        "count": 600,
+        "p50_ms": 929.0212375,
+        "p95_ms": 1313.4243477000002,
+        "p99_ms": 1410.9086806899998,
+        "max_ms": 1549.714228,
+        "mean_ms": 921.486685175
+      },
+      "all_peer_convergence": {
+        "count": 150,
+        "p50_ms": 1116.7476415,
+        "p95_ms": 1402.1265684,
+        "p99_ms": 1513.25056013,
+        "max_ms": 1549.714228,
+        "mean_ms": 1115.09295606
+      },
+      "local_write": {
+        "count": 150,
+        "p50_ms": 5.6339524999999995,
+        "p95_ms": 18.8722085,
+        "p99_ms": 88.7480376899992,
+        "max_ms": 131.746491,
+        "mean_ms": 8.772789719999999
+      }
+    }
+  },
+  "status": "pass"
+}

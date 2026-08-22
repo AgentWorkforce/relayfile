@@ -77,6 +77,12 @@ func BuildStateBackendFromDSN(dsn string) (StateBackend, error) {
 		return NewJSONFileStateBackend(path), nil
 	case "memory", "mem", "inmem":
 		return NewInMemoryStateBackend(), nil
+	case "segmented-file", "filetree":
+		path, pathErr := dsnPath(parsed, dsn)
+		if pathErr != nil {
+			return nil, pathErr
+		}
+		return NewSegmentedFileStateBackend(path), nil
 	case "postgres", "postgresql":
 		return NewPostgresStateBackend(dsn)
 	case "mysql", "sqlite":

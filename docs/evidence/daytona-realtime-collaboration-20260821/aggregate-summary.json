@@ -1,0 +1,135 @@
+{
+  "status": "pass",
+  "consecutive_clean_runs": 3,
+  "runs": [
+    {
+      "run_id": "clean-r3",
+      "small_300_bytes": {
+        "a_to_b": {
+          "p50_ms": 189.09337599999998,
+          "p95_ms": 199.77027840000002,
+          "p99_ms": 204.10706176000014,
+          "max_ms": 230.013952
+        },
+        "b_to_a": {
+          "p50_ms": 197.75001600000002,
+          "p95_ms": 208.52293120000002,
+          "p99_ms": 216.2906624,
+          "max_ms": 221.699072
+        }
+      },
+      "repo_save_11_files_13992_bytes": {
+        "a_to_b": {
+          "p50_ms": 506.70784000000003,
+          "p95_ms": 736.6743296,
+          "max_ms": 773.172224
+        },
+        "b_to_a": {
+          "p50_ms": 658.208384,
+          "p95_ms": 924.9955455999998,
+          "max_ms": 983.347456
+        }
+      },
+      "disjoint_max_ms": 500.337152,
+      "same_path_loser_preserved": true,
+      "saves_verified": 260,
+      "content_hashes_verified": 860,
+      "pass": true
+    },
+    {
+      "run_id": "clean-r4",
+      "small_300_bytes": {
+        "a_to_b": {
+          "p50_ms": 167.761536,
+          "p95_ms": 205.74801919999985,
+          "p99_ms": 333.28284416000065,
+          "max_ms": 453.112064
+        },
+        "b_to_a": {
+          "p50_ms": 173.092864,
+          "p95_ms": 224.32263679999994,
+          "p99_ms": 334.67093504000184,
+          "max_ms": 696.161024
+        }
+      },
+      "repo_save_11_files_13992_bytes": {
+        "a_to_b": {
+          "p50_ms": 369.37152000000003,
+          "p95_ms": 670.1558015999996,
+          "max_ms": 1134.07104
+        },
+        "b_to_a": {
+          "p50_ms": 514.36032,
+          "p95_ms": 801.6976639999999,
+          "max_ms": 845.997312
+        }
+      },
+      "disjoint_max_ms": 549.51424,
+      "same_path_loser_preserved": true,
+      "saves_verified": 260,
+      "content_hashes_verified": 860,
+      "pass": true
+    },
+    {
+      "run_id": "clean-r5",
+      "small_300_bytes": {
+        "a_to_b": {
+          "p50_ms": 175.032192,
+          "p95_ms": 200.79621120000002,
+          "p99_ms": 206.60737792,
+          "max_ms": 210.030592
+        },
+        "b_to_a": {
+          "p50_ms": 174.724608,
+          "p95_ms": 203.5273344,
+          "p99_ms": 210.73898752000036,
+          "max_ms": 283.88608
+        }
+      },
+      "repo_save_11_files_13992_bytes": {
+        "a_to_b": {
+          "p50_ms": 443.759872,
+          "p95_ms": 781.334976,
+          "max_ms": 791.163904
+        },
+        "b_to_a": {
+          "p50_ms": 499.01312,
+          "p95_ms": 651.7129087999999,
+          "max_ms": 729.433088
+        }
+      },
+      "disjoint_max_ms": 412.352,
+      "same_path_loser_preserved": true,
+      "saves_verified": 260,
+      "content_hashes_verified": 860,
+      "pass": true
+    }
+  ],
+  "cross_run": {
+    "total_saves_verified": 780,
+    "total_content_hashes_verified": 2580,
+    "small_worst_directional_p95_ms": 224.32263679999994,
+    "small_worst_directional_p99_ms": 334.67093504000184,
+    "small_worst_max_ms": 696.161024,
+    "repo_worst_directional_p95_ms": 924.9955455999998,
+    "repo_worst_max_ms": 1134.07104,
+    "disjoint_worst_max_ms": 549.51424,
+    "same_path_runs_preserved": 3,
+    "pooled_all_runs": {
+      "small_300_bytes": {
+        "samples": 600,
+        "p50_ms": 176.827264,
+        "p95_ms": 205.5330048,
+        "p99_ms": 264.4444390399998,
+        "max_ms": 696.161024
+      },
+      "repo_save_11_files_13992_bytes": {
+        "samples": 180,
+        "p50_ms": 492.439296,
+        "p95_ms": 792.5546239999996,
+        "p99_ms": 954.0629017600003,
+        "max_ms": 1134.07104
+      }
+    }
+  }
+}

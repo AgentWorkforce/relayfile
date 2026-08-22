@@ -1,0 +1,15 @@
+{
+  "returncode": 0,
+  "payload": {
+    "run_id": "release-conflict-r1",
+    "role": "e2b",
+    "relative_path": "testdata/cross-provider/release-conflict-r1/conflict/shared.txt",
+    "content": "release-conflict-r1-agent-e2b-conflict",
+    "sha256": "6bf3f96ba5bb3c39ea1bcb33cd26f45bea90c7a52090fd7efcf850b50ffa3bb3",
+    "barrier_released_ns": 1787352552544113340,
+    "rename_started_ns": 1787352552546579269,
+    "rename_completed_ns": 1787352552546716658,
+    "atomic_rename_ms": 0.137389
+  },
+  "stderr_tail": ""
+}

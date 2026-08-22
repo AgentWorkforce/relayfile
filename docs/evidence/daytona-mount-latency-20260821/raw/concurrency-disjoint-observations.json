@@ -1,0 +1,14 @@
+{
+  "measurement": "first successful external HTTPS probe after scheduled local write completion",
+  "a_to_b": {
+    "sender_write_completed_ns": 1787319306817057529,
+    "receiver_probe_observed_ns": 1787319398680898000,
+    "upper_bound_ms": 91863.840471
+  },
+  "b_to_a": {
+    "sender_write_completed_ns": 1787319306830038946,
+    "receiver_probe_observed_ns": 1787319353476764000,
+    "upper_bound_ms": 46646.725054
+  },
+  "qualification": "The probe time is an upper bound on local visibility because polling began after the writes and includes the external HTTPS probe path. Mount logs independently record the cross-file GETs at 13:35:53Z and 13:36:38Z."
+}

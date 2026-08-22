@@ -1,0 +1,28 @@
+{
+  "role": "e2b",
+  "manifest": {
+    "files": 327,
+    "bytes": 310661,
+    "manifest_sha256": "a772417caa5ab590714a787046ec324f9e72001006a4426a9bb09126ff92d1cd",
+    "ephemeral_atomic_save_paths": []
+  },
+  "state": {
+    "status": "writeback-pending",
+    "last_applied_revision": null,
+    "event_listener": {
+      "mode": "websocket",
+      "status": "listening",
+      "heartbeatAt": "2026-08-21T21:17:50.423847139Z",
+      "lastConnectedAt": "2026-08-21T21:05:20.306012786Z",
+      "lastAttemptAt": "2026-08-21T21:05:20.247413727Z"
+    },
+    "cursor": "evt_1984",
+    "tracked_files": 327,
+    "conflicts": 0
+  },
+  "conflict": {
+    "canonical": "cross-provider-conflict-r4-agent-e2b-conflict",
+    "canonical_sha256": "e610e46c09aae6da99cc65918d491209736a7c447b3f4d525e3b1db63348ef61",
+    "artifacts": []
+  }
+}

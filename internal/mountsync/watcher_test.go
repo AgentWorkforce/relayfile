@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -86,6 +87,34 @@ func TestWatcherBasenameGuardMatchesRemoteRootMapping(t *testing.T) {
 	}
 }
 
+func TestEphemeralAtomicSaveRelativePath(t *testing.T) {
+	for _, relativePath := range []string{
+		"src/main.go.writer-tmp-692",
+		"src/main.go.tmp-12345",
+		"src/.goutputstream-A1B2C3",
+		"src/.#main.go",
+		"src/.~lock.book.xlsx#",
+		"src/main.go___jb_tmp___",
+		"src/main.go.swp",
+		"src/main.go.tmp",
+		"src/main.go~",
+	} {
+		if !isEphemeralAtomicSaveRelativePath(relativePath) {
+			t.Errorf("expected ephemeral atomic-save path: %q", relativePath)
+		}
+	}
+	for _, relativePath := range []string{
+		"src/main.go",
+		"src/tmp-report.md",
+		"src/writer-tmp-notes.md",
+		"src/report.tmp.csv",
+	} {
+		if isEphemeralAtomicSaveRelativePath(relativePath) {
+			t.Errorf("unexpected ephemeral classification: %q", relativePath)
+		}
+	}
+}
+
 func startFileWatcher(t *testing.T, localDir string) (chan watcherEvent, context.CancelFunc, *FileWatcher) {
 	t.Helper()
 
@@ -162,12 +191,70 @@ func TestWatcherCloseCancelsPendingDebounce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create file watcher: %v", err)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := watcher.Start(ctx); err != nil {
+		t.Fatalf("start watcher: %v", err)
+	}
+	if !watcher.Healthy() {
+		t.Fatal("started watcher should report healthy")
+	}
 
 	watcher.queueChange("notes.md", fsnotify.Write)
 	if err := watcher.Close(); err != nil {
 		t.Fatalf("close watcher: %v", err)
 	}
+	if watcher.Healthy() {
+		t.Fatal("closed watcher should report unhealthy")
+	}
 	assertNoWatcherEvents(t, events, 150*time.Millisecond)
+}
+
+func TestWatcherContextCancellationMarksWatcherUnhealthy(t *testing.T) {
+	localDir := t.TempDir()
+	watcher, err := NewFileWatcher(localDir, func(string, fsnotify.Op) {})
+	if err != nil {
+		t.Fatalf("create file watcher: %v", err)
+	}
+	defer watcher.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := watcher.Start(ctx); err != nil {
+		t.Fatalf("start watcher: %v", err)
+	}
+	if !watcher.Healthy() {
+		t.Fatal("started watcher should report healthy")
+	}
+	cancel()
+	deadline := time.Now().Add(time.Second)
+	for watcher.Healthy() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if watcher.Healthy() {
+		t.Fatal("canceled watcher stayed healthy")
+	}
+}
+
+func TestWatcherBackendClosureMarksWatcherUnhealthy(t *testing.T) {
+	localDir := t.TempDir()
+	watcher, err := NewFileWatcher(localDir, func(string, fsnotify.Op) {})
+	if err != nil {
+		t.Fatalf("create file watcher: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := watcher.Start(ctx); err != nil {
+		t.Fatalf("start watcher: %v", err)
+	}
+	if err := watcher.watcher.Close(); err != nil {
+		t.Fatalf("close watcher backend: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for watcher.Healthy() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if watcher.Healthy() {
+		t.Fatal("watcher stayed healthy after backend channel closure")
+	}
 }
 
 func TestWatcherStartReturnsLimitExceededWhenDirectoryBudgetExceeded(t *testing.T) {
@@ -797,6 +884,138 @@ func TestWatcherDebounce(t *testing.T) {
 	case extra := <-events:
 		t.Fatalf("expected one debounced event, got extra event: %s %s", extra.path, extra.op.String())
 	case <-time.After(250 * time.Millisecond):
+	}
+}
+
+func TestWatcherAtomicDestinationUsesFastSettleDelay(t *testing.T) {
+	localDir := t.TempDir()
+	events := make(chan watcherEvent, 1)
+	watcher, err := NewFileWatcherForTopologyWithTimings(localDir, "/", false, FileWatcherTimings{
+		SettleDelay:       200 * time.Millisecond,
+		AtomicSettleDelay: 5 * time.Millisecond,
+	}, func(path string, op fsnotify.Op) {
+		if path == "atomic.txt" {
+			events <- watcherEvent{path: path, op: op}
+		}
+	})
+	if err != nil {
+		t.Fatalf("new watcher: %v", err)
+	}
+	t.Cleanup(func() { _ = watcher.Close() })
+
+	started := time.Now()
+	watcher.queueChange(".atomic.txt.tmp-1", fsnotify.Rename)
+	watcher.queueChange("atomic.txt", fsnotify.Create)
+	watcher.queueChange("atomic.txt", fsnotify.Write)
+	ev, ok := waitForWatcherEvent(t, events, 100*time.Millisecond)
+	if !ok {
+		t.Fatal("atomic destination event waited for the in-place settle window")
+	}
+	if elapsed := time.Since(started); elapsed >= 100*time.Millisecond {
+		t.Fatalf("atomic destination event took %s, want fast path", elapsed)
+	}
+	if ev.op&(fsnotify.Create|fsnotify.Write) != fsnotify.Create|fsnotify.Write {
+		t.Fatalf("atomic destination op = %s, want Create|Write", ev.op)
+	}
+}
+
+func TestWatcherRealAtomicRenameUsesFastSettleDelay(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("kqueue does not report the transient source rename; production uses polling on macOS")
+	}
+	localDir := t.TempDir()
+	parent := filepath.Join(localDir, "existing")
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		t.Fatalf("create watched parent: %v", err)
+	}
+	events := make(chan watcherEvent, 4)
+	watcher, err := NewFileWatcherForTopologyWithTimings(localDir, "/", false, FileWatcherTimings{
+		SettleDelay:       200 * time.Millisecond,
+		AtomicSettleDelay: 5 * time.Millisecond,
+	}, func(path string, op fsnotify.Op) {
+		if path == "existing/atomic.txt" {
+			events <- watcherEvent{path: path, op: op}
+		}
+	})
+	if err != nil {
+		t.Fatalf("new watcher: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		_ = watcher.Close()
+	})
+	if err := watcher.Start(ctx); err != nil {
+		t.Fatalf("start watcher: %v", err)
+	}
+
+	temporary := filepath.Join(parent, "atomic.txt.writer-tmp-1")
+	if err := os.WriteFile(temporary, []byte("committed"), 0o644); err != nil {
+		t.Fatalf("write staging file: %v", err)
+	}
+	started := time.Now()
+	if err := os.Rename(temporary, filepath.Join(parent, "atomic.txt")); err != nil {
+		t.Fatalf("commit staging file: %v", err)
+	}
+	if _, ok := waitForWatcherEvent(t, events, 100*time.Millisecond); !ok {
+		t.Fatal("real atomic rename waited for the in-place settle window")
+	}
+	if elapsed := time.Since(started); elapsed >= 100*time.Millisecond {
+		t.Fatalf("real atomic rename took %s, want fast path", elapsed)
+	}
+}
+
+func TestWatcherInPlaceWriteKeepsConservativeSettleDelay(t *testing.T) {
+	localDir := t.TempDir()
+	events := make(chan watcherEvent, 1)
+	watcher, err := NewFileWatcherForTopologyWithTimings(localDir, "/", false, FileWatcherTimings{
+		SettleDelay:       80 * time.Millisecond,
+		AtomicSettleDelay: time.Millisecond,
+	}, func(path string, op fsnotify.Op) {
+		events <- watcherEvent{path: path, op: op}
+	})
+	if err != nil {
+		t.Fatalf("new watcher: %v", err)
+	}
+	t.Cleanup(func() { _ = watcher.Close() })
+
+	watcher.queueChange("streamed.txt", fsnotify.Write)
+	if _, ok := waitForWatcherEvent(t, events, 30*time.Millisecond); ok {
+		t.Fatal("in-place write escaped before its conservative settle window")
+	}
+	if ev, ok := waitForWatcherEvent(t, events, 150*time.Millisecond); !ok {
+		t.Fatal("in-place write did not arrive after its settle window")
+	} else if ev.op&fsnotify.Write == 0 {
+		t.Fatalf("in-place op = %s, want Write", ev.op)
+	}
+}
+
+func TestWatcherCoalescesOperationsAndFallsBackToSafeDelay(t *testing.T) {
+	localDir := t.TempDir()
+	events := make(chan watcherEvent, 1)
+	watcher, err := NewFileWatcherForTopologyWithTimings(localDir, "/", false, FileWatcherTimings{
+		SettleDelay:       80 * time.Millisecond,
+		AtomicSettleDelay: time.Millisecond,
+	}, func(path string, op fsnotify.Op) {
+		events <- watcherEvent{path: path, op: op}
+	})
+	if err != nil {
+		t.Fatalf("new watcher: %v", err)
+	}
+	t.Cleanup(func() { _ = watcher.Close() })
+
+	watcher.queueChange("mixed.txt", fsnotify.Create)
+	time.Sleep(5 * time.Millisecond)
+	watcher.queueChange("mixed.txt", fsnotify.Write)
+	if _, ok := waitForWatcherEvent(t, events, 30*time.Millisecond); ok {
+		t.Fatal("create+write burst incorrectly used the atomic fast path")
+	}
+	ev, ok := waitForWatcherEvent(t, events, 150*time.Millisecond)
+	if !ok {
+		t.Fatal("coalesced event not received")
+	}
+	if ev.op&(fsnotify.Create|fsnotify.Write) != fsnotify.Create|fsnotify.Write {
+		t.Fatalf("coalesced op = %s, want Create|Write", ev.op)
 	}
 }
 

@@ -1,0 +1,1 @@
+{"role": "a", "relative_path": "testdata/daytona-sync-benchmark/clean-r1/concurrency/disjoint/a.txt", "target_ns": 1787325898312000000, "write_started_ns": 1787325898312069093, "write_completed_ns": 1787325898313364788, "target_error_ms": 0.069093, "write_ms": 1.295695, "sha256": "d5aa85df0d1caec05dd11c4afd507a75c9b96ec7dd1732fa996973cbe6e836d8"}

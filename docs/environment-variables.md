@@ -76,7 +76,7 @@ These names are interpolated by Compose even when they are not read directly by 
 | `RELAYFILE_INTERNAL_MAX_SKEW` | duration | `5m` | Allowed clock skew for signed internal requests |
 | `RELAYFILE_RATE_LIMIT_MAX` | int | `0` | Request cap per rate-limit window; `0` means unlimited |
 | `RELAYFILE_RATE_LIMIT_WINDOW` | duration | `1m` | Rate-limit window |
-| `RELAYFILE_MAX_BODY_BYTES` | int64 | `0` | Max request body size; `0` means unlimited |
+| `RELAYFILE_MAX_BODY_BYTES` | int64 | `1048576` | Max request body size; non-positive values select the 1 MiB server default |
 
 ### Storage profile and state backend
 
@@ -94,6 +94,14 @@ State backend precedence is:
 1. `RELAYFILE_STATE_BACKEND_DSN`
 2. `RELAYFILE_STATE_FILE`
 3. Profile-derived defaults from `RELAYFILE_BACKEND_PROFILE`
+
+State backend DSNs support `memory://`, `file:///path/to/state.json`,
+`segmented-file:///path/to/state-directory`, and PostgreSQL DSNs. The
+`segmented-file` backend is the durable local choice for repository-scale
+workspaces: immutable file payloads are stored by revision outside the mutable
+metadata checkpoint, so a small edit does not rewrite every unchanged byte in
+the workspace. Its orphaned old-revision blobs are crash-safe and may be
+removed by an offline compactor after their revision is no longer referenced.
 
 ### Queue backends and store tuning
 
@@ -138,6 +146,7 @@ Queue backend precedence is:
 | `RELAYFILE_MOUNT_INTERVAL_JITTER` | float | `0.2` | No | Clamped into the `0..1` range |
 | `RELAYFILE_MOUNT_TIMEOUT` | duration | `15s` | No | Per-sync timeout |
 | `RELAYFILE_MOUNT_WEBSOCKET` | bool | `true` | No | Enables WebSocket streaming when available |
+| `RELAYFILE_INCREMENTAL_READ_CONCURRENCY` | int | `16` | No | Bounded parallel reads for cursor/poll recovery; clamped to 64 |
 | `RELAYFILE_BOOTSTRAP_STALL_CYCLES` | int | `20` | No | Consecutive checkpoint-stable bootstrap cycles before the mount fails terminally |
 | `RELAYFILE_BOOTSTRAP_MAX_DIRECTORIES` | int | `50000` | No | Maximum distinct bounded-tree directories; raise only after inspecting the stalled path for cyclic/expanding aliases |
 
@@ -167,6 +176,7 @@ the `workspace_id`/`wks` claim in the active token, then the default stored by
 | `RELAYFILE_MOUNT_INTERVAL_JITTER` | float | `0.2` | Mount command jitter default |
 | `RELAYFILE_MOUNT_TIMEOUT` | duration | `15s` | Mount command timeout default |
 | `RELAYFILE_MOUNT_WEBSOCKET` | bool | `true` | Mount command WebSocket default |
+| `RELAYFILE_INCREMENTAL_READ_CONCURRENCY` | int | `16` | Bounded parallel reads for cursor/poll recovery; clamped to 64 |
 | `RELAYFILE_BOOTSTRAP_STALL_CYCLES` | int | `20` | Consecutive checkpoint-stable bootstrap cycles before the CLI daemon exits non-zero |
 | `RELAYFILE_BOOTSTRAP_MAX_DIRECTORIES` | int | `50000` | Maximum distinct bootstrap traversal directories; raising it re-arms the persisted checkpoint after operator inspection |
 

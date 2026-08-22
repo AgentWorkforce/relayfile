@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -519,6 +520,12 @@ type WebhookEnvelopeRequest struct {
 	CorrelationID string            `json:"correlationId"`
 }
 
+type eventSubscriber struct {
+	events     chan<- Event
+	overflow   chan<- struct{}
+	overflowed atomic.Bool
+}
+
 type Store struct {
 	mu                      sync.RWMutex
 	queueMu                 sync.Mutex
@@ -558,7 +565,7 @@ type Store struct {
 	// in-flight merge citing a pre-restart revision safely falls back to
 	// merge_base_unavailable, the same fail-closed behavior as any other
 	// provenance miss).
-	revisionProvenance map[string][]revisionProvenanceEntry
+	revisionProvenance      map[string][]revisionProvenanceEntry
 	backendProfile          string
 	maxAttempts             int
 	retryDelay              time.Duration
@@ -571,7 +578,7 @@ type Store struct {
 	providerMaxConcurrency  int
 	providerSemMu           sync.Mutex
 	providerSemaphores      map[string]chan struct{}
-	subscribers             map[string]map[uint64]chan<- Event
+	subscribers             map[string]map[uint64]*eventSubscriber
 	subscriberCounter       uint64
 	deleteStormThreshold    int
 	deleteStormWindow       time.Duration
@@ -980,7 +987,7 @@ func NewStoreWithOptions(opts StoreOptions) *Store {
 		maxStoredEnvelopes:      maxStoredEnvelopes,
 		providerMaxConcurrency:  providerMaxConcurrency,
 		providerSemaphores:      map[string]chan struct{}{},
-		subscribers:             map[string]map[uint64]chan<- Event{},
+		subscribers:             map[string]map[uint64]*eventSubscriber{},
 		deleteStormThreshold:    opts.DeleteStormThreshold,
 		deleteStormWindow:       opts.DeleteStormWindow,
 		deleteStormAdmissions:   map[string][]time.Time{},
@@ -1132,7 +1139,7 @@ func (s *Store) Close() {
 		s.forkTimers = map[string]*time.Timer{}
 		s.mu.Unlock()
 		s.subscriberMu.Lock()
-		s.subscribers = map[string]map[uint64]chan<- Event{}
+		s.subscribers = map[string]map[uint64]*eventSubscriber{}
 		s.subscriberMu.Unlock()
 		if s.queueCancel != nil {
 			s.queueCancel()
@@ -2483,20 +2490,35 @@ func parseEventIDOrdinal(eventID string) (uint64, bool) {
 }
 
 func (s *Store) Subscribe(workspaceID string, ch chan<- Event) func() {
+	return s.SubscribeWithOverflow(workspaceID, ch, nil)
+}
+
+// SubscribeWithOverflow registers a live event subscriber and signals the
+// supplied overflow channel exactly once if its event buffer fills. Once a
+// gap is observed the subscription is latched: no later event is admitted.
+// Consumers can therefore reconnect from their last contiguous event cursor
+// without accidentally advancing past the missing event. The overflow channel
+// is producer-owned and must be empty and buffered with capacity of at least
+// one; the caller must not send to or close it. This guarantees the single
+// latched signal cannot itself be dropped.
+func (s *Store) SubscribeWithOverflow(workspaceID string, ch chan<- Event, overflow chan<- struct{}) func() {
 	workspaceID = strings.TrimSpace(workspaceID)
 	if workspaceID == "" || ch == nil {
 		return func() {}
+	}
+	if overflow != nil && (cap(overflow) < 1 || len(overflow) != 0) {
+		panic("relayfile: overflow signal channel must be empty and buffered")
 	}
 	s.subscriberMu.Lock()
 	s.subscriberCounter++
 	subID := s.subscriberCounter
 	if s.subscribers == nil {
-		s.subscribers = map[string]map[uint64]chan<- Event{}
+		s.subscribers = map[string]map[uint64]*eventSubscriber{}
 	}
 	if s.subscribers[workspaceID] == nil {
-		s.subscribers[workspaceID] = map[uint64]chan<- Event{}
+		s.subscribers[workspaceID] = map[uint64]*eventSubscriber{}
 	}
-	s.subscribers[workspaceID][subID] = ch
+	s.subscribers[workspaceID][subID] = &eventSubscriber{events: ch, overflow: overflow}
 	s.subscriberMu.Unlock()
 
 	var once sync.Once
@@ -3941,11 +3963,48 @@ func (s *Store) writebackWorker() {
 		if !ok {
 			return
 		}
-		s.queueMu.Lock()
-		delete(s.queuedWritebacks, task.OpID)
-		s.queueMu.Unlock()
-		s.processWriteback(task)
+		s.markWritebackDequeued(task)
+		if !s.usesBuiltinNoopWriteback() {
+			s.processWriteback(task)
+			continue
+		}
+
+		// The built-in provider writer is an immediate no-op used when
+		// Relayfile is the authoritative collaboration store. Drain its burst
+		// before persisting completion metadata: otherwise an eleven-file save
+		// rewrites the entire durable workspace once for the bulk mutation and
+		// eleven more times for identical no-op receipts.
+		batch := []writebackTask{task}
+		for len(batch) < 256 {
+			drainCtx, cancel := context.WithTimeout(s.queueCtx, 10*time.Millisecond)
+			next, nextOK := s.writebackQueue.Dequeue(drainCtx)
+			cancel()
+			if !nextOK {
+				break
+			}
+			s.markWritebackDequeued(next)
+			batch = append(batch, next)
+		}
+		mutated := false
+		for _, queued := range batch {
+			mutated = s.processWritebackMutation(queued) || mutated
+		}
+		if mutated {
+			s.mu.Lock()
+			_ = s.saveLocked()
+			s.mu.Unlock()
+		}
 	}
+}
+
+func (s *Store) markWritebackDequeued(task writebackTask) {
+	s.queueMu.Lock()
+	delete(s.queuedWritebacks, task.OpID)
+	s.queueMu.Unlock()
+}
+
+func (s *Store) usesBuiltinNoopWriteback() bool {
+	return !s.providerWriteConfigured && s.providerWriteAction == nil && len(s.adapters) == 0
 }
 
 func (s *Store) tryEnqueueEnvelope(envelopeID string) bool {
@@ -4226,21 +4285,30 @@ func (s *Store) processEnvelope(envelopeID string) {
 }
 
 func (s *Store) processWriteback(task writebackTask) {
+	if !s.processWritebackMutation(task) {
+		return
+	}
+	s.mu.Lock()
+	_ = s.saveLocked()
+	s.mu.Unlock()
+}
+
+func (s *Store) processWritebackMutation(task writebackTask) bool {
 	// Step 1: capture current op state under lock.
 	s.mu.Lock()
 	ws, ok := s.workspaces[task.WorkspaceID]
 	if !ok {
 		s.mu.Unlock()
-		return
+		return false
 	}
 	op, ok := ws.Ops[task.OpID]
 	if !ok {
 		s.mu.Unlock()
-		return
+		return false
 	}
 	if op.Status != "pending" && op.Status != "running" {
 		s.mu.Unlock()
-		return
+		return false
 	}
 	// Backfill path/revision for replay tasks if omitted.
 	if task.Path == "" {
@@ -4307,11 +4375,11 @@ func (s *Store) processWriteback(task writebackTask) {
 	defer s.mu.Unlock()
 	ws, ok = s.workspaces[task.WorkspaceID]
 	if !ok {
-		return
+		return false
 	}
 	op, ok = ws.Ops[task.OpID]
 	if !ok {
-		return
+		return false
 	}
 	op.AttemptCount = attempt
 	op.Path = task.Path
@@ -4342,8 +4410,7 @@ func (s *Store) processWriteback(task writebackTask) {
 			Timestamp:     nowTS,
 		})
 		s.recordSuppressionLocked(task.WorkspaceID, writeAction.Provider, task.OpID, task.CorrelationID, now)
-		_ = s.saveLocked()
-		return
+		return true
 	}
 
 	errText := err.Error()
@@ -4364,8 +4431,7 @@ func (s *Store) processWriteback(task writebackTask) {
 			CorrelationID: task.CorrelationID,
 			Timestamp:     nowTS,
 		})
-		_ = s.saveLocked()
-		return
+		return true
 	}
 
 	op.Status = "pending"
@@ -4374,7 +4440,6 @@ func (s *Store) processWriteback(task writebackTask) {
 	op.UpdatedAt = nowTS
 	op.CompletedAt = nil
 	ws.Ops[task.OpID] = op
-	_ = s.saveLocked()
 
 	retryTask := task
 	time.AfterFunc(s.retryDelay, func() {
@@ -4385,6 +4450,7 @@ func (s *Store) processWriteback(task writebackTask) {
 			s.enqueueWriteback(retryTask)
 		}
 	})
+	return true
 }
 
 func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, action ApplyAction, correlationID string) {
@@ -5758,15 +5824,33 @@ func (s *Store) publishEvent(workspaceID string, event Event) {
 		s.subscriberMu.RUnlock()
 		return
 	}
-	targets := make([]chan<- Event, 0, len(subscribers))
-	for _, ch := range subscribers {
-		targets = append(targets, ch)
+	targets := make([]*eventSubscriber, 0, len(subscribers))
+	for _, subscriber := range subscribers {
+		targets = append(targets, subscriber)
 	}
 	s.subscriberMu.RUnlock()
-	for _, ch := range targets {
+	for _, subscriber := range targets {
+		if subscriber == nil {
+			continue
+		}
+		if subscriber.overflow == nil {
+			// Preserve Subscribe's historical best-effort behavior for
+			// in-process consumers that did not opt into recovery signaling.
+			select {
+			case subscriber.events <- event:
+			default:
+			}
+			continue
+		}
+		if subscriber.overflowed.Load() {
+			continue
+		}
 		select {
-		case ch <- event:
+		case subscriber.events <- event:
 		default:
+			if subscriber.overflowed.CompareAndSwap(false, true) && subscriber.overflow != nil {
+				subscriber.overflow <- struct{}{}
+			}
 		}
 	}
 }

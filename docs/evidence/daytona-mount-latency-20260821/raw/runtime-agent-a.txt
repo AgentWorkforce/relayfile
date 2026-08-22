@@ -1,0 +1,33 @@
+time="2026-08-21T15:38:22+02:00" level=warning msg="Version mismatch: Daytona CLI is on v0.183.0 and API is on v0.207.0.\nMake sure the versions are aligned using 'brew upgrade daytonaio/cli/daytona' or by downloading the latest version from https://github.com/daytonaio/daytona/releases."
+role=agent-a
+Linux 951e03f4-289a-41a2-aa36-191434dd33d9 6.8.0-94-generic #96-Ubuntu SMP PREEMPT_DYNAMIC Fri Jan  9 20:36:55 UTC 2026 x86_64 GNU/Linux
+PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"
+VERSION_ID="12"
+model name	: AMD EPYC 9254 24-Core Processor
+MemTotal:       395741760 kB
+MemAvailable:   295644324 kB
+pid=1270
+Name:	relayfile-mount
+Pid:	1270
+PPid:	1
+VmPeak:	 1245732 kB
+VmSize:	 1245732 kB
+VmHWM:	   60420 kB
+VmRSS:	   22544 kB
+Threads:	53
+voluntary_ctxt_switches:	17
+nonvoluntary_ctxt_switches:	1
+25411703	/home/daytona/rfbench
+25881041	/home/daytona/shared-repo
+mount.log 1066039 bytes
+clock.log 0 bytes
+a2b-small-writer.log 4008 bytes
+a2b-r2-small-writer.log 1077 bytes
+mount-clean.log 296441 bytes
+clean-a2b-small-writer.log 3997 bytes
+clean-a2b-repo-writer.log 1140 bytes
+clean-b2a-watch.log 0 bytes
+time="2026-08-21T15:38:53+02:00" level=warning msg="Version mismatch: Daytona CLI is on v0.183.0 and API is on v0.207.0.\nMake sure the versions are aligned using 'brew upgrade daytonaio/cli/daytona' or by downloading the latest version from https://github.com/daytonaio/daytona/releases."
+2147483648
+244457472
+200000 100000

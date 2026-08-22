@@ -3757,9 +3757,11 @@ func TestOutboxAcksOnlyAfterWritebackOperationSucceeded(t *testing.T) {
 		Provider: "slack",
 		Status:   "succeeded",
 	}
-	forcePendingOutboxDueForTest(t, localDir)
-	if err := syncer.SyncOnce(context.Background()); err != nil {
-		t.Fatalf("sync after op success failed: %v", err)
+	// A healthy WebSocket/watcher mount skips full reconciliation. Its
+	// lightweight heartbeat must still poll this durable receipt to terminal
+	// state instead of leaving writeback-pending indefinitely.
+	if err := syncer.RefreshRealtimeStateWithContext(context.Background()); err != nil {
+		t.Fatalf("real-time heartbeat after op success failed: %v", err)
 	}
 	if client.bulkWriteCalls != 1 {
 		t.Fatalf("expected success polling to avoid re-upload, got %d bulk calls", client.bulkWriteCalls)
@@ -4705,8 +4707,16 @@ func TestFlushOutboxOnceFlushesPendingWithoutMirrorScan(t *testing.T) {
 	if state.Status != "ready" || state.States.HasPendingWriteback || state.PendingWriteback != 0 || state.Outbox.Pending != 0 || state.Outbox.NeedsAttention != 0 {
 		t.Fatalf("expected drained public state without scanning untracked local file, got %+v", state)
 	}
-	if !state.LowMemory || state.Files != nil {
-		t.Fatalf("expected flush public state to be written without per-file mirror scan, got lowMemory=%v files=%d", state.LowMemory, len(state.Files))
+	if state.LowMemory {
+		t.Fatal("expected no-scan flush to preserve the configured full-state representation")
+	}
+	if len(state.Files) != 1 {
+		t.Fatalf("expected no-scan flush to preserve one tracked file, got %+v", state.Files)
+	}
+	for remotePath := range state.Files {
+		if strings.HasSuffix(remotePath, "/untracked-local.txt") {
+			t.Fatalf("no-scan flush unexpectedly discovered untracked local file %q", remotePath)
+		}
 	}
 }
 
@@ -6492,8 +6502,20 @@ func TestSyncOnceUsesWebSocketForRealtimeUpdatesAndSkipsPollingWhileConnected(t 
 	if err != nil {
 		t.Fatalf("read seeded remote file failed: %v", err)
 	}
-	writeMountsyncRemoteFile(t, api.Client(), api.URL, token, workspaceID, "/notion/Docs/A.md", remoteFile.Revision, "# A websocket")
-	waitForLocalContent(t, filepath.Join(localDir, "Docs", "A.md"), "# A websocket")
+	// Use the maximum inline file size with bytes that encoding/json expands to
+	// six-byte escapes. This exceeds 2 MiB on the wire and pins the transport
+	// limit to the server's encoded 1 MiB inline-content contract.
+	websocketContent := strings.Repeat("<", 1<<20)
+	if _, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: workspaceID,
+		Path:        "/notion/Docs/A.md",
+		IfMatch:     remoteFile.Revision,
+		ContentType: "text/markdown",
+		Content:     websocketContent,
+	}); err != nil {
+		t.Fatalf("write maximum escaped inline event: %v", err)
+	}
+	waitForLocalContent(t, filepath.Join(localDir, "Docs", "A.md"), websocketContent)
 
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel2()
@@ -8254,6 +8276,7 @@ type fakeClient struct {
 	eventCursorAliases             map[string]string
 	readFileErrAfter               int
 	readFileErr                    error
+	readFileErrByPath              map[string]error
 	mergeFileCalls                 int
 	mergeFileFunc                  func(ctx context.Context, workspaceID, path, strategy, baseRevision, baseContent, content, contentType string) (MergeResult, error)
 }
@@ -8707,6 +8730,9 @@ func (c *fakeClient) ReadFile(ctx context.Context, workspaceID, path string) (Re
 		c.readFileCallsByPath = make(map[string]int)
 	}
 	c.readFileCallsByPath[path]++
+	if pathErr := c.readFileErrByPath[path]; pathErr != nil {
+		return RemoteFile{}, pathErr
+	}
 	if c.readFileErr != nil && c.readFileCalls > c.readFileErrAfter {
 		return RemoteFile{}, c.readFileErr
 	}
@@ -10049,12 +10075,13 @@ func TestPullRemoteIncrementalResumesWithinAppliedPage(t *testing.T) {
 		})
 	}
 	client := &fakeClient{
-		files:            files,
-		events:           events,
-		revisionCounter:  10,
-		eventCounter:     10,
-		readFileErrAfter: 3,
-		readFileErr:      context.DeadlineExceeded,
+		files:           files,
+		events:          events,
+		revisionCounter: 10,
+		eventCounter:    10,
+		readFileErrByPath: map[string]error{
+			"/notion/Docs/004.md": context.DeadlineExceeded,
+		},
 	}
 	localDir := t.TempDir()
 	syncer, err := NewSyncer(client, SyncerOptions{
@@ -10114,7 +10141,7 @@ func TestPullRemoteIncrementalResumesWithinAppliedPage(t *testing.T) {
 		}
 	}
 
-	client.readFileErr = nil
+	client.readFileErrByPath = nil
 	before := make(map[string]int, len(client.readFileCallsByPath))
 	for path, calls := range client.readFileCallsByPath {
 		before[path] = calls

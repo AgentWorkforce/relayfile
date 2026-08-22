@@ -47,6 +47,21 @@ func TestBuildStateBackendFromDSNFile(t *testing.T) {
 	}
 }
 
+func TestBuildStateBackendFromDSNSegmentedFile(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "segmented-state")
+	backend, err := BuildStateBackendFromDSN("segmented-file://" + root)
+	if err != nil {
+		t.Fatalf("build segmented file backend failed: %v", err)
+	}
+	segmented, ok := backend.(*SegmentedFileStateBackend)
+	if !ok {
+		t.Fatalf("backend type = %T, want *SegmentedFileStateBackend", backend)
+	}
+	if segmented.Root != root {
+		t.Fatalf("segmented root = %q, want %q", segmented.Root, root)
+	}
+}
+
 func TestBuildStateBackendFromDSNUnsupported(t *testing.T) {
 	backend, err := BuildStateBackendFromDSN("postgres://localhost/relayfile?sslmode=disable")
 	if err != nil {

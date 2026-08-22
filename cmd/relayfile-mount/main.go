@@ -26,15 +26,14 @@ import (
 )
 
 const (
-	mountModePoll           = "poll"
-	mountModeFuse           = "fuse"
-	localLayoutExact        = mountscope.LayoutExact
-	localLayoutScoped       = mountscope.LayoutScoped
-	syncModeMirror          = "mirror"
-	syncModePullOnly        = "pull-only"
-	syncModeWriteOnly       = "write-only"
-	websocketReconcileEvery = 10
-	minMountPollInterval    = 5 * time.Second
+	mountModePoll        = "poll"
+	mountModeFuse        = "fuse"
+	localLayoutExact     = mountscope.LayoutExact
+	localLayoutScoped    = mountscope.LayoutScoped
+	syncModeMirror       = "mirror"
+	syncModePullOnly     = "pull-only"
+	syncModeWriteOnly    = "write-only"
+	minMountPollInterval = 5 * time.Second
 )
 
 var errFuseModeUnavailable = errors.New("fuse mode is not available in this build")
@@ -62,6 +61,9 @@ type mountConfig struct {
 	cursorTimeout         time.Duration
 	forceFullRecon        bool
 	websocketEnabled      bool
+	fileSettleDelay       time.Duration
+	atomicSaveSettleDelay time.Duration
+	changeBatchWindow     time.Duration
 	lazyRepos             bool
 	lazySkipUntrackedPush bool
 	lowMemory             bool
@@ -108,6 +110,9 @@ func main() {
 	cursorTimeout := flag.Duration("cursor-timeout", durationEnv("RELAYFILE_CURSOR_TIMEOUT", 60*time.Second), "independent timeout for events-cursor resolution")
 	fullReconcile := flag.Bool("full-reconcile", boolEnv("RELAYFILE_FORCE_FULL_RECONCILE", false), "force one full reconcile regardless of bootstrap-complete state (escape hatch)")
 	websocketEnabled := flag.Bool("websocket", boolEnv("RELAYFILE_MOUNT_WEBSOCKET", true), "enable websocket event streaming when available")
+	fileSettleDelay := flag.Duration("file-settle-delay", durationEnv("RELAYFILE_MOUNT_FILE_SETTLE_DELAY", mountsync.DefaultFileChangeSettleDelay), "settle delay for noisy in-place file writes")
+	atomicSaveSettleDelay := flag.Duration("atomic-save-settle-delay", durationEnv("RELAYFILE_MOUNT_ATOMIC_SAVE_SETTLE_DELAY", mountsync.DefaultAtomicSaveSettleDelay), "settle delay for committed atomic rename/create/remove events")
+	changeBatchWindow := flag.Duration("change-batch-window", durationEnv("RELAYFILE_MOUNT_CHANGE_BATCH_WINDOW", 5*time.Millisecond), "quiet window for grouping near-simultaneous changed paths into one bulk write")
 	lazyRepos := flag.Bool("lazy-repos", lazyReposEnv(), "lazily materialize GitHub repo subtrees on first access")
 	lazySkipUntrackedPush := flag.Bool("lazy-skip-untracked-push", boolEnv("RELAYFILE_LAZY_SKIP_UNTRACKED_PUSH", true), "when --lazy-repos is set, skip pushLocal for local files under a lazy GitHub repo subtree that this daemon does not track in its state (e.g. pre-pulled by an isolated non-lazy mount); writeback drafts/commands (including arbitrary-name GitHub adapter create leaves, e.g. issues/comments/reviews/replies drafts and merge.json) are exempt and still push. Trade-off: this also skips edits to untracked numeric/meta canonical leaves (the adapter's PATCH-by-editing-record surface, e.g. pulls/<n>/reviews/<id>.json) — already nonfunctional under lazy mounts today since those records never materialize locally without an external pre-pull, so nothing that works regresses")
 	lowMemory := flag.Bool("low-memory", boolEnv("RELAYFILE_MOUNT_LOW_MEMORY", false), "reduce mount memory use by omitting per-file public state and deferring content reads")
@@ -202,6 +207,9 @@ func main() {
 		cursorTimeout:         *cursorTimeout,
 		forceFullRecon:        *fullReconcile,
 		websocketEnabled:      *websocketEnabled,
+		fileSettleDelay:       *fileSettleDelay,
+		atomicSaveSettleDelay: *atomicSaveSettleDelay,
+		changeBatchWindow:     *changeBatchWindow,
 		lazyRepos:             *lazyRepos,
 		lazySkipUntrackedPush: *lazySkipUntrackedPush,
 		lowMemory:             *lowMemory,
@@ -517,21 +525,31 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 
 	var watcher *mountsync.FileWatcher
 	if mountWatchesLocalChanges(cfg) {
-		watcher, err = syncer.NewFileWatcher(func(relativePath string, op fsnotify.Op) {
+		changeBatcher := mountsync.NewLocalChangeBatcher(cfg.changeBatchWindow, func(changes []mountsync.LocalChange) {
 			ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
 			defer cancel()
-			if err := syncer.HandleLocalChange(ctx, relativePath, op); err != nil {
+			if err := syncer.HandleLocalChanges(ctx, changes); err != nil {
 				log.Printf("mount local change failed: %v", err)
 			}
 		})
+		watcher, err = syncer.NewFileWatcherWithTimings(mountsync.FileWatcherTimings{
+			SettleDelay:       cfg.fileSettleDelay,
+			AtomicSettleDelay: cfg.atomicSaveSettleDelay,
+		}, func(relativePath string, op fsnotify.Op) {
+			changeBatcher.Add(relativePath, op)
+		})
 		if err != nil {
+			changeBatcher.Close()
 			syncer.EnablePollingLocalChangeDetection()
 			log.Printf("file watcher unavailable; continuing with polling sync: %v", err)
 		} else if err := watcher.Start(rootCtx); err != nil {
 			_ = watcher.Close()
+			changeBatcher.Close()
 			syncer.EnablePollingLocalChangeDetection()
 			log.Printf("file watcher disabled; continuing with polling sync: %v", err)
 			watcher = nil
+		} else {
+			defer changeBatcher.Close()
 		}
 	} else {
 		log.Printf("local change watcher disabled for %s sync", syncModePullOnly)
@@ -561,13 +579,19 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 			}
 		case <-timer.C:
 			cycle++
-			reconcile := shouldReconcileMountCycle(
-				mountReconcileUsesWebSocketCadence(cfg, watcher != nil),
-				cycle,
-			)
+			watcherHealthy := watcher != nil && watcher.Healthy()
+			realtimeHealthy := mountReconcileUsesWebSocketCadence(cfg, watcherHealthy) && syncer.WebSocketConnected()
+			reconcile := shouldReconcileMountCycle(realtimeHealthy, cycle)
 			if reconcile {
 				if err := run(true); err != nil {
 					return err
+				}
+			} else {
+				ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
+				err := syncer.RefreshRealtimeStateWithContext(ctx)
+				cancel()
+				if err != nil {
+					log.Printf("real-time state refresh failed: %v", err)
 				}
 			}
 			timer.Reset(jitteredIntervalWithSample(cfg.interval, cfg.intervalJitter, rng.Float64()))
@@ -872,8 +896,8 @@ func normalizeTokenScopes(raw any) []string {
 	return values
 }
 
-func shouldReconcileMountCycle(websocketEnabled bool, cycle int) bool {
-	return !websocketEnabled || cycle%websocketReconcileEvery == 0
+func shouldReconcileMountCycle(realtimeHealthy bool, _ int) bool {
+	return !realtimeHealthy
 }
 
 func mountWebSocketEnabled(cfg mountConfig) bool {
