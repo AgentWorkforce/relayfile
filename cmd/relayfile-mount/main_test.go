@@ -462,6 +462,59 @@ func TestInstallCredsFileRefreshReloadsChangedToken(t *testing.T) {
 	}
 }
 
+func TestInstallCredsFileRefreshPrefersExternallyRotatedDelegatedToken(t *testing.T) {
+	credsFile := filepath.Join(t.TempDir(), "creds.json")
+	refreshCalls := int32(0)
+	refreshServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&refreshCalls, 1)
+		http.Error(w, "refresh must not be called", http.StatusServiceUnavailable)
+	}))
+	defer refreshServer.Close()
+	if err := os.WriteFile(credsFile, []byte(fmt.Sprintf(`{
+		"accessToken":"new-token",
+		"refreshToken":"rotated-refresh-token",
+		"refreshUrl":%q
+	}`, refreshServer.URL)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := atomic.AddInt32(&calls, 1)
+		switch call {
+		case 1:
+			if got := r.Header.Get("Authorization"); got != "Bearer old-token" {
+				t.Fatalf("expected first request to use old token, got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"code":"unauthorized","message":"Token has expired"}`))
+		case 2:
+			if got := r.Header.Get("Authorization"); got != "Bearer new-token" {
+				t.Fatalf("expected retry to use rotated file token, got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"path":"/slack","entries":[],"nextCursor":null}`))
+		default:
+			t.Fatalf("unexpected call %d", call)
+		}
+	}))
+	defer server.Close()
+
+	client := mountsync.NewHTTPClient(server.URL, "old-token", server.Client())
+	installCredsFileRefresh(client, mountConfig{credsFile: credsFile})
+
+	if _, err := client.ListTree(context.Background(), "ws_auth", "/slack", 1, ""); err != nil {
+		t.Fatalf("expected externally rotated token to recover request: %v", err)
+	}
+	if got := client.Token(); got != "new-token" {
+		t.Fatalf("expected client token to update, got %q", got)
+	}
+	if got := atomic.LoadInt32(&refreshCalls); got != 0 {
+		t.Fatalf("expected no RelayAuth refresh request, got %d", got)
+	}
+}
+
 func TestInstallCredsFileRefreshToleratesParseFailureWithoutRetry(t *testing.T) {
 	credsFile := filepath.Join(t.TempDir(), "creds.json")
 	if err := os.WriteFile(credsFile, []byte(`{"token":`), 0o600); err != nil {

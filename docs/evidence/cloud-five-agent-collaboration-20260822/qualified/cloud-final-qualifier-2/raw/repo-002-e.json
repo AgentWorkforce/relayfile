@@ -1,0 +1,93 @@
+{
+  "run_id": "cloud-final-qualifier-2",
+  "path_set": "cloud-final-qualifier-2",
+  "role": "e",
+  "shape": "repo",
+  "trial": 2,
+  "release_epoch_ms": 1787413940443.0,
+  "ready_lead_ms": 2105.861328125,
+  "write": {
+    "started_local_ns": 1787413940443404900,
+    "completed_local_ns": 1787413940452608458,
+    "started_epoch_ms": 1787413940443.3633,
+    "completed_epoch_ms": 1787413940452.567,
+    "duration_ms": 9.203558,
+    "files": 11,
+    "bytes": 13992
+  },
+  "observations": [
+    {
+      "source": "a",
+      "observed_local_ns": 1787413940670665420,
+      "hashes_verified": 11,
+      "attempts": 198,
+      "observed_epoch_ms": 1787413940670.624
+    },
+    {
+      "source": "b",
+      "observed_local_ns": 1787413940673246155,
+      "hashes_verified": 11,
+      "attempts": 200,
+      "observed_epoch_ms": 1787413940673.2046
+    },
+    {
+      "source": "c",
+      "observed_local_ns": 1787413940680119028,
+      "hashes_verified": 11,
+      "attempts": 206,
+      "observed_epoch_ms": 1787413940680.0776
+    },
+    {
+      "source": "d",
+      "observed_local_ns": 1787413940721240327,
+      "hashes_verified": 11,
+      "attempts": 244,
+      "observed_epoch_ms": 1787413940721.1987
+    }
+  ],
+  "all_visible": true,
+  "clock": {
+    "source": "https://relayfile-clock-bench-20260822.agent-workforce.workers.dev/time",
+    "pre": {
+      "samples": 15,
+      "retained": 7,
+      "min_rtt_ms": 5.702131,
+      "median_rtt_ms": 6.322872,
+      "offset_ms": -0.296875,
+      "uncertainty_ms": 3.3510655,
+      "best_rtt_ms": [
+        5.702131,
+        5.819742,
+        6.128752,
+        6.150661,
+        6.217712,
+        6.245232,
+        6.253102
+      ]
+    },
+    "post": {
+      "samples": 15,
+      "retained": 7,
+      "min_rtt_ms": 9.121218,
+      "median_rtt_ms": 10.09672,
+      "offset_ms": 0.214111328125,
+      "uncertainty_ms": 5.060609,
+      "best_rtt_ms": [
+        9.121218,
+        9.268528,
+        9.446939,
+        9.682839,
+        9.916939,
+        9.977979,
+        10.03556
+      ]
+    },
+    "midpoint_offset_ms": -0.0413818359375,
+    "offset_delta_ms": 0.510986328125,
+    "uncertainty_ms": 5.060609
+  },
+  "execution": {
+    "daytona_returncode": 0,
+    "stderr_tail": "time=\"2026-08-22T17:52:17+02:00\" level=warning msg=\"Version mismatch: Daytona CLI is on v0.205.1 and API is on v0.207.0.\\nMake sure the versions are aligned using 'brew upgrade daytonaio/cli/daytona' or by downloading the latest version from https://github.com/daytona/clients/releases.\"\n"
+  }
+}

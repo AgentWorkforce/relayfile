@@ -227,8 +227,8 @@ type BulkWriteFile struct {
 	ContentIdentity *ContentIdentity `json:"contentIdentity,omitempty"`
 	WritebackIntent string           `json:"writebackIntent,omitempty"`
 	// IfMatch is an optional per-file optimistic-concurrency precondition,
-	// same semantics as WriteRequest.IfMatch: "0" or "*" to create only if
-	// absent, an exact revision to require an unchanged base, "*" to force.
+	// same semantics as WriteRequest.IfMatch: "0" creates only if absent, an
+	// exact revision requires an unchanged base, and "*" forces.
 	// Empty means no check (preserves prior unconditional-overwrite
 	// behavior for callers that don't track revisions, e.g. tarball import).
 	IfMatch string `json:"ifMatch,omitempty"`

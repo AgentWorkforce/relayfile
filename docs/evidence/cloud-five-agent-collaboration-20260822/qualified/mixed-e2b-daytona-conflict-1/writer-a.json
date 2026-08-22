@@ -1,0 +1,53 @@
+{
+  "run_id": "mixed-e2b-daytona-conflict-1",
+  "role": "a",
+  "relative_path": "testdata/cloud-five-agent/mixed-e2b-daytona-conflict-1/conflict/shared.txt",
+  "content": "mixed-e2b-daytona-conflict-1-agent-a-conflict",
+  "sha256": "f01659e4be4b5be2f1e3ed7dd4ff96d52df7b282406368cd52a20a9e6836623e",
+  "ready_lead_ms": 1877.221435546875,
+  "write_started_epoch_ms": 1787414575085.813,
+  "write_completed_epoch_ms": 1787414575087.38,
+  "local_write_ms": 1.567049,
+  "clock": {
+    "pre": {
+      "samples": 15,
+      "retained": 7,
+      "min_rtt_ms": 15.430698,
+      "median_rtt_ms": 16.781609,
+      "offset_ms": 1.36279296875,
+      "uncertainty_ms": 8.215349,
+      "best_rtt_ms": [
+        15.430698,
+        15.54756,
+        15.712933,
+        16.241184,
+        16.241418,
+        16.241685,
+        16.389937
+      ]
+    },
+    "post": {
+      "samples": 15,
+      "retained": 7,
+      "min_rtt_ms": 11.482565,
+      "median_rtt_ms": 12.325925,
+      "offset_ms": 0.21142578125,
+      "uncertainty_ms": 6.2412825,
+      "best_rtt_ms": [
+        11.482565,
+        11.608388,
+        11.703762,
+        11.726797,
+        11.900141,
+        12.08171,
+        12.131696
+      ]
+    },
+    "offset_delta_ms": -1.1513671875,
+    "uncertainty_ms": 8.215349
+  },
+  "execution": {
+    "daytona_returncode": 0,
+    "stderr_tail": ""
+  }
+}

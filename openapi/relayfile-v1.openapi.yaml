@@ -3793,9 +3793,9 @@ components:
           type: string
           description: >-
             Optional per-file optimistic-concurrency precondition, same
-            semantics as the single-file write's If-Match header: "0" or "*"
-            to create only if the path is absent, an exact revision to
-            require an unchanged base, "*" to force. Omitted or empty means
+            semantics as the single-file write's If-Match header: "0"
+            creates only if the path is absent, an exact revision requires
+            an unchanged base, and "*" forces. Omitted or empty means
             no check (unconditional overwrite), preserving prior behavior
             for callers that don't track revisions. Honored on both the
             workspace bulk-write path and the fork bulk-write path (when
