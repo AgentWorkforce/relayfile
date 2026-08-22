@@ -1,0 +1,439 @@
+diff --git a/.trajectories/index.json b/.trajectories/index.json
+index e0d0bf4..23ed0c8 100644
+--- a/.trajectories/index.json
++++ b/.trajectories/index.json
+@@ -1,6 +1,6 @@
+ {
+   "version": 1,
+-  "lastUpdated": "2026-08-15T21:42:38.397Z",
++  "lastUpdated": "2026-08-21T16:24:16.180Z",
+   "trajectories": {
+     "traj_4pvrlmqfnzng": {
+       "title": "Review PR #278 in AgentWorkforce/relayfile",
+@@ -190,6 +190,76 @@
+       "startedAt": "2026-08-15T21:38:24.295Z",
+       "completedAt": "2026-08-15T21:42:38.104Z",
+       "path": ".trajectories/completed/2026-08/traj_1pmb0dufncg0.json"
++    },
++    "traj_1xbcffjdokib": {
++      "title": "Address GitHub issue 295 and open PR",
++      "status": "completed",
++      "startedAt": "2026-06-17T11:55:03.041Z",
++      "completedAt": "2026-06-17T11:59:23.129Z",
++      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-06/traj_1xbcffjdokib.json"
++    },
++    "traj_95az950fe6hv": {
++      "title": "Address GitHub issue 296 and open PR",
++      "status": "completed",
++      "startedAt": "2026-06-17T11:49:16.255Z",
++      "completedAt": "2026-06-17T11:54:36.882Z",
++      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-06/traj_95az950fe6hv.json"
++    },
++    "traj_dictkr6a22pi": {
++      "title": "Address PR comments and conflicts for relayfile PRs",
++      "status": "completed",
++      "startedAt": "2026-06-17T12:03:46.776Z",
++      "completedAt": "2026-06-17T12:18:57.766Z",
++      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-06/traj_dictkr6a22pi.json"
++    },
++    "traj_189qeb956pza": {
++      "title": "Multi-agent collaboration architecture assessment (goal B verdict)",
++      "status": "completed",
++      "startedAt": "2026-07-25T06:32:24.377Z",
++      "completedAt": "2026-07-25T06:45:29.809Z",
++      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-07/traj_189qeb956pza.json"
++    },
++    "traj_bxqe8ybl3shb": {
++      "title": "Multi-agent collaboration architecture assessment (goal B verdict) - finalize and verify",
++      "status": "completed",
++      "startedAt": "2026-07-25T06:51:39.584Z",
++      "completedAt": "2026-07-25T06:51:40.028Z",
++      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-07/traj_bxqe8ybl3shb.json"
++    },
++    "traj_l1iksbhpdtc8": {
++      "title": "Phase 1: codify relayfile path contract grammar + fixtures",
++      "status": "completed",
++      "startedAt": "2026-07-18T13:48:20.463Z",
++      "completedAt": "2026-07-18T13:58:49.836Z",
++      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-07/traj_l1iksbhpdtc8.json"
++    },
++    "traj_tl8p9tr5i7nk": {
++      "title": "Review code changes against main at 071fb805",
++      "status": "completed",
++      "startedAt": "2026-07-25T08:51:04.163Z",
++      "completedAt": "2026-07-25T09:00:29.065Z",
++      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-07/traj_tl8p9tr5i7nk.json"
++    },
++    "traj_xyqijlm5doh0": {
++      "title": "Reconcile stray background-fork changes to the goal-B assessment + verify real cross-machine propagation",
++      "status": "completed",
++      "startedAt": "2026-07-25T06:59:04.757Z",
++      "completedAt": "2026-07-25T06:59:05.423Z",
++      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-07/traj_xyqijlm5doh0.json"
++    },
++    "traj_aabpyjgntwje": {
++      "title": "Wire GitHub push-delivery to relay agents via relayfile subscriptions",
++      "status": "completed",
++      "startedAt": "2026-08-11T09:50:48.646Z",
++      "completedAt": "2026-08-11T10:00:13.927Z",
++      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-08/traj_aabpyjgntwje.json"
++    },
++    "traj_oxr692usmpup": {
++      "title": "Fleet agent subscription design — which agent listens to what",
++      "status": "completed",
++      "startedAt": "2026-08-11T10:58:15.217Z",
++      "completedAt": "2026-08-11T11:07:39.891Z",
++      "path": "/Users/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-08/traj_oxr692usmpup.json"
+     }
+   }
+-}
++}
+\ No newline at end of file
+diff --git a/cmd/relayfile-mount/main.go b/cmd/relayfile-mount/main.go
+index d462364..d35705e 100644
+--- a/cmd/relayfile-mount/main.go
++++ b/cmd/relayfile-mount/main.go
+@@ -61,6 +61,9 @@ type mountConfig struct {
+ 	cursorTimeout         time.Duration
+ 	forceFullRecon        bool
+ 	websocketEnabled      bool
++	fileSettleDelay       time.Duration
++	atomicSaveSettleDelay time.Duration
++	changeBatchWindow     time.Duration
+ 	lazyRepos             bool
+ 	lazySkipUntrackedPush bool
+ 	lowMemory             bool
+@@ -107,6 +110,9 @@ func main() {
+ 	cursorTimeout := flag.Duration("cursor-timeout", durationEnv("RELAYFILE_CURSOR_TIMEOUT", 60*time.Second), "independent timeout for events-cursor resolution")
+ 	fullReconcile := flag.Bool("full-reconcile", boolEnv("RELAYFILE_FORCE_FULL_RECONCILE", false), "force one full reconcile regardless of bootstrap-complete state (escape hatch)")
+ 	websocketEnabled := flag.Bool("websocket", boolEnv("RELAYFILE_MOUNT_WEBSOCKET", true), "enable websocket event streaming when available")
++	fileSettleDelay := flag.Duration("file-settle-delay", durationEnv("RELAYFILE_MOUNT_FILE_SETTLE_DELAY", mountsync.DefaultFileChangeSettleDelay), "settle delay for noisy in-place file writes")
++	atomicSaveSettleDelay := flag.Duration("atomic-save-settle-delay", durationEnv("RELAYFILE_MOUNT_ATOMIC_SAVE_SETTLE_DELAY", mountsync.DefaultAtomicSaveSettleDelay), "settle delay for committed atomic rename/create/remove events")
++	changeBatchWindow := flag.Duration("change-batch-window", durationEnv("RELAYFILE_MOUNT_CHANGE_BATCH_WINDOW", 5*time.Millisecond), "quiet window for grouping near-simultaneous changed paths into one bulk write")
+ 	lazyRepos := flag.Bool("lazy-repos", lazyReposEnv(), "lazily materialize GitHub repo subtrees on first access")
+ 	lazySkipUntrackedPush := flag.Bool("lazy-skip-untracked-push", boolEnv("RELAYFILE_LAZY_SKIP_UNTRACKED_PUSH", true), "when --lazy-repos is set, skip pushLocal for local files under a lazy GitHub repo subtree that this daemon does not track in its state (e.g. pre-pulled by an isolated non-lazy mount); writeback drafts/commands (including arbitrary-name GitHub adapter create leaves, e.g. issues/comments/reviews/replies drafts and merge.json) are exempt and still push. Trade-off: this also skips edits to untracked numeric/meta canonical leaves (the adapter's PATCH-by-editing-record surface, e.g. pulls/<n>/reviews/<id>.json) — already nonfunctional under lazy mounts today since those records never materialize locally without an external pre-pull, so nothing that works regresses")
+ 	lowMemory := flag.Bool("low-memory", boolEnv("RELAYFILE_MOUNT_LOW_MEMORY", false), "reduce mount memory use by omitting per-file public state and deferring content reads")
+@@ -201,6 +207,9 @@ func main() {
+ 		cursorTimeout:         *cursorTimeout,
+ 		forceFullRecon:        *fullReconcile,
+ 		websocketEnabled:      *websocketEnabled,
++		fileSettleDelay:       *fileSettleDelay,
++		atomicSaveSettleDelay: *atomicSaveSettleDelay,
++		changeBatchWindow:     *changeBatchWindow,
+ 		lazyRepos:             *lazyRepos,
+ 		lazySkipUntrackedPush: *lazySkipUntrackedPush,
+ 		lowMemory:             *lowMemory,
+@@ -516,14 +525,17 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
+ 
+ 	var watcher *mountsync.FileWatcher
+ 	if mountWatchesLocalChanges(cfg) {
+-		changeBatcher := mountsync.NewLocalChangeBatcher(5*time.Millisecond, func(changes []mountsync.LocalChange) {
++		changeBatcher := mountsync.NewLocalChangeBatcher(cfg.changeBatchWindow, func(changes []mountsync.LocalChange) {
+ 			ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
+ 			defer cancel()
+ 			if err := syncer.HandleLocalChanges(ctx, changes); err != nil {
+ 				log.Printf("mount local change failed: %v", err)
+ 			}
+ 		})
+-		watcher, err = syncer.NewFileWatcher(func(relativePath string, op fsnotify.Op) {
++		watcher, err = syncer.NewFileWatcherWithTimings(mountsync.FileWatcherTimings{
++			SettleDelay:       cfg.fileSettleDelay,
++			AtomicSettleDelay: cfg.atomicSaveSettleDelay,
++		}, func(relativePath string, op fsnotify.Op) {
+ 			changeBatcher.Add(relativePath, op)
+ 		})
+ 		if err != nil {
+diff --git a/internal/mountsync/syncer.go b/internal/mountsync/syncer.go
+index f18f4ca..00615d3 100644
+--- a/internal/mountsync/syncer.go
++++ b/internal/mountsync/syncer.go
+@@ -2077,10 +2077,16 @@ func (s *Syncer) SetCredentialExpiry(expiresAt string) {
+ // NewFileWatcher creates a watcher with the same local/remote mapping as this
+ // Syncer so path-collision guards cannot diverge between event and scan paths.
+ func (s *Syncer) NewFileWatcher(onChange func(string, fsnotify.Op)) (*FileWatcher, error) {
++	return s.NewFileWatcherWithTimings(FileWatcherTimings{}, onChange)
++}
++
++// NewFileWatcherWithTimings creates the same topology-safe watcher while
++// allowing the mount daemon and certification harnesses to tune settle delays.
++func (s *Syncer) NewFileWatcherWithTimings(timings FileWatcherTimings, onChange func(string, fsnotify.Op)) (*FileWatcher, error) {
+ 	if !recursiveWatcherAllowed() {
+ 		return nil, fmt.Errorf("%w: fsnotify uses descriptor-per-file kqueue on macOS; continuing with polling reconciliation (set RELAYFILE_MOUNT_FORCE_RECURSIVE_WATCHER=1 only for a deliberately small mirror)", ErrRecursiveWatcherUnsafe)
+ 	}
+-	return NewFileWatcherForTopology(s.localRoot, s.remoteRoot, s.scopedChild, onChange)
++	return NewFileWatcherForTopologyWithTimings(s.localRoot, s.remoteRoot, s.scopedChild, timings, onChange)
+ }
+ 
+ // EnablePollingLocalChangeDetection makes each existing local-tree scan treat
+diff --git a/internal/mountsync/watcher.go b/internal/mountsync/watcher.go
+index d9190d3..b656256 100644
+--- a/internal/mountsync/watcher.go
++++ b/internal/mountsync/watcher.go
+@@ -20,6 +20,17 @@ const defaultMaxWatchedDirs = 8192
+ 
+ const defaultLocalChangeBatchWindow = 5 * time.Millisecond
+ 
++const (
++	// DefaultFileChangeSettleDelay protects editors that stream a save through
++	// several in-place write/chmod notifications before the bytes are stable.
++	DefaultFileChangeSettleDelay = 100 * time.Millisecond
++	// DefaultAtomicSaveSettleDelay is intentionally short: a destination-only
++	// create/rename/remove notification is already the commit point of an
++	// atomic save, so making every agent wait the in-place editor window only
++	// adds coordination latency.
++	DefaultAtomicSaveSettleDelay = time.Millisecond
++)
++
+ var (
+ 	ErrWatcherLimitExceeded   = errors.New("mount file watcher directory limit exceeded")
+ 	ErrRecursiveWatcherUnsafe = errors.New("recursive mount file watcher is unsafe on this platform")
+@@ -151,17 +162,29 @@ func (b *LocalChangeBatcher) Close() {
+ // opens a descriptor for every watched file, so production mount loops disable
+ // this recursive watcher on macOS by default and retain polling reconciliation.
+ type FileWatcher struct {
+-	watcher     *fsnotify.Watcher
+-	localDir    string
+-	remoteRoot  string
+-	scopedChild bool
+-	onChange    func(relativePath string, op fsnotify.Op)
+-	maxDirs     int
+-	watchedDirs int
+-	mu          sync.Mutex
+-	debounce    map[string]*time.Timer // debounce rapid events per file
+-	closed      bool
+-	wg          sync.WaitGroup
++	watcher           *fsnotify.Watcher
++	localDir          string
++	remoteRoot        string
++	scopedChild       bool
++	onChange          func(relativePath string, op fsnotify.Op)
++	maxDirs           int
++	watchedDirs       int
++	settleDelay       time.Duration
++	atomicSettleDelay time.Duration
++	mu                sync.Mutex
++	debounce          map[string]*time.Timer // debounce rapid events per file
++	pendingOps        map[string]fsnotify.Op
++	debounceVersion   map[string]uint64
++	closed            bool
++	wg                sync.WaitGroup
++}
++
++// FileWatcherTimings controls the two correctness-aware watcher paths. Zero
++// values select the production defaults. In-place writes use SettleDelay;
++// atomic destination events use AtomicSettleDelay.
++type FileWatcherTimings struct {
++	SettleDelay       time.Duration
++	AtomicSettleDelay time.Duration
+ }
+ 
+ // recursiveWatcherAllowed reports whether a production Syncer may attach the
+@@ -203,18 +226,37 @@ func NewFileWatcherForRemoteRoot(localDir, remoteRoot string, onChange func(stri
+ // scoped children can share a remote root while requiring different treatment
+ // of catalog-only artifacts.
+ func NewFileWatcherForTopology(localDir, remoteRoot string, scopedChild bool, onChange func(string, fsnotify.Op)) (*FileWatcher, error) {
++	return NewFileWatcherForTopologyWithTimings(localDir, remoteRoot, scopedChild, FileWatcherTimings{}, onChange)
++}
++
++// NewFileWatcherForTopologyWithTimings is the configurable form used by the
++// mount daemon and latency certification harnesses. Existing constructors keep
++// the safe defaults above.
++func NewFileWatcherForTopologyWithTimings(localDir, remoteRoot string, scopedChild bool, timings FileWatcherTimings, onChange func(string, fsnotify.Op)) (*FileWatcher, error) {
+ 	w, err := fsnotify.NewWatcher()
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	settleDelay := timings.SettleDelay
++	if settleDelay <= 0 {
++		settleDelay = DefaultFileChangeSettleDelay
++	}
++	atomicSettleDelay := timings.AtomicSettleDelay
++	if atomicSettleDelay <= 0 {
++		atomicSettleDelay = DefaultAtomicSaveSettleDelay
++	}
+ 	return &FileWatcher{
+-		watcher:     w,
+-		localDir:    localDir,
+-		remoteRoot:  normalizeRemotePath(remoteRoot),
+-		scopedChild: scopedChild,
+-		onChange:    onChange,
+-		maxDirs:     watcherMaxDirsFromEnv(),
+-		debounce:    make(map[string]*time.Timer),
++		watcher:           w,
++		localDir:          localDir,
++		remoteRoot:        normalizeRemotePath(remoteRoot),
++		scopedChild:       scopedChild,
++		onChange:          onChange,
++		maxDirs:           watcherMaxDirsFromEnv(),
++		settleDelay:       settleDelay,
++		atomicSettleDelay: atomicSettleDelay,
++		debounce:          make(map[string]*time.Timer),
++		pendingOps:        make(map[string]fsnotify.Op),
++		debounceVersion:   make(map[string]uint64),
+ 	}, nil
+ }
+ 
+@@ -262,8 +304,8 @@ func (fw *FileWatcher) Start(ctx context.Context) error {
+ 					}
+ 				}
+ 
+-				// Debounce: wait 100ms for rapid events on same file to settle
+-				// (editors often do write + chmod + rename in quick succession).
++				// In-place editor writes get a conservative settle window. Atomic
++				// destination events are already committed and take the fast path.
+ 				fw.queueChange(rel, event.Op)
+ 
+ 			case _, ok := <-fw.watcher.Errors:
+@@ -361,24 +403,47 @@ func (fw *FileWatcher) queueChange(rel string, op fsnotify.Op) {
+ 		fw.mu.Unlock()
+ 		return
+ 	}
++	fw.pendingOps[rel] |= op
++	fw.debounceVersion[rel]++
++	version := fw.debounceVersion[rel]
+ 	if t, ok := fw.debounce[rel]; ok {
+ 		if t.Stop() {
+ 			fw.wg.Done()
+ 		}
+ 	}
++	delay := fw.settleDelay
++	combinedOp := fw.pendingOps[rel]
++	if combinedOp&(fsnotify.Write|fsnotify.Chmod) == 0 &&
++		combinedOp&(fsnotify.Create|fsnotify.Rename|fsnotify.Remove) != 0 {
++		delay = fw.atomicSettleDelay
++	}
+ 	fw.wg.Add(1)
+-	fw.debounce[rel] = time.AfterFunc(100*time.Millisecond, func() {
++	fw.debounce[rel] = time.AfterFunc(delay, func() {
+ 		defer fw.wg.Done()
+ 
+ 		fw.mu.Lock()
+ 		if fw.closed {
+-			delete(fw.debounce, rel)
++			if fw.debounceVersion[rel] == version {
++				delete(fw.debounce, rel)
++				delete(fw.pendingOps, rel)
++				delete(fw.debounceVersion, rel)
++			}
++			fw.mu.Unlock()
++			return
++		}
++		// A stopped timer may already have entered its callback. Only the
++		// newest generation may consume the coalesced operation or delete the
++		// replacement timer.
++		if fw.debounceVersion[rel] != version {
+ 			fw.mu.Unlock()
+ 			return
+ 		}
++		combinedOp := fw.pendingOps[rel]
+ 		delete(fw.debounce, rel)
++		delete(fw.pendingOps, rel)
++		delete(fw.debounceVersion, rel)
+ 		fw.mu.Unlock()
+-		fw.onChange(rel, op)
++		fw.onChange(rel, combinedOp)
+ 	})
+ 	fw.mu.Unlock()
+ }
+@@ -482,6 +547,8 @@ func (fw *FileWatcher) Close() error {
+ 			fw.wg.Done()
+ 		}
+ 		delete(fw.debounce, rel)
++		delete(fw.pendingOps, rel)
++		delete(fw.debounceVersion, rel)
+ 	}
+ 	fw.mu.Unlock()
+ 
+diff --git a/internal/mountsync/watcher_test.go b/internal/mountsync/watcher_test.go
+index b69019e..f00d74c 100644
+--- a/internal/mountsync/watcher_test.go
++++ b/internal/mountsync/watcher_test.go
+@@ -828,6 +828,88 @@ func TestWatcherDebounce(t *testing.T) {
+ 	}
+ }
+ 
++func TestWatcherAtomicDestinationUsesFastSettleDelay(t *testing.T) {
++	localDir := t.TempDir()
++	events := make(chan watcherEvent, 1)
++	watcher, err := NewFileWatcherForTopologyWithTimings(localDir, "/", false, FileWatcherTimings{
++		SettleDelay:       200 * time.Millisecond,
++		AtomicSettleDelay: 5 * time.Millisecond,
++	}, func(path string, op fsnotify.Op) {
++		events <- watcherEvent{path: path, op: op}
++	})
++	if err != nil {
++		t.Fatalf("new watcher: %v", err)
++	}
++	t.Cleanup(func() { _ = watcher.Close() })
++
++	started := time.Now()
++	watcher.queueChange("atomic.txt", fsnotify.Create)
++	ev, ok := waitForWatcherEvent(t, events, 100*time.Millisecond)
++	if !ok {
++		t.Fatal("atomic destination event waited for the in-place settle window")
++	}
++	if elapsed := time.Since(started); elapsed >= 100*time.Millisecond {
++		t.Fatalf("atomic destination event took %s, want fast path", elapsed)
++	}
++	if ev.op&fsnotify.Create == 0 {
++		t.Fatalf("atomic destination op = %s, want Create", ev.op)
++	}
++}
++
++func TestWatcherInPlaceWriteKeepsConservativeSettleDelay(t *testing.T) {
++	localDir := t.TempDir()
++	events := make(chan watcherEvent, 1)
++	watcher, err := NewFileWatcherForTopologyWithTimings(localDir, "/", false, FileWatcherTimings{
++		SettleDelay:       80 * time.Millisecond,
++		AtomicSettleDelay: time.Millisecond,
++	}, func(path string, op fsnotify.Op) {
++		events <- watcherEvent{path: path, op: op}
++	})
++	if err != nil {
++		t.Fatalf("new watcher: %v", err)
++	}
++	t.Cleanup(func() { _ = watcher.Close() })
++
++	watcher.queueChange("streamed.txt", fsnotify.Write)
++	if _, ok := waitForWatcherEvent(t, events, 30*time.Millisecond); ok {
++		t.Fatal("in-place write escaped before its conservative settle window")
++	}
++	if ev, ok := waitForWatcherEvent(t, events, 150*time.Millisecond); !ok {
++		t.Fatal("in-place write did not arrive after its settle window")
++	} else if ev.op&fsnotify.Write == 0 {
++		t.Fatalf("in-place op = %s, want Write", ev.op)
++	}
++}
++
++func TestWatcherCoalescesOperationsAndFallsBackToSafeDelay(t *testing.T) {
++	localDir := t.TempDir()
++	events := make(chan watcherEvent, 1)
++	watcher, err := NewFileWatcherForTopologyWithTimings(localDir, "/", false, FileWatcherTimings{
++		SettleDelay:       80 * time.Millisecond,
++		AtomicSettleDelay: time.Millisecond,
++	}, func(path string, op fsnotify.Op) {
++		events <- watcherEvent{path: path, op: op}
++	})
++	if err != nil {
++		t.Fatalf("new watcher: %v", err)
++	}
++	t.Cleanup(func() { _ = watcher.Close() })
++
++	watcher.queueChange("mixed.txt", fsnotify.Create)
++	time.Sleep(5 * time.Millisecond)
++	watcher.queueChange("mixed.txt", fsnotify.Write)
++	if _, ok := waitForWatcherEvent(t, events, 30*time.Millisecond); ok {
++		t.Fatal("create+write burst incorrectly used the atomic fast path")
++	}
++	ev, ok := waitForWatcherEvent(t, events, 150*time.Millisecond)
++	if !ok {
++		t.Fatal("coalesced event not received")
++	}
++	if ev.op&(fsnotify.Create|fsnotify.Write) != fsnotify.Create|fsnotify.Write {
++		t.Fatalf("coalesced op = %s, want Create|Write", ev.op)
++	}
++}
++
+ func TestWatcherNewSubdirectory(t *testing.T) {
+ 	localDir := t.TempDir()
+ 	events, _, _ := startFileWatcher(t, localDir)
