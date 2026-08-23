@@ -3,6 +3,10 @@
 const path = require("path");
 
 const DEFAULT_CLOUD_API_URL = "https://agentrelay.com/cloud";
+const DEFAULT_LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_REFRESH_TIMEOUT_MS = 10 * 1000;
+const MAX_NODE_TIMER_DELAY_MS = 2_147_483_647;
+const MAX_GO_DURATION_NANOSECONDS = 9_223_372_036_854_775_807;
 const SETUP_FLAGS = new Map([
   ["cloud-api-url", true],
   ["cloud-token", true],
@@ -32,56 +36,142 @@ const GO_BOOLEAN_VALUES = new Set([
   "FALSE",
   "False",
 ]);
+const GO_TRUE_VALUES = new Set(["1", "t", "T", "true", "TRUE", "True"]);
+const GO_DURATION_UNITS_IN_NANOSECONDS = new Map([
+  ["ns", 1],
+  ["us", 1_000],
+  ["µs", 1_000],
+  ["μs", 1_000],
+  ["ms", 1_000_000],
+  ["s", 1_000_000_000],
+  ["m", 60 * 1_000_000_000],
+  ["h", 60 * 60 * 1_000_000_000],
+]);
+const VALID_INTEGRATION_BACKENDS = new Set([
+  "",
+  "default",
+  "nango",
+  "composio",
+]);
 
 function hasFlag(args, name) {
   return args.some((arg) => arg === name || arg.startsWith(`${name}=`));
 }
 
-function optionValue(args, name) {
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === name) {
-      return args[index + 1];
-    }
-    if (arg.startsWith(`${name}=`)) {
-      return arg.slice(name.length + 1);
-    }
+function parseGoDurationMilliseconds(value) {
+  let remaining = String(value);
+  let sign = 1;
+  if (remaining.startsWith("+") || remaining.startsWith("-")) {
+    sign = remaining[0] === "-" ? -1 : 1;
+    remaining = remaining.slice(1);
   }
-  return undefined;
+  if (remaining === "0") {
+    return 0;
+  }
+  if (!remaining) {
+    return null;
+  }
+
+  let nanoseconds = 0;
+  let parts = 0;
+  while (remaining) {
+    const match = /^(\d+(?:\.\d*)?|\.\d+)(ns|us|µs|μs|ms|s|m|h)/.exec(
+      remaining,
+    );
+    if (!match) {
+      return null;
+    }
+    const amount = Number(match[1]);
+    const unitNanoseconds = GO_DURATION_UNITS_IN_NANOSECONDS.get(match[2]);
+    nanoseconds += amount * unitNanoseconds;
+    if (
+      !Number.isFinite(nanoseconds) ||
+      nanoseconds > MAX_GO_DURATION_NANOSECONDS
+    ) {
+      return null;
+    }
+    remaining = remaining.slice(match[0].length);
+    parts += 1;
+  }
+  return parts > 0 ? (sign * nanoseconds) / 1_000_000 : null;
 }
 
-function hasValidSetupArguments(args) {
+function parseSetupArguments(args) {
   const setupArgs = args[0] === "setup" ? args.slice(1) : args;
+  const values = new Map();
+  const durations = new Map();
   for (let index = 0; index < setupArgs.length; index += 1) {
     const arg = setupArgs[index];
     if (arg === "--") {
-      return index === setupArgs.length - 1;
+      if (index !== setupArgs.length - 1) {
+        return { valid: false, error: "setup does not accept positional arguments" };
+      }
+      break;
     }
 
     const match = /^--?([^=]+)(?:=(.*))?$/.exec(arg);
     if (!match) {
-      return false;
+      return {
+        valid: false,
+        error: `unexpected setup argument ${JSON.stringify(arg)}`,
+      };
     }
     const [, name, inlineValue] = match;
     const takesValue = SETUP_FLAGS.get(name);
     if (takesValue === undefined) {
-      return false;
+      return { valid: false, error: `unknown setup flag --${name}` };
     }
     if (takesValue) {
+      let value = inlineValue;
       if (inlineValue === undefined) {
         const next = setupArgs[index + 1];
         if (next === undefined || next.startsWith("-")) {
-          return false;
+          return { valid: false, error: `--${name} requires a value` };
         }
+        value = next;
         index += 1;
+      }
+      values.set(name, value);
+      if (name === "login-timeout" || name === "connect-timeout") {
+        const duration = parseGoDurationMilliseconds(value);
+        if (duration === null) {
+          return {
+            valid: false,
+            error: `--${name} has invalid duration ${JSON.stringify(value)}`,
+          };
+        }
+        if (name === "login-timeout" && duration <= 0) {
+          return {
+            valid: false,
+            error: "--login-timeout must be greater than zero",
+          };
+        }
+        durations.set(name, duration);
       }
       continue;
     }
     if (inlineValue !== undefined && !GO_BOOLEAN_VALUES.has(inlineValue)) {
-      return false;
+      return {
+        valid: false,
+        error: `--${name} has invalid boolean value ${JSON.stringify(inlineValue)}`,
+      };
     }
+    values.set(name, inlineValue === undefined || GO_TRUE_VALUES.has(inlineValue));
   }
-  return true;
+
+  const backend = String(values.get("backend") || "").trim().toLowerCase();
+  if (!VALID_INTEGRATION_BACKENDS.has(backend)) {
+    return {
+      valid: false,
+      error: `unsupported integration backend ${JSON.stringify(backend)} (expected nango or composio)`,
+    };
+  }
+
+  return { valid: true, values, durations };
+}
+
+function hasValidSetupArguments(args) {
+  return parseSetupArguments(args).valid;
 }
 
 function shouldPrepareCloudSession(args, env) {
@@ -127,6 +217,17 @@ function loadCloudSessionSDK() {
 }
 
 async function prepareCloudSession(args, env = process.env, dependencies = {}) {
+  const setupCommand = args.length === 0 || args[0] === "setup";
+  const skipsValidation =
+    hasFlag(args, "--help") ||
+    hasFlag(args, "-h") ||
+    hasFlag(args, "--version") ||
+    args[0] === "version";
+  const parsed =
+    setupCommand && !skipsValidation ? parseSetupArguments(args) : null;
+  if (parsed && !parsed.valid) {
+    throw new Error(parsed.error);
+  }
   if (!shouldPrepareCloudSession(args, env)) {
     return false;
   }
@@ -134,15 +235,39 @@ async function prepareCloudSession(args, env = process.env, dependencies = {}) {
   const ensureCloudSession =
     dependencies.ensureCloudSession || loadCloudSessionSDK();
   const apiUrl =
-    String(optionValue(args, "--cloud-api-url") || "").trim() ||
+    String(parsed.values.get("cloud-api-url") || "").trim() ||
     String(env.RELAYFILE_CLOUD_API_URL || "").trim() ||
     String(env.CLOUD_API_URL || "").trim() ||
     DEFAULT_CLOUD_API_URL;
-  await ensureCloudSession({
-    apiUrl,
-    interactive: true,
-    device: hasFlag(args, "--no-open"),
-  });
+  const loginTimeoutMs =
+    parsed.durations.get("login-timeout") || DEFAULT_LOGIN_TIMEOUT_MS;
+  let timer;
+  try {
+    await Promise.race([
+      ensureCloudSession({
+        apiUrl,
+        interactive: true,
+        device: parsed.values.get("no-open") === true,
+        refreshTimeoutMs: Math.max(
+          1,
+          Math.min(loginTimeoutMs, DEFAULT_REFRESH_TIMEOUT_MS),
+        ),
+      }),
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error(
+                `Cloud sign-in timed out after ${parsed.values.get("login-timeout") || "5m"}`,
+              ),
+            ),
+          Math.min(loginTimeoutMs, MAX_NODE_TIMER_DELAY_MS),
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 
   // The SDK owns and refreshes its canonical on-disk session. Do not promote
   // that session into CLOUD_API_* for the child: Relayfile would correctly
@@ -156,7 +281,8 @@ async function prepareCloudSession(args, env = process.env, dependencies = {}) {
 module.exports = {
   DEFAULT_CLOUD_API_URL,
   hasValidSetupArguments,
-  optionValue,
+  parseGoDurationMilliseconds,
+  parseSetupArguments,
   prepareCloudSession,
   shouldPrepareCloudSession,
 };

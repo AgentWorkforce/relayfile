@@ -9,6 +9,7 @@ const test = require("node:test");
 
 const {
   hasValidSetupArguments,
+  parseGoDurationMilliseconds,
   prepareCloudSession,
   shouldPrepareCloudSession,
 } = require("./cloud-preflight.js");
@@ -37,6 +38,7 @@ test("bare relayfile prepares Cloud auth through the Agent Relay SDK", async () 
       apiUrl: "https://agentrelay.com/cloud",
       interactive: true,
       device: false,
+      refreshTimeoutMs: 10000,
     },
   ]);
   assert.deepEqual(env, {});
@@ -50,6 +52,7 @@ test("setup forwards its Cloud URL and no-open mode to the SDK", async () => {
       "setup",
       "--cloud-api-url=https://staging.example/cloud",
       "--no-open",
+      "--login-timeout=10s",
     ],
     env,
     {
@@ -71,6 +74,7 @@ test("setup forwards its Cloud URL and no-open mode to the SDK", async () => {
     apiUrl: "https://staging.example/cloud",
     interactive: true,
     device: true,
+    refreshTimeoutMs: 10000,
   });
   assert.deepEqual(env, {});
 });
@@ -101,18 +105,80 @@ test("malformed setup arguments fail before interactive auth", async () => {
     false,
   );
   let authCalls = 0;
-  const prepared = await prepareCloudSession(
-    ["setup", "--provider"],
-    {},
-    {
-      ensureCloudSession: async () => {
-        authCalls += 1;
-        throw new Error("interactive auth must not run");
+  await assert.rejects(
+    prepareCloudSession(
+      ["setup", "--provider"],
+      {},
+      {
+        ensureCloudSession: async () => {
+          authCalls += 1;
+          throw new Error("interactive auth must not run");
+        },
       },
-    },
+    ),
+    /--provider requires a value/,
   );
-  assert.equal(prepared, false);
   assert.equal(authCalls, 0);
+});
+
+test("invalid setup values fail before interactive auth", async () => {
+  assert.equal(
+    hasValidSetupArguments(["setup", "--connect-timeout=bogus"]),
+    false,
+  );
+  assert.equal(
+    hasValidSetupArguments(["setup", "--backend", "invalid"]),
+    false,
+  );
+  let authCalls = 0;
+  await assert.rejects(
+    prepareCloudSession(
+      ["setup", "--backend", "invalid"],
+      {},
+      {
+        ensureCloudSession: async () => {
+          authCalls += 1;
+        },
+      },
+    ),
+    /unsupported integration backend/,
+  );
+  assert.equal(authCalls, 0);
+});
+
+test("Go durations are validated and converted for SDK login", () => {
+  assert.equal(parseGoDurationMilliseconds("10s"), 10000);
+  assert.equal(parseGoDurationMilliseconds("1m30.5s"), 90500);
+  assert.equal(parseGoDurationMilliseconds("250ms"), 250);
+  assert.equal(parseGoDurationMilliseconds("bogus"), null);
+  assert.equal(parseGoDurationMilliseconds("10"), null);
+});
+
+test("login timeout bounds SDK authentication", async () => {
+  await assert.rejects(
+    prepareCloudSession(
+      ["setup", "--login-timeout=1ms"],
+      {},
+      { ensureCloudSession: () => new Promise(() => {}) },
+    ),
+    /Cloud sign-in timed out after 1ms/,
+  );
+});
+
+test("false no-open values keep browser login enabled", async () => {
+  for (const value of ["false", "0"]) {
+    let received;
+    await prepareCloudSession(
+      ["setup", `--no-open=${value}`],
+      {},
+      {
+        ensureCloudSession: async (options) => {
+          received = options;
+        },
+      },
+    );
+    assert.equal(received.device, false);
+  }
 });
 
 test("valid explicit setup arguments still prepare Cloud auth", () => {
