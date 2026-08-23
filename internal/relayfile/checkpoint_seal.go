@@ -16,17 +16,20 @@ import (
 )
 
 const (
-	DefaultCheckpointSealTTL = 60 * time.Second
-	MaxCheckpointSealTTL     = 5 * time.Minute
+	DefaultCheckpointSealTTL             = 60 * time.Second
+	MaxCheckpointSealTTL                 = 5 * time.Minute
+	CheckpointConsumeReplayRetention     = 24 * time.Hour
+	checkpointExpiredDiagnosticRetention = 24 * time.Hour
 )
 
 var (
-	ErrCheckpointDiverged        = errors.New("checkpoint digest does not match durable workspace state")
-	ErrCheckpointExpired         = errors.New("checkpoint seal expired")
-	ErrCheckpointReplay          = errors.New("checkpoint seal already consumed")
-	ErrCheckpointStale           = errors.New("checkpoint seal is stale")
-	ErrCheckpointGenerationStale = errors.New("checkpoint generation is not newer than the last issued generation")
-	checkpointSessionPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$`)
+	ErrCheckpointDiverged         = errors.New("checkpoint digest does not match durable workspace state")
+	ErrCheckpointExpired          = errors.New("checkpoint seal expired")
+	ErrCheckpointReplay           = errors.New("checkpoint seal already consumed")
+	ErrCheckpointStale            = errors.New("checkpoint seal is stale")
+	ErrCheckpointGenerationStale  = errors.New("checkpoint generation is not newer than the last issued generation")
+	ErrCheckpointConsumerConflict = errors.New("checkpoint consumer idempotency key is bound to a different seal or identity")
+	checkpointSessionPattern      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$`)
 )
 
 type CheckpointDigestEntry struct {
@@ -45,10 +48,11 @@ type CheckpointSealRequest struct {
 }
 
 type CheckpointSealConsumeRequest struct {
-	SealToken  string `json:"sealToken"`
-	Root       string `json:"root"`
-	SessionID  string `json:"sessionId"`
-	Generation uint64 `json:"generation"`
+	SealToken              string `json:"sealToken"`
+	Root                   string `json:"root"`
+	SessionID              string `json:"sessionId"`
+	Generation             uint64 `json:"generation"`
+	ConsumerIdempotencyKey string `json:"consumerIdempotencyKey"`
 }
 
 type CheckpointSeal struct {
@@ -68,8 +72,19 @@ type CheckpointSeal struct {
 
 type checkpointSealRecord struct {
 	CheckpointSeal
-	TokenHash string `json:"tokenHash"`
-	Issuer    string `json:"issuer,omitempty"`
+	TokenHash            string `json:"tokenHash"`
+	Issuer               string `json:"issuer,omitempty"`
+	ConsumerKeyHash      string `json:"consumerKeyHash,omitempty"`
+	IdempotencyExpiresAt string `json:"idempotencyExpiresAt,omitempty"`
+}
+
+type checkpointConsumerBinding struct {
+	TokenHash   string `json:"tokenHash"`
+	WorkspaceID string `json:"workspaceId"`
+	Root        string `json:"root"`
+	SessionID   string `json:"sessionId"`
+	Generation  uint64 `json:"generation"`
+	ReplayUntil string `json:"replayUntil"`
 }
 
 func NormalizeCheckpointRoot(raw string) (string, error) {
@@ -151,6 +166,7 @@ func (s *Store) IssueCheckpointSeal(workspaceID string, req CheckpointSealReques
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.purgeCheckpointSealsLocked(now)
 	key := checkpointGenerationKey(workspaceID, root, sessionID)
 	previousGeneration := s.checkpointGenerations[key]
 	if req.Generation <= previousGeneration {
@@ -208,22 +224,32 @@ func (s *Store) IssueCheckpointSeal(workspaceID string, req CheckpointSealReques
 
 func (s *Store) ConsumeCheckpointSeal(workspaceID string, req CheckpointSealConsumeRequest, now time.Time) (CheckpointSeal, error) {
 	workspaceID = strings.TrimSpace(workspaceID)
+	sessionID := strings.TrimSpace(req.SessionID)
+	consumerKey := strings.TrimSpace(req.ConsumerIdempotencyKey)
 	root, err := NormalizeCheckpointRoot(req.Root)
-	if err != nil || workspaceID == "" || !checkpointSessionPattern.MatchString(strings.TrimSpace(req.SessionID)) || req.Generation == 0 || strings.TrimSpace(req.SealToken) == "" {
+	if err != nil || workspaceID == "" || !checkpointSessionPattern.MatchString(sessionID) || req.Generation == 0 || strings.TrimSpace(req.SealToken) == "" || !checkpointSessionPattern.MatchString(consumerKey) {
 		return CheckpointSeal{}, ErrInvalidInput
 	}
 	now = now.UTC()
 	tokenHash := checkpointTokenHash(strings.TrimSpace(req.SealToken))
+	consumerKeyHash := checkpointTokenHash(consumerKey)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.purgeCheckpointSealsLocked(now)
+	if binding, exists := s.checkpointConsumerKeys[consumerKeyHash]; exists && !checkpointConsumerBindingMatches(binding, tokenHash, workspaceID, root, sessionID, req.Generation) {
+		return CheckpointSeal{}, ErrCheckpointConsumerConflict
+	}
 	record, ok := s.checkpointSeals[tokenHash]
 	if !ok {
 		return CheckpointSeal{}, ErrNotFound
 	}
-	if record.WorkspaceID != workspaceID || record.Root != root || record.SessionID != strings.TrimSpace(req.SessionID) || record.Generation != req.Generation {
+	if record.WorkspaceID != workspaceID || record.Root != root || record.SessionID != sessionID || record.Generation != req.Generation {
 		return CheckpointSeal{}, ErrInvalidInput
 	}
 	if record.ConsumedAt != "" {
+		if record.ConsumerKeyHash == consumerKeyHash {
+			return record.CheckpointSeal, nil
+		}
 		return CheckpointSeal{}, ErrCheckpointReplay
 	}
 	expiresAt, parseErr := time.Parse(time.RFC3339Nano, record.ExpiresAt)
@@ -238,13 +264,49 @@ func (s *Store) ConsumeCheckpointSeal(workspaceID string, req CheckpointSealCons
 		return CheckpointSeal{}, ErrCheckpointStale
 	}
 	record.ConsumedAt = now.Format(time.RFC3339Nano)
+	record.ConsumerKeyHash = consumerKeyHash
+	record.IdempotencyExpiresAt = now.Add(CheckpointConsumeReplayRetention).Format(time.RFC3339Nano)
 	s.checkpointSeals[tokenHash] = record
+	if s.checkpointConsumerKeys == nil {
+		s.checkpointConsumerKeys = map[string]checkpointConsumerBinding{}
+	}
+	s.checkpointConsumerKeys[consumerKeyHash] = checkpointConsumerBinding{
+		TokenHash: tokenHash, WorkspaceID: workspaceID, Root: root,
+		SessionID: sessionID, Generation: req.Generation,
+		ReplayUntil: record.IdempotencyExpiresAt,
+	}
 	if err := s.saveLocked(); err != nil {
 		record.ConsumedAt = ""
+		record.ConsumerKeyHash = ""
+		record.IdempotencyExpiresAt = ""
 		s.checkpointSeals[tokenHash] = record
+		delete(s.checkpointConsumerKeys, consumerKeyHash)
 		return CheckpointSeal{}, err
 	}
 	return record.CheckpointSeal, nil
+}
+
+func checkpointConsumerBindingMatches(binding checkpointConsumerBinding, tokenHash, workspaceID, root, sessionID string, generation uint64) bool {
+	return binding.TokenHash == tokenHash && binding.WorkspaceID == workspaceID && binding.Root == root && binding.SessionID == sessionID && binding.Generation == generation
+}
+
+func (s *Store) purgeCheckpointSealsLocked(now time.Time) {
+	for tokenHash, record := range s.checkpointSeals {
+		deleteRecord := false
+		if record.ConsumedAt != "" {
+			replayUntil, err := time.Parse(time.RFC3339Nano, record.IdempotencyExpiresAt)
+			deleteRecord = err != nil || !now.Before(replayUntil)
+		} else if expiresAt, err := time.Parse(time.RFC3339Nano, record.ExpiresAt); err == nil {
+			deleteRecord = !now.Before(expiresAt.Add(checkpointExpiredDiagnosticRetention))
+		}
+		if !deleteRecord {
+			continue
+		}
+		delete(s.checkpointSeals, tokenHash)
+		if record.ConsumerKeyHash != "" {
+			delete(s.checkpointConsumerKeys, record.ConsumerKeyHash)
+		}
+	}
 }
 
 func (s *Store) checkpointStateLocked(workspaceID, root string) (digest, workspaceRevision, cursor string, err error) {

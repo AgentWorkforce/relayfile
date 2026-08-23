@@ -1679,7 +1679,8 @@ export class RelayFileClient {
         sealToken: input.sealToken,
         root: input.root,
         sessionId: input.sessionId,
-        generation: input.generation
+        generation: input.generation,
+        consumerIdempotencyKey: input.consumerIdempotencyKey
       },
       signal: input.signal
     });

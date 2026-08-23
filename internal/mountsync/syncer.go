@@ -777,6 +777,12 @@ func (c *HTTPClient) IssueCheckpointSeal(ctx context.Context, workspaceID string
 	return out, err
 }
 
+func (c *HTTPClient) ConsumeCheckpointSeal(ctx context.Context, workspaceID string, request CheckpointSealConsumeRequest) (CheckpointSeal, error) {
+	var out CheckpointSeal
+	err := c.doJSON(ctx, http.MethodPost, fmt.Sprintf("/v1/workspaces/%s/sync/checkpoint-seals/consume", url.PathEscape(workspaceID)), nil, request, &out)
+	return out, err
+}
+
 func (c *HTTPClient) ExportFiles(ctx context.Context, workspaceID, path string) ([]RemoteFile, error) {
 	q := url.Values{}
 	q.Set("format", "json")

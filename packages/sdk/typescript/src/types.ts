@@ -172,6 +172,7 @@ export interface ConsumeCheckpointSealInput {
   root: string;
   sessionId: string;
   generation: number;
+  consumerIdempotencyKey: string;
   correlationId?: string;
   signal?: AbortSignal;
 }

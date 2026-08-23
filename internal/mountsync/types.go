@@ -21,6 +21,8 @@ type CheckpointSeal = relayfile.CheckpointSeal
 
 type CheckpointSealRequest = relayfile.CheckpointSealRequest
 
+type CheckpointSealConsumeRequest = relayfile.CheckpointSealConsumeRequest
+
 const DefaultCheckpointSealTTL = relayfile.DefaultCheckpointSealTTL
 
 const MaxCheckpointSealTTL = relayfile.MaxCheckpointSealTTL

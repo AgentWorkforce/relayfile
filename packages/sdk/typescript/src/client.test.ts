@@ -1463,6 +1463,7 @@ describe("RelayFileClient — existing methods", () => {
         root: "/sessions",
         sessionId: "thread-1",
         generation: 4,
+        consumerIdempotencyKey: "cloud-acquire-attempt-1",
       })).resolves.toEqual(consumed);
       expect(f.mock.calls[0]![0]).toContain("/v1/workspaces/ws_acme/sync/checkpoint-seals/consume");
       const init = f.mock.calls[0]![1] as RequestInit;
@@ -1471,6 +1472,7 @@ describe("RelayFileClient — existing methods", () => {
         root: "/sessions",
         sessionId: "thread-1",
         generation: 4,
+        consumerIdempotencyKey: "cloud-acquire-attempt-1",
       });
     });
   });

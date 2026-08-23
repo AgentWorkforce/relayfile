@@ -7057,7 +7057,7 @@ func TestCheckpointSealHTTPServerComputesAndConsumesAuthoritativeSeal(t *testing
 		headers: map[string]string{
 			"Authorization": "Bearer " + cloudToken, "X-Correlation-Id": "corr-checkpoint-consume",
 		},
-		body: map[string]any{"sealToken": seal.SealToken, "root": "/sessions", "sessionId": "thread-http", "generation": 4},
+		body: map[string]any{"sealToken": seal.SealToken, "root": "/sessions", "sessionId": "thread-http", "generation": 4, "consumerIdempotencyKey": "cloud-acquire-http-1"},
 	})
 	if consume.Code != http.StatusOK {
 		t.Fatalf("consume status = %d: %s", consume.Code, consume.Body.String())
@@ -7068,10 +7068,32 @@ func TestCheckpointSealHTTPServerComputesAndConsumesAuthoritativeSeal(t *testing
 		headers: map[string]string{
 			"Authorization": "Bearer " + cloudToken, "X-Correlation-Id": "corr-checkpoint-replay",
 		},
-		body: map[string]any{"sealToken": seal.SealToken, "root": "/sessions", "sessionId": "thread-http", "generation": 4},
+		body: map[string]any{"sealToken": seal.SealToken, "root": "/sessions", "sessionId": "thread-http", "generation": 4, "consumerIdempotencyKey": "cloud-acquire-http-1"},
 	})
-	if replay.Code != http.StatusConflict || !strings.Contains(replay.Body.String(), "checkpoint_replayed") {
-		t.Fatalf("replay status = %d: %s", replay.Code, replay.Body.String())
+	if replay.Code != http.StatusOK {
+		t.Fatalf("idempotent replay status = %d: %s", replay.Code, replay.Body.String())
+	}
+	differentConsumer := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_checkpoint_http/sync/checkpoint-seals/consume",
+		headers: map[string]string{
+			"Authorization": "Bearer " + cloudToken, "X-Correlation-Id": "corr-checkpoint-other-consumer",
+		},
+		body: map[string]any{"sealToken": seal.SealToken, "root": "/sessions", "sessionId": "thread-http", "generation": 4, "consumerIdempotencyKey": "cloud-acquire-http-2"},
+	})
+	if differentConsumer.Code != http.StatusConflict || !strings.Contains(differentConsumer.Body.String(), "checkpoint_replayed") {
+		t.Fatalf("different consumer replay status = %d: %s", differentConsumer.Code, differentConsumer.Body.String())
+	}
+	changedIdentity := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_checkpoint_http/sync/checkpoint-seals/consume",
+		headers: map[string]string{
+			"Authorization": "Bearer " + cloudToken, "X-Correlation-Id": "corr-checkpoint-key-conflict",
+		},
+		body: map[string]any{"sealToken": seal.SealToken, "root": "/other", "sessionId": "thread-http", "generation": 4, "consumerIdempotencyKey": "cloud-acquire-http-1"},
+	})
+	if changedIdentity.Code != http.StatusConflict || !strings.Contains(changedIdentity.Body.String(), "checkpoint_consumer_conflict") {
+		t.Fatalf("consumer identity conflict status = %d: %s", changedIdentity.Code, changedIdentity.Body.String())
 	}
 }
 

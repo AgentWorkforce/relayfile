@@ -1345,7 +1345,12 @@ paths:
       description: >-
         Recomputes durable digest, workspace revision, and event cursor before
         atomically marking the seal consumed. Expired, replayed, identity-
-        mismatched, or remotely stale seals fail closed.
+        mismatched, or remotely stale seals fail closed. A first successful
+        consume is replayable for 24 hours with the exact same consumer
+        idempotency key and bound identity, including after the seal TTL;
+        response-loss retries return the same consumed result. Reusing that key
+        for another seal or identity conflicts, while a different key cannot
+        reuse an already-consumed seal.
       security:
         - BearerAuth: [sync:trigger]
       parameters:
@@ -3437,7 +3442,7 @@ components:
     CheckpointSealConsumeRequest:
       type: object
       additionalProperties: false
-      required: [sealToken, root, sessionId, generation]
+      required: [sealToken, root, sessionId, generation, consumerIdempotencyKey]
       properties:
         sealToken:
           type: string
@@ -3452,6 +3457,10 @@ components:
           type: integer
           format: int64
           minimum: 1
+        consumerIdempotencyKey:
+          type: string
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$'
+          description: Stable Cloud acquire-attempt id persisted before the first consume request.
 
     CheckpointSeal:
       type: object

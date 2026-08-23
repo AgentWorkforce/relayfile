@@ -2285,6 +2285,8 @@ func writeCheckpointSealError(w http.ResponseWriter, err error, correlationID st
 		writeError(w, http.StatusConflict, "checkpoint_diverged", err.Error(), correlationID)
 	case errors.Is(err, relayfile.ErrCheckpointGenerationStale):
 		writeError(w, http.StatusConflict, "checkpoint_generation_stale", err.Error(), correlationID)
+	case errors.Is(err, relayfile.ErrCheckpointConsumerConflict):
+		writeError(w, http.StatusConflict, "checkpoint_consumer_conflict", err.Error(), correlationID)
 	case errors.Is(err, relayfile.ErrCheckpointExpired):
 		writeError(w, http.StatusConflict, "checkpoint_expired", err.Error(), correlationID)
 	case errors.Is(err, relayfile.ErrCheckpointReplay):
