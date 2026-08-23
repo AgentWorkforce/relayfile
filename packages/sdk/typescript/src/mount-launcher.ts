@@ -523,9 +523,9 @@ function scopeGrantsFullRoot(
 ): boolean {
   const relevantNarrowScopes: string[] = []
   for (const scope of scopes) {
-    const segments = scope.split(":", 4)
-    if (segments.length < 3) continue
-    const [plane, resource, grantedAction, scopePath] = segments
+    const parsed = parseStructuredScope(scope)
+    if (!parsed) continue
+    const { plane, resource, action: grantedAction, path: scopePath } = parsed
     const actionMatches =
       grantedAction === action ||
       grantedAction === "*" ||
@@ -544,10 +544,28 @@ function scopeGrantsFullRoot(
       relevantNarrowScopes.push(scopePath.trim())
     }
   }
-  if (relevantNarrowScopes.some((scopePath) => scopePath === "/" || scopePath === "/**")) {
+  if (relevantNarrowScopes.some((scopePath) => scopePath === "/**")) {
     return true
   }
   return relevantNarrowScopes.length === 0 && scopes.includes(`fs:${action}`)
+}
+
+function parseStructuredScope(scope: string): {
+  plane: string
+  resource: string
+  action: string
+  path?: string
+} | null {
+  const first = scope.indexOf(":")
+  const second = first < 0 ? -1 : scope.indexOf(":", first + 1)
+  if (first < 1 || second <= first + 1) return null
+  const third = scope.indexOf(":", second + 1)
+  return {
+    plane: scope.slice(0, first),
+    resource: scope.slice(first + 1, second),
+    action: scope.slice(second + 1, third < 0 ? undefined : third),
+    path: third < 0 ? undefined : scope.slice(third + 1)
+  }
 }
 
 function validateCheckpointSeal(

@@ -501,6 +501,14 @@ describe("default mount launcher", () => {
     [
       "narrow filesystem grants",
       "relayfile:fs:read:/notion/** relayfile:fs:write:/notion/** sync:trigger ops:read"
+    ],
+    [
+      "exact root-node grants",
+      "relayfile:fs:read:/ relayfile:fs:write:/ sync:trigger ops:read"
+    ],
+    [
+      "colon-bearing narrow filesystem grants",
+      "relayfile:fs:read:/:secret relayfile:fs:write:/:secret sync:trigger ops:read"
     ]
   ])("rejects %s checkpoint scopes before stopping the source", async (_name, scopes) => {
     const tempRoot = await mkdtemp(
