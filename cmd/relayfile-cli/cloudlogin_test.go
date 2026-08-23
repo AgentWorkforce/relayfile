@@ -33,7 +33,6 @@ func TestEnsureSetupCloudCredentialsLogsInWithoutAgentRelayCLI(t *testing.T) {
 			query.Set("refresh_token", "cld_rt_setup_secret")
 			query.Set("access_token_expires_at", time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
 			query.Set("refresh_token_expires_at", time.Now().Add(30*24*time.Hour).UTC().Format(time.RFC3339))
-			query.Set("api_url", cloud.URL)
 			callback.RawQuery = query.Encode()
 			http.Redirect(w, r, callback.String(), http.StatusFound)
 		case "/cli/auth-result":

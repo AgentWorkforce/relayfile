@@ -131,7 +131,7 @@ func loginToAgentRelayCloud(
 		}
 
 		auth := agentRelayStoredAuth{
-			APIURL:                strings.TrimRight(strings.TrimSpace(request.URL.Query().Get("api_url")), "/"),
+			APIURL:                firstNonEmpty(strings.TrimRight(strings.TrimSpace(request.URL.Query().Get("api_url")), "/"), canonicalCloudAPI),
 			AccessToken:           strings.TrimSpace(request.URL.Query().Get("access_token")),
 			RefreshToken:          strings.TrimSpace(request.URL.Query().Get("refresh_token")),
 			AccessTokenExpiresAt:  strings.TrimSpace(request.URL.Query().Get("access_token_expires_at")),

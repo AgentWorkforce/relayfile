@@ -1148,11 +1148,15 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 	fmt.Fprintf(stdout, "Starting VFS mount at %s\n", absLocalDir)
 	fmt.Fprintln(stdout, "Keep this terminal open while Relayfile syncs. In another terminal, start your agent and give it this prompt:")
 	if selectedProvider != "" && selectedProvider != "none" && selectedProvider != "skip" {
-		fmt.Fprintf(stdout, "  Use %s as the source of truth. Read LAYOUT.md first, then show me what needs attention.\n", filepath.Join(absLocalDir, selectedProvider))
+		fmt.Fprintf(stdout, "  Use %s as the source of truth. Read LAYOUT.md first, then show me what needs attention.\n", setupAgentPromptPath(absLocalDir, selectedProvider))
 	} else {
 		fmt.Fprintf(stdout, "  Use %s as our shared workspace. Read LAYOUT.md first.\n", absLocalDir)
 	}
 	return runMount(mountArgs)
+}
+
+func setupAgentPromptPath(absLocalDir, provider string) string {
+	return filepath.Join(absLocalDir, mountscope.ProviderRoot(provider))
 }
 
 func ensureCloudCredentials(cloudAPIURL, explicitToken string, timeout time.Duration, shouldOpenBrowser bool, stdout io.Writer) (cloudCredentials, error) {

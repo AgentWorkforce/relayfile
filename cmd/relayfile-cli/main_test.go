@@ -236,6 +236,17 @@ func TestQuickStartFallsBackToTimestampedWorkspaceOutsideAProject(t *testing.T) 
 	}
 }
 
+func TestSetupAgentPromptUsesProviderMountRoot(t *testing.T) {
+	got := setupAgentPromptPath(
+		filepath.Join(string(filepath.Separator), "workspace", "relayfile-mount"),
+		"slack-my-senior-dev",
+	)
+	want := filepath.Join(string(filepath.Separator), "workspace", "relayfile-mount", "slack-msd")
+	if got != want {
+		t.Fatalf("setup agent prompt path = %q, want %q", got, want)
+	}
+}
+
 func TestHelpFlagPrintsUsageForCommandsAndSubcommands(t *testing.T) {
 	cases := []struct {
 		name string
