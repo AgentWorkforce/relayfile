@@ -7632,6 +7632,29 @@ func TestLogoutDoesNotClaimSuccessWhenCloudRevocationCannotBeVerified(t *testing
 	}
 }
 
+func TestLogoutSelfHostedOnlyDoesNotClaimCloudRevocation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	if err := saveCredentials(credentials{Server: "https://self-hosted.test", Token: "self-hosted"}); err != nil {
+		t.Fatalf("save self-hosted credentials: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"logout"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("self-hosted logout failed: %v", err)
+	}
+	got := stdout.String()
+	if !strings.Contains(got, "Logged out of Relayfile on this machine.") {
+		t.Fatalf("self-hosted logout result = %q", got)
+	}
+	if strings.Contains(got, "Cloud session revoked") {
+		t.Fatalf("self-hosted logout claimed a Cloud revoke that did not happen: %q", got)
+	}
+	if _, err := os.Stat(credentialsPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("self-hosted credentials still exist after logout: %v", err)
+	}
+}
+
 func TestLogoutIsIdempotentWhenNoCredentialsExist(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)

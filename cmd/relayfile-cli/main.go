@@ -2977,7 +2977,11 @@ func runLogout(args []string, stdout io.Writer) error {
 		fmt.Fprintln(stdout, "Relayfile is already logged out.")
 		return nil
 	}
-	fmt.Fprintln(stdout, "Logged out of Relayfile on this machine. Agent Relay Cloud session revoked.")
+	if cloudRemoved {
+		fmt.Fprintln(stdout, "Logged out of Relayfile on this machine. Agent Relay Cloud session revoked.")
+	} else {
+		fmt.Fprintln(stdout, "Logged out of Relayfile on this machine.")
+	}
 	return nil
 }
 
