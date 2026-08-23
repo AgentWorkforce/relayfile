@@ -180,17 +180,22 @@ function shouldPrepareCloudSession(args, env) {
     return false;
   }
   if (
-    hasFlag(args, "--help") ||
-    hasFlag(args, "-h") ||
     hasFlag(args, "--version") ||
     args[0] === "version"
   ) {
     return false;
   }
+  const parsed = parseSetupArguments(args);
+  if (!parsed.valid) {
+    return false;
+  }
+  if (parsed.values.has("help") || parsed.values.has("h")) {
+    return false;
+  }
   // Explicit credentials are caller-owned. Let the Go CLI validate and use
   // them without replacing them with an interactive session.
   if (
-    hasFlag(args, "--cloud-token") ||
+    parsed.values.has("cloud-token") ||
     String(env.RELAYFILE_CLOUD_TOKEN || "").trim() ||
     String(env.CLOUD_API_ACCESS_TOKEN || "").trim()
   ) {
@@ -198,9 +203,6 @@ function shouldPrepareCloudSession(args, env) {
   }
   // Let the native CLI report malformed flags without first opening a login
   // flow or mutating the caller's canonical Cloud session.
-  if (!hasValidSetupArguments(args)) {
-    return false;
-  }
   return true;
 }
 
