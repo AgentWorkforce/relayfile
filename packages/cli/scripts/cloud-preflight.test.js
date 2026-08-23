@@ -8,6 +8,7 @@ const { spawnSync } = require("node:child_process");
 const test = require("node:test");
 
 const {
+  hasValidSetupArguments,
   prepareCloudSession,
   shouldPrepareCloudSession,
 } = require("./cloud-preflight.js");
@@ -87,6 +88,54 @@ test("help and caller-owned tokens do not start interactive auth", () => {
     false,
   );
   assert.equal(shouldPrepareCloudSession(["status"], {}), false);
+});
+
+test("malformed setup arguments fail before interactive auth", async () => {
+  assert.equal(hasValidSetupArguments(["setup", "--provider"]), false);
+  assert.equal(hasValidSetupArguments(["setup", "--unknown"]), false);
+  assert.equal(hasValidSetupArguments(["setup", "unexpected"]), false);
+  assert.equal(
+    shouldPrepareCloudSession(["setup", "--provider"], {}),
+    false,
+  );
+  assert.equal(
+    shouldPrepareCloudSession(["setup", "--unknown"], {}),
+    false,
+  );
+  let authCalls = 0;
+  const prepared = await prepareCloudSession(
+    ["setup", "--provider"],
+    {},
+    {
+      ensureCloudSession: async () => {
+        authCalls += 1;
+        throw new Error("interactive auth must not run");
+      },
+    },
+  );
+  assert.equal(prepared, false);
+  assert.equal(authCalls, 0);
+});
+
+test("valid explicit setup arguments still prepare Cloud auth", () => {
+  assert.equal(
+    hasValidSetupArguments([
+      "setup",
+      "--provider",
+      "github",
+      "--workspace=frontend",
+      "--once",
+      "--no-open=true",
+    ]),
+    true,
+  );
+  assert.equal(
+    shouldPrepareCloudSession(
+      ["setup", "--provider", "github", "--workspace=frontend", "--once"],
+      {},
+    ),
+    true,
+  );
 });
 
 test("the bundled SDK reuses canonical auth without exposing tokens", () => {

@@ -39,7 +39,9 @@ npx relayfile@latest
    Cloud SDK slice. The SDK opens hosted login when needed, refreshes existing
    credentials, and writes the canonical shared session.
 2. The quickstart creates a Cloud workspace named after the current directory,
-   connects GitHub, and mounts it at `./relayfile-mount`.
+   connects GitHub, and mounts it at `./relayfile-mount`. If another local
+   project with the same directory name is already tracked, Relayfile adds a
+   stable path suffix instead of reusing that project's workspace or mirror.
 3. `relayfile setup` resolves the Cloud session without invoking
    `agent-relay`. Some other workspace-resolution paths still call
    `agent-relay workspace active --json` for the canonical

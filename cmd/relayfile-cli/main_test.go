@@ -250,7 +250,8 @@ func TestSetupAgentPromptUsesProviderMountRoot(t *testing.T) {
 func TestQuickStartPreservesExistingWorkspaceMirror(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
-	existingDir := filepath.Join(t.TempDir(), "existing-mirror")
+	projectDir := t.TempDir()
+	existingDir := filepath.Join(projectDir, "relayfile-mount")
 	if _, err := upsertWorkspaceDetails(workspaceRecord{
 		Name:     "acme-api",
 		ID:       "ws_acme",
@@ -259,11 +260,39 @@ func TestQuickStartPreservesExistingWorkspaceMirror(t *testing.T) {
 		t.Fatalf("store existing workspace: %v", err)
 	}
 
-	if got := resolveSetupLocalDir("acme-api", "./relayfile-mount", true); got != existingDir {
-		t.Fatalf("quickstart local dir = %q, want existing %q", got, existingDir)
+	gotName, gotDir := resolveSetupTarget("acme-api", existingDir, true)
+	if gotName != "acme-api" || gotDir != existingDir {
+		t.Fatalf("quickstart target = (%q, %q), want (%q, %q)", gotName, gotDir, "acme-api", existingDir)
 	}
-	if got := resolveSetupLocalDir("acme-api", "./explicit-mount", false); got != "./explicit-mount" {
-		t.Fatalf("explicit setup local dir = %q, want caller value", got)
+	gotName, gotDir = resolveSetupTarget("acme-api", "./explicit-mount", false)
+	if gotName != "acme-api" || gotDir != "./explicit-mount" {
+		t.Fatalf("explicit setup target = (%q, %q), want caller values", gotName, gotDir)
+	}
+}
+
+func TestQuickStartDisambiguatesSameNamedProjectDirectories(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	existingDir := filepath.Join(t.TempDir(), "frontend", "relayfile-mount")
+	requestedDir := filepath.Join(t.TempDir(), "frontend", "relayfile-mount")
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:     "frontend",
+		ID:       "ws_existing_frontend",
+		LocalDir: existingDir,
+	}); err != nil {
+		t.Fatalf("store existing workspace: %v", err)
+	}
+
+	firstName, firstDir := resolveSetupTarget("frontend", requestedDir, true)
+	secondName, secondDir := resolveSetupTarget("frontend", requestedDir, true)
+	if firstName == "frontend" || !strings.HasPrefix(firstName, "frontend-") {
+		t.Fatalf("disambiguated workspace name = %q, want stable frontend suffix", firstName)
+	}
+	if firstName != secondName {
+		t.Fatalf("disambiguated workspace changed from %q to %q", firstName, secondName)
+	}
+	if firstDir != requestedDir || secondDir != requestedDir {
+		t.Fatalf("quickstart reused wrong mirror: first=%q second=%q want=%q", firstDir, secondDir, requestedDir)
 	}
 }
 

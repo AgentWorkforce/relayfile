@@ -3,6 +3,35 @@
 const path = require("path");
 
 const DEFAULT_CLOUD_API_URL = "https://agentrelay.com/cloud";
+const SETUP_FLAGS = new Map([
+  ["cloud-api-url", true],
+  ["cloud-token", true],
+  ["workspace", true],
+  ["provider", true],
+  ["backend", true],
+  ["local-dir", true],
+  ["no-open", false],
+  ["skip-mount", false],
+  ["once", false],
+  ["login-timeout", true],
+  ["connect-timeout", true],
+  ["help", false],
+  ["h", false],
+]);
+const GO_BOOLEAN_VALUES = new Set([
+  "1",
+  "t",
+  "T",
+  "true",
+  "TRUE",
+  "True",
+  "0",
+  "f",
+  "F",
+  "false",
+  "FALSE",
+  "False",
+]);
 
 function hasFlag(args, name) {
   return args.some((arg) => arg === name || arg.startsWith(`${name}=`));
@@ -19,6 +48,40 @@ function optionValue(args, name) {
     }
   }
   return undefined;
+}
+
+function hasValidSetupArguments(args) {
+  const setupArgs = args[0] === "setup" ? args.slice(1) : args;
+  for (let index = 0; index < setupArgs.length; index += 1) {
+    const arg = setupArgs[index];
+    if (arg === "--") {
+      return index === setupArgs.length - 1;
+    }
+
+    const match = /^--?([^=]+)(?:=(.*))?$/.exec(arg);
+    if (!match) {
+      return false;
+    }
+    const [, name, inlineValue] = match;
+    const takesValue = SETUP_FLAGS.get(name);
+    if (takesValue === undefined) {
+      return false;
+    }
+    if (takesValue) {
+      if (inlineValue === undefined) {
+        const next = setupArgs[index + 1];
+        if (next === undefined || next.startsWith("-")) {
+          return false;
+        }
+        index += 1;
+      }
+      continue;
+    }
+    if (inlineValue !== undefined && !GO_BOOLEAN_VALUES.has(inlineValue)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function shouldPrepareCloudSession(args, env) {
@@ -41,6 +104,11 @@ function shouldPrepareCloudSession(args, env) {
     String(env.RELAYFILE_CLOUD_TOKEN || "").trim() ||
     String(env.CLOUD_API_ACCESS_TOKEN || "").trim()
   ) {
+    return false;
+  }
+  // Let the native CLI report malformed flags without first opening a login
+  // flow or mutating the caller's canonical Cloud session.
+  if (!hasValidSetupArguments(args)) {
     return false;
   }
   return true;
@@ -95,6 +163,7 @@ async function prepareCloudSession(args, env = process.env, dependencies = {}) {
 
 module.exports = {
   DEFAULT_CLOUD_API_URL,
+  hasValidSetupArguments,
   optionValue,
   prepareCloudSession,
   shouldPrepareCloudSession,

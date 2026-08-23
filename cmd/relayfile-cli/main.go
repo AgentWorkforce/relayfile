@@ -1078,7 +1078,7 @@ func runSetupWithOptions(args []string, stdin io.Reader, stdout io.Writer, optio
 			localDir = "./relayfile-mount"
 		}
 	}
-	localDir = resolveSetupLocalDir(name, localDir, options.preserveExistingLocalDir)
+	name, localDir = resolveSetupTarget(name, localDir, options.preserveExistingLocalDir)
 	absLocalDir, err := filepath.Abs(localDir)
 	if err != nil {
 		return err
@@ -1169,15 +1169,37 @@ func runSetupWithOptions(args []string, stdin io.Reader, stdout io.Writer, optio
 	return runMount(mountArgs)
 }
 
-func resolveSetupLocalDir(workspaceName, requestedLocalDir string, preserveExisting bool) string {
-	if preserveExisting {
-		if existing, ok := workspaceRecordByName(workspaceName); ok {
-			if localDir := strings.TrimSpace(existing.LocalDir); localDir != "" {
-				return localDir
-			}
+func resolveSetupTarget(workspaceName, requestedLocalDir string, preserveExisting bool) (string, string) {
+	if !preserveExisting {
+		return workspaceName, requestedLocalDir
+	}
+
+	requestedAbs := absolutePathIfSet(requestedLocalDir)
+	existing, ok := workspaceRecordByName(workspaceName)
+	if !ok {
+		return workspaceName, requestedLocalDir
+	}
+	if existingAbs := absolutePathIfSet(existing.LocalDir); existingAbs != "" && existingAbs == requestedAbs {
+		return workspaceName, existing.LocalDir
+	}
+
+	// Quickstart names normally stay human-readable (the project basename).
+	// If another local project already claimed that name, add a stable path
+	// discriminator so we never mount or connect the other project's workspace.
+	digest := sha256.Sum256([]byte(filepath.Clean(requestedAbs)))
+	digestHex := hex.EncodeToString(digest[:])
+	for width := 8; width <= len(digestHex); width += 4 {
+		candidate := workspaceName + "-" + digestHex[:width]
+		candidateRecord, exists := workspaceRecordByName(candidate)
+		if !exists {
+			return candidate, requestedLocalDir
+		}
+		if candidateAbs := absolutePathIfSet(candidateRecord.LocalDir); candidateAbs != "" && candidateAbs == requestedAbs {
+			return candidate, candidateRecord.LocalDir
 		}
 	}
-	return requestedLocalDir
+
+	return workspaceName + "-" + digestHex, requestedLocalDir
 }
 
 func setupAgentPromptPath(absLocalDir, provider string) string {
