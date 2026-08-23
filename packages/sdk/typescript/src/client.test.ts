@@ -1475,6 +1475,125 @@ describe("RelayFileClient — existing methods", () => {
         consumerIdempotencyKey: "cloud-acquire-attempt-1",
       });
     });
+
+    it("recovers a committed consume by stable identity without the seal token", async () => {
+      const consumed = { ...seal, sealToken: undefined, consumedAt: "2026-08-23T12:00:05Z" };
+      const f = mockFetch(consumed);
+      const client = makeClient(f);
+      await expect(client.recoverConsumedCheckpointSeal({
+        workspaceId: "ws_acme",
+        root: seal.root,
+        sessionId: seal.sessionId,
+        generation: seal.generation,
+        consumerIdempotencyKey: "cloud-acquire-attempt-1",
+      })).resolves.toEqual(consumed);
+      expect(f.mock.calls[0]![0]).toContain("/v1/workspaces/ws_acme/sync/checkpoint-seals/recover-consume");
+      const init = f.mock.calls[0]![1] as RequestInit;
+      expect(JSON.parse(init.body as string)).toEqual({
+        root: seal.root,
+        sessionId: seal.sessionId,
+        generation: seal.generation,
+        consumerIdempotencyKey: "cloud-acquire-attempt-1",
+      });
+    });
+
+    it("re-attests only the safe consumed receipt and never sends sealToken", async () => {
+      const consumed = { ...seal, sealToken: undefined, consumedAt: "2026-08-23T12:00:05Z" };
+      const f = mockFetch(consumed);
+      const client = makeClient(f);
+      await expect(client.verifyCheckpointSeal({
+        workspaceId: "ws_acme",
+        receipt: consumed,
+      })).resolves.toEqual(consumed);
+      expect(f.mock.calls[0]![0]).toContain("/v1/workspaces/ws_acme/sync/checkpoint-seals/verify");
+      const init = f.mock.calls[0]![1] as RequestInit;
+      expect(JSON.parse(init.body as string)).toEqual({
+        sealId: seal.sealId,
+        root: seal.root,
+        sessionId: seal.sessionId,
+        generation: seal.generation,
+        digest: seal.digest,
+        workspaceRevision: seal.workspaceRevision,
+        eventCursor: seal.eventCursor,
+        issuedAt: seal.issuedAt,
+        expiresAt: seal.expiresAt,
+        consumedAt: consumed.consumedAt,
+      });
+    });
+
+    it("hands back with the original consumer identity and final convergence assertion", async () => {
+      const consumed = { ...seal, sealToken: undefined, consumedAt: "2026-08-23T12:00:05Z" };
+      const proof = {
+        sealId: seal.sealId,
+        workspaceId: seal.workspaceId,
+        root: seal.root,
+        sessionId: seal.sessionId,
+        generation: seal.generation,
+        status: "released" as const,
+        digest: `sha256:${"b".repeat(64)}`,
+        workspaceRevision: "rev_10",
+        eventCursor: "evt_10",
+        consumedAt: consumed.consumedAt,
+        releasedAt: "2026-08-23T13:00:00Z",
+      };
+      const f = mockFetch(proof);
+      const client = makeClient(f);
+      await expect(client.handbackCheckpointSeal({
+        workspaceId: "ws_acme",
+        receipt: consumed,
+        consumerIdempotencyKey: "cloud-acquire-attempt-1",
+        handbackIdempotencyKey: "cloud-handback-attempt-1",
+        expectedDigest: proof.digest,
+      })).resolves.toEqual(proof);
+      expect(f.mock.calls[0]![0]).toContain("/v1/workspaces/ws_acme/sync/checkpoint-seals/handback");
+      const init = f.mock.calls[0]![1] as RequestInit;
+      expect(JSON.parse(init.body as string)).toEqual({
+        sealId: seal.sealId,
+        root: seal.root,
+        sessionId: seal.sessionId,
+        generation: seal.generation,
+        consumedAt: consumed.consumedAt,
+        consumerIdempotencyKey: "cloud-acquire-attempt-1",
+        handbackIdempotencyKey: "cloud-handback-attempt-1",
+        expectedDigest: proof.digest,
+      });
+    });
+
+    it("resumes source ownership with the original token without echoing it", async () => {
+      const proof = {
+        sealId: seal.sealId,
+        workspaceId: seal.workspaceId,
+        root: seal.root,
+        sessionId: seal.sessionId,
+        generation: seal.generation,
+        status: "source-resumed" as const,
+        digest: seal.digest,
+        workspaceRevision: seal.workspaceRevision,
+        eventCursor: seal.eventCursor,
+        consumedAt: "2026-08-23T12:00:05Z",
+        releasedAt: "2026-08-23T13:00:00Z",
+        sourceResumedAt: "2026-08-23T13:00:05Z",
+      };
+      const f = mockFetch(proof);
+      const client = makeClient(f);
+      await expect(client.resumeCheckpointSeal({
+        workspaceId: "ws_acme",
+        sealToken: "opaque-token",
+        root: seal.root,
+        sessionId: seal.sessionId,
+        generation: seal.generation,
+        resumeIdempotencyKey: "source-resume-attempt-1",
+      })).resolves.toEqual(proof);
+      expect(f.mock.calls[0]![0]).toContain("/v1/workspaces/ws_acme/sync/checkpoint-seals/resume");
+      const init = f.mock.calls[0]![1] as RequestInit;
+      expect(JSON.parse(init.body as string)).toEqual({
+        sealToken: "opaque-token",
+        root: seal.root,
+        sessionId: seal.sessionId,
+        generation: seal.generation,
+        resumeIdempotencyKey: "source-resume-attempt-1",
+      });
+    });
   });
 
   // ---- exportWorkspace ----

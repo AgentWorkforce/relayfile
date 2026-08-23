@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"encoding/base64"
 	"encoding/json"
@@ -228,6 +229,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 6 && parts[3] == "sync" && parts[4] == "checkpoint-seals" && parts[5] == "consume" && r.Method == http.MethodPost:
 		requiredScope = "sync:trigger"
 		route = "checkpoint_seal_consume"
+	case len(parts) == 6 && parts[3] == "sync" && parts[4] == "checkpoint-seals" && parts[5] == "recover-consume" && r.Method == http.MethodPost:
+		requiredScope = "sync:trigger"
+		route = "checkpoint_seal_recover_consume"
+	case len(parts) == 6 && parts[3] == "sync" && parts[4] == "checkpoint-seals" && parts[5] == "verify" && r.Method == http.MethodPost:
+		requiredScope = "sync:trigger"
+		route = "checkpoint_seal_verify"
+	case len(parts) == 6 && parts[3] == "sync" && parts[4] == "checkpoint-seals" && parts[5] == "handback" && r.Method == http.MethodPost:
+		requiredScope = "sync:trigger"
+		route = "checkpoint_seal_handback"
+	case len(parts) == 6 && parts[3] == "sync" && parts[4] == "checkpoint-seals" && parts[5] == "resume" && r.Method == http.MethodPost:
+		requiredScope = "sync:trigger"
+		route = "checkpoint_seal_resume"
 	case len(parts) == 4 && parts[3] == "ops" && r.Method == http.MethodGet:
 		requiredScope = "ops:read"
 		route = "ops_list"
@@ -363,7 +376,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "checkpoint_seal_issue":
 		s.handleCheckpointSealIssue(w, r, workspaceID, correlationID, claims)
 	case "checkpoint_seal_consume":
-		s.handleCheckpointSealConsume(w, r, workspaceID, correlationID)
+		s.handleCheckpointSealConsume(w, r, workspaceID, correlationID, claims)
+	case "checkpoint_seal_recover_consume":
+		s.handleCheckpointSealRecoverConsume(w, r, workspaceID, correlationID, claims)
+	case "checkpoint_seal_verify":
+		s.handleCheckpointSealVerify(w, r, workspaceID, correlationID, claims)
+	case "checkpoint_seal_handback":
+		s.handleCheckpointSealHandback(w, r, workspaceID, correlationID, claims)
+	case "checkpoint_seal_resume":
+		s.handleCheckpointSealResume(w, r, workspaceID, correlationID, claims)
 	case "ops_list":
 		s.handleOpsList(w, r, workspaceID, correlationID)
 	case "op_replay":
@@ -2235,7 +2256,7 @@ func (s *Server) handleSyncRefresh(w http.ResponseWriter, r *http.Request, works
 
 func (s *Server) handleCheckpointSealIssue(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
 	var body relayfile.CheckpointSealRequest
-	if !s.decodeJSONBody(w, r, correlationID, &body) {
+	if !s.decodeStrictJSONBody(w, r, correlationID, &body) {
 		return
 	}
 	root, err := relayfile.NormalizeCheckpointRoot(body.Root)
@@ -2262,17 +2283,130 @@ func (s *Server) handleCheckpointSealIssue(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusCreated, seal)
 }
 
-func (s *Server) handleCheckpointSealConsume(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string) {
+func (s *Server) handleCheckpointSealConsume(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
 	var body relayfile.CheckpointSealConsumeRequest
-	if !s.decodeJSONBody(w, r, correlationID, &body) {
+	if !s.decodeStrictJSONBody(w, r, correlationID, &body) {
 		return
 	}
+	root, err := relayfile.NormalizeCheckpointRoot(body.Root)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid checkpoint root", correlationID)
+		return
+	}
+	if !scopeMatchesPath(claims.Scopes, "fs:read", root) || !scopeMatchesPath(claims.Scopes, "fs:write", root) {
+		writeError(w, http.StatusForbidden, "forbidden", "checkpoint consume requires fs:read and fs:write authority for the complete root", correlationID)
+		return
+	}
+	body.Root = root
+	body.ConsumerPrincipal = claims.AgentName
 	seal, err := s.store.ConsumeCheckpointSeal(workspaceID, body, time.Now().UTC())
 	if err != nil {
 		writeCheckpointSealError(w, err, correlationID)
 		return
 	}
 	writeJSON(w, http.StatusOK, seal)
+}
+
+func (s *Server) handleCheckpointSealRecoverConsume(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
+	var body relayfile.CheckpointSealConsumeRecoveryRequest
+	if !s.decodeStrictJSONBody(w, r, correlationID, &body) {
+		return
+	}
+	root, err := relayfile.NormalizeCheckpointRoot(body.Root)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid checkpoint root", correlationID)
+		return
+	}
+	if !scopeMatchesPath(claims.Scopes, "fs:read", root) {
+		writeError(w, http.StatusForbidden, "forbidden", "consume recovery requires fs:read authority for the complete root", correlationID)
+		return
+	}
+	body.Root = root
+	body.ConsumerPrincipal = claims.AgentName
+	seal, err := s.store.RecoverConsumedCheckpointSeal(workspaceID, body, time.Now().UTC())
+	if err != nil {
+		writeCheckpointSealError(w, err, correlationID)
+		return
+	}
+	writeJSON(w, http.StatusOK, seal)
+}
+
+func (s *Server) handleCheckpointSealVerify(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
+	var body relayfile.CheckpointSealVerifyRequest
+	requestBody, ok := s.readRequestBody(w, r, correlationID)
+	if !ok {
+		return
+	}
+	decoder := json.NewDecoder(bytes.NewReader(requestBody))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid checkpoint verification body", correlationID)
+		return
+	}
+	root, err := relayfile.NormalizeCheckpointRoot(body.Root)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid checkpoint root", correlationID)
+		return
+	}
+	if !scopeMatchesPath(claims.Scopes, "fs:read", root) {
+		writeError(w, http.StatusForbidden, "forbidden", "checkpoint verification requires fs:read authority for the complete root", correlationID)
+		return
+	}
+	body.Root = root
+	body.ConsumerPrincipal = claims.AgentName
+	seal, err := s.store.VerifyConsumedCheckpointSeal(workspaceID, body, time.Now().UTC())
+	if err != nil {
+		writeCheckpointSealError(w, err, correlationID)
+		return
+	}
+	writeJSON(w, http.StatusOK, seal)
+}
+
+func (s *Server) handleCheckpointSealHandback(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
+	var body relayfile.CheckpointSealHandbackRequest
+	if !s.decodeStrictJSONBody(w, r, correlationID, &body) {
+		return
+	}
+	root, err := relayfile.NormalizeCheckpointRoot(body.Root)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid checkpoint root", correlationID)
+		return
+	}
+	if !scopeMatchesPath(claims.Scopes, "fs:read", root) || !scopeMatchesPath(claims.Scopes, "fs:write", root) {
+		writeError(w, http.StatusForbidden, "forbidden", "checkpoint handback requires fs:read and fs:write authority for the complete root", correlationID)
+		return
+	}
+	body.Root = root
+	body.ConsumerPrincipal = claims.AgentName
+	proof, err := s.store.HandbackCheckpointSeal(workspaceID, body, time.Now().UTC())
+	if err != nil {
+		writeCheckpointSealError(w, err, correlationID)
+		return
+	}
+	writeJSON(w, http.StatusOK, proof)
+}
+
+func (s *Server) handleCheckpointSealResume(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
+	var body relayfile.CheckpointSealResumeRequest
+	if !s.decodeStrictJSONBody(w, r, correlationID, &body) {
+		return
+	}
+	root, err := relayfile.NormalizeCheckpointRoot(body.Root)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid checkpoint root", correlationID)
+		return
+	}
+	if !scopeMatchesPath(claims.Scopes, "fs:read", root) || !scopeMatchesPath(claims.Scopes, "fs:write", root) {
+		writeError(w, http.StatusForbidden, "forbidden", "checkpoint source resume requires fs:read and fs:write authority for the complete root", correlationID)
+		return
+	}
+	body.Root = root
+	proof, err := s.store.ResumeCheckpointSeal(workspaceID, body, time.Now().UTC())
+	if err != nil {
+		writeCheckpointSealError(w, err, correlationID)
+		return
+	}
+	writeJSON(w, http.StatusOK, proof)
 }
 
 func writeCheckpointSealError(w http.ResponseWriter, err error, correlationID string) {
@@ -2287,6 +2421,14 @@ func writeCheckpointSealError(w http.ResponseWriter, err error, correlationID st
 		writeError(w, http.StatusConflict, "checkpoint_generation_stale", err.Error(), correlationID)
 	case errors.Is(err, relayfile.ErrCheckpointConsumerConflict):
 		writeError(w, http.StatusConflict, "checkpoint_consumer_conflict", err.Error(), correlationID)
+	case errors.Is(err, relayfile.ErrCheckpointUnconsumed):
+		writeError(w, http.StatusConflict, "checkpoint_unconsumed", err.Error(), correlationID)
+	case errors.Is(err, relayfile.ErrCheckpointHandbackRequired):
+		writeError(w, http.StatusConflict, "checkpoint_handback_required", err.Error(), correlationID)
+	case errors.Is(err, relayfile.ErrCheckpointHandbackConflict):
+		writeError(w, http.StatusConflict, "checkpoint_handback_conflict", err.Error(), correlationID)
+	case errors.Is(err, relayfile.ErrCheckpointResumeConflict):
+		writeError(w, http.StatusConflict, "checkpoint_resume_conflict", err.Error(), correlationID)
 	case errors.Is(err, relayfile.ErrCheckpointExpired):
 		writeError(w, http.StatusConflict, "checkpoint_expired", err.Error(), correlationID)
 	case errors.Is(err, relayfile.ErrCheckpointReplay):
@@ -2555,6 +2697,20 @@ func (s *Server) decodeJSONBody(w http.ResponseWriter, r *http.Request, correlat
 		return false
 	}
 	if err := json.Unmarshal(body, dst); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid json body", correlationID)
+		return false
+	}
+	return true
+}
+
+func (s *Server) decodeStrictJSONBody(w http.ResponseWriter, r *http.Request, correlationID string, dst any) bool {
+	body, ok := s.readRequestBody(w, r, correlationID)
+	if !ok {
+		return false
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid json body", correlationID)
 		return false
 	}

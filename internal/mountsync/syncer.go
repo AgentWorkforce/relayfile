@@ -47,6 +47,8 @@ var (
 	ErrCheckpointUnmanagedRoot      = errors.New("checkpoint sealing requires an existing managed Relayfile mount")
 	ErrCheckpointNonConverged       = errors.New("local and durable Relayfile state did not converge")
 	checkpointSessionPattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$`)
+	checkpointRevisionPattern       = regexp.MustCompile(`^(?:0|rev_[0-9]+)$`)
+	checkpointEventCursorPattern    = regexp.MustCompile(`^(?:0|evt_[0-9]+)$`)
 )
 
 var sensitiveLogQueryValue = regexp.MustCompile(`(?i)([?&](?:token|access_token|api_key)=)[^&#\s"']*`)
@@ -457,10 +459,36 @@ type checkpointSealClient interface {
 	IssueCheckpointSeal(ctx context.Context, workspaceID string, request CheckpointSealRequest) (CheckpointSeal, error)
 }
 
+type checkpointSealVerifierClient interface {
+	VerifyCheckpointSeal(ctx context.Context, workspaceID string, request CheckpointSealVerifyRequest) (CheckpointSeal, error)
+}
+
+type checkpointSealHandbackClient interface {
+	HandbackCheckpointSeal(ctx context.Context, workspaceID string, request CheckpointSealHandbackRequest) (CheckpointSealOwnership, error)
+}
+
 type CheckpointAndSealOptions struct {
 	SessionID  string
 	Generation uint64
 	TTLSeconds int
+}
+
+type CheckpointObservedState struct {
+	Digest            string `json:"digest"`
+	WorkspaceRevision string `json:"workspaceRevision"`
+	EventCursor       string `json:"eventCursor"`
+}
+
+type CheckpointVerificationHealth struct {
+	PendingWriteback     int  `json:"pendingWriteback"`
+	Conflicts            int  `json:"conflicts"`
+	OutboxPending        int  `json:"outboxPending"`
+	OutboxNeedsAttention bool `json:"outboxNeedsAttention"`
+}
+
+type CheckpointVerification struct {
+	Observed CheckpointObservedState      `json:"observed"`
+	Health   CheckpointVerificationHealth `json:"health"`
 }
 
 // Merge strategy constants mirror the server's internal/relayfile package.
@@ -780,6 +808,30 @@ func (c *HTTPClient) IssueCheckpointSeal(ctx context.Context, workspaceID string
 func (c *HTTPClient) ConsumeCheckpointSeal(ctx context.Context, workspaceID string, request CheckpointSealConsumeRequest) (CheckpointSeal, error) {
 	var out CheckpointSeal
 	err := c.doJSON(ctx, http.MethodPost, fmt.Sprintf("/v1/workspaces/%s/sync/checkpoint-seals/consume", url.PathEscape(workspaceID)), nil, request, &out)
+	return out, err
+}
+
+func (c *HTTPClient) RecoverConsumedCheckpointSeal(ctx context.Context, workspaceID string, request CheckpointSealConsumeRecoveryRequest) (CheckpointSeal, error) {
+	var out CheckpointSeal
+	err := c.doJSON(ctx, http.MethodPost, fmt.Sprintf("/v1/workspaces/%s/sync/checkpoint-seals/recover-consume", url.PathEscape(workspaceID)), nil, request, &out)
+	return out, err
+}
+
+func (c *HTTPClient) VerifyCheckpointSeal(ctx context.Context, workspaceID string, request CheckpointSealVerifyRequest) (CheckpointSeal, error) {
+	var out CheckpointSeal
+	err := c.doJSON(ctx, http.MethodPost, fmt.Sprintf("/v1/workspaces/%s/sync/checkpoint-seals/verify", url.PathEscape(workspaceID)), nil, request, &out)
+	return out, err
+}
+
+func (c *HTTPClient) HandbackCheckpointSeal(ctx context.Context, workspaceID string, request CheckpointSealHandbackRequest) (CheckpointSealOwnership, error) {
+	var out CheckpointSealOwnership
+	err := c.doJSON(ctx, http.MethodPost, fmt.Sprintf("/v1/workspaces/%s/sync/checkpoint-seals/handback", url.PathEscape(workspaceID)), nil, request, &out)
+	return out, err
+}
+
+func (c *HTTPClient) ResumeCheckpointSeal(ctx context.Context, workspaceID string, request CheckpointSealResumeRequest) (CheckpointSealOwnership, error) {
+	var out CheckpointSealOwnership
+	err := c.doJSON(ctx, http.MethodPost, fmt.Sprintf("/v1/workspaces/%s/sync/checkpoint-seals/resume", url.PathEscape(workspaceID)), nil, request, &out)
 	return out, err
 }
 
@@ -2375,6 +2427,12 @@ func (s *Syncer) CheckpointAndSeal(ctx context.Context, options CheckpointAndSea
 	if s.pullOnly {
 		return CheckpointSeal{}, fmt.Errorf("%w: pull-only mounts cannot drain local changes", ErrCheckpointNonConverged)
 	}
+	if len(s.scopes) > 0 && !checkpointScopeGrantsOpsRead(s.scopes) {
+		return CheckpointSeal{}, fmt.Errorf("%w: checkpoint drain requires ops:read to settle asynchronous write receipts", ErrCheckpointNonConverged)
+	}
+	if s.remoteRoot != "/" {
+		return CheckpointSeal{}, fmt.Errorf("%w: live checkpoint v1 supports only the full remote root /", ErrCheckpointUnmanagedRoot)
+	}
 	issuer, ok := s.client.(checkpointSealClient)
 	if !ok {
 		return CheckpointSeal{}, fmt.Errorf("%w: server/client checkpoint seal contract unavailable", ErrCheckpointNonConverged)
@@ -2422,14 +2480,18 @@ func (s *Syncer) CheckpointAndSeal(ctx context.Context, options CheckpointAndSea
 		if len(conflicted) > 0 {
 			return CheckpointSeal{}, fmt.Errorf("%w: %d conflict(s) materialized during drain", ErrCheckpointNonConverged, len(conflicted))
 		}
-		if err := s.flushOutboxRecords(ctx, nil, true, true); err != nil {
-			return CheckpointSeal{}, fmt.Errorf("%w: flush durable outbox: %v", ErrCheckpointNonConverged, err)
-		}
-		outbox := s.summarizeOutbox()
-		if outbox.Pending > 0 || outbox.NeedsAttention > 0 {
-			return CheckpointSeal{}, fmt.Errorf("%w: outbox pending=%d needsAttention=%d", ErrCheckpointNonConverged, outbox.Pending, outbox.NeedsAttention)
+		if err := s.settleCheckpointOutbox(ctx); err != nil {
+			return CheckpointSeal{}, fmt.Errorf("%w: settle durable outbox: %v", ErrCheckpointNonConverged, err)
 		}
 	}
+	health, err := s.checkpointVerificationHealthLocked()
+	if err != nil {
+		return CheckpointSeal{}, fmt.Errorf("%w: inspect final drain health: %v", ErrCheckpointNonConverged, err)
+	}
+	if health.PendingWriteback != 0 || health.Conflicts != 0 || health.OutboxPending != 0 || health.OutboxNeedsAttention {
+		return CheckpointSeal{}, fmt.Errorf("%w: final drain pendingWriteback=%d conflicts=%d outboxPending=%d outboxNeedsAttention=%t", ErrCheckpointNonConverged, health.PendingWriteback, health.Conflicts, health.OutboxPending, health.OutboxNeedsAttention)
+	}
+	s.markSyncSuccess()
 	if err := s.saveStateWithoutLocalScan(); err != nil {
 		return CheckpointSeal{}, fmt.Errorf("persist drained mount state: %w", err)
 	}
@@ -2466,6 +2528,410 @@ func (s *Syncer) CheckpointAndSeal(ctx context.Context, options CheckpointAndSea
 		return CheckpointSeal{}, ErrCheckpointConcurrentMutation
 	}
 	return seal, nil
+}
+
+// HandbackCheckpoint drains a stopped destination and atomically releases its
+// server-side ownership back to the original source. It intentionally does not
+// issue a second seal (which would be the same-generation replay); the original
+// consumer identity and an independent handback key bind this transition.
+func (s *Syncer) HandbackCheckpoint(ctx context.Context, consumed CheckpointSeal, consumerKey, handbackKey string) (CheckpointSealOwnership, CheckpointVerificationHealth, error) {
+	var health CheckpointVerificationHealth
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	consumerKey = strings.TrimSpace(consumerKey)
+	handbackKey = strings.TrimSpace(handbackKey)
+	if err := validateConsumedCheckpointReceipt(consumed); err != nil || !checkpointSessionPattern.MatchString(consumerKey) || !checkpointSessionPattern.MatchString(handbackKey) {
+		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: invalid consumed receipt or handback identity", ErrCheckpointNonConverged)
+	}
+	if err := ctx.Err(); err != nil {
+		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: %v", ErrCheckpointNonConverged, err)
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+	}
+	if s.pullOnly {
+		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: pull-only mounts cannot drain local changes", ErrCheckpointNonConverged)
+	}
+	if len(s.scopes) > 0 && !checkpointScopeGrantsOpsRead(s.scopes) {
+		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: handback drain requires ops:read to settle asynchronous write receipts", ErrCheckpointNonConverged)
+	}
+	if s.remoteRoot != "/" || consumed.Root != "/" || consumed.WorkspaceID != s.workspace {
+		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: handback v1 requires the exact full workspace root", ErrCheckpointUnmanagedRoot)
+	}
+	handbackClient, ok := s.client.(checkpointSealHandbackClient)
+	if !ok {
+		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: server/client checkpoint handback contract unavailable", ErrCheckpointNonConverged)
+	}
+	if err := s.assertManagedCheckpointRoot(); err != nil {
+		return CheckpointSealOwnership{}, health, err
+	}
+	if err := s.assertMountRootInvariant(); err != nil {
+		return CheckpointSealOwnership{}, health, err
+	}
+
+	s.localMutationMu.Lock()
+	defer s.localMutationMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.loadState(); err != nil {
+		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: load private mount state: %v", ErrCheckpointUnmanagedRoot, err)
+	}
+	if !s.state.BootstrapComplete {
+		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: destination mount bootstrap is incomplete", ErrCheckpointNonConverged)
+	}
+	if len(s.state.QuarantinedPaths) > 0 || len(s.state.SkippedMaterializations) > 0 || s.state.IncrementalBacklogDraining || s.state.IncrementalCheckpoint != nil || len(s.state.IncrementalReadNotReadySince) > 0 {
+		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: destination has quarantined, skipped, or incomplete remote state", ErrCheckpointNonConverged)
+	}
+
+	previousPolling := s.pollLocalChanges
+	previousRecovery := s.recoverStartupDrift
+	previousRootCtx := s.rootCtx
+	s.pollLocalChanges = true
+	s.recoverStartupDrift = true
+	s.rootCtx = ctx
+	defer func() {
+		s.pollLocalChanges = previousPolling
+		s.recoverStartupDrift = previousRecovery
+		s.rootCtx = previousRootCtx
+	}()
+	for pass := 0; pass < 2; pass++ {
+		conflicted, err := s.pushLocal(ctx)
+		if err != nil {
+			return CheckpointSealOwnership{}, health, fmt.Errorf("%w: drain destination changes: %v", ErrCheckpointNonConverged, err)
+		}
+		if len(conflicted) > 0 {
+			return CheckpointSealOwnership{}, health, fmt.Errorf("%w: %d conflict(s) materialized during handback drain", ErrCheckpointNonConverged, len(conflicted))
+		}
+		if err := s.settleCheckpointOutbox(ctx); err != nil {
+			return CheckpointSealOwnership{}, health, fmt.Errorf("%w: settle destination outbox: %v", ErrCheckpointNonConverged, err)
+		}
+	}
+	var err error
+	health, err = s.checkpointVerificationHealthLocked()
+	if err != nil {
+		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: inspect handback health: %v", ErrCheckpointNonConverged, err)
+	}
+	if health.PendingWriteback != 0 || health.Conflicts != 0 || health.OutboxPending != 0 || health.OutboxNeedsAttention {
+		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: handback pendingWriteback=%d conflicts=%d outboxPending=%d outboxNeedsAttention=%t", ErrCheckpointNonConverged, health.PendingWriteback, health.Conflicts, health.OutboxPending, health.OutboxNeedsAttention)
+	}
+	s.markSyncSuccess()
+	if err := s.saveStateWithoutLocalScan(); err != nil {
+		return CheckpointSealOwnership{}, health, fmt.Errorf("persist handback mount state: %w", err)
+	}
+	firstDigest, err := s.checkpointLocalDigestLocked()
+	if err != nil {
+		return CheckpointSealOwnership{}, health, err
+	}
+	s.runCheckpointTestHook("handback-after-first-scan")
+	secondDigest, err := s.checkpointLocalDigestLocked()
+	if err != nil || firstDigest != secondDigest {
+		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: destination changed during handback", ErrCheckpointConcurrentMutation)
+	}
+	proof, err := handbackClient.HandbackCheckpointSeal(ctx, s.workspace, CheckpointSealHandbackRequest{
+		SealID: consumed.SealID, Root: consumed.Root, SessionID: consumed.SessionID,
+		Generation: consumed.Generation, ConsumedAt: consumed.ConsumedAt,
+		ConsumerIdempotencyKey: consumerKey, HandbackIdempotencyKey: handbackKey,
+		ExpectedDigest: secondDigest,
+	})
+	if err != nil {
+		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: release destination ownership: %w", ErrCheckpointNonConverged, err)
+	}
+	if proof.Status != "released" || proof.SealID != consumed.SealID || proof.WorkspaceID != s.workspace || proof.Root != "/" || proof.SessionID != consumed.SessionID || proof.Generation != consumed.Generation ||
+		proof.Digest != secondDigest || !checkpointEventCursorPattern.MatchString(strings.TrimSpace(proof.EventCursor)) || !checkpointRevisionPattern.MatchString(strings.TrimSpace(proof.WorkspaceRevision)) || proof.ConsumedAt != consumed.ConsumedAt || strings.TrimSpace(proof.ReleasedAt) == "" || proof.SourceResumedAt != "" {
+		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: server returned a changed handback proof", ErrCheckpointNonConverged)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(proof.ReleasedAt)); err != nil {
+		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: server returned malformed handback time", ErrCheckpointNonConverged)
+	}
+	return proof, health, nil
+}
+
+func (s *Syncer) settleCheckpointOutbox(ctx context.Context) error {
+	for {
+		if err := s.flushOutboxRecords(ctx, nil, true, true); err != nil {
+			return err
+		}
+		outbox := s.summarizeOutbox()
+		if outbox.Pending == 0 && outbox.NeedsAttention == 0 {
+			return nil
+		}
+		if outbox.NeedsAttention > 0 {
+			return fmt.Errorf("outbox pending=%d needsAttention=%d", outbox.Pending, outbox.NeedsAttention)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("outbox pending=%d needsAttention=%d: %w", outbox.Pending, outbox.NeedsAttention, ctx.Err())
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+}
+
+func checkpointScopeGrantsOpsRead(scopes []string) bool {
+	for _, scope := range scopes {
+		switch strings.TrimSpace(scope) {
+		case "ops:read", "ops:*", "*:*", "relayfile:ops:read", "relayfile:ops:*", "relayfile:*:*":
+			return true
+		}
+	}
+	return false
+}
+
+// VerifyCheckpoint proves that a stopped destination mount contains exactly
+// the bytes/revisions named by a consumed server seal. Relayfile owns both
+// halves of the proof: this process recomputes the canonical local digest and
+// the server re-attests the consumed receipt against current durable state.
+// Callers receive an exit-0 style verdict; they must not duplicate the digest
+// algorithm or infer convergence from elapsed sync time.
+func (s *Syncer) VerifyCheckpoint(ctx context.Context, expected CheckpointSeal) (CheckpointVerification, error) {
+	var verification CheckpointVerification
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := validateConsumedCheckpointReceipt(expected); err != nil {
+		return verification, fmt.Errorf("%w: %v", ErrCheckpointNonConverged, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return verification, fmt.Errorf("%w: %v", ErrCheckpointNonConverged, err)
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+	}
+	if s.remoteRoot != "/" || expected.Root != "/" || expected.WorkspaceID != s.workspace {
+		return verification, fmt.Errorf("%w: destination verification v1 requires the exact full workspace root", ErrCheckpointUnmanagedRoot)
+	}
+	verifier, ok := s.client.(checkpointSealVerifierClient)
+	if !ok {
+		return verification, fmt.Errorf("%w: server/client checkpoint verification contract unavailable", ErrCheckpointNonConverged)
+	}
+	if err := s.assertManagedCheckpointRoot(); err != nil {
+		return verification, err
+	}
+	if err := s.assertMountRootInvariant(); err != nil {
+		return verification, err
+	}
+
+	s.localMutationMu.Lock()
+	defer s.localMutationMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.loadState(); err != nil {
+		return verification, fmt.Errorf("%w: load private mount state: %v", ErrCheckpointUnmanagedRoot, err)
+	}
+	if !s.state.BootstrapComplete || s.state.LastSuccessfulReconcileAt == "" || s.state.LastError != nil {
+		return verification, fmt.Errorf("%w: destination mount is not successfully bootstrapped", ErrCheckpointNonConverged)
+	}
+	if len(s.state.QuarantinedPaths) > 0 || len(s.state.SkippedMaterializations) > 0 || s.state.IncrementalBacklogDraining || s.state.IncrementalCheckpoint != nil || len(s.state.IncrementalReadNotReadySince) > 0 {
+		return verification, fmt.Errorf("%w: destination has quarantined, skipped, or incomplete remote state", ErrCheckpointNonConverged)
+	}
+
+	health, err := s.checkpointVerificationHealthLocked()
+	if err != nil {
+		return verification, fmt.Errorf("%w: inspect destination health: %v", ErrCheckpointNonConverged, err)
+	}
+	verification.Health = health
+	if health.PendingWriteback != 0 || health.Conflicts != 0 || health.OutboxPending != 0 || health.OutboxNeedsAttention {
+		return verification, fmt.Errorf("%w: pendingWriteback=%d conflicts=%d outboxPending=%d outboxNeedsAttention=%t", ErrCheckpointNonConverged, health.PendingWriteback, health.Conflicts, health.OutboxPending, health.OutboxNeedsAttention)
+	}
+
+	firstDigest, err := s.checkpointLocalDigestLocked()
+	if err != nil {
+		return verification, err
+	}
+	s.runCheckpointTestHook("verify-after-first-scan")
+	secondDigest, err := s.checkpointLocalDigestLocked()
+	if err != nil || secondDigest != firstDigest {
+		return verification, fmt.Errorf("%w: destination changed during local verification", ErrCheckpointConcurrentMutation)
+	}
+	verification.Observed.Digest = secondDigest
+	verification.Observed.EventCursor = normalizedCheckpointEventCursor(s.state.EventsCursor)
+	if secondDigest != expected.Digest || verification.Observed.EventCursor != expected.EventCursor {
+		return verification, fmt.Errorf("%w: local digest/cursor does not match consumed receipt", ErrCheckpointNonConverged)
+	}
+
+	serverSeal, err := verifier.VerifyCheckpointSeal(ctx, s.workspace, checkpointVerifyRequestFromSeal(expected))
+	if err != nil {
+		return verification, fmt.Errorf("%w: server re-attestation failed: %w", ErrCheckpointNonConverged, err)
+	}
+	if !sameCheckpointReceiptIdentity(serverSeal, expected) || serverSeal.SealToken != "" {
+		return verification, fmt.Errorf("%w: server returned a changed or bearer-bearing verification receipt", ErrCheckpointNonConverged)
+	}
+	verification.Observed.WorkspaceRevision = serverSeal.WorkspaceRevision
+	return verification, nil
+}
+
+// VerifyCheckpointOwnership is the source-side admission gate after the server
+// has durably returned ownership. Process health alone is insufficient: a
+// restarted source can be healthy while it is still missing the destination's
+// final turn. This method proves the source's tracked local bytes/revisions and
+// event cursor exactly match the server-issued resume proof before Cloud admits
+// another turn.
+func (s *Syncer) VerifyCheckpointOwnership(ctx context.Context, proof CheckpointSealOwnership) (CheckpointVerification, error) {
+	var verification CheckpointVerification
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return verification, fmt.Errorf("%w: %v", ErrCheckpointNonConverged, err)
+	}
+	if proof.Status != "source-resumed" || strings.TrimSpace(proof.SealID) == "" || proof.WorkspaceID != s.workspace || proof.Root != "/" || s.remoteRoot != "/" ||
+		!checkpointSessionPattern.MatchString(strings.TrimSpace(proof.SessionID)) || proof.Generation == 0 || !validCheckpointDigestString(proof.Digest) ||
+		!checkpointRevisionPattern.MatchString(strings.TrimSpace(proof.WorkspaceRevision)) || !checkpointEventCursorPattern.MatchString(strings.TrimSpace(proof.EventCursor)) ||
+		strings.TrimSpace(proof.ReleasedAt) == "" || strings.TrimSpace(proof.SourceResumedAt) == "" {
+		return verification, fmt.Errorf("%w: malformed or mismatched source-resume proof", ErrCheckpointNonConverged)
+	}
+	for _, raw := range []string{proof.ReleasedAt, proof.SourceResumedAt} {
+		if _, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(raw)); err != nil {
+			return verification, fmt.Errorf("%w: malformed source-resume proof timestamp", ErrCheckpointNonConverged)
+		}
+	}
+	if strings.TrimSpace(proof.ConsumedAt) != "" {
+		if _, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(proof.ConsumedAt)); err != nil {
+			return verification, fmt.Errorf("%w: malformed source-resume consume timestamp", ErrCheckpointNonConverged)
+		}
+	}
+	if err := s.assertManagedCheckpointRoot(); err != nil {
+		return verification, err
+	}
+	if err := s.assertMountRootInvariant(); err != nil {
+		return verification, err
+	}
+
+	s.localMutationMu.Lock()
+	defer s.localMutationMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.loadState(); err != nil {
+		return verification, fmt.Errorf("%w: load private mount state: %v", ErrCheckpointUnmanagedRoot, err)
+	}
+	if !s.state.BootstrapComplete || s.state.LastSuccessfulReconcileAt == "" || s.state.LastError != nil {
+		return verification, fmt.Errorf("%w: resumed source mount is not successfully reconciled", ErrCheckpointNonConverged)
+	}
+	if len(s.state.QuarantinedPaths) > 0 || len(s.state.SkippedMaterializations) > 0 || s.state.IncrementalBacklogDraining || s.state.IncrementalCheckpoint != nil || len(s.state.IncrementalReadNotReadySince) > 0 {
+		return verification, fmt.Errorf("%w: resumed source has quarantined, skipped, or incomplete remote state", ErrCheckpointNonConverged)
+	}
+	health, err := s.checkpointVerificationHealthLocked()
+	if err != nil {
+		return verification, fmt.Errorf("%w: inspect resumed source health: %v", ErrCheckpointNonConverged, err)
+	}
+	verification.Health = health
+	if health.PendingWriteback != 0 || health.Conflicts != 0 || health.OutboxPending != 0 || health.OutboxNeedsAttention {
+		return verification, fmt.Errorf("%w: resumed source pendingWriteback=%d conflicts=%d outboxPending=%d outboxNeedsAttention=%t", ErrCheckpointNonConverged, health.PendingWriteback, health.Conflicts, health.OutboxPending, health.OutboxNeedsAttention)
+	}
+	firstDigest, err := s.checkpointLocalDigestLocked()
+	if err != nil {
+		return verification, err
+	}
+	s.runCheckpointTestHook("resume-proof-after-first-scan")
+	secondDigest, err := s.checkpointLocalDigestLocked()
+	if err != nil || firstDigest != secondDigest {
+		return verification, fmt.Errorf("%w: resumed source changed during admission verification", ErrCheckpointConcurrentMutation)
+	}
+	verification.Observed = CheckpointObservedState{
+		Digest: secondDigest, WorkspaceRevision: proof.WorkspaceRevision,
+		EventCursor: normalizedCheckpointEventCursor(s.state.EventsCursor),
+	}
+	if verification.Observed.Digest != proof.Digest || verification.Observed.EventCursor != proof.EventCursor {
+		return verification, fmt.Errorf("%w: resumed source digest/cursor does not match ownership proof", ErrCheckpointNonConverged)
+	}
+	return verification, nil
+}
+
+func validateConsumedCheckpointReceipt(seal CheckpointSeal) error {
+	if strings.TrimSpace(seal.SealID) == "" || strings.TrimSpace(seal.SealToken) != "" || strings.TrimSpace(seal.WorkspaceID) == "" || seal.Root != "/" ||
+		!checkpointSessionPattern.MatchString(strings.TrimSpace(seal.SessionID)) || seal.Generation == 0 || !validCheckpointDigestString(seal.Digest) || !checkpointRevisionPattern.MatchString(strings.TrimSpace(seal.WorkspaceRevision)) || !checkpointEventCursorPattern.MatchString(strings.TrimSpace(seal.EventCursor)) || strings.TrimSpace(seal.ConsumedAt) == "" {
+		return errors.New("receipt must be an exact consumed full-root seal without sealToken")
+	}
+	for _, raw := range []string{seal.IssuedAt, seal.ExpiresAt, seal.ConsumedAt} {
+		if _, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(raw)); err != nil {
+			return errors.New("receipt timestamps must be RFC3339")
+		}
+	}
+	return nil
+}
+
+func normalizedCheckpointEventCursor(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "0"
+	}
+	return value
+}
+
+func validCheckpointDigestString(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) != len("sha256:")+sha256.Size*2 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	_, err := hex.DecodeString(strings.TrimPrefix(value, "sha256:"))
+	return err == nil
+}
+
+func checkpointVerifyRequestFromSeal(seal CheckpointSeal) CheckpointSealVerifyRequest {
+	return CheckpointSealVerifyRequest{
+		SealID: seal.SealID, Root: seal.Root, SessionID: seal.SessionID, Generation: seal.Generation,
+		Digest: seal.Digest, WorkspaceRevision: seal.WorkspaceRevision, EventCursor: seal.EventCursor,
+		IssuedAt: seal.IssuedAt, ExpiresAt: seal.ExpiresAt, ConsumedAt: seal.ConsumedAt,
+	}
+}
+
+func sameCheckpointReceiptIdentity(left, right CheckpointSeal) bool {
+	return left.SealID == right.SealID && left.WorkspaceID == right.WorkspaceID && left.Root == right.Root && left.SessionID == right.SessionID && left.Generation == right.Generation &&
+		left.Digest == right.Digest && left.WorkspaceRevision == right.WorkspaceRevision && left.EventCursor == right.EventCursor && left.IssuedAt == right.IssuedAt && left.ExpiresAt == right.ExpiresAt && left.ConsumedAt == right.ConsumedAt
+}
+
+func (s *Syncer) checkpointVerificationHealthLocked() (CheckpointVerificationHealth, error) {
+	var health CheckpointVerificationHealth
+	for remotePath, tracked := range s.state.Files {
+		if isUnderRemoteRoot(s.remoteRoot, remotePath) && (tracked.Dirty || tracked.DeletePending || tracked.Denied || tracked.WriteDenied) {
+			health.PendingWriteback++
+		}
+	}
+	_, conflicts, err := s.listConflictArtifacts()
+	if err != nil {
+		return health, err
+	}
+	health.Conflicts = conflicts
+	pending, err := s.listPendingOutboxRecords()
+	if err != nil {
+		return health, err
+	}
+	health.OutboxPending = len(pending)
+	failed, err := countCheckpointJSONFiles(s.outboxFailedDir())
+	if err != nil {
+		return health, err
+	}
+	attention, err := countCheckpointSuffixFiles(s.outboxAttentionDir(), ".marker")
+	if err != nil {
+		return health, err
+	}
+	health.OutboxNeedsAttention = failed > 0 || attention > 0
+	return health, nil
+}
+
+func countCheckpointJSONFiles(dir string) (int, error) {
+	return countCheckpointSuffixFiles(dir, ".json")
+}
+
+func countCheckpointSuffixFiles(dir, suffix string) (int, error) {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), suffix) {
+			count++
+		}
+	}
+	return count, nil
 }
 
 func (s *Syncer) assertManagedCheckpointRoot() error {

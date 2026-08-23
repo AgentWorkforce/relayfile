@@ -7050,17 +7050,128 @@ func TestCheckpointSealHTTPServerComputesAndConsumesAuthoritativeSeal(t *testing
 		t.Fatalf("issued seal = %+v", seal)
 	}
 
-	cloudToken := mustTestJWT(t, "dev-secret", "ws_checkpoint_http", "CloudAcquire", []string{"sync:trigger"}, time.Now().Add(time.Hour))
+	syncOnlyToken := mustTestJWT(t, "dev-secret", "ws_checkpoint_http", "CloudAcquire", []string{"sync:trigger"}, time.Now().Add(time.Hour))
+	consumeBody := map[string]any{"sealToken": seal.SealToken, "root": "/sessions", "sessionId": "thread-http", "generation": 4, "consumerIdempotencyKey": "cloud-acquire-http-1"}
+	deniedConsume := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_checkpoint_http/sync/checkpoint-seals/consume",
+		headers: map[string]string{
+			"Authorization": "Bearer " + syncOnlyToken, "X-Correlation-Id": "corr-checkpoint-consume-no-files",
+		},
+		body: consumeBody,
+	})
+	if deniedConsume.Code != http.StatusForbidden {
+		t.Fatalf("consume without complete root authority = %d: %s", deniedConsume.Code, deniedConsume.Body.String())
+	}
+	scopedElsewhereToken := mustTestJWT(t, "dev-secret", "ws_checkpoint_http", "CloudAcquire", []string{"sync:trigger", "relayfile:fs:read:/other/**", "relayfile:fs:write:/other/**"}, time.Now().Add(time.Hour))
+	deniedScopedConsume := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_checkpoint_http/sync/checkpoint-seals/consume",
+		headers: map[string]string{
+			"Authorization": "Bearer " + scopedElsewhereToken, "X-Correlation-Id": "corr-checkpoint-consume-wrong-scope",
+		},
+		body: consumeBody,
+	})
+	if deniedScopedConsume.Code != http.StatusForbidden {
+		t.Fatalf("consume with incomplete root authority = %d: %s", deniedScopedConsume.Code, deniedScopedConsume.Body.String())
+	}
+	cloudToken := mustTestJWT(t, "dev-secret", "ws_checkpoint_http", "CloudAcquire", []string{"fs:read", "fs:write", "sync:trigger"}, time.Now().Add(time.Hour))
 	consume := doRequest(t, server, request{
 		method: http.MethodPost,
 		path:   "/v1/workspaces/ws_checkpoint_http/sync/checkpoint-seals/consume",
 		headers: map[string]string{
 			"Authorization": "Bearer " + cloudToken, "X-Correlation-Id": "corr-checkpoint-consume",
 		},
-		body: map[string]any{"sealToken": seal.SealToken, "root": "/sessions", "sessionId": "thread-http", "generation": 4, "consumerIdempotencyKey": "cloud-acquire-http-1"},
+		body: consumeBody,
 	})
 	if consume.Code != http.StatusOK {
 		t.Fatalf("consume status = %d: %s", consume.Code, consume.Body.String())
+	}
+	var consumed relayfile.CheckpointSeal
+	if err := json.NewDecoder(consume.Body).Decode(&consumed); err != nil {
+		t.Fatalf("decode consumed seal: %v", err)
+	}
+	if consumed.SealToken != "" || consumed.ConsumedAt == "" {
+		t.Fatalf("consume must return a safe receipt without sealToken: %+v", consumed)
+	}
+	recoveryToken := mustTestJWT(t, "dev-secret", "ws_checkpoint_http", "CloudAcquire", []string{"fs:read", "sync:trigger"}, time.Now().Add(2*time.Hour))
+	recoverConsume := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_checkpoint_http/sync/checkpoint-seals/recover-consume",
+		headers: map[string]string{
+			"Authorization": "Bearer " + recoveryToken, "X-Correlation-Id": "corr-checkpoint-recover-consume",
+		},
+		body: map[string]any{"root": "/sessions", "sessionId": "thread-http", "generation": 4, "consumerIdempotencyKey": "cloud-acquire-http-1"},
+	})
+	if recoverConsume.Code != http.StatusOK || strings.Contains(recoverConsume.Body.String(), "sealToken") {
+		t.Fatalf("same-principal consume recovery = %d %s", recoverConsume.Code, recoverConsume.Body.String())
+	}
+	var recovered relayfile.CheckpointSeal
+	if err := json.NewDecoder(recoverConsume.Body).Decode(&recovered); err != nil || recovered.SealID != consumed.SealID || recovered.ConsumedAt != consumed.ConsumedAt {
+		t.Fatalf("recovered receipt = %+v err=%v", recovered, err)
+	}
+	otherPrincipalToken := mustTestJWT(t, "dev-secret", "ws_checkpoint_http", "OtherAgent", []string{"fs:read", "fs:write", "sync:trigger"}, time.Now().Add(time.Hour))
+	wrongPrincipalRecovery := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_checkpoint_http/sync/checkpoint-seals/recover-consume",
+		headers: map[string]string{
+			"Authorization": "Bearer " + otherPrincipalToken, "X-Correlation-Id": "corr-checkpoint-recover-wrong-principal",
+		},
+		body: map[string]any{"root": "/sessions", "sessionId": "thread-http", "generation": 4, "consumerIdempotencyKey": "cloud-acquire-http-1"},
+	})
+	if wrongPrincipalRecovery.Code != http.StatusConflict || !strings.Contains(wrongPrincipalRecovery.Body.String(), "checkpoint_consumer_conflict") {
+		t.Fatalf("wrong-principal consume recovery = %d %s", wrongPrincipalRecovery.Code, wrongPrincipalRecovery.Body.String())
+	}
+	verifyBody := map[string]any{
+		"sealId": consumed.SealID, "root": consumed.Root, "sessionId": consumed.SessionID,
+		"generation": consumed.Generation, "digest": consumed.Digest, "workspaceRevision": consumed.WorkspaceRevision,
+		"eventCursor": consumed.EventCursor, "issuedAt": consumed.IssuedAt, "expiresAt": consumed.ExpiresAt, "consumedAt": consumed.ConsumedAt,
+	}
+	verify := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_checkpoint_http/sync/checkpoint-seals/verify",
+		headers: map[string]string{
+			"Authorization": "Bearer " + recoveryToken, "X-Correlation-Id": "corr-checkpoint-verify",
+		},
+		body: verifyBody,
+	})
+	if verify.Code != http.StatusOK || strings.Contains(verify.Body.String(), "sealToken") {
+		t.Fatalf("verify status = %d, response must not echo seal token: %s", verify.Code, verify.Body.String())
+	}
+	verifyBody["sealToken"] = seal.SealToken
+	verifyWithBearer := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_checkpoint_http/sync/checkpoint-seals/verify",
+		headers: map[string]string{
+			"Authorization": "Bearer " + recoveryToken, "X-Correlation-Id": "corr-checkpoint-verify-bearer",
+		},
+		body: verifyBody,
+	})
+	if verifyWithBearer.Code != http.StatusBadRequest {
+		t.Fatalf("verify accepted sealToken in body: %d %s", verifyWithBearer.Code, verifyWithBearer.Body.String())
+	}
+	delete(verifyBody, "sealToken")
+	verifyWrongPrincipal := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_checkpoint_http/sync/checkpoint-seals/verify",
+		headers: map[string]string{
+			"Authorization": "Bearer " + fullToken, "X-Correlation-Id": "corr-checkpoint-verify-wrong-principal",
+		},
+		body: verifyBody,
+	})
+	if verifyWrongPrincipal.Code != http.StatusConflict || !strings.Contains(verifyWrongPrincipal.Body.String(), "checkpoint_consumer_conflict") {
+		t.Fatalf("verify with wrong principal = %d: %s", verifyWrongPrincipal.Code, verifyWrongPrincipal.Body.String())
+	}
+	verifyWithoutRead := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_checkpoint_http/sync/checkpoint-seals/verify",
+		headers: map[string]string{
+			"Authorization": "Bearer " + syncOnlyToken, "X-Correlation-Id": "corr-checkpoint-verify-no-read",
+		},
+		body: verifyBody,
+	})
+	if verifyWithoutRead.Code != http.StatusForbidden {
+		t.Fatalf("verify without full-root read authority = %d: %s", verifyWithoutRead.Code, verifyWithoutRead.Body.String())
 	}
 	replay := doRequest(t, server, request{
 		method: http.MethodPost,
@@ -7068,10 +7179,28 @@ func TestCheckpointSealHTTPServerComputesAndConsumesAuthoritativeSeal(t *testing
 		headers: map[string]string{
 			"Authorization": "Bearer " + cloudToken, "X-Correlation-Id": "corr-checkpoint-replay",
 		},
-		body: map[string]any{"sealToken": seal.SealToken, "root": "/sessions", "sessionId": "thread-http", "generation": 4, "consumerIdempotencyKey": "cloud-acquire-http-1"},
+		body: consumeBody,
 	})
 	if replay.Code != http.StatusOK {
 		t.Fatalf("idempotent replay status = %d: %s", replay.Code, replay.Body.String())
+	}
+	var replayed relayfile.CheckpointSeal
+	if err := json.NewDecoder(replay.Body).Decode(&replayed); err != nil {
+		t.Fatalf("decode replayed consume: %v", err)
+	}
+	if replayed.SealToken != "" || replayed.ConsumedAt != consumed.ConsumedAt || replayed.SealID != consumed.SealID {
+		t.Fatalf("consume replay changed or leaked safe receipt: first=%+v replay=%+v", consumed, replayed)
+	}
+	wrongPrincipalConsume := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_checkpoint_http/sync/checkpoint-seals/consume",
+		headers: map[string]string{
+			"Authorization": "Bearer " + otherPrincipalToken, "X-Correlation-Id": "corr-checkpoint-consume-wrong-principal",
+		},
+		body: consumeBody,
+	})
+	if wrongPrincipalConsume.Code != http.StatusConflict || !strings.Contains(wrongPrincipalConsume.Body.String(), "checkpoint_consumer_conflict") {
+		t.Fatalf("wrong-principal consume replay = %d %s", wrongPrincipalConsume.Code, wrongPrincipalConsume.Body.String())
 	}
 	differentConsumer := doRequest(t, server, request{
 		method: http.MethodPost,
@@ -7094,6 +7223,97 @@ func TestCheckpointSealHTTPServerComputesAndConsumesAuthoritativeSeal(t *testing
 	})
 	if changedIdentity.Code != http.StatusConflict || !strings.Contains(changedIdentity.Body.String(), "checkpoint_consumer_conflict") {
 		t.Fatalf("consumer identity conflict status = %d: %s", changedIdentity.Code, changedIdentity.Body.String())
+	}
+}
+
+func TestCheckpointHandbackHTTPIsStrictTokenlessAndSourceGated(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	write, err := store.WriteFile(relayfile.WriteRequest{WorkspaceID: "ws_handback_http", Path: "/transcript.jsonl", IfMatch: "0", Content: "turn\n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentHash := sha256.Sum256([]byte("turn\n"))
+	digest, err := relayfile.ComputeCheckpointDigest("/", []relayfile.CheckpointDigestEntry{{Path: "/transcript.jsonl", Revision: write.TargetRevision, ContentHash: fmt.Sprintf("%x", contentHash[:])}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(store)
+	fullToken := mustTestJWT(t, "dev-secret", "ws_handback_http", "CutoverController", []string{"fs:read", "fs:write", "sync:trigger"}, time.Now().Add(time.Hour))
+	syncOnlyToken := mustTestJWT(t, "dev-secret", "ws_handback_http", "CutoverController", []string{"sync:trigger"}, time.Now().Add(time.Hour))
+	issue := doRequest(t, server, request{
+		method: http.MethodPost, path: "/v1/workspaces/ws_handback_http/sync/checkpoint-seals",
+		headers: map[string]string{"Authorization": "Bearer " + fullToken, "X-Correlation-Id": "corr-handback-issue"},
+		body:    map[string]any{"root": "/", "sessionId": "thread-handback-http", "generation": 1, "expectedDigest": digest},
+	})
+	var issued relayfile.CheckpointSeal
+	if issue.Code != http.StatusCreated || json.NewDecoder(issue.Body).Decode(&issued) != nil {
+		t.Fatalf("issue = %d %s", issue.Code, issue.Body.String())
+	}
+	consumerKey := "cutover-http-one"
+	consume := doRequest(t, server, request{
+		method: http.MethodPost, path: "/v1/workspaces/ws_handback_http/sync/checkpoint-seals/consume",
+		headers: map[string]string{"Authorization": "Bearer " + fullToken, "X-Correlation-Id": "corr-handback-consume"},
+		body:    map[string]any{"sealToken": issued.SealToken, "root": "/", "sessionId": issued.SessionID, "generation": issued.Generation, "consumerIdempotencyKey": consumerKey},
+	})
+	var consumed relayfile.CheckpointSeal
+	if consume.Code != http.StatusOK || json.NewDecoder(consume.Body).Decode(&consumed) != nil {
+		t.Fatalf("consume = %d %s", consume.Code, consume.Body.String())
+	}
+	resumeBody := map[string]any{
+		"sealToken": issued.SealToken, "root": "/", "sessionId": issued.SessionID,
+		"generation": issued.Generation, "resumeIdempotencyKey": "source-resume-http-one",
+	}
+	premature := doRequest(t, server, request{
+		method: http.MethodPost, path: "/v1/workspaces/ws_handback_http/sync/checkpoint-seals/resume",
+		headers: map[string]string{"Authorization": "Bearer " + fullToken, "X-Correlation-Id": "corr-handback-premature-resume"}, body: resumeBody,
+	})
+	if premature.Code != http.StatusConflict || !strings.Contains(premature.Body.String(), "checkpoint_handback_required") {
+		t.Fatalf("premature resume = %d %s", premature.Code, premature.Body.String())
+	}
+	handbackBody := map[string]any{
+		"sealId": consumed.SealID, "root": "/", "sessionId": consumed.SessionID,
+		"generation": consumed.Generation, "consumedAt": consumed.ConsumedAt,
+		"consumerIdempotencyKey": consumerKey, "handbackIdempotencyKey": "handback-http-one",
+		"expectedDigest": consumed.Digest,
+	}
+	forbidden := doRequest(t, server, request{
+		method: http.MethodPost, path: "/v1/workspaces/ws_handback_http/sync/checkpoint-seals/handback",
+		headers: map[string]string{"Authorization": "Bearer " + syncOnlyToken, "X-Correlation-Id": "corr-handback-forbidden"}, body: handbackBody,
+	})
+	if forbidden.Code != http.StatusForbidden {
+		t.Fatalf("handback without file authority = %d %s", forbidden.Code, forbidden.Body.String())
+	}
+	handbackBody["sealToken"] = issued.SealToken
+	strict := doRequest(t, server, request{
+		method: http.MethodPost, path: "/v1/workspaces/ws_handback_http/sync/checkpoint-seals/handback",
+		headers: map[string]string{"Authorization": "Bearer " + fullToken, "X-Correlation-Id": "corr-handback-strict"}, body: handbackBody,
+	})
+	if strict.Code != http.StatusBadRequest {
+		t.Fatalf("handback accepted sealToken = %d %s", strict.Code, strict.Body.String())
+	}
+	delete(handbackBody, "sealToken")
+	otherFullToken := mustTestJWT(t, "dev-secret", "ws_handback_http", "OtherAgent", []string{"fs:read", "fs:write", "sync:trigger"}, time.Now().Add(time.Hour))
+	wrongPrincipal := doRequest(t, server, request{
+		method: http.MethodPost, path: "/v1/workspaces/ws_handback_http/sync/checkpoint-seals/handback",
+		headers: map[string]string{"Authorization": "Bearer " + otherFullToken, "X-Correlation-Id": "corr-handback-wrong-principal"}, body: handbackBody,
+	})
+	if wrongPrincipal.Code != http.StatusConflict || !strings.Contains(wrongPrincipal.Body.String(), "checkpoint_consumer_conflict") {
+		t.Fatalf("wrong-principal handback = %d %s", wrongPrincipal.Code, wrongPrincipal.Body.String())
+	}
+	handback := doRequest(t, server, request{
+		method: http.MethodPost, path: "/v1/workspaces/ws_handback_http/sync/checkpoint-seals/handback",
+		headers: map[string]string{"Authorization": "Bearer " + fullToken, "X-Correlation-Id": "corr-handback-release"}, body: handbackBody,
+	})
+	if handback.Code != http.StatusOK || strings.Contains(handback.Body.String(), "sealToken") || !strings.Contains(handback.Body.String(), `"status":"released"`) {
+		t.Fatalf("handback = %d %s", handback.Code, handback.Body.String())
+	}
+	resume := doRequest(t, server, request{
+		method: http.MethodPost, path: "/v1/workspaces/ws_handback_http/sync/checkpoint-seals/resume",
+		headers: map[string]string{"Authorization": "Bearer " + fullToken, "X-Correlation-Id": "corr-handback-resume"}, body: resumeBody,
+	})
+	if resume.Code != http.StatusOK || strings.Contains(resume.Body.String(), "sealToken") || !strings.Contains(resume.Body.String(), `"status":"source-resumed"`) {
+		t.Fatalf("resume = %d %s", resume.Code, resume.Body.String())
 	}
 }
 

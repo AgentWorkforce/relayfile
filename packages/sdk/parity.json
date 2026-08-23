@@ -157,11 +157,17 @@
     {
       "id": "checkpoint-seals",
       "status": "ts-only",
-      "summary": "Authoritative server-issued checkpoint seals and one-use consume verification for live migration.",
+      "summary": "Authoritative checkpoint ownership, one-use consume, destination handback, and source resume for live migration.",
       "tsExports": [
         "CheckpointSeal",
+        "CheckpointSealOwnership",
+        "ConsumedCheckpointSeal",
         "ConsumeCheckpointSealInput",
-        "IssueCheckpointSealInput"
+        "HandbackCheckpointSealInput",
+        "IssueCheckpointSealInput",
+        "RecoverConsumedCheckpointSealInput",
+        "ResumeCheckpointSealInput",
+        "VerifyCheckpointSealInput"
       ],
       "pyExports": []
     },

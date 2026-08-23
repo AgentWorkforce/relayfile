@@ -1346,13 +1346,13 @@ paths:
         Recomputes durable digest, workspace revision, and event cursor before
         atomically marking the seal consumed. Expired, replayed, identity-
         mismatched, or remotely stale seals fail closed. A first successful
-        consume is replayable for 24 hours with the exact same consumer
-        idempotency key and bound identity, including after the seal TTL;
-        response-loss retries return the same consumed result. Reusing that key
-        for another seal or identity conflicts, while a different key cannot
-        reuse an already-consumed seal.
+        consume is replayable with the exact same consumer idempotency key and
+        bound identity until handback; consumed+unreleased ownership records are
+        never time-purged. Response-loss retries return the same consumed result.
+        Reusing that key for another seal or identity conflicts, while a
+        different key cannot reuse an already-consumed seal.
       security:
-        - BearerAuth: [sync:trigger]
+        - BearerAuth: [sync:trigger, fs:read, fs:write]
       parameters:
         - $ref: '#/components/parameters/WorkspaceId'
         - $ref: '#/components/parameters/CorrelationId'
@@ -1379,6 +1379,201 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           description: Seal expired, replayed, or stale against durable state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/sync/checkpoint-seals/recover-consume:
+    post:
+      tags: [Sync]
+      operationId: recoverConsumedCheckpointSeal
+      summary: Recover a committed consume after response loss without the seal token
+      description: >-
+        Looks up the durable tokenless consume receipt by the exact stable
+        consumer idempotency key and bound workspace/root/session/generation.
+        The authenticated AgentName must equal the principal that performed the
+        consume; refreshed credentials for that same principal are accepted.
+        A 404 authoritatively means no matching consume committed.
+      security:
+        - BearerAuth: [sync:trigger, fs:read]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CheckpointSealConsumeRecoveryRequest'
+      responses:
+        '200':
+          description: Exact durable tokenless consumed receipt
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckpointSeal'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Consumer identity or authenticated principal conflicts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/sync/checkpoint-seals/verify:
+    post:
+      tags: [Sync]
+      operationId: verifyConsumedCheckpointSeal
+      summary: Re-attest a consumed checkpoint seal against current durable state
+      description: >-
+        Requires the exact consumed receipt identity and independently recomputes
+        the durable digest, workspace revision, and event cursor under the server
+        lock. The one-use sealToken is neither accepted nor returned. Destination
+        clients combine this durable re-attestation with Relayfile's local
+        canonical digest verification; callers must not reproduce the digest
+        algorithm outside Relayfile. The authenticated AgentName must equal the
+        principal that consumed the seal.
+      security:
+        - BearerAuth: [sync:trigger, fs:read]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CheckpointSealVerifyRequest'
+      responses:
+        '200':
+          description: Consumed seal identity and current durable state match exactly
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckpointSeal'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Receipt is unconsumed, stale, tampered, or no longer matches durable state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/sync/checkpoint-seals/handback:
+    post:
+      tags: [Sync]
+      operationId: handbackCheckpointSeal
+      summary: Drain and release consumed destination ownership
+      description: >-
+        The original destination consumer releases ownership with its exact
+        consumer idempotency key plus a separately stable handback key. The
+        authenticated AgentName must equal the principal that consumed it. The
+        server independently recomputes the final digest, workspace revision,
+        and event cursor under the mutation lock. Consumed+unreleased ownership
+        records do not expire; only explicit handback permits source resume.
+        The sealToken is neither accepted nor returned.
+      security:
+        - BearerAuth: [sync:trigger, fs:read, fs:write]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CheckpointSealHandbackRequest'
+      responses:
+        '200':
+          description: Destination ownership released with authoritative final state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckpointSealOwnership'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Consumer mismatch, divergent final state, or conflicting handback retry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/sync/checkpoint-seals/resume:
+    post:
+      tags: [Sync]
+      operationId: resumeCheckpointSealSource
+      summary: Return released checkpoint ownership to the stopped source
+      description: >-
+        The stopped source presents the original one-use sealToken and a stable
+        resume idempotency key. Unconsumed seals can be cancelled directly;
+        consumed seals require an explicit destination handback first. Exact
+        retries are idempotent and the response never returns the sealToken.
+      security:
+        - BearerAuth: [sync:trigger, fs:read, fs:write]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CheckpointSealResumeRequest'
+      responses:
+        '200':
+          description: Source ownership resumed or unconsumed seal cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckpointSealOwnership'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Destination has not handed back or resume retry identity conflicts
           content:
             application/json:
               schema:
@@ -3462,6 +3657,154 @@ components:
           pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$'
           description: Stable Cloud acquire-attempt id persisted before the first consume request.
 
+    CheckpointSealConsumeRecoveryRequest:
+      type: object
+      additionalProperties: false
+      required: [root, sessionId, generation, consumerIdempotencyKey]
+      properties:
+        root:
+          type: string
+          pattern: '^/'
+        sessionId:
+          type: string
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$'
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        consumerIdempotencyKey:
+          type: string
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$'
+
+    CheckpointSealVerifyRequest:
+      type: object
+      additionalProperties: false
+      required: [sealId, root, sessionId, generation, digest, workspaceRevision, eventCursor, issuedAt, expiresAt, consumedAt]
+      properties:
+        sealId:
+          type: string
+          minLength: 1
+        root:
+          type: string
+          pattern: '^/'
+        sessionId:
+          type: string
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$'
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        digest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        workspaceRevision:
+          type: string
+          pattern: '^(0|rev_[0-9]+)$'
+        eventCursor:
+          type: string
+          pattern: '^(0|evt_[0-9]+)$'
+        issuedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        consumedAt:
+          type: string
+          format: date-time
+
+    CheckpointSealHandbackRequest:
+      type: object
+      additionalProperties: false
+      required: [sealId, root, sessionId, generation, consumedAt, consumerIdempotencyKey, handbackIdempotencyKey, expectedDigest]
+      properties:
+        sealId:
+          type: string
+          minLength: 1
+        root:
+          type: string
+          pattern: '^/'
+        sessionId:
+          type: string
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$'
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        consumedAt:
+          type: string
+          format: date-time
+        consumerIdempotencyKey:
+          type: string
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$'
+        handbackIdempotencyKey:
+          type: string
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$'
+        expectedDigest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+
+    CheckpointSealResumeRequest:
+      type: object
+      additionalProperties: false
+      required: [sealToken, root, sessionId, generation, resumeIdempotencyKey]
+      properties:
+        sealToken:
+          type: string
+          minLength: 32
+        root:
+          type: string
+          pattern: '^/'
+        sessionId:
+          type: string
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$'
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        resumeIdempotencyKey:
+          type: string
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$'
+
+    CheckpointSealOwnership:
+      type: object
+      additionalProperties: false
+      required: [sealId, workspaceId, root, sessionId, generation, status, digest, workspaceRevision, eventCursor, releasedAt]
+      properties:
+        sealId:
+          type: string
+        workspaceId:
+          type: string
+        root:
+          type: string
+        sessionId:
+          type: string
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        status:
+          type: string
+          enum: [released, source-resumed]
+        digest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        workspaceRevision:
+          type: string
+          pattern: '^(0|rev_[0-9]+)$'
+        eventCursor:
+          type: string
+          pattern: '^(0|evt_[0-9]+)$'
+        consumedAt:
+          type: string
+          format: date-time
+        releasedAt:
+          type: string
+          format: date-time
+        sourceResumedAt:
+          type: string
+          format: date-time
+
     CheckpointSeal:
       type: object
       additionalProperties: false
@@ -3487,8 +3830,10 @@ components:
           pattern: '^sha256:[0-9a-f]{64}$'
         workspaceRevision:
           type: string
+          pattern: '^(0|rev_[0-9]+)$'
         eventCursor:
           type: string
+          pattern: '^(0|evt_[0-9]+)$'
         issuedAt:
           type: string
           format: date-time

@@ -155,6 +155,11 @@ export interface CheckpointSeal {
   consumedAt?: string;
 }
 
+export interface ConsumedCheckpointSeal extends Omit<CheckpointSeal, "sealToken" | "consumedAt"> {
+  sealToken?: never;
+  consumedAt: string;
+}
+
 export interface IssueCheckpointSealInput {
   workspaceId: string;
   root: string;
@@ -173,6 +178,59 @@ export interface ConsumeCheckpointSealInput {
   sessionId: string;
   generation: number;
   consumerIdempotencyKey: string;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface RecoverConsumedCheckpointSealInput {
+  workspaceId: string;
+  root: string;
+  sessionId: string;
+  generation: number;
+  consumerIdempotencyKey: string;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface VerifyCheckpointSealInput {
+  workspaceId: string;
+  receipt: ConsumedCheckpointSeal;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface CheckpointSealOwnership {
+  sealId: string;
+  workspaceId: string;
+  root: string;
+  sessionId: string;
+  generation: number;
+  status: "released" | "source-resumed";
+  digest: string;
+  workspaceRevision: string;
+  eventCursor: string;
+  consumedAt?: string;
+  releasedAt: string;
+  sourceResumedAt?: string;
+}
+
+export interface HandbackCheckpointSealInput {
+  workspaceId: string;
+  receipt: ConsumedCheckpointSeal;
+  consumerIdempotencyKey: string;
+  handbackIdempotencyKey: string;
+  expectedDigest: string;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface ResumeCheckpointSealInput {
+  workspaceId: string;
+  sealToken: string;
+  root: string;
+  sessionId: string;
+  generation: number;
+  resumeIdempotencyKey: string;
   correlationId?: string;
   signal?: AbortSignal;
 }

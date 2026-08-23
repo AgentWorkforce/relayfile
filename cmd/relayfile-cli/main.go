@@ -528,6 +528,10 @@ type daemonPIDState struct {
 	// stop/restart confirm a recorded PID still belongs to a relayfile
 	// daemon before signaling it, guarding against PID reuse.
 	Executable string `json:"executable,omitempty"`
+	// CheckpointConfig is the complete non-secret restart contract for this
+	// daemon. It is copied into a private resume record before live migration;
+	// bearer tokens are never persisted in argv or this catalog.
+	CheckpointConfig *checkpointMountConfig `json:"checkpointConfig,omitempty"`
 }
 
 type mountDaemonProcess struct {
@@ -590,7 +594,12 @@ func main() {
 	log.SetFlags(0)
 	if err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
+		exitCode := 1
+		var coded interface{ ExitCode() int }
+		if errors.As(err, &coded) {
+			exitCode = coded.ExitCode()
+		}
+		os.Exit(exitCode)
 	}
 }
 
@@ -635,6 +644,18 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		// `start` and `on` are friendlier aliases for `mount`. Same flags,
 		// same foreground/background behavior; pass --background to detach.
 		// `on` migrates the agent-relay `relay on` mount UX into relayfile.
+		if len(args) > 1 && args[1] == "checkpoint-seal" {
+			return runMountCheckpointSeal(args[2:], stdout)
+		}
+		if len(args) > 1 && args[1] == "resume-seal" {
+			return runMountResumeSeal(args[2:], stdin, stdout)
+		}
+		if len(args) > 1 && args[1] == "verify-seal" {
+			return runMountVerifySeal(args[2:], stdin, stdout)
+		}
+		if len(args) > 1 && args[1] == "handback-seal" {
+			return runMountHandbackSeal(args[2:], stdin, stdout)
+		}
 		return runMount(args[1:])
 	case "restart":
 		return runRestart(args[1:], stdout)
@@ -738,7 +759,17 @@ func printHelpForArgs(args []string, stdout io.Writer) {
 	case "pull":
 		fmt.Fprintln(stdout, "Usage: relayfile pull [--workspace NAME] [--provider PROVIDER] [--reason TEXT]")
 	case "mount", "start", "on":
-		printMountHelp(stdout)
+		if subcommand == "checkpoint-seal" {
+			fmt.Fprintln(stdout, "Usage: relayfile mount checkpoint-seal --root ABS_LOCAL_ROOT --lifecycle-id STABLE_ID --session ID --generation N [--timeout 30s] [--ttl 60s] --json")
+		} else if subcommand == "resume-seal" {
+			fmt.Fprintln(stdout, "Usage: printf '{\"resumeId\":\"...\"}' | relayfile mount resume-seal --root ABS_LOCAL_ROOT [--timeout 60s] --json")
+		} else if subcommand == "verify-seal" {
+			fmt.Fprintln(stdout, "Usage: printf '{\"verificationId\":\"...\",\"receipt\":{...}}' | relayfile mount verify-seal --root ABS_LOCAL_ROOT [--timeout 60s] --json")
+		} else if subcommand == "handback-seal" {
+			fmt.Fprintln(stdout, "Usage: printf '{\"handbackId\":\"...\",\"consumerIdempotencyKey\":\"...\",\"receipt\":{...}}' | relayfile mount handback-seal --root ABS_LOCAL_ROOT [--timeout 60s] --json")
+		} else {
+			printMountHelp(stdout)
+		}
 	case "restart":
 		fmt.Fprintln(stdout, "Usage: relayfile restart [WORKSPACE] [--foreground]")
 	case "tree", "ls":
@@ -7545,6 +7576,32 @@ func runMount(args []string) error {
 			LogFile:     logFile,
 			StartedAt:   time.Now().UTC().Format(time.RFC3339),
 			Executable:  resolvedSelfExecutable(),
+			CheckpointConfig: &checkpointMountConfig{
+				Version:                   1,
+				Server:                    strings.TrimRight(strings.TrimSpace(*server), "/"),
+				CredentialsFile:           absolutePathIfSet(delegatedCredsPath),
+				WorkspaceID:               workspaceID,
+				LocalRoot:                 absLocalDir,
+				RemotePaths:               append([]string(nil), record.RemotePaths...),
+				LocalLayout:               resolvedLocalLayout,
+				EventProvider:             strings.TrimSpace(*eventProvider),
+				StateFile:                 absolutePathIfSet(*stateFile),
+				StateDir:                  absolutePathIfSet(*stateDir),
+				MountKind:                 mountsync.NormalizeMountKind(*mountKind),
+				Mode:                      defaultMountMode,
+				Interval:                  interval.String(),
+				IntervalJitter:            *intervalJitter,
+				Timeout:                   timeout.String(),
+				BootstrapTimeout:          bootstrapTimeout.String(),
+				BootstrapMaxFilesPerCycle: *bootstrapMaxFiles,
+				FullPullMinInterval:       fullPullMinInterval.String(),
+				CursorTimeout:             cursorTimeout.String(),
+				ForceFullReconcile:        *fullReconcile,
+				WebsocketEnabled:          *websocketEnabled,
+				LowMemory:                 *lowMemory,
+				PprofAddr:                 strings.TrimSpace(*pprofAddr),
+				MemlogInterval:            memlogInterval.String(),
+			},
 		}); err != nil {
 			return err
 		}

@@ -7,6 +7,8 @@ import (
 	"time"
 )
 
+const checkpointTestConsumerPrincipal = "cloud-dashboard-observer"
+
 func TestCheckpointSealIsOneUseAndIdentityBound(t *testing.T) {
 	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
 	defer store.Close()
@@ -27,9 +29,9 @@ func TestCheckpointSealIsOneUseAndIdentityBound(t *testing.T) {
 		t.Fatalf("incomplete server seal: %+v", seal)
 	}
 	for name, req := range map[string]CheckpointSealConsumeRequest{
-		"root":       {SealToken: seal.SealToken, Root: "/other", SessionID: "thread-123", Generation: 7, ConsumerIdempotencyKey: "acquire-mismatch-root"},
-		"session":    {SealToken: seal.SealToken, Root: "/sessions", SessionID: "thread-456", Generation: 7, ConsumerIdempotencyKey: "acquire-mismatch-session"},
-		"generation": {SealToken: seal.SealToken, Root: "/sessions", SessionID: "thread-123", Generation: 8, ConsumerIdempotencyKey: "acquire-mismatch-generation"},
+		"root":       {SealToken: seal.SealToken, Root: "/other", SessionID: "thread-123", Generation: 7, ConsumerIdempotencyKey: "acquire-mismatch-root", ConsumerPrincipal: checkpointTestConsumerPrincipal},
+		"session":    {SealToken: seal.SealToken, Root: "/sessions", SessionID: "thread-456", Generation: 7, ConsumerIdempotencyKey: "acquire-mismatch-session", ConsumerPrincipal: checkpointTestConsumerPrincipal},
+		"generation": {SealToken: seal.SealToken, Root: "/sessions", SessionID: "thread-123", Generation: 8, ConsumerIdempotencyKey: "acquire-mismatch-generation", ConsumerPrincipal: checkpointTestConsumerPrincipal},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := store.ConsumeCheckpointSeal("ws_seal", req, now.Add(time.Second)); !errors.Is(err, ErrInvalidInput) {
@@ -37,12 +39,17 @@ func TestCheckpointSealIsOneUseAndIdentityBound(t *testing.T) {
 			}
 		})
 	}
-	consume := CheckpointSealConsumeRequest{SealToken: seal.SealToken, Root: "/sessions", SessionID: "thread-123", Generation: 7, ConsumerIdempotencyKey: "acquire-one"}
+	consume := CheckpointSealConsumeRequest{SealToken: seal.SealToken, Root: "/sessions", SessionID: "thread-123", Generation: 7, ConsumerIdempotencyKey: "acquire-one", ConsumerPrincipal: checkpointTestConsumerPrincipal}
 	if _, err := store.ConsumeCheckpointSeal("ws_seal", consume, now.Add(time.Second)); err != nil {
 		t.Fatalf("consume seal: %v", err)
 	}
 	if replay, err := store.ConsumeCheckpointSeal("ws_seal", consume, now.Add(2*time.Second)); err != nil || replay.ConsumedAt == "" {
 		t.Fatalf("exact idempotent replay = %+v, err=%v", replay, err)
+	}
+	differentPrincipal := consume
+	differentPrincipal.ConsumerPrincipal = "other-authenticated-agent"
+	if _, err := store.ConsumeCheckpointSeal("ws_seal", differentPrincipal, now.Add(2*time.Second)); !errors.Is(err, ErrCheckpointConsumerConflict) {
+		t.Fatalf("different authenticated principal error = %v, want consumer conflict", err)
 	}
 	differentConsumer := consume
 	differentConsumer.ConsumerIdempotencyKey = "acquire-two"
@@ -75,7 +82,7 @@ func TestCheckpointSealRejectsDivergenceExpiryAndRemoteMutation(t *testing.T) {
 		t.Fatalf("issue expiring: %v", err)
 	}
 	if _, err := store.ConsumeCheckpointSeal("ws_stale", CheckpointSealConsumeRequest{
-		SealToken: expiring.SealToken, Root: "/sessions", SessionID: "thread-expire", Generation: 1, ConsumerIdempotencyKey: "acquire-expire",
+		SealToken: expiring.SealToken, Root: "/sessions", SessionID: "thread-expire", Generation: 1, ConsumerIdempotencyKey: "acquire-expire", ConsumerPrincipal: checkpointTestConsumerPrincipal,
 	}, now.Add(time.Second)); !errors.Is(err, ErrCheckpointExpired) {
 		t.Fatalf("expiry error = %v", err)
 	}
@@ -88,7 +95,7 @@ func TestCheckpointSealRejectsDivergenceExpiryAndRemoteMutation(t *testing.T) {
 	}
 	seedCheckpointFile(t, store, "ws_stale", "/sessions/after.json", "changed")
 	if _, err := store.ConsumeCheckpointSeal("ws_stale", CheckpointSealConsumeRequest{
-		SealToken: stale.SealToken, Root: "/sessions", SessionID: "thread-stale", Generation: 2, ConsumerIdempotencyKey: "acquire-stale",
+		SealToken: stale.SealToken, Root: "/sessions", SessionID: "thread-stale", Generation: 2, ConsumerIdempotencyKey: "acquire-stale", ConsumerPrincipal: checkpointTestConsumerPrincipal,
 	}, now.Add(time.Second)); !errors.Is(err, ErrCheckpointStale) {
 		t.Fatalf("remote mutation error = %v, want stale", err)
 	}
@@ -111,7 +118,7 @@ func TestCheckpointSealSurvivesDaemonRestart(t *testing.T) {
 	second := NewStoreWithOptions(StoreOptions{StateFile: stateFile, DisableWorkers: true})
 	defer second.Close()
 	if _, err := second.ConsumeCheckpointSeal("ws_restart", CheckpointSealConsumeRequest{
-		SealToken: seal.SealToken, Root: "/sessions", SessionID: "thread-restart", Generation: 3, ConsumerIdempotencyKey: "acquire-restart",
+		SealToken: seal.SealToken, Root: "/sessions", SessionID: "thread-restart", Generation: 3, ConsumerIdempotencyKey: "acquire-restart", ConsumerPrincipal: checkpointTestConsumerPrincipal,
 	}, now.Add(time.Second)); err != nil {
 		t.Fatalf("consume after restart: %v", err)
 	}
@@ -137,7 +144,7 @@ func TestCheckpointConsumeResponseLossIsIdempotentAcrossExpiryAndRestart(t *test
 	}
 	consume := CheckpointSealConsumeRequest{
 		SealToken: seal.SealToken, Root: "/sessions", SessionID: "thread-idempotent",
-		Generation: 1, ConsumerIdempotencyKey: "cloud-acquire-attempt-123",
+		Generation: 1, ConsumerIdempotencyKey: "cloud-acquire-attempt-123", ConsumerPrincipal: checkpointTestConsumerPrincipal,
 	}
 	consumed, err := first.ConsumeCheckpointSeal("ws_idempotent", consume, now.Add(500*time.Millisecond))
 	if err != nil {
@@ -154,6 +161,31 @@ func TestCheckpointConsumeResponseLossIsIdempotentAcrossExpiryAndRestart(t *test
 	if replayed.ConsumedAt != consumed.ConsumedAt || replayed.SealID != consumed.SealID {
 		t.Fatalf("replayed result changed: first=%+v replay=%+v", consumed, replayed)
 	}
+	recovered, err := second.RecoverConsumedCheckpointSeal("ws_idempotent", CheckpointSealConsumeRecoveryRequest{
+		Root: consume.Root, SessionID: consume.SessionID, Generation: consume.Generation,
+		ConsumerIdempotencyKey: consume.ConsumerIdempotencyKey, ConsumerPrincipal: checkpointTestConsumerPrincipal,
+	}, now.Add(25*time.Hour))
+	if err != nil || recovered.SealToken != "" || recovered.SealID != consumed.SealID || recovered.ConsumedAt != consumed.ConsumedAt {
+		t.Fatalf("tokenless consume recovery after lease cap = %+v err=%v", recovered, err)
+	}
+	if _, err := second.RecoverConsumedCheckpointSeal("ws_idempotent", CheckpointSealConsumeRecoveryRequest{
+		Root: "/other", SessionID: consume.SessionID, Generation: consume.Generation,
+		ConsumerIdempotencyKey: consume.ConsumerIdempotencyKey, ConsumerPrincipal: checkpointTestConsumerPrincipal,
+	}, now.Add(25*time.Hour)); !errors.Is(err, ErrCheckpointConsumerConflict) {
+		t.Fatalf("changed recovery identity error = %v", err)
+	}
+	if _, err := second.RecoverConsumedCheckpointSeal("ws_idempotent", CheckpointSealConsumeRecoveryRequest{
+		Root: consume.Root, SessionID: consume.SessionID, Generation: consume.Generation,
+		ConsumerIdempotencyKey: consume.ConsumerIdempotencyKey, ConsumerPrincipal: "other-authenticated-agent",
+	}, now.Add(25*time.Hour)); !errors.Is(err, ErrCheckpointConsumerConflict) {
+		t.Fatalf("changed recovery principal error = %v", err)
+	}
+	if _, err := second.RecoverConsumedCheckpointSeal("ws_idempotent", CheckpointSealConsumeRecoveryRequest{
+		Root: consume.Root, SessionID: consume.SessionID, Generation: consume.Generation,
+		ConsumerIdempotencyKey: "unknown-consumer", ConsumerPrincipal: checkpointTestConsumerPrincipal,
+	}, now.Add(25*time.Hour)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown recovery error = %v", err)
+	}
 
 	changedIdentity := consume
 	changedIdentity.Root = "/other"
@@ -169,13 +201,13 @@ func TestCheckpointConsumeResponseLossIsIdempotentAcrossExpiryAndRestart(t *test
 	}
 	if _, err := second.ConsumeCheckpointSeal("ws_idempotent", CheckpointSealConsumeRequest{
 		SealToken: otherSeal.SealToken, Root: "/sessions", SessionID: "thread-other",
-		Generation: 1, ConsumerIdempotencyKey: consume.ConsumerIdempotencyKey,
+		Generation: 1, ConsumerIdempotencyKey: consume.ConsumerIdempotencyKey, ConsumerPrincipal: checkpointTestConsumerPrincipal,
 	}, now.Add(13*time.Minute)); !errors.Is(err, ErrCheckpointConsumerConflict) {
 		t.Fatalf("consumer key reused for another seal error = %v", err)
 	}
 }
 
-func TestCheckpointConsumeReplayRetentionIsBounded(t *testing.T) {
+func TestCheckpointConsumedOwnershipIsRetainedUntilExplicitHandback(t *testing.T) {
 	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
 	defer store.Close()
 	seedCheckpointFile(t, store, "ws_retention", "/sessions/transcript.jsonl", "durable\n")
@@ -189,14 +221,293 @@ func TestCheckpointConsumeReplayRetentionIsBounded(t *testing.T) {
 	}
 	consume := CheckpointSealConsumeRequest{
 		SealToken: seal.SealToken, Root: "/sessions", SessionID: "thread-retention",
-		Generation: 1, ConsumerIdempotencyKey: "cloud-retention-attempt",
+		Generation: 1, ConsumerIdempotencyKey: "cloud-retention-attempt", ConsumerPrincipal: checkpointTestConsumerPrincipal,
 	}
 	if _, err := store.ConsumeCheckpointSeal("ws_retention", consume, now.Add(time.Second)); err != nil {
 		t.Fatalf("consume: %v", err)
 	}
-	if _, err := store.ConsumeCheckpointSeal("ws_retention", consume, now.Add(time.Second+CheckpointConsumeReplayRetention)); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("post-retention replay error = %v, want not found after GC", err)
+	if replayed, err := store.ConsumeCheckpointSeal("ws_retention", consume, now.Add(time.Second+CheckpointConsumeReplayRetention)); err != nil || replayed.ConsumedAt == "" {
+		t.Fatalf("active ownership replay after diagnostic retention = %+v err=%v", replayed, err)
 	}
+}
+
+func TestCheckpointVerifyReattestsConsumedSealWhenLatestRevisionIsDeletion(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	defer store.Close()
+	keep := seedCheckpointFileResult(t, store, "ws_verify_delete", "/keep.txt", "keep\n")
+	deleted := seedCheckpointFileResult(t, store, "ws_verify_delete", "/delete.txt", "delete\n")
+	if _, err := store.DeleteFile(DeleteRequest{WorkspaceID: "ws_verify_delete", Path: "/delete.txt", IfMatch: deleted.TargetRevision}); err != nil {
+		t.Fatalf("delete latest file: %v", err)
+	}
+	digest := checkpointDigestForStore(t, store, "ws_verify_delete", "/")
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	issued, err := store.IssueCheckpointSeal("ws_verify_delete", CheckpointSealRequest{
+		Root: "/", SessionID: "thread-delete", Generation: 1, ExpectedDigest: digest,
+	}, now)
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	if issued.WorkspaceRevision == keep.TargetRevision {
+		t.Fatalf("fixture did not create delete-only revision: workspace=%q surviving=%q", issued.WorkspaceRevision, keep.TargetRevision)
+	}
+	unconsumedRequest := checkpointVerifyRequest(issued)
+	unconsumedRequest.ConsumedAt = now.Add(time.Second).Format(time.RFC3339Nano)
+	if _, err := store.VerifyConsumedCheckpointSeal("ws_verify_delete", unconsumedRequest, now); !errors.Is(err, ErrCheckpointUnconsumed) {
+		t.Fatalf("unconsumed verification error = %v", err)
+	}
+	consumed, err := store.ConsumeCheckpointSeal("ws_verify_delete", CheckpointSealConsumeRequest{
+		SealToken: issued.SealToken, Root: "/", SessionID: issued.SessionID, Generation: issued.Generation,
+		ConsumerIdempotencyKey: "cloud-delete-proof", ConsumerPrincipal: checkpointTestConsumerPrincipal,
+	}, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+	verified, err := store.VerifyConsumedCheckpointSeal("ws_verify_delete", checkpointVerifyRequest(consumed), now.Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("verify consumed delete-latest seal: %v", err)
+	}
+	if verified.SealToken != "" || verified.WorkspaceRevision != consumed.WorkspaceRevision || verified.ConsumedAt != consumed.ConsumedAt {
+		t.Fatalf("verification leaked token or changed identity: %+v", verified)
+	}
+
+	tampered := checkpointVerifyRequest(consumed)
+	tampered.EventCursor = "evt_999"
+	if _, err := store.VerifyConsumedCheckpointSeal("ws_verify_delete", tampered, now.Add(2*time.Second)); !errors.Is(err, ErrCheckpointStale) {
+		t.Fatalf("tampered receipt error = %v", err)
+	}
+	seedCheckpointFile(t, store, "ws_verify_delete", "/after.txt", "after\n")
+	if _, err := store.VerifyConsumedCheckpointSeal("ws_verify_delete", checkpointVerifyRequest(consumed), now.Add(3*time.Second)); !errors.Is(err, ErrCheckpointStale) {
+		t.Fatalf("post-consume remote mutation error = %v", err)
+	}
+}
+
+func TestCheckpointSealUsesCanonicalZeroRevisionAndCursorForEmptyWorkspace(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	defer store.Close()
+	digest := checkpointDigestForStore(t, store, "ws_empty_checkpoint", "/")
+	seal, err := store.IssueCheckpointSeal("ws_empty_checkpoint", CheckpointSealRequest{
+		Root: "/", SessionID: "thread-empty", Generation: 1, ExpectedDigest: digest,
+	}, time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("issue empty-workspace seal: %v", err)
+	}
+	if seal.WorkspaceRevision != "0" || seal.EventCursor != "0" {
+		t.Fatalf("empty-workspace wire state = revision %q cursor %q, want canonical zeroes", seal.WorkspaceRevision, seal.EventCursor)
+	}
+}
+
+func TestCheckpointHandbackIsConsumerBoundDurableAndGatesSourceResume(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "relayfile-state.json")
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	first := NewStoreWithOptions(StoreOptions{StateFile: stateFile, DisableWorkers: true})
+	seedCheckpointFile(t, first, "ws_handback", "/transcript.jsonl", "source turn\n")
+	digest := checkpointDigestForStore(t, first, "ws_handback", "/")
+	issued, err := first.IssueCheckpointSeal("ws_handback", CheckpointSealRequest{
+		Root: "/", SessionID: "thread-handback", Generation: 4, ExpectedDigest: digest,
+	}, now)
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	consumerKey := "cutover-job-4"
+	consumed, err := first.ConsumeCheckpointSeal("ws_handback", CheckpointSealConsumeRequest{
+		SealToken: issued.SealToken, Root: "/", SessionID: issued.SessionID, Generation: issued.Generation,
+		ConsumerIdempotencyKey: consumerKey, ConsumerPrincipal: checkpointTestConsumerPrincipal,
+	}, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+	resumeRequest := CheckpointSealResumeRequest{
+		SealToken: issued.SealToken, Root: "/", SessionID: issued.SessionID, Generation: issued.Generation,
+		ResumeIdempotencyKey: "source-resume-job-4",
+	}
+	if _, err := first.ResumeCheckpointSeal("ws_handback", resumeRequest, now.Add(2*time.Second)); !errors.Is(err, ErrCheckpointHandbackRequired) {
+		t.Fatalf("premature source resume error = %v, want handback required", err)
+	}
+	seedCheckpointFile(t, first, "ws_handback", "/destination.txt", "destination turn\n")
+	finalDigest, _, finalCursor := checkpointStateForTest(t, first, "ws_handback", "/")
+	handback := CheckpointSealHandbackRequest{
+		SealID: issued.SealID, Root: "/", SessionID: issued.SessionID, Generation: issued.Generation,
+		ConsumedAt: consumed.ConsumedAt, ConsumerIdempotencyKey: consumerKey,
+		HandbackIdempotencyKey: "handback-job-4", ExpectedDigest: finalDigest, ConsumerPrincipal: checkpointTestConsumerPrincipal,
+	}
+	wrongConsumer := handback
+	wrongConsumer.ConsumerIdempotencyKey = "cutover-job-other"
+	if _, err := first.HandbackCheckpointSeal("ws_handback", wrongConsumer, now.Add(3*time.Second)); !errors.Is(err, ErrCheckpointConsumerConflict) {
+		t.Fatalf("wrong-consumer handback error = %v", err)
+	}
+	wrongPrincipal := handback
+	wrongPrincipal.ConsumerPrincipal = "other-authenticated-agent"
+	if _, err := first.HandbackCheckpointSeal("ws_handback", wrongPrincipal, now.Add(3*time.Second)); !errors.Is(err, ErrCheckpointConsumerConflict) {
+		t.Fatalf("wrong-principal handback error = %v", err)
+	}
+	validButDiverged := handback
+	validButDiverged.ExpectedDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	if _, err := first.HandbackCheckpointSeal("ws_handback", validButDiverged, now.Add(3*time.Second)); !errors.Is(err, ErrCheckpointDiverged) {
+		t.Fatalf("diverged handback digest error = %v, want checkpoint diverged", err)
+	}
+	diverged := handback
+	diverged.ExpectedDigest = "sha256:" + string(make([]byte, 64))
+	if _, err := first.HandbackCheckpointSeal("ws_handback", diverged, now.Add(3*time.Second)); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("malformed handback digest error = %v", err)
+	}
+	proof, err := first.HandbackCheckpointSeal("ws_handback", handback, now.Add(4*time.Second))
+	if err != nil {
+		t.Fatalf("handback: %v", err)
+	}
+	if proof.Status != "released" || proof.Digest != finalDigest || proof.EventCursor != finalCursor || proof.ReleasedAt == "" || proof.SourceResumedAt != "" {
+		t.Fatalf("handback proof = %+v", proof)
+	}
+	replayed, err := first.HandbackCheckpointSeal("ws_handback", handback, now.Add(5*time.Second))
+	if err != nil || replayed != proof {
+		t.Fatalf("handback replay = %+v err=%v, want %+v", replayed, err, proof)
+	}
+	changedHandback := handback
+	changedHandback.HandbackIdempotencyKey = "handback-job-changed"
+	if _, err := first.HandbackCheckpointSeal("ws_handback", changedHandback, now.Add(5*time.Second)); !errors.Is(err, ErrCheckpointHandbackConflict) {
+		t.Fatalf("changed handback replay error = %v", err)
+	}
+	first.Close()
+
+	second := NewStoreWithOptions(StoreOptions{StateFile: stateFile, DisableWorkers: true})
+	defer second.Close()
+	resumed, err := second.ResumeCheckpointSeal("ws_handback", resumeRequest, now.Add(6*time.Second))
+	if err != nil {
+		t.Fatalf("resume after durable handback: %v", err)
+	}
+	if resumed.Status != "source-resumed" || resumed.Digest != proof.Digest || resumed.SourceResumedAt == "" {
+		t.Fatalf("source resume proof = %+v", resumed)
+	}
+	resumedReplay, err := second.ResumeCheckpointSeal("ws_handback", resumeRequest, now.Add(7*time.Second))
+	if err != nil || resumedReplay != resumed {
+		t.Fatalf("resume replay = %+v err=%v, want %+v", resumedReplay, err, resumed)
+	}
+	changedResume := resumeRequest
+	changedResume.ResumeIdempotencyKey = "source-resume-changed"
+	if _, err := second.ResumeCheckpointSeal("ws_handback", changedResume, now.Add(7*time.Second)); !errors.Is(err, ErrCheckpointResumeConflict) {
+		t.Fatalf("changed resume replay error = %v", err)
+	}
+	if _, err := second.ConsumeCheckpointSeal("ws_handback", CheckpointSealConsumeRequest{
+		SealToken: issued.SealToken, Root: "/", SessionID: issued.SessionID, Generation: issued.Generation,
+		ConsumerIdempotencyKey: consumerKey, ConsumerPrincipal: checkpointTestConsumerPrincipal,
+	}, now.Add(8*time.Second)); !errors.Is(err, ErrCheckpointReplay) {
+		t.Fatalf("destination reacquire after handback error = %v", err)
+	}
+}
+
+func TestCheckpointUnconsumedSealCanBeCancelledBySource(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	defer store.Close()
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	digest := checkpointDigestForStore(t, store, "ws_cancel", "/")
+	issued, err := store.IssueCheckpointSeal("ws_cancel", CheckpointSealRequest{
+		Root: "/", SessionID: "thread-cancel", Generation: 1, ExpectedDigest: digest,
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := store.ResumeCheckpointSeal("ws_cancel", CheckpointSealResumeRequest{
+		SealToken: issued.SealToken, Root: "/", SessionID: issued.SessionID,
+		Generation: issued.Generation, ResumeIdempotencyKey: "source-cancel-one",
+	}, now.Add(10*time.Minute))
+	if err != nil {
+		t.Fatalf("cancel expired unconsumed seal: %v", err)
+	}
+	if proof.Status != "source-resumed" || proof.ConsumedAt != "" || proof.SourceResumedAt == "" {
+		t.Fatalf("cancel proof = %+v", proof)
+	}
+}
+
+func TestCheckpointConsumedOwnershipSurvivesPastGatewayLeaseCap(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "relayfile-state.json")
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	first := NewStoreWithOptions(StoreOptions{StateFile: stateFile, DisableWorkers: true})
+	digest := checkpointDigestForStore(t, first, "ws_long_owner", "/")
+	issued, err := first.IssueCheckpointSeal("ws_long_owner", CheckpointSealRequest{
+		Root: "/", SessionID: "thread-long-owner", Generation: 1, ExpectedDigest: digest,
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumerKey := "cutover-long-owner"
+	consumed, err := first.ConsumeCheckpointSeal("ws_long_owner", CheckpointSealConsumeRequest{
+		SealToken: issued.SealToken, Root: "/", SessionID: issued.SessionID,
+		Generation: issued.Generation, ConsumerIdempotencyKey: consumerKey, ConsumerPrincipal: checkpointTestConsumerPrincipal,
+	}, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Close()
+
+	second := NewStoreWithOptions(StoreOptions{StateFile: stateFile, DisableWorkers: true})
+	defer second.Close()
+	proof, err := second.HandbackCheckpointSeal("ws_long_owner", CheckpointSealHandbackRequest{
+		SealID: consumed.SealID, Root: "/", SessionID: consumed.SessionID, Generation: consumed.Generation,
+		ConsumedAt: consumed.ConsumedAt, ConsumerIdempotencyKey: consumerKey,
+		HandbackIdempotencyKey: "handback-after-cap", ExpectedDigest: digest, ConsumerPrincipal: checkpointTestConsumerPrincipal,
+	}, now.Add(25*time.Hour))
+	if err != nil {
+		t.Fatalf("handback after 24h lease cap: %v", err)
+	}
+	if proof.Status != "released" {
+		t.Fatalf("late handback proof = %+v", proof)
+	}
+}
+
+func TestCheckpointStoppedSourceOwnershipSurvivesPastDiagnosticRetention(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+
+	t.Run("destination handed back but source stayed offline", func(t *testing.T) {
+		store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+		defer store.Close()
+		seedCheckpointFile(t, store, "ws_offline_after_handback", "/turn.txt", "destination turn\n")
+		digest := checkpointDigestForStore(t, store, "ws_offline_after_handback", "/")
+		issued, err := store.IssueCheckpointSeal("ws_offline_after_handback", CheckpointSealRequest{
+			Root: "/", SessionID: "thread-offline-handback", Generation: 1, ExpectedDigest: digest,
+		}, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		consumed, err := store.ConsumeCheckpointSeal("ws_offline_after_handback", CheckpointSealConsumeRequest{
+			SealToken: issued.SealToken, Root: "/", SessionID: issued.SessionID, Generation: issued.Generation,
+			ConsumerIdempotencyKey: "consume-offline-handback", ConsumerPrincipal: checkpointTestConsumerPrincipal,
+		}, now.Add(time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.HandbackCheckpointSeal("ws_offline_after_handback", CheckpointSealHandbackRequest{
+			SealID: issued.SealID, Root: "/", SessionID: issued.SessionID, Generation: issued.Generation,
+			ConsumedAt: consumed.ConsumedAt, ConsumerIdempotencyKey: "consume-offline-handback",
+			HandbackIdempotencyKey: "handback-offline-source", ExpectedDigest: digest, ConsumerPrincipal: checkpointTestConsumerPrincipal,
+		}, now.Add(2*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		proof, err := store.ResumeCheckpointSeal("ws_offline_after_handback", CheckpointSealResumeRequest{
+			SealToken: issued.SealToken, Root: "/", SessionID: issued.SessionID, Generation: issued.Generation,
+			ResumeIdempotencyKey: "resume-after-25-hours",
+		}, now.Add(25*time.Hour))
+		if err != nil || proof.Status != "source-resumed" {
+			t.Fatalf("resume after 25h offline proof=%+v err=%v", proof, err)
+		}
+	})
+
+	t.Run("unconsumed expired seal still identifies stopped source", func(t *testing.T) {
+		store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+		defer store.Close()
+		digest := checkpointDigestForStore(t, store, "ws_offline_unconsumed", "/")
+		issued, err := store.IssueCheckpointSeal("ws_offline_unconsumed", CheckpointSealRequest{
+			Root: "/", SessionID: "thread-offline-unconsumed", Generation: 1, ExpectedDigest: digest, TTLSeconds: 1,
+		}, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		proof, err := store.ResumeCheckpointSeal("ws_offline_unconsumed", CheckpointSealResumeRequest{
+			SealToken: issued.SealToken, Root: "/", SessionID: issued.SessionID, Generation: issued.Generation,
+			ResumeIdempotencyKey: "resume-unconsumed-after-25-hours",
+		}, now.Add(25*time.Hour))
+		if err != nil || proof.Status != "source-resumed" || proof.ConsumedAt != "" {
+			t.Fatalf("resume expired unconsumed seal proof=%+v err=%v", proof, err)
+		}
+	})
 }
 
 func TestCheckpointDigestRejectsMalformedRootAndDuplicatePath(t *testing.T) {
@@ -259,8 +570,24 @@ func TestCheckpointSealRejectsMalformedDigestAndTTL(t *testing.T) {
 
 func seedCheckpointFile(t *testing.T, store *Store, workspaceID, path, content string) {
 	t.Helper()
-	if _, err := store.WriteFile(WriteRequest{WorkspaceID: workspaceID, Path: path, IfMatch: "*", Content: content}); err != nil {
+	_ = seedCheckpointFileResult(t, store, workspaceID, path, content)
+}
+
+func seedCheckpointFileResult(t *testing.T, store *Store, workspaceID, path, content string) WriteResult {
+	t.Helper()
+	result, err := store.WriteFile(WriteRequest{WorkspaceID: workspaceID, Path: path, IfMatch: "*", Content: content})
+	if err != nil {
 		t.Fatalf("seed %s: %v", path, err)
+	}
+	return result
+}
+
+func checkpointVerifyRequest(seal CheckpointSeal) CheckpointSealVerifyRequest {
+	return CheckpointSealVerifyRequest{
+		SealID: seal.SealID, Root: seal.Root, SessionID: seal.SessionID, Generation: seal.Generation,
+		Digest: seal.Digest, WorkspaceRevision: seal.WorkspaceRevision, EventCursor: seal.EventCursor,
+		IssuedAt: seal.IssuedAt, ExpiresAt: seal.ExpiresAt, ConsumedAt: seal.ConsumedAt,
+		ConsumerPrincipal: checkpointTestConsumerPrincipal,
 	}
 }
 
@@ -273,4 +600,15 @@ func checkpointDigestForStore(t *testing.T, store *Store, workspaceID, root stri
 		t.Fatalf("checkpoint state: %v", err)
 	}
 	return digest
+}
+
+func checkpointStateForTest(t *testing.T, store *Store, workspaceID, root string) (string, string, string) {
+	t.Helper()
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	digest, revision, cursor, err := store.checkpointStateLocked(workspaceID, root)
+	if err != nil {
+		t.Fatalf("checkpoint state: %v", err)
+	}
+	return digest, revision, cursor
 }

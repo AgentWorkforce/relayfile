@@ -8444,7 +8444,7 @@ func TestCheckpointAndSealReturnsBoundAuthoritativeSeal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("checkpoint and seal: %v", err)
 	}
-	if seal.WorkspaceID != "ws_checkpoint" || seal.Root != "/sessions" || seal.SessionID != "thread-success" || seal.Generation != 9 || seal.SealToken == "" || !strings.HasPrefix(seal.Digest, "sha256:") {
+	if seal.WorkspaceID != "ws_checkpoint" || seal.Root != "/" || seal.SessionID != "thread-success" || seal.Generation != 9 || seal.SealToken == "" || !strings.HasPrefix(seal.Digest, "sha256:") {
 		t.Fatalf("bound seal = %+v", seal)
 	}
 }
@@ -8469,6 +8469,366 @@ func TestCheckpointAndSealRejectsInvalidIdentityBeforeDraining(t *testing.T) {
 	}
 }
 
+func TestCheckpointAndHandbackRequireOpsReadBeforeDrain(t *testing.T) {
+	client := &fakeClient{}
+	syncer, _ := newManagedCheckpointSyncer(t, client)
+	syncer.scopes = []string{"fs:read", "fs:write", "sync:trigger"}
+	if _, err := syncer.CheckpointAndSeal(context.Background(), CheckpointAndSealOptions{SessionID: "thread-scope", Generation: 1}); !errors.Is(err, ErrCheckpointNonConverged) || !strings.Contains(err.Error(), "ops:read") {
+		t.Fatalf("checkpoint scope error = %v", err)
+	}
+	receipt := consumedCheckpointReceiptForTest(t, syncer)
+	if _, _, err := syncer.HandbackCheckpoint(context.Background(), receipt, "cutover-scope", "handback-scope"); !errors.Is(err, ErrCheckpointNonConverged) || !strings.Contains(err.Error(), "ops:read") {
+		t.Fatalf("handback scope error = %v", err)
+	}
+	if client.checkpointIssueCalls != 0 || client.checkpointHandbackCalls != 0 || client.writeFileCalls != 0 || client.bulkWriteCalls != 0 {
+		t.Fatalf("missing ops:read reached drain/server: %+v", client)
+	}
+}
+
+func TestCheckpointAndSealRejectsPreexistingConflictBeforeIssuance(t *testing.T) {
+	client := &fakeClient{}
+	syncer, _ := newManagedCheckpointSyncer(t, client)
+	artifact := conflictArtifactPath(syncer.conflictsDir, "/transcript.jsonl", "rev_1")
+	if err := os.MkdirAll(filepath.Dir(artifact), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(artifact, []byte("unresolved local conflict\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := syncer.CheckpointAndSeal(context.Background(), CheckpointAndSealOptions{SessionID: "thread-conflict", Generation: 1})
+	if !errors.Is(err, ErrCheckpointNonConverged) || !strings.Contains(err.Error(), "conflicts=1") {
+		t.Fatalf("pre-existing conflict error = %v", err)
+	}
+	if client.checkpointIssueCalls != 0 {
+		t.Fatalf("server seal issued with pre-existing conflict: %d", client.checkpointIssueCalls)
+	}
+}
+
+func TestHandbackCheckpointDrainsAndReturnsAuthoritativeRelease(t *testing.T) {
+	client := &fakeClient{}
+	syncer, _ := newManagedCheckpointSyncer(t, client)
+	receipt := consumedCheckpointReceiptForTest(t, syncer)
+	localDestinationWrite := filepath.Join(syncer.localRoot, "destination.txt")
+	if err := os.WriteFile(localDestinationWrite, []byte("destination turn\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	proof, health, err := syncer.HandbackCheckpoint(context.Background(), receipt, "cutover-job-one", "handback-job-one")
+	if err != nil {
+		t.Fatalf("handback: %v", err)
+	}
+	if client.checkpointHandbackCalls != 1 || client.writeFileCalls+client.bulkWriteCalls == 0 {
+		t.Fatalf("handback calls=%d writes=%d bulkWrites=%d", client.checkpointHandbackCalls, client.writeFileCalls, client.bulkWriteCalls)
+	}
+	if proof.Status != "released" || proof.Digest != client.checkpointHandbackRequest.ExpectedDigest || !checkpointEventCursorPattern.MatchString(proof.EventCursor) || proof.SourceResumedAt != "" {
+		t.Fatalf("handback proof=%+v request=%+v", proof, client.checkpointHandbackRequest)
+	}
+	if health != (CheckpointVerificationHealth{}) {
+		t.Fatalf("handback health=%+v", health)
+	}
+}
+
+func TestHandbackCheckpointFailsBeforeReleaseOnMutationOrPendingHealth(t *testing.T) {
+	t.Run("concurrent mutation", func(t *testing.T) {
+		client := &fakeClient{}
+		syncer, localPath := newManagedCheckpointSyncer(t, client)
+		receipt := consumedCheckpointReceiptForTest(t, syncer)
+		syncer.checkpointTestHook = func(stage string) {
+			if stage == "handback-after-first-scan" {
+				if err := os.WriteFile(localPath, []byte("late destination write\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		if _, _, err := syncer.HandbackCheckpoint(context.Background(), receipt, "cutover-job-two", "handback-job-two"); !errors.Is(err, ErrCheckpointConcurrentMutation) {
+			t.Fatalf("mutation error=%v", err)
+		}
+		if client.checkpointHandbackCalls != 0 {
+			t.Fatalf("mutating handback reached server: %d", client.checkpointHandbackCalls)
+		}
+	})
+
+	t.Run("pre-existing conflict", func(t *testing.T) {
+		client := &fakeClient{}
+		syncer, _ := newManagedCheckpointSyncer(t, client)
+		receipt := consumedCheckpointReceiptForTest(t, syncer)
+		artifact := conflictArtifactPath(syncer.conflictsDir, "/transcript.jsonl", "rev_1")
+		if err := os.MkdirAll(filepath.Dir(artifact), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(artifact, []byte("conflict\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, health, err := syncer.HandbackCheckpoint(context.Background(), receipt, "cutover-job-three", "handback-job-three")
+		if !errors.Is(err, ErrCheckpointNonConverged) || health.Conflicts != 1 {
+			t.Fatalf("conflict health=%+v err=%v", health, err)
+		}
+		if client.checkpointHandbackCalls != 0 {
+			t.Fatalf("conflicted handback reached server: %d", client.checkpointHandbackCalls)
+		}
+	})
+}
+
+func TestCheckpointOwnershipEndToEndHandbackPreservesDestinationTurn(t *testing.T) {
+	store := relayfile.NewStore()
+	t.Cleanup(store.Close)
+	workspaceID := "ws_checkpoint_handoff_e2e"
+	if _, err := store.WriteFile(relayfile.WriteRequest{WorkspaceID: workspaceID, Path: "/seed.txt", IfMatch: "0", Content: "seed\n"}); err != nil {
+		t.Fatal(err)
+	}
+	api := httptest.NewServer(newMountsyncAPIHandler(t, store))
+	defer api.Close()
+	sourceToken := mustMountsyncTestJWT(t, "dev-secret", workspaceID, "local-source", []string{"fs:read", "fs:write", "sync:trigger", "ops:read"}, time.Now().Add(time.Hour))
+	destinationPrincipal := "live-teleport-e2e-proof"
+	destinationToken := mustMountsyncTestJWT(t, "dev-secret", workspaceID, destinationPrincipal, []string{"fs:read", "fs:write", "sync:trigger", "ops:read"}, time.Now().Add(time.Hour))
+	sourceClient := NewHTTPClient(api.URL, sourceToken, api.Client())
+	destinationClient := NewHTTPClient(api.URL, destinationToken, api.Client())
+
+	newE2ESyncer := func(localRoot string, client *HTTPClient) *Syncer {
+		syncer, err := NewSyncer(client, SyncerOptions{
+			WorkspaceID: workspaceID, RemoteRoot: "/", LocalRoot: localRoot,
+			StateDir: t.TempDir(), RootCtx: context.Background(), FullPullEvery: -1, WebSocket: boolPtr(false),
+		})
+		if err != nil {
+			t.Fatalf("new syncer: %v", err)
+		}
+		if err := syncer.SyncOnce(context.Background()); err != nil {
+			t.Fatalf("initial sync: %v", err)
+		}
+		return syncer
+	}
+
+	sourceRoot := t.TempDir()
+	source := newE2ESyncer(sourceRoot, sourceClient)
+	if err := os.WriteFile(filepath.Join(sourceRoot, "source-turn.txt"), []byte("source turn\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	issued, err := source.CheckpointAndSeal(context.Background(), CheckpointAndSealOptions{SessionID: "thread-e2e", Generation: 1})
+	if err != nil {
+		t.Fatalf("source checkpoint: %v", err)
+	}
+	consumerKey := "cutover-e2e-one"
+	consumed, err := destinationClient.ConsumeCheckpointSeal(context.Background(), workspaceID, CheckpointSealConsumeRequest{
+		SealToken: issued.SealToken, Root: "/", SessionID: issued.SessionID,
+		Generation: issued.Generation, ConsumerIdempotencyKey: consumerKey,
+	})
+	if err != nil {
+		t.Fatalf("destination consume: %v", err)
+	}
+	if consumed.SealToken != "" || consumed.ConsumedAt == "" {
+		t.Fatalf("unsafe consumed receipt: %+v", consumed)
+	}
+	if _, err := sourceClient.ResumeCheckpointSeal(context.Background(), workspaceID, CheckpointSealResumeRequest{
+		SealToken: issued.SealToken, Root: "/", SessionID: issued.SessionID,
+		Generation: issued.Generation, ResumeIdempotencyKey: "source-resume-e2e",
+	}); err == nil {
+		t.Fatal("source resumed before destination handback")
+	} else {
+		var httpErr *HTTPError
+		if !errors.As(err, &httpErr) || httpErr.Code != "checkpoint_handback_required" {
+			t.Fatalf("premature source resume error = %v", err)
+		}
+	}
+
+	destinationRoot := t.TempDir()
+	destination := newE2ESyncer(destinationRoot, destinationClient)
+	if _, err := destination.VerifyCheckpoint(context.Background(), consumed); err != nil {
+		t.Fatalf("destination verify: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(destinationRoot, "destination-turn.txt"), []byte("destination turn\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	proof, health, err := destination.HandbackCheckpoint(context.Background(), consumed, consumerKey, "handback-e2e-one")
+	if err != nil {
+		t.Fatalf("destination handback: %v", err)
+	}
+	if proof.Status != "released" || proof.Digest == consumed.Digest || health != (CheckpointVerificationHealth{}) {
+		t.Fatalf("handback proof=%+v health=%+v", proof, health)
+	}
+	resumed, err := sourceClient.ResumeCheckpointSeal(context.Background(), workspaceID, CheckpointSealResumeRequest{
+		SealToken: issued.SealToken, Root: "/", SessionID: issued.SessionID,
+		Generation: issued.Generation, ResumeIdempotencyKey: "source-resume-e2e",
+	})
+	if err != nil || resumed.Status != "source-resumed" || resumed.Digest != proof.Digest {
+		t.Fatalf("source resume proof=%+v err=%v", resumed, err)
+	}
+	if _, statErr := os.Stat(filepath.Join(sourceRoot, "destination-turn.txt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("destination turn materialized before admission check: %v", statErr)
+	}
+	if _, err := source.VerifyCheckpointOwnership(context.Background(), resumed); !errors.Is(err, ErrCheckpointNonConverged) {
+		t.Fatalf("source admitted before pulling destination turn: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(sourceRoot, "destination-turn.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("destination turn materialized before source reconcile: %v", err)
+	}
+	source.forceFullReconcile = true
+	if err := source.Reconcile(context.Background()); err != nil {
+		t.Fatalf("source reconcile after handback: %v", err)
+	}
+	assertLocalFileContent(t, filepath.Join(sourceRoot, "destination-turn.txt"), "destination turn\n")
+	if _, err := source.VerifyCheckpointOwnership(context.Background(), resumed); !errors.Is(err, ErrCheckpointNonConverged) {
+		t.Fatalf("source admitted before durable event cursor caught up: %v", err)
+	}
+	if err := source.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("source incremental cursor catch-up after handback: %v", err)
+	}
+	admission, err := source.VerifyCheckpointOwnership(context.Background(), resumed)
+	if err != nil || admission.Observed.Digest != resumed.Digest || admission.Observed.EventCursor != resumed.EventCursor || admission.Observed.WorkspaceRevision != resumed.WorkspaceRevision || admission.Health != (CheckpointVerificationHealth{}) {
+		t.Fatalf("source admission=%+v err=%v", admission, err)
+	}
+	assertLocalFileContent(t, filepath.Join(sourceRoot, "source-turn.txt"), "source turn\n")
+	assertLocalFileContent(t, filepath.Join(sourceRoot, "destination-turn.txt"), "destination turn\n")
+}
+
+func TestVerifyCheckpointRequiresLocalExactnessAndServerReattestation(t *testing.T) {
+	t.Run("empty local cursor normalizes to canonical zero", func(t *testing.T) {
+		client := &fakeClient{}
+		syncer, _ := newManagedCheckpointSyncer(t, client)
+		receipt := consumedCheckpointReceiptForTest(t, syncer)
+		receipt.EventCursor = "0"
+		client.checkpointVerifySeal = receipt
+		syncer.state.EventsCursor = ""
+		if err := syncer.saveStateWithoutLocalScan(); err != nil {
+			t.Fatal(err)
+		}
+		verification, err := syncer.VerifyCheckpoint(context.Background(), receipt)
+		if err != nil {
+			t.Fatalf("verify canonical zero cursor: %v", err)
+		}
+		if verification.Observed.EventCursor != "0" || client.checkpointVerifyCalls != 1 {
+			t.Fatalf("verification=%+v calls=%d", verification, client.checkpointVerifyCalls)
+		}
+	})
+
+	t.Run("delete-latest workspace revision is server-attested", func(t *testing.T) {
+		client := &fakeClient{}
+		syncer, _ := newManagedCheckpointSyncer(t, client)
+		receipt := consumedCheckpointReceiptForTest(t, syncer)
+		// A delete-only latest mutation advances the server workspace revision
+		// beyond every surviving file revision. The verifier must not compare
+		// this field to the mount's max surviving revision.
+		syncer.state.LastAppliedRevision = "rev_1"
+		receipt.WorkspaceRevision = "rev_2"
+		client.checkpointVerifySeal = receipt
+		if err := syncer.saveStateWithoutLocalScan(); err != nil {
+			t.Fatal(err)
+		}
+		verification, err := syncer.VerifyCheckpoint(context.Background(), receipt)
+		if err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+		if client.checkpointVerifyCalls != 1 || verification.Observed.WorkspaceRevision != "rev_2" || verification.Observed.Digest != receipt.Digest || verification.Observed.EventCursor != receipt.EventCursor {
+			t.Fatalf("verification=%+v calls=%d", verification, client.checkpointVerifyCalls)
+		}
+	})
+
+	t.Run("local divergence fails before server", func(t *testing.T) {
+		client := &fakeClient{}
+		syncer, localPath := newManagedCheckpointSyncer(t, client)
+		receipt := consumedCheckpointReceiptForTest(t, syncer)
+		if err := os.WriteFile(localPath, []byte("diverged\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := syncer.VerifyCheckpoint(context.Background(), receipt); !errors.Is(err, ErrCheckpointNonConverged) {
+			t.Fatalf("local divergence error = %v", err)
+		}
+		if client.checkpointVerifyCalls != 0 {
+			t.Fatalf("divergent local state reached server: %d", client.checkpointVerifyCalls)
+		}
+	})
+
+	t.Run("stale cursor and pending writeback fail closed", func(t *testing.T) {
+		client := &fakeClient{}
+		syncer, _ := newManagedCheckpointSyncer(t, client)
+		receipt := consumedCheckpointReceiptForTest(t, syncer)
+		syncer.state.EventsCursor = "evt_stale"
+		if err := syncer.saveStateWithoutLocalScan(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := syncer.VerifyCheckpoint(context.Background(), receipt); !errors.Is(err, ErrCheckpointNonConverged) {
+			t.Fatalf("stale cursor error = %v", err)
+		}
+		syncer.state.EventsCursor = receipt.EventCursor
+		tracked := syncer.state.Files["/transcript.jsonl"]
+		tracked.Dirty = true
+		syncer.state.Files["/transcript.jsonl"] = tracked
+		if err := syncer.saveStateWithoutLocalScan(); err != nil {
+			t.Fatal(err)
+		}
+		verification, err := syncer.VerifyCheckpoint(context.Background(), receipt)
+		if !errors.Is(err, ErrCheckpointNonConverged) || verification.Health.PendingWriteback != 1 {
+			t.Fatalf("pending verification=%+v err=%v", verification, err)
+		}
+	})
+
+	t.Run("server unavailable or changed response fails closed", func(t *testing.T) {
+		client := &fakeClient{checkpointVerifyErr: errors.New("server unavailable")}
+		syncer, _ := newManagedCheckpointSyncer(t, client)
+		receipt := consumedCheckpointReceiptForTest(t, syncer)
+		if _, err := syncer.VerifyCheckpoint(context.Background(), receipt); !errors.Is(err, ErrCheckpointNonConverged) || !strings.Contains(err.Error(), "server unavailable") {
+			t.Fatalf("server unavailable error = %v", err)
+		}
+		client.checkpointVerifyErr = nil
+		changed := receipt
+		changed.WorkspaceRevision = "rev_999"
+		client.checkpointVerifySeal = changed
+		if _, err := syncer.VerifyCheckpoint(context.Background(), receipt); !errors.Is(err, ErrCheckpointNonConverged) {
+			t.Fatalf("changed re-attestation error = %v", err)
+		}
+	})
+
+	t.Run("issued bearer is rejected", func(t *testing.T) {
+		client := &fakeClient{}
+		syncer, _ := newManagedCheckpointSyncer(t, client)
+		receipt := consumedCheckpointReceiptForTest(t, syncer)
+		receipt.SealToken = "must-not-cross-destination-verifier"
+		if _, err := syncer.VerifyCheckpoint(context.Background(), receipt); !errors.Is(err, ErrCheckpointNonConverged) {
+			t.Fatalf("bearer receipt error = %v", err)
+		}
+		if client.checkpointVerifyCalls != 0 {
+			t.Fatalf("bearer receipt reached server: %d", client.checkpointVerifyCalls)
+		}
+	})
+
+	t.Run("non-native revision and cursor are rejected before server", func(t *testing.T) {
+		for name, mutate := range map[string]func(*CheckpointSeal){
+			"bare revision": func(receipt *CheckpointSeal) { receipt.WorkspaceRevision = "12" },
+			"bare cursor":   func(receipt *CheckpointSeal) { receipt.EventCursor = "12" },
+		} {
+			t.Run(name, func(t *testing.T) {
+				client := &fakeClient{}
+				syncer, _ := newManagedCheckpointSyncer(t, client)
+				receipt := consumedCheckpointReceiptForTest(t, syncer)
+				mutate(&receipt)
+				if _, err := syncer.VerifyCheckpoint(context.Background(), receipt); !errors.Is(err, ErrCheckpointNonConverged) {
+					t.Fatalf("non-native receipt error = %v", err)
+				}
+				if client.checkpointVerifyCalls != 0 {
+					t.Fatalf("invalid receipt reached server: %d", client.checkpointVerifyCalls)
+				}
+			})
+		}
+	})
+}
+
+func consumedCheckpointReceiptForTest(t *testing.T, syncer *Syncer) CheckpointSeal {
+	t.Helper()
+	digest, err := syncer.checkpointLocalDigestLocked()
+	if err != nil {
+		t.Fatalf("checkpoint digest: %v", err)
+	}
+	now := time.Now().UTC()
+	syncer.state.EventsCursor = "evt_2"
+	syncer.state.LastSuccessfulReconcileAt = now.Format(time.RFC3339Nano)
+	if err := syncer.saveStateWithoutLocalScan(); err != nil {
+		t.Fatalf("persist verification state: %v", err)
+	}
+	return CheckpointSeal{
+		SealID: "cps_consumed", WorkspaceID: syncer.workspace, Root: "/", SessionID: "thread-verify", Generation: 1,
+		Digest: digest, WorkspaceRevision: "rev_1", EventCursor: "evt_2",
+		IssuedAt: now.Add(-time.Minute).Format(time.RFC3339Nano), ExpiresAt: now.Add(time.Minute).Format(time.RFC3339Nano), ConsumedAt: now.Format(time.RFC3339Nano),
+	}
+}
+
 func newManagedCheckpointSyncer(t *testing.T, client *fakeClient) (*Syncer, string) {
 	t.Helper()
 	localRoot := t.TempDir()
@@ -8477,12 +8837,12 @@ func newManagedCheckpointSyncer(t *testing.T, client *fakeClient) (*Syncer, stri
 	if err := os.WriteFile(localPath, content, 0o644); err != nil {
 		t.Fatalf("write checkpoint fixture: %v", err)
 	}
-	remotePath := "/sessions/transcript.jsonl"
+	remotePath := "/transcript.jsonl"
 	client.files = map[string]RemoteFile{remotePath: {
 		Path: remotePath, Revision: "rev_1", ContentType: "application/octet-stream", Content: string(content), ContentHash: hashBytes(content),
 	}}
 	syncer, err := NewSyncer(client, SyncerOptions{
-		WorkspaceID: "ws_checkpoint", RemoteRoot: "/sessions", LocalRoot: localRoot,
+		WorkspaceID: "ws_checkpoint", RemoteRoot: "/", LocalRoot: localRoot,
 		StateDir: t.TempDir(), RootCtx: context.Background(), FullPullEvery: -1,
 	})
 	if err != nil {
@@ -8532,6 +8892,13 @@ type fakeClient struct {
 	mergeFileFunc                  func(ctx context.Context, workspaceID, path, strategy, baseRevision, baseContent, content, contentType string) (MergeResult, error)
 	checkpointIssueCalls           int
 	checkpointIssueFunc            func(context.Context, string, CheckpointSealRequest) (CheckpointSeal, error)
+	checkpointVerifyCalls          int
+	checkpointVerifySeal           CheckpointSeal
+	checkpointVerifyErr            error
+	checkpointHandbackCalls        int
+	checkpointHandbackRequest      CheckpointSealHandbackRequest
+	checkpointHandbackProof        CheckpointSealOwnership
+	checkpointHandbackErr          error
 }
 
 func (c *fakeClient) IssueCheckpointSeal(ctx context.Context, workspaceID string, request CheckpointSealRequest) (CheckpointSeal, error) {
@@ -8542,8 +8909,40 @@ func (c *fakeClient) IssueCheckpointSeal(ctx context.Context, workspaceID string
 	return CheckpointSeal{
 		SealID: "cps_fake", SealToken: "fake-one-use-token", WorkspaceID: workspaceID,
 		Root: request.Root, SessionID: request.SessionID, Generation: request.Generation,
-		Digest: request.ExpectedDigest, WorkspaceRevision: "rev_workspace", EventCursor: "evt_checkpoint",
+		Digest: request.ExpectedDigest, WorkspaceRevision: "rev_2", EventCursor: "evt_2",
 		IssuedAt: time.Now().UTC().Format(time.RFC3339Nano), ExpiresAt: time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano),
+	}, nil
+}
+
+func (c *fakeClient) VerifyCheckpointSeal(_ context.Context, _ string, request CheckpointSealVerifyRequest) (CheckpointSeal, error) {
+	c.checkpointVerifyCalls++
+	if c.checkpointVerifyErr != nil {
+		return CheckpointSeal{}, c.checkpointVerifyErr
+	}
+	if c.checkpointVerifySeal.SealID != "" {
+		return c.checkpointVerifySeal, nil
+	}
+	return CheckpointSeal{
+		SealID: request.SealID, WorkspaceID: "ws_checkpoint", Root: request.Root, SessionID: request.SessionID, Generation: request.Generation,
+		Digest: request.Digest, WorkspaceRevision: request.WorkspaceRevision, EventCursor: request.EventCursor,
+		IssuedAt: request.IssuedAt, ExpiresAt: request.ExpiresAt, ConsumedAt: request.ConsumedAt,
+	}, nil
+}
+
+func (c *fakeClient) HandbackCheckpointSeal(_ context.Context, workspaceID string, request CheckpointSealHandbackRequest) (CheckpointSealOwnership, error) {
+	c.checkpointHandbackCalls++
+	c.checkpointHandbackRequest = request
+	if c.checkpointHandbackErr != nil {
+		return CheckpointSealOwnership{}, c.checkpointHandbackErr
+	}
+	if c.checkpointHandbackProof.SealID != "" {
+		return c.checkpointHandbackProof, nil
+	}
+	return CheckpointSealOwnership{
+		SealID: request.SealID, WorkspaceID: workspaceID, Root: request.Root,
+		SessionID: request.SessionID, Generation: request.Generation, Status: "released",
+		Digest: request.ExpectedDigest, WorkspaceRevision: "rev_3", EventCursor: "evt_3",
+		ConsumedAt: request.ConsumedAt, ReleasedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}, nil
 }
 
