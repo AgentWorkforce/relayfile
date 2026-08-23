@@ -1,6 +1,7 @@
 package relayfile
 
 import (
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -8,6 +9,31 @@ import (
 )
 
 const checkpointTestConsumerPrincipal = "cloud-dashboard-observer"
+
+func TestCheckpointSealOwnershipOmitsEmptyConsumedAt(t *testing.T) {
+	payload, err := json.Marshal(CheckpointSealOwnership{Status: "source-resumed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(payload, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := wire["consumedAt"]; present {
+		t.Fatalf("empty consumedAt must be omitted to match the optional OpenAPI/TypeScript contract: %s", payload)
+	}
+
+	payload, err = json.Marshal(CheckpointSealOwnership{Status: "released", ConsumedAt: "2026-08-23T12:00:00Z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(payload, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire["consumedAt"] != "2026-08-23T12:00:00Z" {
+		t.Fatalf("non-empty consumedAt was not preserved: %s", payload)
+	}
+}
 
 func TestCheckpointSealIsOneUseAndIdentityBound(t *testing.T) {
 	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})

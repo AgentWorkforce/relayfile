@@ -137,7 +137,7 @@ type CheckpointSealOwnership struct {
 	Digest            string `json:"digest"`
 	WorkspaceRevision string `json:"workspaceRevision"`
 	EventCursor       string `json:"eventCursor"`
-	ConsumedAt        string `json:"consumedAt"`
+	ConsumedAt        string `json:"consumedAt,omitempty"`
 	PreparedAt        string `json:"preparedAt,omitempty"`
 	ReleasedAt        string `json:"releasedAt,omitempty"`
 	SourceResumedAt   string `json:"sourceResumedAt,omitempty"`

@@ -1382,8 +1382,13 @@ func saveCheckpointHandback(state checkpointHandbackLifecycle) error {
 		if state.Result.HandbackID != state.HandbackID || state.Result.WorkspaceID != state.WorkspaceID || !sameCheckpointLocalRoot(state.Result.LocalRoot, state.LocalRoot) || state.Result.RemoteRoot != state.RemoteRoot ||
 			state.Result.SessionID != state.SessionID || state.Result.Generation != state.Generation || state.Result.Status != "released" || proof.Status != "released" || proof.SealID != state.Receipt.SealID ||
 			proof.WorkspaceID != state.WorkspaceID || proof.Root != state.RemoteRoot || proof.SessionID != state.SessionID || proof.Generation != state.Generation || proof.ConsumedAt != state.Receipt.ConsumedAt ||
-			!checkpointDigestPattern.MatchString(proof.Digest) || !checkpointRevisionPattern.MatchString(proof.WorkspaceRevision) || !checkpointCursorPattern.MatchString(proof.EventCursor) || proof.ReleasedAt == "" || proof.SourceResumedAt != "" {
+			!checkpointDigestPattern.MatchString(proof.Digest) || !checkpointRevisionPattern.MatchString(proof.WorkspaceRevision) || !checkpointCursorPattern.MatchString(proof.EventCursor) || proof.PreparedAt == "" || proof.ReleasedAt == "" || proof.SourceResumedAt != "" {
 			return errors.New("checkpoint handback result identity mismatch")
+		}
+		for _, raw := range []string{proof.PreparedAt, proof.ReleasedAt} {
+			if _, err := time.Parse(time.RFC3339Nano, raw); err != nil {
+				return errors.New("checkpoint handback result timestamps must be RFC3339")
+			}
 		}
 	}
 	if err := ensureCheckpointHandbackDir(); err != nil {

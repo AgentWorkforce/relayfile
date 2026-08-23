@@ -53,7 +53,7 @@ func installCheckpointLifecycleSeams(t *testing.T, active activeCheckpointMount,
 			SealID: consumed.SealID, WorkspaceID: consumed.WorkspaceID, Root: consumed.Root,
 			SessionID: consumed.SessionID, Generation: consumed.Generation, Status: "released",
 			Digest: consumed.Digest, WorkspaceRevision: consumed.WorkspaceRevision, EventCursor: consumed.EventCursor,
-			ConsumedAt: consumed.ConsumedAt, ReleasedAt: "2026-08-23T12:00:10Z",
+			ConsumedAt: consumed.ConsumedAt, PreparedAt: "2026-08-23T12:00:09Z", ReleasedAt: "2026-08-23T12:00:10Z",
 		}, mountsync.CheckpointVerificationHealth{}, nil
 	}
 	checkpointEnsureSource = func(checkpointMountConfig, time.Duration) error { ensureCalls++; return nil }
@@ -482,7 +482,7 @@ func TestMountHandbackSealStopsDrainsReleasesAndIsResponseLossIdempotent(t *test
 			SealID: consumed.SealID, WorkspaceID: consumed.WorkspaceID, Root: consumed.Root,
 			SessionID: consumed.SessionID, Generation: consumed.Generation, Status: "released",
 			Digest: consumed.Digest, WorkspaceRevision: "rev_3", EventCursor: consumed.EventCursor,
-			ConsumedAt: consumed.ConsumedAt, ReleasedAt: "2026-08-23T12:00:10Z",
+			ConsumedAt: consumed.ConsumedAt, PreparedAt: "2026-08-23T12:00:09Z", ReleasedAt: "2026-08-23T12:00:10Z",
 		}, mountsync.CheckpointVerificationHealth{}, nil
 	}
 	input := checkpointHandbackInput{HandbackID: "handback-job-one", ConsumerIdempotencyKey: "cutover-job-handback", Receipt: receipt}
@@ -511,6 +511,24 @@ func TestMountHandbackSealStopsDrainsReleasesAndIsResponseLossIdempotent(t *test
 	}
 	if handbackCalls != 1 || replay.String() != first.String() {
 		t.Fatalf("handback retry calls=%d first=%s replay=%s", handbackCalls, first.String(), replay.String())
+	}
+	saved, ok, err := loadCheckpointHandbackIfExists(input.HandbackID)
+	if err != nil || !ok || saved.Result == nil {
+		t.Fatalf("load released handback lifecycle=%+v ok=%v err=%v", saved, ok, err)
+	}
+	for name, preparedAt := range map[string]string{
+		"missing preparedAt":   "",
+		"malformed preparedAt": "not-a-time",
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := saved
+			result := *saved.Result
+			result.Proof.PreparedAt = preparedAt
+			candidate.Result = &result
+			if err := saveCheckpointHandback(candidate); err == nil {
+				t.Fatal("released handback lifecycle accepted invalid preparedAt")
+			}
+		})
 	}
 }
 
@@ -646,7 +664,7 @@ func TestMountHandbackFailureRecoveryDistinguishesDefinitiveFromAmbiguous(t *tes
 				SealID: consumed.SealID, WorkspaceID: consumed.WorkspaceID, Root: consumed.Root,
 				SessionID: consumed.SessionID, Generation: consumed.Generation, Status: "released",
 				Digest: consumed.Digest, WorkspaceRevision: "rev_3", EventCursor: consumed.EventCursor,
-				ConsumedAt: consumed.ConsumedAt, ReleasedAt: "2026-08-23T12:00:10Z",
+				ConsumedAt: consumed.ConsumedAt, PreparedAt: "2026-08-23T12:00:09Z", ReleasedAt: "2026-08-23T12:00:10Z",
 			}
 			if !committed {
 				committed = true

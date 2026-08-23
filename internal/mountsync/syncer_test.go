@@ -8590,6 +8590,66 @@ func TestHandbackCheckpointFailsBeforeReleaseOnMutationOrPendingHealth(t *testin
 		}
 	})
 
+	t.Run("append inside commit callback releases remotely but fails fenced locally", func(t *testing.T) {
+		client := &fakeClient{}
+		syncer, localPath := newManagedCheckpointSyncer(t, client)
+		receipt := consumedCheckpointReceiptForTest(t, syncer)
+		preparedAt := time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano)
+		releasedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		authoritativeDigest := ""
+		released := false
+		client.checkpointHandbackFunc = func(_ context.Context, workspaceID string, request CheckpointSealHandbackRequest) (CheckpointSealOwnership, error) {
+			status := "prepared"
+			proofReleasedAt := ""
+			if authoritativeDigest == "" {
+				authoritativeDigest = request.ExpectedDigest
+			}
+			if released {
+				status = "released"
+				proofReleasedAt = releasedAt
+			} else if request.Phase == CheckpointHandbackPhaseCommit {
+				file, err := os.OpenFile(localPath, os.O_WRONLY|os.O_APPEND, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := file.WriteString("append during commit callback\n"); err != nil {
+					_ = file.Close()
+					t.Fatal(err)
+				}
+				if err := file.Close(); err != nil {
+					t.Fatal(err)
+				}
+				released = true
+				status = "released"
+				proofReleasedAt = releasedAt
+			}
+			return CheckpointSealOwnership{
+				SealID: request.SealID, WorkspaceID: workspaceID, Root: request.Root,
+				SessionID: request.SessionID, Generation: request.Generation, Status: status,
+				Digest: authoritativeDigest, WorkspaceRevision: "rev_3", EventCursor: "evt_3",
+				ConsumedAt: request.ConsumedAt, PreparedAt: preparedAt, ReleasedAt: proofReleasedAt,
+			}, nil
+		}
+
+		proof, _, err := syncer.HandbackCheckpoint(context.Background(), receipt, "cutover-job-commit-race", "handback-job-commit-race")
+		if !errors.Is(err, ErrCheckpointConcurrentMutation) || proof != (CheckpointSealOwnership{}) || !released {
+			t.Fatalf("commit append proof=%+v released=%v err=%v", proof, released, err)
+		}
+		if client.checkpointHandbackCalls != 2 || client.checkpointHandbackRequest.Phase != CheckpointHandbackPhaseCommit {
+			t.Fatalf("commit append calls=%d lastPhase=%q", client.checkpointHandbackCalls, client.checkpointHandbackRequest.Phase)
+		}
+
+		// The same durable handback identity can be retried, but the released
+		// server proof excludes the appended bytes. The retry must remain fenced
+		// and must never attempt a second commit.
+		if retryProof, _, retryErr := syncer.HandbackCheckpoint(context.Background(), receipt, "cutover-job-commit-race", "handback-job-commit-race"); !errors.Is(retryErr, ErrCheckpointNonConverged) || retryProof != (CheckpointSealOwnership{}) {
+			t.Fatalf("commit append retry proof=%+v err=%v", retryProof, retryErr)
+		}
+		if client.checkpointHandbackCalls != 3 || client.checkpointHandbackRequest.Phase != CheckpointHandbackPhasePrepare {
+			t.Fatalf("commit append retry calls=%d lastPhase=%q", client.checkpointHandbackCalls, client.checkpointHandbackRequest.Phase)
+		}
+	})
+
 	t.Run("active watcher is not safe handback quiescence", func(t *testing.T) {
 		client := &fakeClient{}
 		syncer, _ := newManagedCheckpointSyncer(t, client)

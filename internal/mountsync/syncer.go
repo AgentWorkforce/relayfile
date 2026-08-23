@@ -2658,6 +2658,14 @@ func (s *Syncer) HandbackCheckpoint(ctx context.Context, consumed CheckpointSeal
 				return CheckpointSealOwnership{}, health, fmt.Errorf("%w: server returned malformed released handback replay time", ErrCheckpointNonConverged)
 			}
 		}
+		// The released proof is durable recovery for a commit whose response was
+		// lost. It still cannot be reported as a successful local handback until
+		// a scan performed after this RPC proves no process appended while the
+		// proof was in flight.
+		postReplayDigest, err := s.checkpointLocalDigestLocked()
+		if err != nil || postReplayDigest != secondDigest {
+			return CheckpointSealOwnership{}, health, fmt.Errorf("%w: destination changed while recovering released handback proof", ErrCheckpointConcurrentMutation)
+		}
 		return prepared, health, nil
 	}
 	if prepared.Status != "prepared" || prepared.SealID != consumed.SealID || prepared.WorkspaceID != s.workspace || prepared.Root != "/" || prepared.SessionID != consumed.SessionID || prepared.Generation != consumed.Generation ||
@@ -2677,6 +2685,14 @@ func (s *Syncer) HandbackCheckpoint(ctx context.Context, consumed CheckpointSeal
 	proof, err := handbackClient.HandbackCheckpointSeal(ctx, s.workspace, request)
 	if err != nil {
 		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: commit destination handback: %w", ErrCheckpointNonConverged, err)
+	}
+	// Commit releases remote ownership. A local append can occur inside the
+	// commit RPC even though the mount daemon and watcher are stopped, so the
+	// pre-commit closing scan is not sufficient. Fail fenced instead of
+	// reporting success if the local bytes no longer match the released proof.
+	postCommitDigest, postCommitErr := s.checkpointLocalDigestLocked()
+	if postCommitErr != nil || postCommitDigest != secondDigest {
+		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: destination changed while committing handback; remote release outcome must be recovered with the same handback identity", ErrCheckpointConcurrentMutation)
 	}
 	if proof.Status != "released" || proof.SealID != consumed.SealID || proof.WorkspaceID != s.workspace || proof.Root != "/" || proof.SessionID != consumed.SessionID || proof.Generation != consumed.Generation ||
 		proof.Digest != secondDigest || proof.WorkspaceRevision != prepared.WorkspaceRevision || proof.EventCursor != prepared.EventCursor || proof.ConsumedAt != consumed.ConsumedAt || proof.PreparedAt != prepared.PreparedAt || strings.TrimSpace(proof.ReleasedAt) == "" || proof.SourceResumedAt != "" {
