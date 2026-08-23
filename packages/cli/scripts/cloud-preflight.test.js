@@ -39,9 +39,7 @@ test("bare relayfile prepares Cloud auth through the Agent Relay SDK", async () 
       device: false,
     },
   ]);
-  assert.equal(env.CLOUD_API_ACCESS_TOKEN, "cld_at_test_secret");
-  assert.equal(env.CLOUD_API_REFRESH_TOKEN, "cld_rt_test_secret");
-  assert.equal(env.CLOUD_API_URL, "https://cloud.example");
+  assert.deepEqual(env, {});
 });
 
 test("setup forwards its Cloud URL and no-open mode to the SDK", async () => {
@@ -74,7 +72,7 @@ test("setup forwards its Cloud URL and no-open mode to the SDK", async () => {
     interactive: true,
     device: true,
   });
-  assert.equal(env.CLOUD_API_REFRESH_TOKEN_EXPIRES_AT, undefined);
+  assert.deepEqual(env, {});
 });
 
 test("help and caller-owned tokens do not start interactive auth", () => {
@@ -138,7 +136,7 @@ test("valid explicit setup arguments still prepare Cloud auth", () => {
   );
 });
 
-test("the bundled SDK reuses canonical auth without exposing tokens", () => {
+test("the bundled SDK keeps canonical auth out of the child environment", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "relayfile-cloud-sdk-"));
   const authDir = path.join(home, ".agentworkforce", "relay");
   fs.mkdirSync(authDir, { recursive: true, mode: 0o700 });
@@ -155,26 +153,39 @@ test("the bundled SDK reuses canonical auth without exposing tokens", () => {
   );
 
   const modulePath = path.join(__dirname, "cloud-preflight.js");
+  const authPath = path.join(authDir, "cloud-auth.json");
   const script = `
+    const fs = require("node:fs");
     const { prepareCloudSession } = require(${JSON.stringify(modulePath)});
     prepareCloudSession([], process.env).then(() => {
+      const stored = JSON.parse(fs.readFileSync(${JSON.stringify(authPath)}, "utf8"));
       console.log(JSON.stringify({
-        apiUrl: process.env.CLOUD_API_URL,
+        apiUrl: stored.apiUrl,
         hasAccess: Boolean(process.env.CLOUD_API_ACCESS_TOKEN),
         hasRefresh: Boolean(process.env.CLOUD_API_REFRESH_TOKEN),
       }));
     }).catch((error) => { console.error(error.message); process.exit(1); });
   `;
+  const childEnv = { ...process.env, HOME: home };
+  for (const name of [
+    "CLOUD_API_URL",
+    "CLOUD_API_ACCESS_TOKEN",
+    "CLOUD_API_REFRESH_TOKEN",
+    "CLOUD_API_ACCESS_TOKEN_EXPIRES_AT",
+    "CLOUD_API_REFRESH_TOKEN_EXPIRES_AT",
+  ]) {
+    delete childEnv[name];
+  }
   const result = spawnSync(process.execPath, ["-e", script], {
     encoding: "utf8",
-    env: { ...process.env, HOME: home },
+    env: childEnv,
   });
 
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), {
     apiUrl: "https://cloud.example",
-    hasAccess: true,
-    hasRefresh: true,
+    hasAccess: false,
+    hasRefresh: false,
   });
   assert.doesNotMatch(result.stdout, /cld_[ar]t_bundle_secret/);
 });

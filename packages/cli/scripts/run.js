@@ -62,8 +62,8 @@ function sourceCheckoutRoot() {
 
 async function main() {
   // Agent Relay's Cloud SDK owns interactive login, token refresh, locking,
-  // and the canonical session store. Relayfile consumes that session through
-  // the child environment instead of invoking the agent-relay CLI.
+  // and the canonical session store. The native runtime reads that same store
+  // directly instead of receiving copied tokens or invoking agent-relay CLI.
   await prepareCloudSession(args, process.env);
 
   let result;

@@ -138,8 +138,9 @@ explicit `relayfile setup` wizard.
 **Behavior:**
 
 1. The npm launcher asks the bundled Agent Relay Cloud SDK to establish or
-   refresh the canonical shared session, then passes it to the native runtime
-   only through inherited `CLOUD_API_*` environment variables.
+   refresh the canonical shared session. The native runtime then reads that
+   same store directly; the launcher does not copy file-backed credentials
+   into `CLOUD_API_*` environment variables.
 2. The native runtime reads the Cloud access token from
    `~/.agentworkforce/relay/cloud-auth.json` (or the `CLOUD_API_*`
    environment), refreshing it in place when it is inside its expiry window.

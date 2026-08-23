@@ -138,26 +138,18 @@ async function prepareCloudSession(args, env = process.env, dependencies = {}) {
     String(env.RELAYFILE_CLOUD_API_URL || "").trim() ||
     String(env.CLOUD_API_URL || "").trim() ||
     DEFAULT_CLOUD_API_URL;
-  const session = await ensureCloudSession({
+  await ensureCloudSession({
     apiUrl,
     interactive: true,
     device: hasFlag(args, "--no-open"),
   });
 
-  // The child receives the session through its environment, never through
-  // argv or stdout. The SDK has already persisted the same session in Agent
-  // Relay's canonical auth store for future commands.
-  env.CLOUD_API_URL = session.auth.apiUrl;
-  env.CLOUD_API_ACCESS_TOKEN = session.auth.accessToken;
-  env.CLOUD_API_REFRESH_TOKEN = session.auth.refreshToken;
-  env.CLOUD_API_ACCESS_TOKEN_EXPIRES_AT =
-    session.auth.accessTokenExpiresAt;
-  if (session.auth.refreshTokenExpiresAt) {
-    env.CLOUD_API_REFRESH_TOKEN_EXPIRES_AT =
-      session.auth.refreshTokenExpiresAt;
-  } else {
-    delete env.CLOUD_API_REFRESH_TOKEN_EXPIRES_AT;
-  }
+  // The SDK owns and refreshes its canonical on-disk session. Do not promote
+  // that session into CLOUD_API_* for the child: Relayfile would correctly
+  // treat those variables as caller-owned and would not persist rotated
+  // refresh tokens back to the shared file. The native runtime reads the same
+  // canonical file directly. Genuine caller-provided environment credentials
+  // bypass this preflight above and remain untouched.
   return true;
 }
 

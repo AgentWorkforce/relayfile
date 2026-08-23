@@ -76,8 +76,10 @@ step **MUST** be idempotent on re-run:
      so a clean-machine `npx relayfile@latest` does not install the Agent Relay
      CLI or the Cloud SDK's unrelated storage dependencies.
    - The SDK reads or writes `~/.agentworkforce/relay/cloud-auth.json` at
-     `0600`, then passes the active session to the native Relayfile process via
-     inherited `CLOUD_API_*` variables rather than argv or stdout.
+     `0600`; the native Relayfile process reads the same canonical file. The
+     launcher does not copy file-backed credentials into inherited
+     `CLOUD_API_*` variables, argv, or stdout, so either runtime can safely
+     persist refresh-token rotation under the shared lock.
    - Relayfile does not persist `~/.relayfile/cloud-credentials.json` as a
      Cloud session source of truth.
 3. **Workspace name.** Use `--workspace`, else prompt. Default suggestion:
