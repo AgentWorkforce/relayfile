@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -31,6 +32,7 @@ const (
 	checkpointLifecycleVersion = 1
 	checkpointStopTimeout      = 10 * time.Second
 	checkpointResumeTimeout    = 60 * time.Second
+	checkpointCLIInputMaxBytes = 16 * 1024
 )
 
 var (
@@ -55,6 +57,25 @@ func checkpointError(code string, exitCode int, err error) error {
 		err = errors.New(code)
 	}
 	return &checkpointCLIError{code: code, exitCode: exitCode, err: err}
+}
+
+func decodeStrictCheckpointInput(stdin io.Reader, out any) error {
+	payload, err := io.ReadAll(io.LimitReader(stdin, checkpointCLIInputMaxBytes+1))
+	if err != nil {
+		return err
+	}
+	if len(payload) > checkpointCLIInputMaxBytes {
+		return fmt.Errorf("checkpoint input exceeds %d bytes", checkpointCLIInputMaxBytes)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(out); err != nil {
+		return err
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return errors.New("checkpoint input must contain exactly one JSON document")
+	}
+	return nil
 }
 
 type checkpointMountConfig struct {
@@ -377,9 +398,7 @@ func runMountResumeSeal(args []string, stdin io.Reader, stdout io.Writer) error 
 		return checkpointError("resume_invalid_input", 2, errors.New("--root and --json are required and timeout must be positive"))
 	}
 	var input checkpointResumeInput
-	decoder := json.NewDecoder(io.LimitReader(stdin, 16*1024))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&input); err != nil || decoder.Decode(&struct{}{}) != io.EOF || !checkpointLifecycleIDPattern.MatchString(strings.TrimSpace(input.ResumeID)) {
+	if err := decodeStrictCheckpointInput(stdin, &input); err != nil || !checkpointLifecycleIDPattern.MatchString(strings.TrimSpace(input.ResumeID)) {
 		return checkpointError("resume_invalid_input", 2, errors.New("stdin must contain exactly one JSON object with a valid resumeId"))
 	}
 	lockCtx, lockCancel := context.WithTimeout(context.Background(), *timeout)
@@ -497,9 +516,7 @@ func runMountVerifySeal(args []string, stdin io.Reader, stdout io.Writer) error 
 		return checkpointError("verification_invalid_input", 2, errors.New("--root and --json are required and timeout must be positive"))
 	}
 	var input checkpointVerificationInput
-	decoder := json.NewDecoder(io.LimitReader(stdin, 64*1024))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&input); err != nil || decoder.Decode(&struct{}{}) != io.EOF || !checkpointLifecycleIDPattern.MatchString(strings.TrimSpace(input.VerificationID)) {
+	if err := decodeStrictCheckpointInput(stdin, &input); err != nil || !checkpointLifecycleIDPattern.MatchString(strings.TrimSpace(input.VerificationID)) {
 		return checkpointError("verification_invalid_input", 2, errors.New("stdin must contain only a valid verificationId and consumed receipt"))
 	}
 	input.VerificationID = strings.TrimSpace(input.VerificationID)
@@ -604,9 +621,7 @@ func runMountHandbackSeal(args []string, stdin io.Reader, stdout io.Writer) erro
 		return checkpointError("handback_invalid_input", 2, errors.New("--root and --json are required and timeout must be positive"))
 	}
 	var input checkpointHandbackInput
-	decoder := json.NewDecoder(io.LimitReader(stdin, 64*1024))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&input); err != nil || decoder.Decode(&struct{}{}) != io.EOF ||
+	if err := decodeStrictCheckpointInput(stdin, &input); err != nil ||
 		!checkpointLifecycleIDPattern.MatchString(strings.TrimSpace(input.HandbackID)) || !checkpointLifecycleIDPattern.MatchString(strings.TrimSpace(input.ConsumerIdempotencyKey)) || validateDestinationReceipt(input.Receipt) != nil {
 		return checkpointError("handback_invalid_input", 2, errors.New("stdin must contain only handbackId, original consumerIdempotencyKey, and a consumed full-root receipt"))
 	}
@@ -774,15 +789,14 @@ func definitiveCheckpointHandbackHTTPFailure(err error) bool {
 		return true
 	case httpErr.StatusCode == 403 && code == "forbidden":
 		return true
-	case httpErr.StatusCode == 404 && code == "checkpoint_seal_not_found":
-		return true
-	case httpErr.StatusCode == 409 && strings.HasPrefix(code, "checkpoint_"):
+	case httpErr.StatusCode == 409 && code == "checkpoint_diverged":
 		return true
 	case httpErr.StatusCode == 413 && code == "payload_too_large":
 		return true
 	default:
-		// Unknown/gateway 4xx, retry-class 408/425/429, transport failures,
-		// and every 5xx remain ambiguous after an exhausted POST.
+		// Not-found can follow source-resume/GC; handback/replay/resume conflicts
+		// can mean ownership already moved. Unknown/gateway 4xx, retry-class
+		// 408/425/429, transport failures, and every 5xx are likewise ambiguous.
 		return false
 	}
 }

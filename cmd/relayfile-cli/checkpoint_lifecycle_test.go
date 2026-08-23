@@ -88,6 +88,16 @@ func consumedCheckpointTestReceipt(receipt mountsync.CheckpointSeal) mountsync.C
 	return receipt
 }
 
+func checkpointInputAtLimit(t *testing.T, base []byte) []byte {
+	t.Helper()
+	if len(base) > checkpointCLIInputMaxBytes {
+		t.Fatalf("base input is already %d bytes", len(base))
+	}
+	payload := append([]byte(nil), base...)
+	payload = append(payload, bytes.Repeat([]byte(" "), checkpointCLIInputMaxBytes-len(payload))...)
+	return payload
+}
+
 func checkpointTestActive(t *testing.T) (activeCheckpointMount, mountsync.CheckpointSeal) {
 	t.Helper()
 	root := t.TempDir()
@@ -232,6 +242,73 @@ func TestMountResumeSealRejectsNonExactJSONDocument(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCheckpointCommandInputCutoffRejectsHiddenTrailingBytes(t *testing.T) {
+	t.Run("exact boundary remains a complete decodable document", func(t *testing.T) {
+		payload := checkpointInputAtLimit(t, []byte(`{"resumeId":"rsm_boundary"}`))
+		var input checkpointResumeInput
+		if err := decodeStrictCheckpointInput(bytes.NewReader(payload), &input); err != nil || input.ResumeID != "rsm_boundary" {
+			t.Fatalf("exact-boundary decode input=%+v err=%v", input, err)
+		}
+	})
+
+	t.Run("resume second object just beyond cutoff has no lifecycle effect", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		root := t.TempDir()
+		payload := append(checkpointInputAtLimit(t, []byte(`{"resumeId":"rsm_cutoff"}`)), []byte(`{}`)...)
+		err := runMountResumeSeal([]string{"--root", root, "--json"}, bytes.NewReader(payload), &bytes.Buffer{})
+		if checkpointExitCode(err) != 2 {
+			t.Fatalf("resume cutoff error=%v", err)
+		}
+		if _, statErr := os.Stat(checkpointLifecyclePath("rsm_cutoff")); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("resume cutoff created lifecycle: %v", statErr)
+		}
+	})
+
+	t.Run("verify garbage just beyond cutoff has no mount effect", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		active, issued := checkpointTestActive(t)
+		receipt := consumedCheckpointTestReceipt(issued)
+		installCheckpointLifecycleSeams(t, active, receipt)
+		resolveCalls := 0
+		checkpointResolveActive = func(string) (activeCheckpointMount, error) {
+			resolveCalls++
+			return active, nil
+		}
+		input := checkpointVerificationInput{VerificationID: "vrf_cutoff", Receipt: receipt}
+		base, _ := json.Marshal(input)
+		payload := append(checkpointInputAtLimit(t, base), 'x')
+		err := runMountVerifySeal([]string{"--root", active.config.LocalRoot, "--json"}, bytes.NewReader(payload), &bytes.Buffer{})
+		if checkpointExitCode(err) != 2 || resolveCalls != 0 {
+			t.Fatalf("verify cutoff error=%v resolveCalls=%d", err, resolveCalls)
+		}
+		if _, statErr := os.Stat(checkpointVerificationPath(input.VerificationID)); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("verify cutoff created lifecycle: %v", statErr)
+		}
+	})
+
+	t.Run("handback second object just beyond cutoff has no mount effect", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		active, issued := checkpointTestActive(t)
+		receipt := consumedCheckpointTestReceipt(issued)
+		installCheckpointLifecycleSeams(t, active, receipt)
+		resolveCalls := 0
+		checkpointResolveActive = func(string) (activeCheckpointMount, error) {
+			resolveCalls++
+			return active, nil
+		}
+		input := checkpointHandbackInput{HandbackID: "handback-cutoff", ConsumerIdempotencyKey: "cutover-cutoff", Receipt: receipt}
+		base, _ := json.Marshal(input)
+		payload := append(checkpointInputAtLimit(t, base), []byte(`{}`)...)
+		err := runMountHandbackSeal([]string{"--root", active.config.LocalRoot, "--json"}, bytes.NewReader(payload), &bytes.Buffer{})
+		if checkpointExitCode(err) != 2 || resolveCalls != 0 {
+			t.Fatalf("handback cutoff error=%v resolveCalls=%d", err, resolveCalls)
+		}
+		if _, statErr := os.Stat(checkpointHandbackPath(input.HandbackID)); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("handback cutoff created lifecycle: %v", statErr)
+		}
+	})
 }
 
 func TestMountResumeSealCannotReportReadyBeforeResumeProofMaterializes(t *testing.T) {
@@ -472,6 +549,39 @@ func TestMountHandbackFailureRecoveryDistinguishesDefinitiveFromAmbiguous(t *tes
 		}
 	})
 
+	for _, tc := range []struct {
+		name   string
+		status int
+		code   string
+	}{
+		{name: "unknown-409", status: 409, code: "conflict"},
+		{name: "released-under-another-handback-key", status: 409, code: "checkpoint_handback_conflict"},
+		{name: "not-found-after-release-or-gc", status: 404, code: "checkpoint_seal_not_found"},
+		{name: "source-already-resumed", status: 409, code: "checkpoint_replayed"},
+		{name: "resume-ownership-conflict", status: 409, code: "checkpoint_resume_conflict"},
+	} {
+		tc := tc
+		t.Run(tc.name+" stays stopped and ambiguous", func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			active, issued := checkpointTestActive(t)
+			receipt := consumedCheckpointTestReceipt(issued)
+			_, ensureCalls, _ := installCheckpointLifecycleSeams(t, active, receipt)
+			checkpointHandbackStopped = func(context.Context, checkpointMountConfig, mountsync.CheckpointSeal, string, string) (mountsync.CheckpointSealOwnership, mountsync.CheckpointVerificationHealth, error) {
+				return mountsync.CheckpointSealOwnership{}, mountsync.CheckpointVerificationHealth{}, &mountsync.HTTPError{StatusCode: tc.status, Code: tc.code, Message: "ownership outcome is not safe to invert"}
+			}
+			handbackID := "handback-" + tc.name
+			payload, _ := json.Marshal(checkpointHandbackInput{HandbackID: handbackID, ConsumerIdempotencyKey: "cutover-" + tc.name, Receipt: receipt})
+			err := runMountHandbackSeal([]string{"--root", active.config.LocalRoot, "--json"}, bytes.NewReader(payload), &bytes.Buffer{})
+			if checkpointExitCode(err) != 4 || !strings.Contains(err.Error(), "handback_result_unknown") || *ensureCalls != 0 {
+				t.Fatalf("ambiguous semantic HTTP error=%v restart=%d", err, *ensureCalls)
+			}
+			state, ok, loadErr := loadCheckpointHandbackIfExists(handbackID)
+			if loadErr != nil || !ok || state.Status != "handback-unknown" {
+				t.Fatalf("ambiguous semantic lifecycle=%+v ok=%v err=%v", state, ok, loadErr)
+			}
+		})
+	}
+
 	t.Run("503 after application commit stays stopped and exact retry recovers proof", func(t *testing.T) {
 		t.Setenv("HOME", t.TempDir())
 		active, issued := checkpointTestActive(t)
@@ -527,7 +637,6 @@ func TestCheckpointHandbackHTTPFailureClassification(t *testing.T) {
 		{StatusCode: 400, Code: "bad_request"},
 		{StatusCode: 401, Code: "unauthorized"},
 		{StatusCode: 403, Code: "forbidden"},
-		{StatusCode: 404, Code: "checkpoint_seal_not_found"},
 		{StatusCode: 409, Code: "checkpoint_diverged"},
 		{StatusCode: 413, Code: "payload_too_large"},
 	} {
@@ -538,7 +647,12 @@ func TestCheckpointHandbackHTTPFailureClassification(t *testing.T) {
 	for _, httpErr := range []*mountsync.HTTPError{
 		{StatusCode: 0},
 		{StatusCode: 400, Code: "gateway_bad_request"},
+		{StatusCode: 404, Code: "checkpoint_seal_not_found"},
 		{StatusCode: 404, Code: "not_found"},
+		{StatusCode: 409, Code: "conflict"},
+		{StatusCode: 409, Code: "checkpoint_handback_conflict"},
+		{StatusCode: 409, Code: "checkpoint_replayed"},
+		{StatusCode: 409, Code: "checkpoint_resume_conflict"},
 		{StatusCode: 408, Code: "request_timeout"},
 		{StatusCode: 425, Code: "too_early"},
 		{StatusCode: 429, Code: "rate_limited"},
