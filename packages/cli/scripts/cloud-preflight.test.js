@@ -102,6 +102,14 @@ test("help and caller-owned tokens do not start interactive auth", () => {
     false,
   );
   assert.equal(
+    shouldPrepareCloudSession(["setup", "--cloud-token="], {}),
+    true,
+  );
+  assert.equal(
+    shouldPrepareCloudSession(["setup", "--cloud-token", ""], {}),
+    true,
+  );
+  assert.equal(
     shouldPrepareCloudSession([], { CLOUD_API_ACCESS_TOKEN: "ci-token" }),
     false,
   );

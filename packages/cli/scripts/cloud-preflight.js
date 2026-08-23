@@ -198,7 +198,7 @@ function shouldPrepareCloudSession(args, env) {
   // Explicit credentials are caller-owned. Let the Go CLI validate and use
   // them without replacing them with an interactive session.
   if (
-    parsed.values.has("cloud-token") ||
+    String(parsed.values.get("cloud-token") || "").trim() ||
     String(env.RELAYFILE_CLOUD_TOKEN || "").trim() ||
     String(env.CLOUD_API_ACCESS_TOKEN || "").trim()
   ) {
