@@ -11,14 +11,12 @@ This repo is the file server and mount layer. For the rest of the ecosystem, see
 If you want Notion, Slack, Linear, GitHub, or other provider-backed files without running any infrastructure, start here. Agent Relay Cloud runs the daemon, OAuth, sync workers, and writeback workers for you.
 
 ```bash
-relayfile setup \
-  --provider notion \
-  --workspace my-agent \
-  --local-dir ./relayfile-mount \
-  --no-open
+npx relayfile@latest
 ```
 
-That command connects to `agentrelay.com`, completes provider auth, waits for sync, and mounts provider files locally. Your agent reads and reacts to the mounted files; the integration stack is hosted.
+That command signs the user in with Google, creates the account and workspace without an invite code, connects GitHub, and mounts provider files at `./relayfile-mount`. No separate Agent Relay CLI or copied token is needed. Your agent reads and reacts to the mounted files; the integration stack is hosted.
+
+Use `npx relayfile@latest setup --provider notion --workspace my-agent --local-dir ./relayfile-mount` when you want a different provider or explicit names.
 
 ## Local OSS Quickstart
 

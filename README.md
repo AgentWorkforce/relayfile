@@ -27,7 +27,7 @@ That's the entire interface. No new SDK to learn, no MCP schemas eating your con
 
 ## Quick paths
 
-- **Hosted integrations:** `npx relayfile setup --provider notion --workspace research-room --local-dir ./relayfile-mount`
+- **Hosted integrations:** `npx relayfile@latest` — sign in, connect GitHub, and mount the current project with no prior account or CLI setup.
 - **Local OSS:** run the Docker stack below, then mount `ws_demo` as a normal directory.
 - **Sandbox SDK:** use `RelayfileSetup.ensureMountedWorkspace()` when your runtime already has a cloud access token.
 - **Programmatic agents:** use [`@relayfile/agents`](packages/agents/README.md) for Vercel AI SDK, OpenAI Agents SDK, and LangChain, or wrap `RelayFileClient.readFile()` / `writeFile()` directly in any custom harness.
@@ -320,17 +320,22 @@ Hosted Agent Relay runs these pieces for you. Fully self-hosted provider-backed 
 
 If you want Notion, Slack, Linear, GitHub, or other provider-backed files without running any infrastructure, use hosted Agent Relay. Agent Relay Cloud runs the workspace, relayfile API, scoped auth, Nango OAuth, provider sync workers, and writeback workers for you.
 
-Use the [`setting-up-relayfile` skill](https://github.com/AgentWorkforce/skills/blob/main/skills/setting-up-relayfile/SKILL.md) when an agent should set up hosted files:
+From the project where your agent will work, run:
 
 ```bash
-relayfile setup \
-  --provider notion \
-  --workspace my-agent \
-  --local-dir ./relayfile-mount \
-  --no-open
+npx relayfile@latest
 ```
 
-That command connects to `agentrelay.com`, creates or joins a cloud workspace, completes provider auth, waits for sync, and mounts the resulting files for the agent. The local directory is just the agent's file interface; the integration stack is hosted.
+That one command opens Google sign-in, creates the account and workspace, opens GitHub OAuth, and mounts files at `./relayfile-mount`. No invite code, API token, or separate `agent-relay` installation is required. The command stays open to keep the mount synchronized and prints the exact path and starter prompt for a second terminal.
+
+For another provider or a custom workspace name, use the explicit setup form:
+
+```bash
+npx relayfile@latest setup \
+  --provider notion \
+  --workspace my-agent \
+  --local-dir ./relayfile-mount
+```
 
 Use the OSS repo when you want to run the file server yourself. Use hosted Agent Relay when you want the whole integration path managed:
 

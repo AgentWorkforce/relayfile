@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -208,6 +209,62 @@ func parseBrowserFragment(t *testing.T, rawURL string) url.Values {
 		t.Fatalf("parse observer fragment failed: %v", err)
 	}
 	return fragment
+}
+
+func TestQuickStartUsesProjectNameGitHubAndLocalMountDefaults(t *testing.T) {
+	args := quickStartSetupArgsForDir(
+		filepath.Join(string(filepath.Separator), "workspaces", "acme-api"),
+		time.Date(2026, time.August, 23, 12, 0, 0, 0, time.UTC),
+	)
+	want := []string{
+		"--provider", "github",
+		"--workspace", "acme-api",
+		"--local-dir", "./relayfile-mount",
+	}
+	if !slices.Equal(args, want) {
+		t.Fatalf("quick-start args = %#v, want %#v", args, want)
+	}
+}
+
+func TestQuickStartFallsBackToTimestampedWorkspaceOutsideAProject(t *testing.T) {
+	args := quickStartSetupArgsForDir(
+		string(filepath.Separator),
+		time.Date(2026, time.August, 23, 12, 34, 56, 0, time.UTC),
+	)
+	if got, want := args[3], "relayfile-20260823-123456"; got != want {
+		t.Fatalf("fallback workspace = %q, want %q", got, want)
+	}
+}
+
+func TestSetupAgentPromptUsesProviderMountRoot(t *testing.T) {
+	got := setupAgentPromptPath(
+		filepath.Join(string(filepath.Separator), "workspace", "relayfile-mount"),
+		"slack-my-senior-dev",
+	)
+	want := filepath.Join(string(filepath.Separator), "workspace", "relayfile-mount", "slack-msd")
+	if got != want {
+		t.Fatalf("setup agent prompt path = %q, want %q", got, want)
+	}
+}
+
+func TestQuickStartPreservesExistingWorkspaceMirror(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	existingDir := filepath.Join(t.TempDir(), "existing-mirror")
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:     "acme-api",
+		ID:       "ws_acme",
+		LocalDir: existingDir,
+	}); err != nil {
+		t.Fatalf("store existing workspace: %v", err)
+	}
+
+	if got := resolveSetupLocalDir("acme-api", "./relayfile-mount", true); got != existingDir {
+		t.Fatalf("quickstart local dir = %q, want existing %q", got, existingDir)
+	}
+	if got := resolveSetupLocalDir("acme-api", "./explicit-mount", false); got != "./explicit-mount" {
+		t.Fatalf("explicit setup local dir = %q, want caller value", got)
+	}
 }
 
 func TestHelpFlagPrintsUsageForCommandsAndSubcommands(t *testing.T) {

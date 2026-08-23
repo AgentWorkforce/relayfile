@@ -12,6 +12,8 @@ if (args[0] === "--version") {
   process.exit(0);
 }
 
+const { prepareCloudSession } = require("./cloud-preflight.js");
+
 const PLATFORM_MAP = {
   darwin: "darwin",
   linux: "linux",
@@ -58,46 +60,59 @@ function sourceCheckoutRoot() {
   return null;
 }
 
-let result;
-if (binPath) {
-  result = spawnSync(binPath, args, { stdio: "inherit" });
-} else {
-  const repoRoot = sourceCheckoutRoot();
-  if (!repoRoot) {
-    console.error(
-      `relayfile binary not found for ${os.platform()} ${os.arch()}. Reinstall the package or run postinstall again.`
-    );
-    process.exit(1);
-  }
-  result = spawnSync("go", ["run", "./cmd/relayfile-cli", ...args], {
-    cwd: repoRoot,
-    stdio: "inherit",
-  });
-  if (result.error && result.error.code === "ENOENT") {
-    console.error(
-      "relayfile binary not found and Go is not installed to run from source. " +
-        "Install Go or run `npm run build --workspace=packages/cli`."
-    );
-    process.exit(1);
-  }
-}
+async function main() {
+  // Agent Relay's Cloud SDK owns interactive login, token refresh, locking,
+  // and the canonical session store. Relayfile consumes that session through
+  // the child environment instead of invoking the agent-relay CLI.
+  await prepareCloudSession(args, process.env);
 
-if (result.error) {
-  console.error(`Failed to launch relayfile: ${result.error.message}`);
+  let result;
+  if (binPath) {
+    result = spawnSync(binPath, args, { stdio: "inherit" });
+  } else {
+    const repoRoot = sourceCheckoutRoot();
+    if (!repoRoot) {
+      console.error(
+        `relayfile binary not found for ${os.platform()} ${os.arch()}. Reinstall the package or run postinstall again.`
+      );
+      process.exit(1);
+    }
+    result = spawnSync("go", ["run", "./cmd/relayfile-cli", ...args], {
+      cwd: repoRoot,
+      stdio: "inherit",
+    });
+    if (result.error && result.error.code === "ENOENT") {
+      console.error(
+        "relayfile binary not found and Go is not installed to run from source. " +
+          "Install Go or run `npm run build --workspace=packages/cli`."
+      );
+      process.exit(1);
+    }
+  }
+
+  if (result.error) {
+    console.error(`Failed to launch relayfile: ${result.error.message}`);
+    process.exit(1);
+  }
+
+  if (typeof result.status === "number") {
+    process.exit(result.status);
+  }
+
+  // The child was terminated by a signal: spawnSync reports status === null
+  // and signal === <name>. Preserve conventional 128 + signal-number exit
+  // semantics (e.g. 130 for SIGINT) so callers can distinguish user
+  // cancellation from a generic failure.
+  if (result.signal) {
+    const signum = os.constants.signals[result.signal];
+    process.exit(typeof signum === "number" ? 128 + signum : 1);
+  }
+
   process.exit(1);
 }
 
-if (typeof result.status === "number") {
-  process.exit(result.status);
-}
-
-// The child was terminated by a signal: spawnSync reports status === null
-// and signal === <name>. Preserve conventional 128 + signal-number exit
-// semantics (e.g. 130 for SIGINT) so callers can distinguish user
-// cancellation from a generic failure.
-if (result.signal) {
-  const signum = os.constants.signals[result.signal];
-  process.exit(typeof signum === "number" ? 128 + signum : 1);
-}
-
-process.exit(1);
+main().catch((error) => {
+  const detail = error instanceof Error ? error.message : String(error);
+  console.error(`Relayfile Cloud sign-in failed: ${detail}`);
+  process.exit(1);
+});

@@ -15,20 +15,26 @@ The mirror has real limitations. Read [Known Limitations](#known-limitations) be
 ### Interactive (recommended for humans)
 
 ```bash
-relayfile
+npx relayfile@latest
 ```
 
-This runs the full setup wizard:
+This runs the zero-configuration GitHub quickstart:
 
 1. Opens a browser to sign in to Relayfile Cloud.
-2. Prompts for a workspace name (default: `relayfile-<timestamp>`).
-3. Prompts for an integration provider (GitHub, Notion, Linear, Slack, or none).
-4. Prompts for a local directory (default: `./relayfile-mount`).
+2. Creates the user's account without an invite code and names the workspace after the current directory.
+3. Selects GitHub as the first integration.
+4. Uses `./relayfile-mount` as the local directory.
 5. Opens the integration OAuth consent page.
 6. Waits for the initial sync to complete, showing live progress.
 7. Starts the sync loop in the foreground.
 
-Press `Ctrl+C` at any time to stop. The local files remain; re-run `relayfile` or `relayfile mount <workspace> <dir>` to resume.
+No separate `agent-relay` CLI, API token, or prior Cloud session is required. Press `Ctrl+C` at any time to stop. The local files remain; re-run `npx relayfile@latest` or `relayfile mount <workspace> <dir>` to resume.
+
+For interactive provider/workspace/directory prompts, run `relayfile setup` without flags. For an explicit path, use:
+
+```bash
+npx relayfile@latest setup --provider notion --workspace my-project --local-dir ./relayfile-mount
+```
 
 ### Non-interactive / CI
 
@@ -326,14 +332,15 @@ If the mount has not reconciled for ≥10 minutes it logs `mount stalled: <reaso
 error: cloud session expired. Run 'agent-relay cloud login' to sign in again.
 ```
 
-Run `agent-relay cloud login`. The running mount continues serving local reads from disk until the process is restarted.
+Rerun `npx relayfile@latest` to refresh the shared Cloud session and resume the
+project mount. `agent-relay cloud login` remains a compatible recovery path for
+machines that already use that CLI. The running mount continues serving local
+reads from disk until it is restarted.
 
 If the refresh token itself expires (default 7 days), the mount enters degraded mode: local reads work, local writes are refused and logged to `.relay/permissions-denied.log` with reason `cloud_session_expired`. Fix:
 
 ```bash
-agent-relay cloud login
-relayfile stop my-project
-relayfile mount --background my-project ./relayfile-mount
+npx relayfile@latest
 ```
 
 ### Integration shows `error` status

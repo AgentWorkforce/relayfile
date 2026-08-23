@@ -601,7 +601,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return nil
 	}
 	if len(args) == 0 {
-		return runSetup(nil, stdin, stdout)
+		return runSetupWithOptions(
+			quickStartSetupArgs(),
+			stdin,
+			stdout,
+			setupRunOptions{preserveExistingLocalDir: true},
+		)
 	}
 
 	switch args[0] {
@@ -662,6 +667,23 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	default:
 		printUsage(stderr)
 		return fmt.Errorf("unknown subcommand %q", args[0])
+	}
+}
+
+func quickStartSetupArgs() []string {
+	workingDir, _ := os.Getwd()
+	return quickStartSetupArgsForDir(workingDir, time.Now())
+}
+
+func quickStartSetupArgsForDir(workingDir string, now time.Time) []string {
+	workspaceName := "relayfile-" + now.UTC().Format("20060102-150405")
+	if base := strings.TrimSpace(filepath.Base(workingDir)); base != "" && base != "." && base != string(filepath.Separator) {
+		workspaceName = base
+	}
+	return []string{
+		"--provider", "github",
+		"--workspace", workspaceName,
+		"--local-dir", "./relayfile-mount",
 	}
 }
 
@@ -874,7 +896,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, `relayfile is the RelayFile CLI.
 
 Usage:
-  relayfile
+  relayfile                                             (hosted GitHub quickstart for the current project)
   relayfile setup [--provider PROVIDER] [--backend BACKEND] [--workspace NAME] [--local-dir DIR]
   relayfile login [--no-open] [--provision-messaging-only] [--api-key] [--server URL] [--token TOKEN]
   relayfile logout
@@ -961,7 +983,15 @@ Subcommands:
   observer    Open the hosted file observer for a workspace`)
 }
 
+type setupRunOptions struct {
+	preserveExistingLocalDir bool
+}
+
 func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
+	return runSetupWithOptions(args, stdin, stdout, setupRunOptions{})
+}
+
+func runSetupWithOptions(args []string, stdin io.Reader, stdout io.Writer, options setupRunOptions) error {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	cloudAPIURL := fs.String("cloud-api-url", envOrDefault("RELAYFILE_CLOUD_API_URL", defaultCloudAPIURL), "Relayfile Cloud API URL")
@@ -1048,6 +1078,7 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 			localDir = "./relayfile-mount"
 		}
 	}
+	localDir = resolveSetupLocalDir(name, localDir, options.preserveExistingLocalDir)
 	absLocalDir, err := filepath.Abs(localDir)
 	if err != nil {
 		return err
@@ -1128,8 +1159,29 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 		return nil
 	}
 
-	fmt.Fprintf(stdout, "Starting VFS mount at %s\n", localDir)
+	fmt.Fprintf(stdout, "Starting VFS mount at %s\n", absLocalDir)
+	fmt.Fprintln(stdout, "Keep this terminal open while Relayfile syncs. In another terminal, start your agent and give it this prompt:")
+	if selectedProvider != "" && selectedProvider != "none" && selectedProvider != "skip" {
+		fmt.Fprintf(stdout, "  Use %s as the source of truth. Read LAYOUT.md first, then show me what needs attention.\n", setupAgentPromptPath(absLocalDir, selectedProvider))
+	} else {
+		fmt.Fprintf(stdout, "  Use %s as our shared workspace. Read LAYOUT.md first.\n", absLocalDir)
+	}
 	return runMount(mountArgs)
+}
+
+func resolveSetupLocalDir(workspaceName, requestedLocalDir string, preserveExisting bool) string {
+	if preserveExisting {
+		if existing, ok := workspaceRecordByName(workspaceName); ok {
+			if localDir := strings.TrimSpace(existing.LocalDir); localDir != "" {
+				return localDir
+			}
+		}
+	}
+	return requestedLocalDir
+}
+
+func setupAgentPromptPath(absLocalDir, provider string) string {
+	return filepath.Join(absLocalDir, mountscope.ProviderRoot(provider))
 }
 
 func ensureCloudCredentials(cloudAPIURL, explicitToken string, timeout time.Duration, shouldOpenBrowser bool, stdout io.Writer) (cloudCredentials, error) {
