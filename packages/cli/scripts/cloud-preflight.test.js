@@ -107,6 +107,9 @@ test("bundled SDK carries the Relayfile marker through both login modes", () => 
 
 test("help and caller-owned tokens do not start interactive auth", () => {
   assert.equal(shouldPrepareCloudSession(["setup", "--help"], {}), false);
+  assert.equal(shouldPrepareCloudSession(["setup", "--help=true"], {}), false);
+  assert.equal(shouldPrepareCloudSession(["setup", "--help=false"], {}), true);
+  assert.equal(shouldPrepareCloudSession(["setup", "-h=0"], {}), true);
   assert.equal(
     shouldPrepareCloudSession(["setup", "--cloud-token", "explicit"], {}),
     false,
@@ -124,10 +127,47 @@ test("help and caller-owned tokens do not start interactive auth", () => {
     true,
   );
   assert.equal(
+    shouldPrepareCloudSession(
+      ["setup", "--cloud-token="],
+      { RELAYFILE_CLOUD_TOKEN: "inherited-token" },
+    ),
+    true,
+  );
+  assert.equal(
+    shouldPrepareCloudSession(
+      ["setup"],
+      { RELAYFILE_CLOUD_TOKEN: "inherited-token" },
+    ),
+    false,
+  );
+  assert.equal(
     shouldPrepareCloudSession([], { CLOUD_API_ACCESS_TOKEN: "ci-token" }),
     false,
   );
   assert.equal(shouldPrepareCloudSession(["status"], {}), false);
+});
+
+test("false help and an empty token override still prepare SDK auth", async () => {
+  for (const { args, env } of [
+    { args: ["setup", "--help=false"], env: {} },
+    {
+      args: ["setup", "-h=0", "--cloud-token="],
+      env: { RELAYFILE_CLOUD_TOKEN: "inherited-token" },
+    },
+  ]) {
+    let calls = 0;
+    const prepared = await prepareCloudSession(
+      args,
+      env,
+      {
+        ensureCloudSession: async () => {
+          calls += 1;
+        },
+      },
+    );
+    assert.equal(prepared, true);
+    assert.equal(calls, 1);
+  }
 });
 
 test("malformed setup arguments fail before interactive auth", async () => {

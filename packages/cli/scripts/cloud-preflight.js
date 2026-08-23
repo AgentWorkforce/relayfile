@@ -61,6 +61,18 @@ function hasFlag(args, name) {
   return args.some((arg) => arg === name || arg.startsWith(`${name}=`));
 }
 
+function hasEnabledBooleanFlag(args, name) {
+  return args.some((arg) => {
+    if (arg === name) {
+      return true;
+    }
+    if (!arg.startsWith(`${name}=`)) {
+      return false;
+    }
+    return GO_TRUE_VALUES.has(arg.slice(name.length + 1));
+  });
+}
+
 function parseGoDurationMilliseconds(value) {
   let remaining = String(value);
   let sign = 1;
@@ -192,14 +204,19 @@ function shouldPrepareCloudSession(args, env) {
   if (!parsed.valid) {
     return false;
   }
-  if (parsed.values.has("help") || parsed.values.has("h")) {
+  if (
+    parsed.values.get("help") === true ||
+    parsed.values.get("h") === true
+  ) {
     return false;
   }
   // Explicit credentials are caller-owned. Let the Go CLI validate and use
   // them without replacing them with an interactive session.
+  const relayfileCloudToken = parsed.values.has("cloud-token")
+    ? String(parsed.values.get("cloud-token") || "").trim()
+    : String(env.RELAYFILE_CLOUD_TOKEN || "").trim();
   if (
-    String(parsed.values.get("cloud-token") || "").trim() ||
-    String(env.RELAYFILE_CLOUD_TOKEN || "").trim() ||
+    relayfileCloudToken ||
     String(env.CLOUD_API_ACCESS_TOKEN || "").trim()
   ) {
     return false;
@@ -235,8 +252,8 @@ function loadCloudSessionSDK() {
 async function prepareCloudSession(args, env = process.env, dependencies = {}) {
   const setupCommand = args.length === 0 || args[0] === "setup";
   const skipsValidation =
-    hasFlag(args, "--help") ||
-    hasFlag(args, "-h") ||
+    hasEnabledBooleanFlag(args, "--help") ||
+    hasEnabledBooleanFlag(args, "-h") ||
     hasFlag(args, "--version") ||
     args[0] === "version";
   const parsed =
