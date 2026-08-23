@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
@@ -1761,6 +1762,213 @@ func TestFreshUserSetupCreatesAndResolvesWorkspaceBeforeMinting(t *testing.T) {
 	record, ok := workspaceRecordByName("fresh-user")
 	if !ok || record.ID != cloudWorkspaceID || record.RelayWorkspaceID != relayWorkspaceID {
 		t.Fatalf("fresh setup workspace record = %#v, ok=%v", record, ok)
+	}
+}
+
+func TestHostedSetupIgnoresCollidingSelfHostedCatalogRow(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	localDir := t.TempDir()
+	if err := saveCredentials(credentials{
+		Server: "https://self-hosted.relayfile.test",
+		Token:  "self_hosted_token",
+	}); err != nil {
+		t.Fatalf("save self-hosted credentials: %v", err)
+	}
+	credentialsBefore, err := os.ReadFile(credentialsPath())
+	if err != nil {
+		t.Fatalf("read self-hosted credentials: %v", err)
+	}
+	selfHosted := workspaceRecord{
+		Name:       "demo",
+		ID:         "self-hosted-demo",
+		CreatedAt:  "2025-01-02T03:04:05Z",
+		LastUsedAt: "2025-01-02T03:04:05Z",
+		LocalDir:   "/legacy/self-hosted/demo",
+		Server:     "https://self-hosted.relayfile.test",
+	}
+	if err := saveWorkspaceCatalog(workspaceCatalog{
+		Default:    "demo",
+		Workspaces: []workspaceRecord{selfHosted},
+	}); err != nil {
+		t.Fatalf("save colliding self-hosted catalog: %v", err)
+	}
+
+	const (
+		cloudWorkspaceID = "cloud-demo-440"
+		relayWorkspaceID = "rw_cloud_demo_440"
+	)
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "POST /api/v1/workspaces":
+			var body cloudWorkspaceCreateRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode create request: %v", err)
+			}
+			if body.Name != "demo" {
+				t.Fatalf("workspace create name = %q, want demo", body.Name)
+			}
+			_, _ = w.Write([]byte(`{"workspaceId":"` + cloudWorkspaceID + `","relayfileUrl":"https://relayfile.test","createdAt":"2026-08-23T00:00:00Z","name":"demo"}`))
+		case "GET /api/v1/workspaces/" + cloudWorkspaceID + "/resolve":
+			_, _ = w.Write([]byte(`{"cloudWorkspaceId":"` + cloudWorkspaceID + `","relayfileWorkspaceId":"` + relayWorkspaceID + `","provisioned":true}`))
+		case "POST /api/v1/workspaces/" + relayWorkspaceID + "/relayfile/delegated-token":
+			writeDelegatedBundleResponse(t, w, "https://relayfile.test", relayWorkspaceID, "rf_cloud_demo", "refresh_cloud_demo")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"code":"workspace_not_found","message":"Workspace not found"}`))
+		}
+	}))
+	defer server.Close()
+	writeAgentRelayCloudAuthForTest(t, server.URL, "cld_fresh")
+
+	var stdout bytes.Buffer
+	runErr := run([]string{
+		"setup",
+		"--workspace", "demo",
+		"--provider", "none",
+		"--local-dir", localDir,
+		"--no-open",
+		"--skip-mount",
+	}, strings.NewReader(""), &stdout, &stdout)
+
+	credentialsAfter, err := os.ReadFile(credentialsPath())
+	if err != nil {
+		t.Fatalf("self-hosted credentials disappeared: %v", err)
+	}
+	if !bytes.Equal(credentialsAfter, credentialsBefore) {
+		t.Fatalf("self-hosted credentials changed:\nbefore=%s\nafter=%s", credentialsBefore, credentialsAfter)
+	}
+	if runErr != nil {
+		t.Fatalf("hosted setup with a colliding self-hosted row failed: %v\nrequests: %v\noutput:\n%s", runErr, requests, stdout.String())
+	}
+	wantRequests := []string{
+		"POST /api/v1/workspaces",
+		"GET /api/v1/workspaces/" + cloudWorkspaceID + "/resolve",
+		"POST /api/v1/workspaces/" + relayWorkspaceID + "/relayfile/delegated-token",
+	}
+	if !slices.Equal(requests, wantRequests) {
+		t.Fatalf("hosted setup request order = %v, want %v", requests, wantRequests)
+	}
+	catalog, err := loadWorkspaceCatalog()
+	if err != nil {
+		t.Fatalf("load workspace catalog: %v", err)
+	}
+	if len(catalog.Workspaces) != 2 {
+		t.Fatalf("catalog workspace count = %d, want preserved self-hosted row plus hosted row: %#v", len(catalog.Workspaces), catalog)
+	}
+	foundSelfHosted := false
+	foundCloud := false
+	for _, record := range catalog.Workspaces {
+		if record.ID == selfHosted.ID {
+			foundSelfHosted = true
+			if !reflect.DeepEqual(record, selfHosted) {
+				t.Fatalf("self-hosted catalog row changed:\nbefore=%#v\nafter=%#v", selfHosted, record)
+			}
+		}
+		if record.ID == cloudWorkspaceID && record.RelayWorkspaceID == relayWorkspaceID {
+			foundCloud = true
+		}
+	}
+	if !foundSelfHosted {
+		t.Fatalf("self-hosted workspace missing from catalog: %#v", catalog)
+	}
+	if !foundCloud {
+		t.Fatalf("hosted workspace missing from catalog: %#v", catalog)
+	}
+}
+
+func TestEnsureWorkspaceForSetupReusesOnlyCurrentCloudBinding(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	if err := saveWorkspaceCatalog(workspaceCatalog{Workspaces: []workspaceRecord{{
+		Name:             "demo",
+		ID:               "cloud-current",
+		RelayWorkspaceID: "rw_current",
+		CreatedAt:        "2026-08-23T00:00:00Z",
+	}}}); err != nil {
+		t.Fatalf("save hosted catalog: %v", err)
+	}
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /api/v1/workspaces":
+			_, _ = w.Write([]byte(`{"workspaces":[{"id":"cloud-current","name":"demo"}]}`))
+		case "GET /api/v1/workspaces/cloud-current/resolve":
+			_, _ = w.Write([]byte(`{"cloudWorkspaceId":"cloud-current","relayfileWorkspaceId":"rw_current","provisioned":true}`))
+		default:
+			t.Fatalf("unexpected current-Cloud binding request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	record, created, err := ensureWorkspaceForSetup(cloudCredentials{APIURL: server.URL, AccessToken: "cld_current"}, "demo", "")
+	if err != nil {
+		t.Fatalf("ensure current Cloud workspace: %v", err)
+	}
+	if created {
+		t.Fatal("current Cloud workspace was created instead of reused")
+	}
+	if record.ID != "cloud-current" || record.RelayWorkspaceID != "rw_current" {
+		t.Fatalf("reused workspace = %#v", record)
+	}
+	want := []string{"GET /api/v1/workspaces", "GET /api/v1/workspaces/cloud-current/resolve"}
+	if !slices.Equal(requests, want) {
+		t.Fatalf("current binding request order = %v, want %v", requests, want)
+	}
+}
+
+func TestEnsureWorkspaceForSetupCreatesWhenHostedBindingIsStale(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	stale := workspaceRecord{
+		Name:             "demo",
+		ID:               "cloud-stale",
+		RelayWorkspaceID: "rw_stale",
+		CreatedAt:        "2025-01-02T03:04:05Z",
+		CloudAPIURL:      "https://previous-session.test",
+	}
+	if err := saveWorkspaceCatalog(workspaceCatalog{Workspaces: []workspaceRecord{stale}}); err != nil {
+		t.Fatalf("save stale hosted catalog: %v", err)
+	}
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /api/v1/workspaces":
+			_, _ = w.Write([]byte(`{"workspaces":[{"id":"cloud-other","name":"other"}]}`))
+		case "POST /api/v1/workspaces":
+			_, _ = w.Write([]byte(`{"workspaceId":"cloud-new","relayfileUrl":"https://relayfile.test","createdAt":"2026-08-23T00:00:00Z","name":"demo"}`))
+		case "GET /api/v1/workspaces/cloud-new/resolve":
+			_, _ = w.Write([]byte(`{"cloudWorkspaceId":"cloud-new","relayfileWorkspaceId":"rw_new","provisioned":true}`))
+		default:
+			t.Fatalf("unexpected stale-binding request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	record, created, err := ensureWorkspaceForSetup(cloudCredentials{APIURL: server.URL, AccessToken: "cld_current"}, "demo", "")
+	if err != nil {
+		t.Fatalf("replace stale Cloud binding: %v", err)
+	}
+	if !created {
+		t.Fatal("stale Cloud binding was reused")
+	}
+	if record.ID != "cloud-new" || record.RelayWorkspaceID != "rw_new" {
+		t.Fatalf("created workspace = %#v", record)
+	}
+	want := []string{
+		"GET /api/v1/workspaces",
+		"POST /api/v1/workspaces",
+		"GET /api/v1/workspaces/cloud-new/resolve",
+	}
+	if !slices.Equal(requests, want) {
+		t.Fatalf("stale binding request order = %v, want %v", requests, want)
 	}
 }
 
@@ -4938,11 +5146,14 @@ func TestLoginCanProvisionSeparateWorkspaceForMessagingOnlyRelaycastWorkspace(t 
 	defer relaycast.Close()
 	t.Setenv("RELAYCAST_BASE_URL", relaycast.URL)
 
-	var createCalls, mintCalls int
+	var createCalls, listCalls, mintCalls int
 	var cloud *httptest.Server
 	cloud = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/workspaces":
+			listCalls++
+			_, _ = w.Write([]byte(`{"workspaces":[{"id":"rw_relayfile","name":"chat-only (Relayfile)"}]}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/workspaces":
 			createCalls++
 			var body map[string]any
@@ -5011,8 +5222,8 @@ exit 2
 	if err := run([]string{"login", "--no-open", "--provision-messaging-only"}, strings.NewReader(""), &stdout, &stdout); err != nil {
 		t.Fatalf("repeat local provisioning failed: %v\noutput:\n%s", err, stdout.String())
 	}
-	if createCalls != 1 || mintCalls != 2 {
-		t.Fatalf("repeat local provisioning calls create=%d mint=%d, want create=1 mint=2", createCalls, mintCalls)
+	if createCalls != 1 || listCalls != 1 || mintCalls != 2 {
+		t.Fatalf("repeat local provisioning calls create=%d list=%d mint=%d, want create=1 list=1 mint=2", createCalls, listCalls, mintCalls)
 	}
 }
 
@@ -8663,6 +8874,27 @@ func TestActiveCloudWorkspaceNameIgnoresSelfHostedNameCollision(t *testing.T) {
 	})
 	if got != "" {
 		t.Fatalf("self-hosted display-name collision selected Cloud workspace %q", got)
+	}
+}
+
+func TestActiveCloudWorkspaceNameUsesExactHostedRowAcrossNameCollision(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	if err := saveWorkspaceCatalog(workspaceCatalog{
+		Default: "demo",
+		Workspaces: []workspaceRecord{
+			{Name: "demo", ID: "self-hosted-demo", CreatedAt: time.Now().UTC().Format(time.RFC3339)},
+			{Name: "demo", ID: "cloud-demo", RelayWorkspaceID: "rw_cloud_demo", CreatedAt: time.Now().UTC().Format(time.RFC3339)},
+		},
+	}); err != nil {
+		t.Fatalf("save colliding catalog: %v", err)
+	}
+	got := activeCloudWorkspaceName([]cloudWorkspaceSummary{
+		{ID: "cloud-demo", Name: "demo"},
+		{ID: "cloud-other", Name: "other"},
+	})
+	if got != "demo" {
+		t.Fatalf("exact hosted catalog row selected Cloud workspace %q, want demo", got)
 	}
 }
 

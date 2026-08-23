@@ -2351,24 +2351,9 @@ Start activity questions from the digest surface before walking provider trees.
 `
 
 func ensureWorkspaceForSetup(cloud cloudCredentials, name, localDir string) (workspaceRecord, bool, error) {
-	if record, ok := workspaceRecordByName(name); ok {
-		if record.ID == "" {
-			record.ID = record.Name
-		}
-		if record.AgentName == "" {
-			record.AgentName = "relayfile-cli"
-		}
-		if len(record.Scopes) == 0 {
-			record.Scopes = append([]string(nil), defaultJoinScopes...)
-		}
-		if strings.TrimSpace(record.RelayWorkspaceID) == "" {
-			resolved, err := resolveCloudWorkspaceForRelayfile(cloud, record.ID)
-			if err != nil {
-				return workspaceRecord{}, false, err
-			}
-			record.ID = resolved.CloudWorkspaceID
-			record.RelayWorkspaceID = resolved.RelayfileWorkspaceID
-		}
+	if record, ok, err := currentCloudWorkspaceRecordForSetup(cloud, name); err != nil {
+		return workspaceRecord{}, false, err
+	} else if ok {
 		return record, false, nil
 	}
 	client, err := newAPIClient(cloud.APIURL, cloud.AccessToken)
@@ -2403,6 +2388,60 @@ func ensureWorkspaceForSetup(cloud cloudCredentials, name, localDir string) (wor
 	record.ID = resolved.CloudWorkspaceID
 	record.RelayWorkspaceID = resolved.RelayfileWorkspaceID
 	return record, true, nil
+}
+
+// currentCloudWorkspaceRecordForSetup only reuses a local record after the
+// current Cloud session confirms its exact Cloud workspace ID. The workspace
+// catalog is shared with self-hosted mode, so a display-name match alone is not
+// provenance: it may be a legitimate self-hosted row or a stale hosted binding
+// from another account. When there is no locally bound candidate, setup goes
+// straight to create and does not consult Cloud by the untrusted local ID.
+func currentCloudWorkspaceRecordForSetup(cloud cloudCredentials, name string) (workspaceRecord, bool, error) {
+	name = strings.TrimSpace(name)
+	catalog, err := loadWorkspaceCatalog()
+	if err != nil {
+		return workspaceRecord{}, false, err
+	}
+	candidates := make([]workspaceRecord, 0, 1)
+	for _, record := range catalog.Workspaces {
+		if record.Name != name && record.ID != name && record.RelayWorkspaceID != name {
+			continue
+		}
+		if strings.TrimSpace(record.ID) == "" || strings.TrimSpace(record.RelayWorkspaceID) == "" {
+			continue
+		}
+		candidates = append(candidates, record)
+	}
+	if len(candidates) == 0 {
+		return workspaceRecord{}, false, nil
+	}
+
+	workspaces, err := listCloudWorkspaces(cloud)
+	if err != nil {
+		return workspaceRecord{}, false, fmt.Errorf("verify the existing workspace against the current Cloud session: %w", err)
+	}
+	for _, record := range candidates {
+		for _, workspace := range workspaces {
+			if strings.TrimSpace(record.ID) != workspace.ID {
+				continue
+			}
+			resolved, err := resolveCloudWorkspaceForRelayfile(cloud, workspace.ID)
+			if err != nil {
+				return workspaceRecord{}, false, err
+			}
+			record.ID = resolved.CloudWorkspaceID
+			record.RelayWorkspaceID = resolved.RelayfileWorkspaceID
+			record.CloudAPIURL = strings.TrimRight(strings.TrimSpace(cloud.APIURL), "/")
+			if record.AgentName == "" {
+				record.AgentName = "relayfile-cli"
+			}
+			if len(record.Scopes) == 0 {
+				record.Scopes = append([]string(nil), defaultJoinScopes...)
+			}
+			return record, true, nil
+		}
+	}
+	return workspaceRecord{}, false, nil
 }
 
 func resolveCloudWorkspaceForRelayfile(cloud cloudCredentials, workspaceID string) (cloudWorkspaceResolveResponse, error) {
@@ -2639,7 +2678,6 @@ func persistDelegatedWorkspace(record workspaceRecord, bundle delegatedauth.Bund
 	}
 	record.Server = strings.TrimRight(bundle.ServerURL(), "/")
 	record.LocalDir = localDir
-	record.CloudAPIURL = ""
 	record.LastUsedAt = time.Now().UTC().Format(time.RFC3339)
 	if record.AgentName == "" {
 		record.AgentName = "relayfile-cli"
@@ -6605,7 +6643,10 @@ func activeCloudWorkspaceName(workspaces []cloudWorkspaceSummary) string {
 	}
 	if catalog, err := loadWorkspaceCatalog(); err == nil {
 		defaultName := strings.TrimSpace(catalog.Default)
-		if record, ok := workspaceRecordByName(defaultName); ok {
+		for _, record := range catalog.Workspaces {
+			if record.Name != defaultName {
+				continue
+			}
 			for _, workspace := range workspaces {
 				if record.ID == workspace.ID || record.RelayWorkspaceID == workspace.ID {
 					return workspace.Name
@@ -11453,18 +11494,35 @@ func upsertWorkspaceDetails(record workspaceRecord) (workspaceRecord, error) {
 	if err != nil {
 		return workspaceRecord{}, err
 	}
-	for i := range catalog.Workspaces {
-		current := catalog.Workspaces[i]
-		if current.Name == record.Name || (record.ID != "" && current.ID == record.ID) {
-			if record.CreatedAt == "" {
-				record.CreatedAt = current.CreatedAt
-			}
-			catalog.Workspaces[i] = mergeWorkspaceRecords(current, record)
-			if err := saveWorkspaceCatalog(catalog); err != nil {
-				return workspaceRecord{}, err
-			}
-			return catalog.Workspaces[i], nil
+	matchIndex := -1
+	for i, current := range catalog.Workspaces {
+		if (record.ID != "" && (current.ID == record.ID || current.RelayWorkspaceID == record.ID)) ||
+			(record.RelayWorkspaceID != "" && (current.ID == record.RelayWorkspaceID || current.RelayWorkspaceID == record.RelayWorkspaceID)) {
+			matchIndex = i
+			break
 		}
+	}
+	// A Cloud-sourced record has verified identity and must never replace a
+	// same-name self-hosted or stale hosted row. Non-Cloud callers retain the
+	// legacy name-based update behavior.
+	if matchIndex == -1 && record.CloudAPIURL == "" {
+		for i, current := range catalog.Workspaces {
+			if current.Name == record.Name {
+				matchIndex = i
+				break
+			}
+		}
+	}
+	if matchIndex >= 0 {
+		current := catalog.Workspaces[matchIndex]
+		if record.CreatedAt == "" {
+			record.CreatedAt = current.CreatedAt
+		}
+		catalog.Workspaces[matchIndex] = mergeWorkspaceRecords(current, record)
+		if err := saveWorkspaceCatalog(catalog); err != nil {
+			return workspaceRecord{}, err
+		}
+		return catalog.Workspaces[matchIndex], nil
 	}
 	catalog.Workspaces = append(catalog.Workspaces, record)
 	if strings.TrimSpace(catalog.Default) == "" {

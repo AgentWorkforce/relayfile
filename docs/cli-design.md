@@ -218,7 +218,9 @@ relayfile workspace create <name>
 
 **Behavior:**
 
-1. With the canonical hosted session, `POST /api/v1/workspaces` with
+1. With the canonical hosted session, reuse a stored hosted binding only when
+   `GET /api/v1/workspaces` confirms its exact Cloud workspace ID for the
+   current session. Otherwise, `POST /api/v1/workspaces` with
    `{ "name": "<name>" }`.
 2. Resolve the returned Cloud app workspace ID through
    `GET /api/v1/workspaces/{id}/resolve`. Relayfile data-plane and delegated
@@ -228,6 +230,11 @@ relayfile workspace create <name>
    the Cloud-ID ↔ Relayfile-ID mapping in `~/.relayfile/workspaces.json`.
 4. With only `~/.relayfile/credentials.json`, preserve the existing
    self-hosted/API-key compatibility behavior and leave that file unchanged.
+   The catalog is shared by both modes, so hosted setup never reuses a row by
+   display name alone. A stored hosted binding is reusable only when the
+   current Cloud session lists its exact Cloud workspace ID; otherwise the CLI
+   creates a new hosted workspace and leaves the self-hosted or stale row
+   untouched.
 
 **`~/.relayfile/workspaces.json`:**
 
