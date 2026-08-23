@@ -6605,9 +6605,11 @@ func activeCloudWorkspaceName(workspaces []cloudWorkspaceSummary) string {
 	}
 	if catalog, err := loadWorkspaceCatalog(); err == nil {
 		defaultName := strings.TrimSpace(catalog.Default)
-		for _, workspace := range workspaces {
-			if defaultName == workspace.ID || defaultName == workspace.Slug || defaultName == workspace.Name {
-				return workspace.Name
+		if record, ok := workspaceRecordByName(defaultName); ok {
+			for _, workspace := range workspaces {
+				if record.ID == workspace.ID || record.RelayWorkspaceID == workspace.ID {
+					return workspace.Name
+				}
 			}
 		}
 	}

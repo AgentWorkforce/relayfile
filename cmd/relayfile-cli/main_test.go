@@ -8644,6 +8644,28 @@ func TestWorkspaceCurrentUsesCanonicalCloudSessionForFreshUser(t *testing.T) {
 	}
 }
 
+func TestActiveCloudWorkspaceNameIgnoresSelfHostedNameCollision(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	if err := saveWorkspaceCatalog(workspaceCatalog{
+		Default: "demo",
+		Workspaces: []workspaceRecord{{
+			Name:      "demo",
+			ID:        "self-hosted-demo",
+			CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		}},
+	}); err != nil {
+		t.Fatalf("save self-hosted catalog: %v", err)
+	}
+	got := activeCloudWorkspaceName([]cloudWorkspaceSummary{
+		{ID: "cloud-demo", Name: "demo"},
+		{ID: "cloud-other", Name: "other"},
+	})
+	if got != "" {
+		t.Fatalf("self-hosted display-name collision selected Cloud workspace %q", got)
+	}
+}
+
 func TestWorkspaceCurrentPrefersAgentRelayActiveWorkspace(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
