@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -208,6 +209,31 @@ func parseBrowserFragment(t *testing.T, rawURL string) url.Values {
 		t.Fatalf("parse observer fragment failed: %v", err)
 	}
 	return fragment
+}
+
+func TestQuickStartUsesProjectNameGitHubAndLocalMountDefaults(t *testing.T) {
+	args := quickStartSetupArgsForDir(
+		filepath.Join(string(filepath.Separator), "workspaces", "acme-api"),
+		time.Date(2026, time.August, 23, 12, 0, 0, 0, time.UTC),
+	)
+	want := []string{
+		"--provider", "github",
+		"--workspace", "acme-api",
+		"--local-dir", "./relayfile-mount",
+	}
+	if !slices.Equal(args, want) {
+		t.Fatalf("quick-start args = %#v, want %#v", args, want)
+	}
+}
+
+func TestQuickStartFallsBackToTimestampedWorkspaceOutsideAProject(t *testing.T) {
+	args := quickStartSetupArgsForDir(
+		string(filepath.Separator),
+		time.Date(2026, time.August, 23, 12, 34, 56, 0, time.UTC),
+	)
+	if got, want := args[3], "relayfile-20260823-123456"; got != want {
+		t.Fatalf("fallback workspace = %q, want %q", got, want)
+	}
 }
 
 func TestHelpFlagPrintsUsageForCommandsAndSubcommands(t *testing.T) {

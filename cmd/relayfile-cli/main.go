@@ -601,7 +601,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return nil
 	}
 	if len(args) == 0 {
-		return runSetup(nil, stdin, stdout)
+		return runSetup(quickStartSetupArgs(), stdin, stdout)
 	}
 
 	switch args[0] {
@@ -662,6 +662,23 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	default:
 		printUsage(stderr)
 		return fmt.Errorf("unknown subcommand %q", args[0])
+	}
+}
+
+func quickStartSetupArgs() []string {
+	workingDir, _ := os.Getwd()
+	return quickStartSetupArgsForDir(workingDir, time.Now())
+}
+
+func quickStartSetupArgsForDir(workingDir string, now time.Time) []string {
+	workspaceName := "relayfile-" + now.UTC().Format("20060102-150405")
+	if base := strings.TrimSpace(filepath.Base(workingDir)); base != "" && base != "." && base != string(filepath.Separator) {
+		workspaceName = base
+	}
+	return []string{
+		"--provider", "github",
+		"--workspace", workspaceName,
+		"--local-dir", "./relayfile-mount",
 	}
 }
 
@@ -874,7 +891,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, `relayfile is the RelayFile CLI.
 
 Usage:
-  relayfile
+  relayfile                                             (hosted GitHub quickstart for the current project)
   relayfile setup [--provider PROVIDER] [--backend BACKEND] [--workspace NAME] [--local-dir DIR]
   relayfile login [--no-open] [--provision-messaging-only] [--api-key] [--server URL] [--token TOKEN]
   relayfile logout
@@ -1001,7 +1018,7 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 
 	fmt.Fprintln(stdout, "Relayfile setup. This signs you in, connects an integration, and prepares a local VFS mount.")
 
-	tokenSet, err := ensureCloudCredentials(cloudAPI, strings.TrimSpace(*cloudToken), *loginTimeout, !*noOpen, stdout)
+	tokenSet, err := ensureSetupCloudCredentials(cloudAPI, strings.TrimSpace(*cloudToken), *loginTimeout, !*noOpen, stdout)
 	if err != nil {
 		return err
 	}
@@ -1128,7 +1145,13 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 		return nil
 	}
 
-	fmt.Fprintf(stdout, "Starting VFS mount at %s\n", localDir)
+	fmt.Fprintf(stdout, "Starting VFS mount at %s\n", absLocalDir)
+	fmt.Fprintln(stdout, "Keep this terminal open while Relayfile syncs. In another terminal, start your agent and give it this prompt:")
+	if selectedProvider != "" && selectedProvider != "none" && selectedProvider != "skip" {
+		fmt.Fprintf(stdout, "  Use %s as the source of truth. Read LAYOUT.md first, then show me what needs attention.\n", filepath.Join(absLocalDir, selectedProvider))
+	} else {
+		fmt.Fprintf(stdout, "  Use %s as our shared workspace. Read LAYOUT.md first.\n", absLocalDir)
+	}
 	return runMount(mountArgs)
 }
 

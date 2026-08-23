@@ -12,7 +12,7 @@ The `relayfile` CLI is the primary interface for humans and CI systems to intera
 ### Design principles
 
 - **Minimal flags, sensible defaults.** The happy path should require as few arguments as possible.
-- **Canonical auth over local fallbacks.** Cloud login and active workspace selection are owned by `agent-relay cloud login` and the `@agent-relay/cloud` session. Explicit Relayfile tokens (`--token`, `RELAYFILE_TOKEN`, or self-hosted `relayfile login --api-key`) remain available for CI and self-hosted deployments.
+- **Canonical auth over local fallbacks.** Cloud login uses the shared `@agent-relay/cloud` session. `relayfile setup` can establish it directly on a clean machine, while Agent Relay commands can reuse it. Explicit Relayfile tokens (`--token`, `RELAYFILE_TOKEN`, or self-hosted `relayfile login --api-key`) remain available for CI and self-hosted deployments.
 - **Composable with pipes and scripts.** All commands emit structured JSON when `--json` is passed; human-readable tables otherwise.
 - **No implicit destructive actions.** Deletes require confirmation unless `--yes` is passed.
 
@@ -32,14 +32,14 @@ The `relayfile` CLI is the primary interface for humans and CI systems to intera
 ### Auth flow: Cloud-hosted
 
 ```
-agent-relay cloud login
-agent-relay workspace switch my-project
-relayfile mount
+npx relayfile@latest
 ```
 
-1. `agent-relay cloud login` writes the canonical cloud session in the relay SDK store.
-2. `agent-relay workspace switch <name>` selects the active relay workspace.
-3. `relayfile` commands resolve the cloud session without running any CLI, and
+1. Relayfile opens the hosted login and writes the canonical cloud session in
+   the shared relay SDK store.
+2. The quickstart creates a Cloud workspace named after the current directory,
+   connects GitHub, and mounts it at `./relayfile-mount`.
+3. Other `relayfile` commands resolve the cloud session without running any CLI, and
    call `agent-relay workspace active --json` for the canonical
    `relayfileWorkspaceId`. Session resolution order:
    - A `CLOUD_API_ACCESS_TOKEN` in the environment wins, together with
@@ -100,7 +100,7 @@ relayfile login --api-key --server https://api.relayfile.dev
 
 - `server` — base URL for all API calls. Default: `https://api.relayfile.dev`.
 - `token` — Bearer JWT or API key.
-- `refreshToken` / `expiresAt` — legacy fields. Cloud-hosted refresh is owned by `agent-relay`.
+- `refreshToken` / `expiresAt` — legacy fields. Cloud-hosted refresh uses the shared canonical Cloud session instead.
 - File permissions: `0600` (user-only read/write).
 
 ---
@@ -116,6 +116,10 @@ relayfile
 relayfile setup [--provider github] [--workspace my-project] [--local-dir ./relayfile-mount]
 ```
 
+With no arguments, `relayfile` supplies `github`, the current directory name,
+and `./relayfile-mount` automatically. The flag defaults below describe the
+explicit `relayfile setup` wizard.
+
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--cloud-api-url` | `https://agentrelay.com/cloud` | Relayfile Cloud API URL |
@@ -129,12 +133,14 @@ relayfile setup [--provider github] [--workspace my-project] [--local-dir ./rela
 
 **Behavior:**
 
-1. Ensure the user has run `agent-relay cloud login`; `relayfile setup` reads the canonical relay session instead of starting its own login flow.
+1. Read the canonical relay session. If none exists, start the localhost
+   browser callback and establish that same shared session directly.
 2. Read the Cloud access token from the canonical credential file
    `~/.agentworkforce/relay/cloud-auth.json` (or the `CLOUD_API_*`
    environment), refreshing it in place when it is inside its expiry window.
-3. Use `agent-relay workspace active --json` for the canonical workspace descriptor and `relayfileWorkspaceId`.
-4. Create/join the Cloud workspace when needed, minting Relayfile runtime credentials without persisting them as a second login.
+3. Create or reuse the named Cloud workspace directly; setup does not require
+   an installed `agent-relay` binary or a preselected Agent Relay workspace.
+4. Mint Relayfile runtime credentials without persisting them as a second login.
 5. Request a hosted Nango connect session for the selected integration and wait until the Cloud status endpoint reports it ready.
 6. Start the existing `relayfile mount` sync loop so the user and agent see ordinary files.
 

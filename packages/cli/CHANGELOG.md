@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased - Patch]
 
+### Added
+
+- `npx relayfile@latest` is now a true clean-machine Cloud quickstart. With no arguments it uses the current directory name for the workspace, connects GitHub, mounts at `./relayfile-mount`, and prints a ready-to-paste agent prompt. When no Cloud session exists, Relayfile completes the localhost browser login itself and writes the canonical shared session; a separately installed `agent-relay` CLI is no longer required for setup.
+
 ### Fixed
 
 - Mount bootstrap stalls now terminate the CLI daemon after the persisted retry limit, survive supervisor restarts without rereading already committed files, and surface as `mount: stalled` with the blocked path. Bootstrap progress uses the tree API's authoritative file total when safe, suppresses totals that include pruned runtime subtrees, and never renders a synthetic `/0` denominator.
