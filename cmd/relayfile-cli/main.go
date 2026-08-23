@@ -601,7 +601,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return nil
 	}
 	if len(args) == 0 {
-		return runSetup(quickStartSetupArgs(), stdin, stdout)
+		return runSetupWithOptions(
+			quickStartSetupArgs(),
+			stdin,
+			stdout,
+			setupRunOptions{preserveExistingLocalDir: true},
+		)
 	}
 
 	switch args[0] {
@@ -978,7 +983,15 @@ Subcommands:
   observer    Open the hosted file observer for a workspace`)
 }
 
+type setupRunOptions struct {
+	preserveExistingLocalDir bool
+}
+
 func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
+	return runSetupWithOptions(args, stdin, stdout, setupRunOptions{})
+}
+
+func runSetupWithOptions(args []string, stdin io.Reader, stdout io.Writer, options setupRunOptions) error {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	cloudAPIURL := fs.String("cloud-api-url", envOrDefault("RELAYFILE_CLOUD_API_URL", defaultCloudAPIURL), "Relayfile Cloud API URL")
@@ -1065,6 +1078,7 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 			localDir = "./relayfile-mount"
 		}
 	}
+	localDir = resolveSetupLocalDir(name, localDir, options.preserveExistingLocalDir)
 	absLocalDir, err := filepath.Abs(localDir)
 	if err != nil {
 		return err
@@ -1153,6 +1167,17 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 		fmt.Fprintf(stdout, "  Use %s as our shared workspace. Read LAYOUT.md first.\n", absLocalDir)
 	}
 	return runMount(mountArgs)
+}
+
+func resolveSetupLocalDir(workspaceName, requestedLocalDir string, preserveExisting bool) string {
+	if preserveExisting {
+		if existing, ok := workspaceRecordByName(workspaceName); ok {
+			if localDir := strings.TrimSpace(existing.LocalDir); localDir != "" {
+				return localDir
+			}
+		}
+	}
+	return requestedLocalDir
 }
 
 func setupAgentPromptPath(absLocalDir, provider string) string {

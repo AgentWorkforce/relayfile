@@ -29,7 +29,9 @@ mitigation. We do not paper over the difference.
 
 ### 1.1 Invocation forms
 
-The CLI **MUST** support these equivalent first-run forms:
+The CLI **MUST** support these first-run forms. Bare `relayfile` is the
+zero-prompt quickstart; explicit `relayfile setup` retains its prompt-driven
+defaults and flag overrides:
 
 ```
 relayfile
@@ -55,7 +57,7 @@ below are normative for `setup`; defaults are listed in parentheses.
 | `--login-timeout`   | `5m`                                   | OAuth callback timeout                                             |
 | `--connect-timeout` | `5m`                                   | Integration readiness timeout                                      |
 
-The bare `relayfile` quickstart supplies `github`, the current directory name,
+The bare `relayfile` quickstart supplies GitHub, the current directory name,
 and `./relayfile-mount` as explicit setup values. The prompt defaults above
 apply when a user invokes `relayfile setup` without those flags.
 

@@ -39,9 +39,10 @@ npx relayfile@latest
    the shared relay SDK store.
 2. The quickstart creates a Cloud workspace named after the current directory,
    connects GitHub, and mounts it at `./relayfile-mount`.
-3. Other `relayfile` commands resolve the cloud session without running any CLI, and
-   call `agent-relay workspace active --json` for the canonical
-   `relayfileWorkspaceId`. Session resolution order:
+3. `relayfile setup` establishes and resolves the shared Cloud session without
+   invoking `agent-relay`. Some other workspace-resolution paths still call
+   `agent-relay workspace active --json` for the canonical
+   `relayfileWorkspaceId`. Cloud session resolution itself uses this order:
    - A `CLOUD_API_ACCESS_TOKEN` in the environment wins, together with
      `CLOUD_API_URL`, `CLOUD_API_REFRESH_TOKEN`,
      `CLOUD_API_ACCESS_TOKEN_EXPIRES_AT` and

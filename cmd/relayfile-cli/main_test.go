@@ -247,6 +247,26 @@ func TestSetupAgentPromptUsesProviderMountRoot(t *testing.T) {
 	}
 }
 
+func TestQuickStartPreservesExistingWorkspaceMirror(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	existingDir := filepath.Join(t.TempDir(), "existing-mirror")
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:     "acme-api",
+		ID:       "ws_acme",
+		LocalDir: existingDir,
+	}); err != nil {
+		t.Fatalf("store existing workspace: %v", err)
+	}
+
+	if got := resolveSetupLocalDir("acme-api", "./relayfile-mount", true); got != existingDir {
+		t.Fatalf("quickstart local dir = %q, want existing %q", got, existingDir)
+	}
+	if got := resolveSetupLocalDir("acme-api", "./explicit-mount", false); got != "./explicit-mount" {
+		t.Fatalf("explicit setup local dir = %q, want caller value", got)
+	}
+}
+
 func TestHelpFlagPrintsUsageForCommandsAndSubcommands(t *testing.T) {
 	cases := []struct {
 		name string
