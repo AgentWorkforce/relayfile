@@ -582,6 +582,54 @@ func TestMountHandbackFailureRecoveryDistinguishesDefinitiveFromAmbiguous(t *tes
 		})
 	}
 
+	for _, tc := range []struct {
+		name       string
+		status     int
+		code       string
+		retryCount int
+	}{
+		{name: "bad-request", status: 400, code: "bad_request", retryCount: 1},
+		{name: "unauthorized", status: 401, code: "unauthorized", retryCount: 2},
+		{name: "forbidden", status: 403, code: "forbidden", retryCount: 2},
+		{name: "payload-too-large", status: 413, code: "payload_too_large", retryCount: 1},
+	} {
+		tc := tc
+		t.Run(tc.name+" after committed response loss stays stopped", func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			active, issued := checkpointTestActive(t)
+			receipt := consumedCheckpointTestReceipt(issued)
+			lease, ensureCalls, _ := installCheckpointLifecycleSeams(t, active, receipt)
+			committed := false
+			handbackCalls := 0
+			checkpointHandbackStopped = func(context.Context, checkpointMountConfig, mountsync.CheckpointSeal, string, string) (mountsync.CheckpointSealOwnership, mountsync.CheckpointVerificationHealth, error) {
+				handbackCalls++
+				committed = true
+				return mountsync.CheckpointSealOwnership{}, mountsync.CheckpointVerificationHealth{}, &mountsync.HTTPError{
+					StatusCode: tc.status,
+					Code:       tc.code,
+					Message:    "retry response received after the original POST committed",
+				}
+			}
+			handbackID := "handback-postcommit-" + tc.name
+			payload, _ := json.Marshal(checkpointHandbackInput{HandbackID: handbackID, ConsumerIdempotencyKey: "cutover-postcommit-" + tc.name, Receipt: receipt})
+			args := []string{"--root", active.config.LocalRoot, "--json"}
+			for attempt := 0; attempt < tc.retryCount; attempt++ {
+				var output bytes.Buffer
+				err := runMountHandbackSeal(args, bytes.NewReader(payload), &output)
+				if checkpointExitCode(err) != 4 || !strings.Contains(err.Error(), "handback_result_unknown") || output.Len() != 0 || *ensureCalls != 0 || !committed {
+					t.Fatalf("attempt %d err=%v output=%q restart=%d committed=%v", attempt+1, err, output.String(), *ensureCalls, committed)
+				}
+				state, ok, loadErr := loadCheckpointHandbackIfExists(handbackID)
+				if loadErr != nil || !ok || state.Status != "handback-unknown" || state.Result != nil {
+					t.Fatalf("attempt %d lifecycle=%+v ok=%v err=%v", attempt+1, state, ok, loadErr)
+				}
+			}
+			if !lease.released || handbackCalls != tc.retryCount {
+				t.Fatalf("lease=%v handbackCalls=%d want=%d", lease.released, handbackCalls, tc.retryCount)
+			}
+		})
+	}
+
 	t.Run("503 after application commit stays stopped and exact retry recovers proof", func(t *testing.T) {
 		t.Setenv("HOME", t.TempDir())
 		active, issued := checkpointTestActive(t)
@@ -634,11 +682,7 @@ func TestMountHandbackFailureRecoveryDistinguishesDefinitiveFromAmbiguous(t *tes
 
 func TestCheckpointHandbackHTTPFailureClassification(t *testing.T) {
 	for _, httpErr := range []*mountsync.HTTPError{
-		{StatusCode: 400, Code: "bad_request"},
-		{StatusCode: 401, Code: "unauthorized"},
-		{StatusCode: 403, Code: "forbidden"},
 		{StatusCode: 409, Code: "checkpoint_diverged"},
-		{StatusCode: 413, Code: "payload_too_large"},
 	} {
 		if !definitiveCheckpointHandbackHTTPFailure(httpErr) {
 			t.Errorf("HTTP %d/%s should be definitive", httpErr.StatusCode, httpErr.Code)
@@ -646,7 +690,10 @@ func TestCheckpointHandbackHTTPFailureClassification(t *testing.T) {
 	}
 	for _, httpErr := range []*mountsync.HTTPError{
 		{StatusCode: 0},
+		{StatusCode: 400, Code: "bad_request"},
 		{StatusCode: 400, Code: "gateway_bad_request"},
+		{StatusCode: 401, Code: "unauthorized"},
+		{StatusCode: 403, Code: "forbidden"},
 		{StatusCode: 404, Code: "checkpoint_seal_not_found"},
 		{StatusCode: 404, Code: "not_found"},
 		{StatusCode: 409, Code: "conflict"},
@@ -656,6 +703,7 @@ func TestCheckpointHandbackHTTPFailureClassification(t *testing.T) {
 		{StatusCode: 408, Code: "request_timeout"},
 		{StatusCode: 425, Code: "too_early"},
 		{StatusCode: 429, Code: "rate_limited"},
+		{StatusCode: 413, Code: "payload_too_large"},
 		{StatusCode: 500, Code: "internal_error"},
 		{StatusCode: 502, Code: "bad_gateway"},
 		{StatusCode: 503, Code: "upstream_unavailable"},
@@ -761,7 +809,13 @@ func TestStopCheckpointMountSignalsRealProcessAndWaitsForLease(t *testing.T) {
 	root := t.TempDir()
 	server := "https://relayfile.stop.test"
 	workspace := "ws_stop_real"
+	readyReader, readyWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readyReader.Close()
 	cmd := exec.Command(os.Args[0], "-test.run=TestCheckpointLifecycleHelperProcess")
+	cmd.ExtraFiles = []*os.File{readyWriter}
 	cmd.Env = append(os.Environ(),
 		"RELAYFILE_CHECKPOINT_HELPER=1",
 		"RELAYFILE_CHECKPOINT_HELPER_SERVER="+server,
@@ -769,23 +823,29 @@ func TestStopCheckpointMountSignalsRealProcessAndWaitsForLease(t *testing.T) {
 		"RELAYFILE_CHECKPOINT_HELPER_ROOT="+root,
 	)
 	if err := cmd.Start(); err != nil {
+		_ = readyWriter.Close()
 		t.Fatal(err)
 	}
+	_ = readyWriter.Close()
+	defer func() {
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+		}
+	}()
 	waited := make(chan error, 1)
 	go func() { waited <- cmd.Wait() }()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		lease, err := mountlease.Acquire(server, workspace, root)
-		if errors.Is(err, mountlease.ErrHeld) {
-			break
-		}
+	if err := readyReader.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	ready := make([]byte, 1)
+	if n, err := readyReader.Read(ready); err != nil || n != 1 || ready[0] != 1 {
+		t.Fatalf("helper readiness n=%d byte=%v err=%v", n, ready, err)
+	}
+	if lease, err := mountlease.Acquire(server, workspace, root); !errors.Is(err, mountlease.ErrHeld) {
 		if err == nil {
 			_ = lease.Release()
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("helper never acquired mount lease")
-		}
-		time.Sleep(20 * time.Millisecond)
+		t.Fatalf("helper signaled ready without holding mount lease: %v", err)
 	}
 	active := activeCheckpointMount{pid: daemonPIDState{PID: cmd.Process.Pid}, config: checkpointMountConfig{Server: server, WorkspaceID: workspace, LocalRoot: root}}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -804,6 +864,9 @@ func TestCheckpointLifecycleHelperProcess(t *testing.T) {
 	if os.Getenv("RELAYFILE_CHECKPOINT_HELPER") != "1" {
 		return
 	}
+	signals := make(chan os.Signal, 1)
+	signalNotify(signals)
+	defer signal.Stop(signals)
 	lease, err := mountlease.Acquire(
 		os.Getenv("RELAYFILE_CHECKPOINT_HELPER_SERVER"),
 		os.Getenv("RELAYFILE_CHECKPOINT_HELPER_WORKSPACE"),
@@ -812,8 +875,17 @@ func TestCheckpointLifecycleHelperProcess(t *testing.T) {
 	if err != nil {
 		os.Exit(41)
 	}
-	signals := make(chan os.Signal, 1)
-	signalNotify(signals)
+	readyWriter := os.NewFile(uintptr(3), "checkpoint-helper-ready")
+	if readyWriter == nil {
+		_ = lease.Release()
+		os.Exit(42)
+	}
+	if _, err := readyWriter.Write([]byte{1}); err != nil {
+		_ = readyWriter.Close()
+		_ = lease.Release()
+		os.Exit(43)
+	}
+	_ = readyWriter.Close()
 	<-signals
 	_ = lease.Release()
 }

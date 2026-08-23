@@ -309,6 +309,12 @@ describe("default mount launcher", () => {
       })
       await instance.ready
 
+      await expect(instance.checkpointAndSeal?.({
+        sessionId: "",
+        generation: 7
+      })).rejects.toMatchObject({ code: "checkpoint_seal_invalid_input" })
+      expect(daemon.killSignals).toEqual([])
+
       const seal = await instance.checkpointAndSeal?.({
         sessionId: "session-123",
         generation: 7,
@@ -359,6 +365,40 @@ describe("default mount launcher", () => {
         sessionId: "session-123",
         generation: 7
       })).rejects.toMatchObject({ code: "checkpoint_seal_mode_unavailable" })
+      expect(instance.stopped).toBe(false)
+      expect(daemon.killSignals).toEqual([])
+      expect(spawnImpl).toHaveBeenCalledTimes(1)
+      await instance.stop()
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("rejects pull-only checkpoints before stopping the source", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-default-launcher-checkpoint-pull-only-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const daemon = new FakeChildProcess()
+    const spawnImpl = vi.fn().mockReturnValue(daemon as never)
+    const launcher = createDefaultMountLauncher({ spawnImpl })
+
+    try {
+      await writeReadyState(localDir)
+      const instance = await launcher.start({
+        env: {
+          ...createMountEnv(localDir),
+          RELAYFILE_MOUNT_SYNC_MODE: "pull-only"
+        },
+        readyTimeoutMs: 50
+      })
+      await instance.ready
+
+      await expect(instance.checkpointAndSeal?.({
+        sessionId: "session-123",
+        generation: 7
+      })).rejects.toMatchObject({ code: "checkpoint_seal_mode_unavailable" })
+      expect(instance.stopped).toBe(false)
       expect(daemon.killSignals).toEqual([])
       expect(spawnImpl).toHaveBeenCalledTimes(1)
       await instance.stop()

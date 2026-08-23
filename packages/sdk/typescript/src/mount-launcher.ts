@@ -185,6 +185,10 @@ class RelayfileMountProcessInstance implements MountLauncherInstance {
   private readyResolved = false
   private checkpointPromise?: Promise<CheckpointSeal>
 
+  get stopped(): boolean {
+    return this.exited
+  }
+
   constructor(input: {
     child: ChildProcess
     logStream: NodeJS.WritableStream
@@ -245,13 +249,14 @@ class RelayfileMountProcessInstance implements MountLauncherInstance {
   }
 
   async checkpointAndSeal(input: CheckpointAndSealInput): Promise<CheckpointSeal> {
+    this.validateCheckpointPreconditions(input)
     if (!this.checkpointPromise) {
       this.checkpointPromise = this.performCheckpointAndSeal(input)
     }
     return this.checkpointPromise
   }
 
-  private async performCheckpointAndSeal(input: CheckpointAndSealInput): Promise<CheckpointSeal> {
+  private validateCheckpointPreconditions(input: CheckpointAndSealInput): void {
     validateCheckpointInput(input)
     if (normalizeMountMode(this.input.env.RELAYFILE_MOUNT_MODE) !== "poll") {
       throw new RelayfileSetupError(
@@ -265,6 +270,9 @@ class RelayfileMountProcessInstance implements MountLauncherInstance {
         "checkpoint_seal_mode_unavailable"
       )
     }
+  }
+
+  private async performCheckpointAndSeal(input: CheckpointAndSealInput): Promise<CheckpointSeal> {
     await this.ready
     await this.stop()
     return runCheckpointSealProcess({

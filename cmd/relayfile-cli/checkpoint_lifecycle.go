@@ -782,23 +782,12 @@ func definitiveCheckpointHandbackHTTPFailure(err error) bool {
 		return false
 	}
 	code := strings.TrimSpace(httpErr.Code)
-	switch {
-	case httpErr.StatusCode == 400 && code == "bad_request":
-		return true
-	case httpErr.StatusCode == 401 && code == "unauthorized":
-		return true
-	case httpErr.StatusCode == 403 && code == "forbidden":
-		return true
-	case httpErr.StatusCode == 409 && code == "checkpoint_diverged":
-		return true
-	case httpErr.StatusCode == 413 && code == "payload_too_large":
-		return true
-	default:
-		// Not-found can follow source-resume/GC; handback/replay/resume conflicts
-		// can mean ownership already moved. Unknown/gateway 4xx, retry-class
-		// 408/425/429, transport failures, and every 5xx are likewise ambiguous.
-		return false
-	}
+	// checkpoint_diverged is emitted by the authoritative store while it still
+	// owns the mutation lock and before ownership can be released. Authentication,
+	// request-shape/size, gateway, and generic HTTP responses can instead be the
+	// exhausted retry observed after an earlier POST committed but lost its
+	// response, so none of those responses is safe evidence for restart.
+	return httpErr.StatusCode == 409 && code == "checkpoint_diverged"
 }
 
 func continueStoppedDestinationVerification(state checkpointVerificationLifecycle, timeout time.Duration, stdout io.Writer) error {

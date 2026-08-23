@@ -78,6 +78,17 @@ const DEFAULT_MOUNT_SYNC_MODE: MountSyncMode = "mirror"
 const DEFAULT_MOUNT_HEALTH_INTERVAL_MS = 30_000
 const DEFAULT_MOUNT_REFRESH_RETRY_BASE_MS = 1_000
 const DEFAULT_MOUNT_REFRESH_RETRY_MAX_MS = 60_000
+const confirmedMountStop = Symbol("confirmedMountStop")
+
+interface ConfirmedMountStopHandle {
+  [confirmedMountStop](): boolean
+}
+
+function hasConfirmedMountStop(handle: MountedWorkspaceHandle): boolean {
+  const candidate = handle as MountedWorkspaceHandle &
+    Partial<ConfirmedMountStopHandle>
+  return candidate[confirmedMountStop]?.() === true
+}
 const TOKEN_REFRESH_AGE_MS = 55 * 60 * 1000
 
 const nodeOnlyMountLauncher: MountLauncher = {
@@ -1158,6 +1169,7 @@ class MountedWorkspaceHandleImpl implements MountedWorkspaceHandle {
   private readySnapshot = true
   private stopPromise?: Promise<void>
   private checkpointPromise?: Promise<CheckpointSeal>
+  private checkpointStopped = false
 
   constructor(input: {
     mountSession: MountSessionResult
@@ -1225,16 +1237,38 @@ class MountedWorkspaceHandleImpl implements MountedWorkspaceHandle {
 
   async checkpointAndSeal(input: CheckpointAndSealInput): Promise<CheckpointSeal> {
     if (!this.checkpointPromise) {
-      this.readySnapshot = false
       if (this.probeOnly || !this.launcherInstance?.checkpointAndSeal) {
         throw new RelayfileSetupError(
           "checkpointAndSeal requires a locally managed relayfile-mount launcher.",
           "checkpoint_seal_unavailable"
         )
       }
-      this.checkpointPromise = this.launcherInstance.checkpointAndSeal(input)
+      this.checkpointPromise = this.performCheckpointAndSeal(input)
     }
     return this.checkpointPromise
+  }
+
+  [confirmedMountStop](): boolean {
+    return this.checkpointStopped
+  }
+
+  private async performCheckpointAndSeal(input: CheckpointAndSealInput): Promise<CheckpointSeal> {
+    try {
+      const seal = await this.launcherInstance!.checkpointAndSeal!(input)
+      this.checkpointStopped = true
+      this.readySnapshot = false
+      return seal
+    } catch (error) {
+      if (this.launcherInstance?.stopped === true) {
+        this.checkpointStopped = true
+        this.readySnapshot = false
+      } else {
+        // A launcher precondition can reject before touching the daemon. Keep
+        // both readiness and retryability when no physical stop was confirmed.
+        this.checkpointPromise = undefined
+      }
+      throw error
+    }
   }
 
   private async performStop(): Promise<void> {
@@ -1299,7 +1333,9 @@ class SharedMountedWorkspaceHandle implements MountedWorkspaceHandle {
     try {
       return await this.mounted.checkpointAndSeal(input)
     } finally {
-      this.onStopped()
+      if (hasConfirmedMountStop(this.mounted)) {
+        this.onStopped()
+      }
     }
   }
 
@@ -1404,13 +1440,37 @@ class SupervisedMountedWorkspaceHandle implements MountedWorkspaceHandle {
   }
 
   async checkpointAndSeal(input: CheckpointAndSealInput): Promise<CheckpointSeal> {
+    this.supervisorReady = false
+    if (this.timer) clearTimeout(this.timer)
+    this.timer = undefined
+    await this.refreshPromise?.catch(() => {})
+    try {
+      const seal = await this.mounted.checkpointAndSeal(input)
+      this.retireAfterCheckpointStop()
+      return seal
+    } catch (error) {
+      if (hasConfirmedMountStop(this.mounted)) {
+        this.retireAfterCheckpointStop()
+      } else {
+        // Validation/mode failures occur before the daemon is stopped. Restore
+        // the supervisor and leave the shared ensured handle reusable.
+        this.supervisorReady = this.mounted.ready
+        this.schedule()
+      }
+      throw error
+    }
+  }
+
+  [confirmedMountStop](): boolean {
+    return this.stopped && hasConfirmedMountStop(this.mounted)
+  }
+
+  private retireAfterCheckpointStop(): void {
     this.stopped = true
     this.supervisorReady = false
     this.signal?.removeEventListener("abort", this.handleAbort)
     if (this.timer) clearTimeout(this.timer)
     this.timer = undefined
-    await this.refreshPromise?.catch(() => {})
-    return this.mounted.checkpointAndSeal(input)
   }
 
   private async performStop(): Promise<void> {

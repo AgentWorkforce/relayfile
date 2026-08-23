@@ -211,6 +211,8 @@ export interface MountLauncherStart {
 
 export interface MountLauncherInstance {
   pid?: number
+  /** True only after the owned daemon process is confirmed stopped. */
+  readonly stopped?: boolean
   ready: Promise<void>
   status(): Promise<MountedWorkspaceStatus>
   checkpointAndSeal?(input: CheckpointAndSealInput): Promise<CheckpointSeal>

@@ -50,6 +50,24 @@ type LocalChange struct {
 	Op           fsnotify.Op
 }
 
+type localChangeTimer interface {
+	Stop() bool
+	Reset(time.Duration) bool
+}
+
+type localChangeClock interface {
+	Now() time.Time
+	AfterFunc(time.Duration, func()) localChangeTimer
+}
+
+type realtimeLocalChangeClock struct{}
+
+func (realtimeLocalChangeClock) Now() time.Time { return time.Now() }
+
+func (realtimeLocalChangeClock) AfterFunc(delay time.Duration, callback func()) localChangeTimer {
+	return time.AfterFunc(delay, callback)
+}
+
 // LocalChangeBatcher collapses the near-simultaneous per-path callbacks emitted
 // by FileWatcher into one ordered batch. The per-file debounce has already let
 // editor rename/write/chmod sequences settle; this short cross-file window is
@@ -59,8 +77,9 @@ type LocalChangeBatcher struct {
 	window  time.Duration
 	maxWait time.Duration
 	onBatch func([]LocalChange)
+	clock   localChangeClock
 	pending map[string]LocalChange
-	timer   *time.Timer
+	timer   localChangeTimer
 	started time.Time
 	lastAdd time.Time
 	closed  bool
@@ -68,13 +87,21 @@ type LocalChangeBatcher struct {
 }
 
 func NewLocalChangeBatcher(window time.Duration, onBatch func([]LocalChange)) *LocalChangeBatcher {
+	return newLocalChangeBatcherWithClock(window, onBatch, realtimeLocalChangeClock{})
+}
+
+func newLocalChangeBatcherWithClock(window time.Duration, onBatch func([]LocalChange), clock localChangeClock) *LocalChangeBatcher {
 	if window <= 0 {
 		window = defaultLocalChangeBatchWindow
+	}
+	if clock == nil {
+		clock = realtimeLocalChangeClock{}
 	}
 	return &LocalChangeBatcher{
 		window:  window,
 		maxWait: 10 * window,
 		onBatch: onBatch,
+		clock:   clock,
 		pending: make(map[string]LocalChange),
 	}
 }
@@ -96,7 +123,7 @@ func (b *LocalChangeBatcher) Add(relativePath string, op fsnotify.Op) {
 	change.RelativePath = relativePath
 	change.Op |= op
 	b.pending[relativePath] = change
-	now := time.Now()
+	now := b.clock.Now()
 	b.lastAdd = now
 	if b.timer != nil {
 		// Flush after one quiet window so callbacks spread across a multi-file
@@ -115,7 +142,7 @@ func (b *LocalChangeBatcher) Add(relativePath string, op fsnotify.Op) {
 	}
 	b.wg.Add(1)
 	b.started = now
-	b.timer = time.AfterFunc(b.window, b.flush)
+	b.timer = b.clock.AfterFunc(b.window, b.flush)
 }
 
 func (b *LocalChangeBatcher) flush() {
@@ -128,7 +155,7 @@ func (b *LocalChangeBatcher) flush() {
 		return
 	}
 	if !b.closed && len(b.pending) > 0 {
-		if delay := b.nextFlushDelayLocked(time.Now()); delay > 0 {
+		if delay := b.nextFlushDelayLocked(b.clock.Now()); delay > 0 {
 			b.timer.Reset(delay)
 			b.mu.Unlock()
 			return
