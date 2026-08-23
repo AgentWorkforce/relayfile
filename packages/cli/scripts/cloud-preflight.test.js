@@ -215,6 +215,43 @@ test("pseudo-help values never start SDK auth", async () => {
   }
 });
 
+test("native help short-circuits even when it occupies a setup value slot", async () => {
+  let calls = 0;
+  const prepared = await prepareCloudSession(
+    ["setup", "--provider", "--help"],
+    {},
+    {
+      ensureCloudSession: async () => {
+        calls += 1;
+      },
+    },
+  );
+  assert.equal(prepared, false);
+  assert.equal(calls, 0);
+});
+
+test("version only bypasses auth when the native CLI treats it as version", async () => {
+  assert.equal(shouldPrepareCloudSession(["--version"], {}), false);
+  assert.equal(shouldPrepareCloudSession(["version"], {}), false);
+  assert.equal(
+    shouldPrepareCloudSession(["setup", "--local-dir", "--version"], {}),
+    true,
+  );
+
+  let calls = 0;
+  const prepared = await prepareCloudSession(
+    ["setup", "--local-dir", "--version"],
+    {},
+    {
+      ensureCloudSession: async () => {
+        calls += 1;
+      },
+    },
+  );
+  assert.equal(prepared, true);
+  assert.equal(calls, 1);
+});
+
 test("dash-prefixed values follow the native setup grammar", async () => {
   const args = ["setup", "--local-dir", "-mirror"];
   assert.equal(hasValidSetupArguments(args), true);

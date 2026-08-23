@@ -57,8 +57,14 @@ const VALID_INTEGRATION_BACKENDS = new Set([
   "composio",
 ]);
 
-function hasFlag(args, name) {
-  return args.some((arg) => arg === name || arg.startsWith(`${name}=`));
+function wantsNativeVersion(args) {
+  return (
+    args.length === 1 && (args[0] === "--version" || args[0] === "version")
+  );
+}
+
+function wantsNativeHelp(args) {
+  return args.some((arg) => arg === "--help" || arg === "-h");
 }
 
 function parseGoDurationMilliseconds(value) {
@@ -182,10 +188,7 @@ function shouldPrepareCloudSession(args, env) {
   if (!setupCommand) {
     return false;
   }
-  if (
-    hasFlag(args, "--version") ||
-    args[0] === "version"
-  ) {
+  if (wantsNativeVersion(args) || wantsNativeHelp(args)) {
     return false;
   }
   const parsed = parseSetupArguments(args);
@@ -236,13 +239,11 @@ function loadCloudSessionSDK() {
 
 async function prepareCloudSession(args, env = process.env, dependencies = {}) {
   const setupCommand = args.length === 0 || args[0] === "setup";
-  const skipsValidation =
-    hasFlag(args, "--help") ||
-    hasFlag(args, "-h") ||
-    hasFlag(args, "--version") ||
-    args[0] === "version";
+  if (wantsNativeVersion(args) || wantsNativeHelp(args)) {
+    return false;
+  }
   const parsed =
-    setupCommand && !skipsValidation ? parseSetupArguments(args) : null;
+    setupCommand ? parseSetupArguments(args) : null;
   if (parsed && !parsed.valid) {
     throw new Error(parsed.error);
   }
