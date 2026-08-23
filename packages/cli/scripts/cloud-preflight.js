@@ -262,6 +262,7 @@ async function prepareCloudSession(args, env = process.env, dependencies = {}) {
     await Promise.race([
       ensureCloudSession({
         apiUrl,
+        client: "relayfile",
         interactive: true,
         device: parsed.values.get("no-open") === true,
         refreshTimeoutMs: Math.max(

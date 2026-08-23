@@ -48,6 +48,7 @@ test("bare relayfile prepares Cloud auth through the Agent Relay SDK", async () 
   assert.deepEqual(calls, [
     {
       apiUrl: "https://agentrelay.com/cloud",
+      client: "relayfile",
       interactive: true,
       device: false,
       refreshTimeoutMs: 10000,
@@ -84,11 +85,24 @@ test("setup forwards its Cloud URL and no-open mode to the SDK", async () => {
 
   assert.deepEqual(received, {
     apiUrl: "https://staging.example/cloud",
+    client: "relayfile",
     interactive: true,
     device: true,
     refreshTimeoutMs: 10000,
   });
   assert.deepEqual(env, {});
+});
+
+test("bundled SDK carries the Relayfile marker through both login modes", () => {
+  const bundledSdk = fs.readFileSync(
+    path.join(__dirname, "cloud-auth.cjs"),
+    "utf8",
+  );
+  assert.match(
+    bundledSdk,
+    /loginUrl\.searchParams\.set\("client", options\.client\)/,
+  );
+  assert.match(bundledSdk, /clientName: options\.client/);
 });
 
 test("help and caller-owned tokens do not start interactive auth", () => {

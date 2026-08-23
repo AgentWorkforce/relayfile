@@ -901,7 +901,7 @@ function redirectToHostedCliAuthPage(response, apiUrl, options) {
   response.setHeader("location", resultUrl.toString());
   response.end();
 }
-async function beginBrowserLogin(apiUrl) {
+async function beginBrowserLogin(apiUrl, options = {}) {
   const state = (0, import_node_crypto.randomUUID)();
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -979,6 +979,9 @@ async function beginBrowserLogin(apiUrl) {
       const loginUrl = buildApiUrl(apiUrl, "/api/v1/cli/login");
       loginUrl.searchParams.set("redirect_uri", callbackUrl.toString());
       loginUrl.searchParams.set("state", state);
+      if (options.client) {
+        loginUrl.searchParams.set("client", options.client);
+      }
       console.log(`Opening browser for cloud login: ${loginUrl.toString()}`);
       console.log("If the browser does not open, paste this URL into your browser.");
       try {
@@ -1053,8 +1056,8 @@ async function completeLogin(auth) {
   }
   return auth;
 }
-async function loginWithBrowser(apiUrl) {
-  return completeLogin(await beginBrowserLogin(apiUrl));
+async function loginWithBrowser(apiUrl, options = {}) {
+  return completeLogin(await beginBrowserLogin(apiUrl, options));
 }
 async function loginWithDevice(apiUrl, options = {}) {
   return completeLogin(await runDeviceAuthorizationFlow(apiUrl, options));
@@ -1062,9 +1065,13 @@ async function loginWithDevice(apiUrl, options = {}) {
 async function loginInteractive(apiUrl, options = {}) {
   const env = options.env ?? process.env;
   if (options.device === true || isHeadlessEnvironment(env)) {
-    return loginWithDevice(apiUrl);
+    return loginWithDevice(apiUrl, {
+      ...options.client ? { clientName: options.client } : {}
+    });
   }
-  return loginWithBrowser(apiUrl);
+  return loginWithBrowser(apiUrl, {
+    ...options.client ? { client: options.client } : {}
+  });
 }
 async function ensureCloudSession(options = {}) {
   const env = options.env ?? process.env;
@@ -1079,7 +1086,11 @@ async function ensureCloudSession(options = {}) {
         isHeadlessEnvironment(env) ? "Cloud login required. Run `agent-relay cloud login --device`." : "Cloud login required. Run `agent-relay login`."
       );
     }
-    const auth = await loginInteractive(apiUrl, { device: options.device, env });
+    const auth = await loginInteractive(apiUrl, {
+      device: options.device,
+      env,
+      client: options.client
+    });
     return createCloudSession(auth, { refreshTimeoutMs });
   }
   if (!shouldRefreshStoredAuth(stored)) {
@@ -1095,7 +1106,11 @@ async function ensureCloudSession(options = {}) {
     if (!interactive) {
       throw error;
     }
-    const auth = await loginInteractive(stored.apiUrl, { device: options.device, env });
+    const auth = await loginInteractive(stored.apiUrl, {
+      device: options.device,
+      env,
+      client: options.client
+    });
     return createCloudSession(auth, { refreshTimeoutMs });
   }
 }
