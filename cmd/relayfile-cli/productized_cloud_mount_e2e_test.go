@@ -618,6 +618,12 @@ func (m *productizedCloudMock) serveHTTP(w http.ResponseWriter, r *http.Request)
 	switch {
 	case r.URL.Path == "/api/v1/workspaces" && r.Method == http.MethodPost:
 		m.serveCreateWorkspace(w, r)
+	case r.URL.Path == "/api/v1/workspaces/"+m.workspaceID+"/resolve" && r.Method == http.MethodGet:
+		writeMockJSON(w, http.StatusOK, cloudWorkspaceResolveResponse{
+			CloudWorkspaceID:     m.workspaceID,
+			RelayfileWorkspaceID: m.workspaceID,
+			Provisioned:          true,
+		})
 	case r.URL.Path == "/v1/tokens/refresh" && r.Method == http.MethodPost:
 		m.serveRefreshToken(w, r)
 	case strings.HasSuffix(r.URL.Path, "/relayfile/delegated-token") && r.Method == http.MethodPost:

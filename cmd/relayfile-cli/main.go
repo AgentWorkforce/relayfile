@@ -329,6 +329,22 @@ type cloudWorkspaceCreateResponse struct {
 	Name         string `json:"name,omitempty"`
 }
 
+type cloudWorkspaceResolveResponse struct {
+	CloudWorkspaceID     string `json:"cloudWorkspaceId"`
+	RelayfileWorkspaceID string `json:"relayfileWorkspaceId"`
+	Provisioned          bool   `json:"provisioned"`
+}
+
+type cloudWorkspaceSummary struct {
+	ID   string `json:"id"`
+	Slug string `json:"slug,omitempty"`
+	Name string `json:"name,omitempty"`
+}
+
+type cloudWorkspaceListResponse struct {
+	Workspaces []cloudWorkspaceSummary `json:"workspaces"`
+}
+
 type cloudRelayfileDelegatedTokenRequest struct {
 	AgentName string   `json:"agentName,omitempty"`
 	Scopes    []string `json:"scopes,omitempty"`
@@ -1102,7 +1118,8 @@ func runSetupWithOptions(args []string, stdin io.Reader, stdout io.Writer, optio
 	}
 
 	controlToken := tokenSet.AccessToken
-	delegated, err := delegatedRelayfileTokenViaCloud(tokenSet, record.ID, record.AgentName, record.Scopes)
+	relayWorkspaceID := firstNonEmpty(record.RelayWorkspaceID, record.ID)
+	delegated, err := delegatedRelayfileTokenViaCloud(tokenSet, relayWorkspaceID, record.AgentName, record.Scopes)
 	if err != nil {
 		return err
 	}
@@ -1796,6 +1813,11 @@ func mapDelegatedTokenCloudError(err error) error {
 		return fmt.Errorf("mint delegated relayfile credentials: %w", err)
 	}
 	switch ae.Code {
+	case "workspace_not_found":
+		return fmt.Errorf(
+			"mint delegated relayfile credentials: the workspace is not provisioned for Relayfile; complete the workspace create and resolve steps before minting: %w",
+			err,
+		)
 	case "needs_reauth":
 		return fmt.Errorf("%w: %s", ErrCloudRefreshExpired, ae.Message)
 	case "scope_insufficient":
@@ -2339,6 +2361,14 @@ func ensureWorkspaceForSetup(cloud cloudCredentials, name, localDir string) (wor
 		if len(record.Scopes) == 0 {
 			record.Scopes = append([]string(nil), defaultJoinScopes...)
 		}
+		if strings.TrimSpace(record.RelayWorkspaceID) == "" {
+			resolved, err := resolveCloudWorkspaceForRelayfile(cloud, record.ID)
+			if err != nil {
+				return workspaceRecord{}, false, err
+			}
+			record.ID = resolved.CloudWorkspaceID
+			record.RelayWorkspaceID = resolved.RelayfileWorkspaceID
+		}
 		return record, false, nil
 	}
 	client, err := newAPIClient(cloud.APIURL, cloud.AccessToken)
@@ -2366,7 +2396,69 @@ func ensureWorkspaceForSetup(cloud cloudCredentials, name, localDir string) (wor
 	if record.ID == "" {
 		return workspaceRecord{}, false, errors.New("cloud workspace response missing workspaceId")
 	}
+	resolved, err := resolveCloudWorkspaceForRelayfile(cloud, record.ID)
+	if err != nil {
+		return workspaceRecord{}, false, err
+	}
+	record.ID = resolved.CloudWorkspaceID
+	record.RelayWorkspaceID = resolved.RelayfileWorkspaceID
 	return record, true, nil
+}
+
+func resolveCloudWorkspaceForRelayfile(cloud cloudCredentials, workspaceID string) (cloudWorkspaceResolveResponse, error) {
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" {
+		return cloudWorkspaceResolveResponse{}, errors.New("resolve cloud workspace for Relayfile: workspace id is required after the create step")
+	}
+	client, err := newAPIClient(cloud.APIURL, cloud.AccessToken)
+	if err != nil {
+		return cloudWorkspaceResolveResponse{}, err
+	}
+	var resolved cloudWorkspaceResolveResponse
+	if err := client.getJSON(context.Background(), fmt.Sprintf("/api/v1/workspaces/%s/resolve", url.PathEscape(workspaceID)), &resolved); err != nil {
+		return cloudWorkspaceResolveResponse{}, fmt.Errorf(
+			"resolve the workspace after the create step: Cloud did not provision a Relayfile workspace for %s: %w",
+			workspaceID,
+			err,
+		)
+	}
+	resolved.CloudWorkspaceID = strings.TrimSpace(resolved.CloudWorkspaceID)
+	resolved.RelayfileWorkspaceID = strings.TrimSpace(resolved.RelayfileWorkspaceID)
+	if resolved.CloudWorkspaceID == "" || resolved.RelayfileWorkspaceID == "" {
+		return cloudWorkspaceResolveResponse{}, errors.New("resolve the workspace after the create step: Cloud did not return cloudWorkspaceId and relayfileWorkspaceId; workspace provisioning did not complete")
+	}
+	return resolved, nil
+}
+
+func listCloudWorkspaces(cloud cloudCredentials) ([]cloudWorkspaceSummary, error) {
+	client, err := newAPIClient(cloud.APIURL, cloud.AccessToken)
+	if err != nil {
+		return nil, err
+	}
+	var response cloudWorkspaceListResponse
+	if err := client.getJSON(context.Background(), "/api/v1/workspaces", &response); err != nil {
+		return nil, fmt.Errorf("list Cloud workspaces: %w", err)
+	}
+	workspaces := make([]cloudWorkspaceSummary, 0, len(response.Workspaces))
+	for _, workspace := range response.Workspaces {
+		workspace.ID = strings.TrimSpace(workspace.ID)
+		workspace.Slug = strings.TrimSpace(workspace.Slug)
+		workspace.Name = strings.TrimSpace(workspace.Name)
+		if workspace.ID == "" {
+			continue
+		}
+		if workspace.Slug == "" {
+			workspace.Slug = workspace.ID
+		}
+		if workspace.Name == "" {
+			workspace.Name = workspace.Slug
+		}
+		workspaces = append(workspaces, workspace)
+	}
+	sort.Slice(workspaces, func(i, j int) bool {
+		return strings.ToLower(workspaces[i].Name) < strings.ToLower(workspaces[j].Name)
+	})
+	return workspaces, nil
 }
 
 func delegatedRelayfileTokenViaCloud(cloud cloudCredentials, workspaceID, agentName string, scopes []string) (delegatedauth.Bundle, error) {
@@ -2858,9 +2950,6 @@ func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("bootstrap delegated relayfile credentials: %w", err)
 	}
-	if err := removeCredentialFile(credentialsPath()); err != nil {
-		fmt.Fprintf(stdout, "warning: could not clear stale relayfile credentials: %v\n", err)
-	}
 	if usedSeparateWorkspace {
 		fmt.Fprintf(stdout, "Relayfile now uses separate Relayfile-backed workspace %s (id: %s). The active messaging-only Agent Relay workspace and its key were left unchanged.\n", record.Name, record.ID)
 	} else {
@@ -2873,17 +2962,22 @@ func runLogout(args []string, stdout io.Writer) error {
 	if len(args) > 0 {
 		return errors.New("usage: relayfile logout")
 	}
+	cloudRemoved, err := revokeAndClearAgentRelayCloudSession(context.Background())
+	if err != nil {
+		return err
+	}
 	removed, err := clearAuthCredentials()
 	if err != nil {
 		return err
 	}
+	if cloudRemoved {
+		removed++
+	}
 	if removed == 0 {
 		fmt.Fprintln(stdout, "Relayfile is already logged out.")
-		fmt.Fprintln(stdout, "Agent Relay cloud session left intact; run `agent-relay cloud logout` to fully sign out.")
 		return nil
 	}
-	fmt.Fprintln(stdout, "Logged out of Relayfile on this machine.")
-	fmt.Fprintln(stdout, "Agent Relay cloud session left intact; run `agent-relay cloud logout` to fully sign out.")
+	fmt.Fprintln(stdout, "Logged out of Relayfile on this machine. Agent Relay Cloud session revoked.")
 	return nil
 }
 
@@ -6223,19 +6317,53 @@ func resolvePullProviders(commandClient *workspaceCommandClient, requested strin
 func runWorkspaceCreate(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("workspace create", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{})); err != nil {
+	token := fs.String("token", "", "relayfile token override")
+	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
+		"token": true,
+	})); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: relayfile workspace create NAME")
+		return errors.New("usage: relayfile workspace create NAME [--token TOKEN]")
 	}
 
 	name := strings.TrimSpace(fs.Arg(0))
 	if name == "" {
 		return errors.New("workspace name is required")
 	}
-	if _, err := loadCredentials(); err != nil {
+	explicitToken := resolveExplicitToken(*token)
+	hasCloudSession, err := hasConfiguredAgentRelayCloudSession()
+	if err != nil {
 		return err
+	}
+	if explicitToken == "" && hasCloudSession {
+		cloud, err := cloudCredentialsFromAgentRelay()
+		if err != nil {
+			return err
+		}
+		record, _, err := ensureWorkspaceForSetup(cloud, name, "")
+		if err != nil {
+			return err
+		}
+		relayWorkspaceID := firstNonEmpty(record.RelayWorkspaceID, record.ID)
+		delegated, err := delegatedRelayfileTokenViaCloud(cloud, relayWorkspaceID, record.AgentName, record.Scopes)
+		if err != nil {
+			return err
+		}
+		if err := delegatedauth.SaveAtomic(delegatedCredentialsPathForRequest(record.ID, record.Scopes), delegated); err != nil {
+			return fmt.Errorf("persist delegated relayfile credentials: %w", err)
+		}
+		record, err = persistDelegatedWorkspace(record, delegated, "", true)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "Workspace %s ready (id: %s)\n", record.Name, record.ID)
+		return nil
+	}
+	if explicitToken == "" {
+		if _, err := loadCredentials(); err != nil {
+			return err
+		}
 	}
 	record, err := upsertWorkspace(name)
 	if err != nil {
@@ -6357,7 +6485,37 @@ func runWorkspaceList(args []string, stdout io.Writer) error {
 	}
 
 	creds, _ := loadCredentials()
-	tokenValue := resolveToken(*token, creds)
+	tokenValue := resolveExplicitToken(*token)
+	hasCloudSession, cloudSessionErr := hasConfiguredAgentRelayCloudSession()
+	if cloudSessionErr != nil {
+		return cloudSessionErr
+	}
+	if tokenValue == "" && hasCloudSession {
+		cloud, err := cloudCredentialsFromAgentRelay()
+		if err != nil {
+			return err
+		}
+		workspaces, err := listCloudWorkspaces(cloud)
+		if err != nil {
+			return err
+		}
+		activeName := activeCloudWorkspaceName(workspaces)
+		for _, workspace := range workspaces {
+			if *namesOnly || activeName == "" {
+				fmt.Fprintln(stdout, workspace.Name)
+				continue
+			}
+			marker := "  "
+			if workspace.Name == activeName {
+				marker = "* "
+			}
+			fmt.Fprintln(stdout, marker+workspace.Name)
+		}
+		return nil
+	}
+	if tokenValue == "" {
+		tokenValue = resolveToken("", creds)
+	}
 	activeName, _ := activeWorkspaceName(tokenValue)
 	emit := func(name string) {
 		if *namesOnly || activeName == "" {
@@ -6433,6 +6591,28 @@ func activeWorkspaceName(token string) (string, string) {
 	return "", ""
 }
 
+func activeCloudWorkspaceName(workspaces []cloudWorkspaceSummary) string {
+	if value := strings.TrimSpace(os.Getenv("RELAYFILE_WORKSPACE")); value != "" {
+		for _, workspace := range workspaces {
+			if value == workspace.ID || value == workspace.Slug || value == workspace.Name {
+				return workspace.Name
+			}
+		}
+	}
+	if catalog, err := loadWorkspaceCatalog(); err == nil {
+		defaultName := strings.TrimSpace(catalog.Default)
+		for _, workspace := range workspaces {
+			if defaultName == workspace.ID || defaultName == workspace.Slug || defaultName == workspace.Name {
+				return workspace.Name
+			}
+		}
+	}
+	if len(workspaces) == 1 {
+		return workspaces[0].Name
+	}
+	return ""
+}
+
 func runWorkspaceCurrent(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("workspace current", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -6446,7 +6626,33 @@ func runWorkspaceCurrent(args []string, stdout io.Writer) error {
 	}
 
 	creds, _ := loadCredentials()
-	tokenValue := resolveToken(*token, creds)
+	tokenValue := resolveExplicitToken(*token)
+	if tokenValue == "" {
+		hasCloudSession, err := hasConfiguredAgentRelayCloudSession()
+		if err != nil {
+			return err
+		}
+		if hasCloudSession {
+			cloud, err := cloudCredentialsFromAgentRelay()
+			if err != nil {
+				return err
+			}
+			workspaces, err := listCloudWorkspaces(cloud)
+			if err != nil {
+				return err
+			}
+			if name := activeCloudWorkspaceName(workspaces); name != "" {
+				if !*verbose {
+					fmt.Fprintln(stdout, name)
+					return nil
+				}
+				fmt.Fprintf(stdout, "%s (source: Agent Relay Cloud session)\n", name)
+				return nil
+			}
+			return errors.New("no active workspace: the Agent Relay Cloud session can access multiple workspaces; set RELAYFILE_WORKSPACE or pass a workspace name")
+		}
+		tokenValue = resolveToken("", creds)
+	}
 	name, source := activeWorkspaceName(tokenValue)
 	if name == "" {
 		return errors.New("no active workspace; pass WORKSPACE, set RELAYFILE_WORKSPACE, or run 'agent-relay workspace switch NAME'")
@@ -7923,11 +8129,6 @@ func prepareWorkspaceCommandClient(workspaceValue, serverFlag, tokenFlag string,
 		return nil, err
 	}
 	commandClient.client = client
-	if credsFile != "" {
-		if err := removeCredentialFile(credentialsPath()); err != nil {
-			return nil, fmt.Errorf("clear stale relayfile credentials: %w", err)
-		}
-	}
 	return commandClient, nil
 }
 
