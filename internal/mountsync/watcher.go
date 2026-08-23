@@ -50,6 +50,24 @@ type LocalChange struct {
 	Op           fsnotify.Op
 }
 
+type localChangeTimer interface {
+	Stop() bool
+	Reset(time.Duration) bool
+}
+
+type localChangeClock interface {
+	Now() time.Time
+	AfterFunc(time.Duration, func()) localChangeTimer
+}
+
+type realtimeLocalChangeClock struct{}
+
+func (realtimeLocalChangeClock) Now() time.Time { return time.Now() }
+
+func (realtimeLocalChangeClock) AfterFunc(delay time.Duration, callback func()) localChangeTimer {
+	return time.AfterFunc(delay, callback)
+}
+
 // LocalChangeBatcher collapses the near-simultaneous per-path callbacks emitted
 // by FileWatcher into one ordered batch. The per-file debounce has already let
 // editor rename/write/chmod sequences settle; this short cross-file window is
@@ -59,21 +77,31 @@ type LocalChangeBatcher struct {
 	window  time.Duration
 	maxWait time.Duration
 	onBatch func([]LocalChange)
+	clock   localChangeClock
 	pending map[string]LocalChange
-	timer   *time.Timer
+	timer   localChangeTimer
 	started time.Time
+	lastAdd time.Time
 	closed  bool
 	wg      sync.WaitGroup
 }
 
 func NewLocalChangeBatcher(window time.Duration, onBatch func([]LocalChange)) *LocalChangeBatcher {
+	return newLocalChangeBatcherWithClock(window, onBatch, realtimeLocalChangeClock{})
+}
+
+func newLocalChangeBatcherWithClock(window time.Duration, onBatch func([]LocalChange), clock localChangeClock) *LocalChangeBatcher {
 	if window <= 0 {
 		window = defaultLocalChangeBatchWindow
+	}
+	if clock == nil {
+		clock = realtimeLocalChangeClock{}
 	}
 	return &LocalChangeBatcher{
 		window:  window,
 		maxWait: 10 * window,
 		onBatch: onBatch,
+		clock:   clock,
 		pending: make(map[string]LocalChange),
 	}
 }
@@ -95,35 +123,51 @@ func (b *LocalChangeBatcher) Add(relativePath string, op fsnotify.Op) {
 	change.RelativePath = relativePath
 	change.Op |= op
 	b.pending[relativePath] = change
+	now := b.clock.Now()
+	b.lastAdd = now
 	if b.timer != nil {
 		// Flush after one quiet window so callbacks spread across a multi-file
 		// save stay in one bulk request. Cap the total wait so sustained churn
 		// cannot starve writeback indefinitely.
-		if b.timer.Stop() {
-			delay := b.window
-			if remaining := b.maxWait - time.Since(b.started); remaining < delay {
-				delay = remaining
-			}
-			if delay <= 0 {
-				delay = time.Nanosecond
-			}
-			b.timer.Reset(delay)
+		delay := b.nextFlushDelayLocked(now)
+		// Reset must be unconditional. For an AfterFunc timer, false means the
+		// callback has expired or is already running; Reset schedules the next
+		// callback in exactly that case. Gating Reset on Stop's result loses the
+		// quiet-window extension when Add races the callback.
+		if delay <= 0 {
+			delay = time.Nanosecond
 		}
+		b.timer.Reset(delay)
 		return
 	}
 	b.wg.Add(1)
-	b.started = time.Now()
-	b.timer = time.AfterFunc(b.window, b.flush)
+	b.started = now
+	b.timer = b.clock.AfterFunc(b.window, b.flush)
 }
 
 func (b *LocalChangeBatcher) flush() {
-	defer b.wg.Done()
 	b.mu.Lock()
+	// Reset may race an already-running AfterFunc callback. Recheck the
+	// authoritative last-add deadline under the mutex before draining; a stale
+	// callback must yield to the newly extended quiet window.
+	if b.timer == nil {
+		b.mu.Unlock()
+		return
+	}
+	if !b.closed && len(b.pending) > 0 {
+		if delay := b.nextFlushDelayLocked(b.clock.Now()); delay > 0 {
+			b.timer.Reset(delay)
+			b.mu.Unlock()
+			return
+		}
+	}
 	b.timer = nil
 	b.started = time.Time{}
+	b.lastAdd = time.Time{}
 	if b.closed || len(b.pending) == 0 {
 		b.pending = make(map[string]LocalChange)
 		b.mu.Unlock()
+		b.wg.Done()
 		return
 	}
 	paths := make([]string, 0, len(b.pending))
@@ -138,9 +182,18 @@ func (b *LocalChangeBatcher) flush() {
 	b.pending = make(map[string]LocalChange)
 	onBatch := b.onBatch
 	b.mu.Unlock()
+	defer b.wg.Done()
 	if onBatch != nil {
 		onBatch(changes)
 	}
+}
+
+func (b *LocalChangeBatcher) nextFlushDelayLocked(now time.Time) time.Duration {
+	delay := b.window - now.Sub(b.lastAdd)
+	if remaining := b.maxWait - now.Sub(b.started); remaining < delay {
+		delay = remaining
+	}
+	return delay
 }
 
 func (b *LocalChangeBatcher) Close() {
@@ -155,9 +208,9 @@ func (b *LocalChangeBatcher) Close() {
 	}
 	b.closed = true
 	if b.timer != nil && b.timer.Stop() {
+		b.timer = nil
 		b.wg.Done()
 	}
-	b.timer = nil
 	b.pending = nil
 	b.mu.Unlock()
 	b.wg.Wait()

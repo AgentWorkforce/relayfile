@@ -840,15 +840,30 @@ func TestLocalChangeBatcherCoalescesBurst(t *testing.T) {
 
 func TestLocalChangeBatcherUsesQuietWindowAcrossStaggeredSave(t *testing.T) {
 	batches := make(chan []LocalChange, 2)
-	batcher := NewLocalChangeBatcher(5*time.Millisecond, func(changes []LocalChange) {
+	clock := newFakeLocalChangeClock()
+	batcher := newLocalChangeBatcherWithClock(5*time.Millisecond, func(changes []LocalChange) {
 		batches <- changes
-	})
+	}, clock)
 	defer batcher.Close()
 
 	for i := 0; i < 5; i++ {
 		batcher.Add(fmt.Sprintf("shared/%02d.txt", i), fsnotify.Write)
-		time.Sleep(3 * time.Millisecond)
+		if i < 4 {
+			clock.Advance(3 * time.Millisecond)
+			select {
+			case batch := <-batches:
+				t.Fatalf("batch flushed before the extended quiet deadline: %+v", batch)
+			default:
+			}
+		}
 	}
+	clock.Advance(4 * time.Millisecond)
+	select {
+	case batch := <-batches:
+		t.Fatalf("batch flushed before a full quiet window: %+v", batch)
+	default:
+	}
+	clock.Advance(time.Millisecond)
 	select {
 	case batch := <-batches:
 		if len(batch) != 5 {
@@ -860,8 +875,139 @@ func TestLocalChangeBatcherUsesQuietWindowAcrossStaggeredSave(t *testing.T) {
 	select {
 	case extra := <-batches:
 		t.Fatalf("staggered save produced an extra batch: %+v", extra)
-	case <-time.After(20 * time.Millisecond):
+	default:
 	}
+}
+
+func TestLocalChangeBatcherReschedulesInactiveTimer(t *testing.T) {
+	batches := make(chan []LocalChange, 1)
+	clock := newFakeLocalChangeClock()
+	batcher := newLocalChangeBatcherWithClock(5*time.Millisecond, func(changes []LocalChange) {
+		batches <- changes
+	}, clock)
+
+	batcher.Add("shared/one.txt", fsnotify.Write)
+	batcher.mu.Lock()
+	if !batcher.timer.Stop() {
+		batcher.mu.Unlock()
+		t.Fatal("timer expired before deterministic race setup")
+	}
+	batcher.mu.Unlock()
+
+	// This is the state Add observes when an AfterFunc callback has expired or
+	// started: timer is non-nil, but Stop returns false. The Add must still
+	// reschedule it and eventually flush both changes.
+	batcher.Add("shared/two.txt", fsnotify.Write)
+	clock.Advance(5 * time.Millisecond)
+	select {
+	case batch := <-batches:
+		if len(batch) != 2 {
+			t.Fatalf("batch size = %d, want 2", len(batch))
+		}
+		batcher.Close()
+	default:
+		t.Fatal("inactive timer was not rescheduled")
+	}
+}
+
+func TestLocalChangeBatcherCapsSustainedChurn(t *testing.T) {
+	batches := make(chan []LocalChange, 1)
+	clock := newFakeLocalChangeClock()
+	batcher := newLocalChangeBatcherWithClock(5*time.Millisecond, func(changes []LocalChange) {
+		batches <- changes
+	}, clock)
+	defer batcher.Close()
+
+	batcher.Add("shared/00.txt", fsnotify.Write)
+	for i := 1; i <= 12; i++ {
+		clock.Advance(4 * time.Millisecond)
+		batcher.Add(fmt.Sprintf("shared/%02d.txt", i), fsnotify.Write)
+	}
+	clock.Advance(time.Millisecond)
+	select {
+	case batch := <-batches:
+		t.Fatalf("sustained churn flushed before maxWait: %+v", batch)
+	default:
+	}
+	clock.Advance(time.Millisecond)
+	select {
+	case batch := <-batches:
+		if len(batch) != 13 {
+			t.Fatalf("maxWait batch size = %d, want 13", len(batch))
+		}
+	default:
+		t.Fatal("sustained churn did not flush at maxWait")
+	}
+}
+
+type fakeLocalChangeClock struct {
+	mu     sync.Mutex
+	now    time.Time
+	timers []*fakeLocalChangeTimer
+}
+
+type fakeLocalChangeTimer struct {
+	clock    *fakeLocalChangeClock
+	deadline time.Time
+	callback func()
+	active   bool
+}
+
+func newFakeLocalChangeClock() *fakeLocalChangeClock {
+	return &fakeLocalChangeClock{now: time.Unix(1, 0)}
+}
+
+func (c *fakeLocalChangeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *fakeLocalChangeClock) AfterFunc(delay time.Duration, callback func()) localChangeTimer {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	timer := &fakeLocalChangeTimer{clock: c, deadline: c.now.Add(delay), callback: callback, active: true}
+	c.timers = append(c.timers, timer)
+	return timer
+}
+
+func (c *fakeLocalChangeClock) Advance(delta time.Duration) {
+	c.mu.Lock()
+	c.now = c.now.Add(delta)
+	c.mu.Unlock()
+	for {
+		var callback func()
+		c.mu.Lock()
+		for _, timer := range c.timers {
+			if timer.active && !timer.deadline.After(c.now) {
+				timer.active = false
+				callback = timer.callback
+				break
+			}
+		}
+		c.mu.Unlock()
+		if callback == nil {
+			return
+		}
+		callback()
+	}
+}
+
+func (t *fakeLocalChangeTimer) Stop() bool {
+	t.clock.mu.Lock()
+	defer t.clock.mu.Unlock()
+	wasActive := t.active
+	t.active = false
+	return wasActive
+}
+
+func (t *fakeLocalChangeTimer) Reset(delay time.Duration) bool {
+	t.clock.mu.Lock()
+	defer t.clock.mu.Unlock()
+	wasActive := t.active
+	t.active = true
+	t.deadline = t.clock.now.Add(delay)
+	return wasActive
 }
 
 func TestWatcherBatchCheckpointsPrivateStateAfterVisibilityPath(t *testing.T) {

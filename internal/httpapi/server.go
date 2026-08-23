@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"encoding/base64"
 	"encoding/json"
@@ -134,10 +135,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleAdminSync(w, r)
 		return
 	}
+	if r.URL.Path == "/v1/admin/checkpoint-seals" && r.Method == http.MethodGet {
+		s.handleAdminCheckpointSeals(w, r)
+		return
+	}
 
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
 	if len(parts) >= 5 && parts[0] == "v1" && parts[1] == "admin" && parts[2] == "replay" {
 		s.handleAdminReplay(w, r, parts)
+		return
+	}
+	if len(parts) == 5 && parts[0] == "v1" && parts[1] == "admin" && parts[2] == "checkpoint-seals" && parts[4] == "reconcile-source" {
+		s.handleAdminCheckpointSealReconcile(w, r, parts[3])
 		return
 	}
 
@@ -222,6 +231,24 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 5 && parts[3] == "sync" && parts[4] == "refresh" && r.Method == http.MethodPost:
 		requiredScope = "sync:trigger"
 		route = "sync_refresh"
+	case len(parts) == 5 && parts[3] == "sync" && parts[4] == "checkpoint-seals" && r.Method == http.MethodPost:
+		requiredScope = "sync:trigger"
+		route = "checkpoint_seal_issue"
+	case len(parts) == 6 && parts[3] == "sync" && parts[4] == "checkpoint-seals" && parts[5] == "consume" && r.Method == http.MethodPost:
+		requiredScope = "sync:trigger"
+		route = "checkpoint_seal_consume"
+	case len(parts) == 6 && parts[3] == "sync" && parts[4] == "checkpoint-seals" && parts[5] == "recover-consume" && r.Method == http.MethodPost:
+		requiredScope = "sync:trigger"
+		route = "checkpoint_seal_recover_consume"
+	case len(parts) == 6 && parts[3] == "sync" && parts[4] == "checkpoint-seals" && parts[5] == "verify" && r.Method == http.MethodPost:
+		requiredScope = "sync:trigger"
+		route = "checkpoint_seal_verify"
+	case len(parts) == 6 && parts[3] == "sync" && parts[4] == "checkpoint-seals" && parts[5] == "handback" && r.Method == http.MethodPost:
+		requiredScope = "sync:trigger"
+		route = "checkpoint_seal_handback"
+	case len(parts) == 6 && parts[3] == "sync" && parts[4] == "checkpoint-seals" && parts[5] == "resume" && r.Method == http.MethodPost:
+		requiredScope = "sync:trigger"
+		route = "checkpoint_seal_resume"
 	case len(parts) == 4 && parts[3] == "ops" && r.Method == http.MethodGet:
 		requiredScope = "ops:read"
 		route = "ops_list"
@@ -354,6 +381,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleSyncDeadLetterReplay(w, r, workspaceID, parts[5], correlationID)
 	case "sync_refresh":
 		s.handleSyncRefresh(w, r, workspaceID, correlationID)
+	case "checkpoint_seal_issue":
+		s.handleCheckpointSealIssue(w, r, workspaceID, correlationID, claims)
+	case "checkpoint_seal_consume":
+		s.handleCheckpointSealConsume(w, r, workspaceID, correlationID, claims)
+	case "checkpoint_seal_recover_consume":
+		s.handleCheckpointSealRecoverConsume(w, r, workspaceID, correlationID, claims)
+	case "checkpoint_seal_verify":
+		s.handleCheckpointSealVerify(w, r, workspaceID, correlationID, claims)
+	case "checkpoint_seal_handback":
+		s.handleCheckpointSealHandback(w, r, workspaceID, correlationID, claims)
+	case "checkpoint_seal_resume":
+		s.handleCheckpointSealResume(w, r, workspaceID, correlationID, claims)
 	case "ops_list":
 		s.handleOpsList(w, r, workspaceID, correlationID)
 	case "op_replay":
@@ -483,6 +522,63 @@ func (s *Server) handleAdminBackends(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.store.GetBackendStatus())
+}
+
+func (s *Server) handleAdminCheckpointSeals(w http.ResponseWriter, r *http.Request) {
+	claims, authErr := authorizeBearer(r.Header.Get("Authorization"), s.bearerVerifier, "", "", "", time.Now().UTC())
+	if authErr != nil {
+		writeError(w, authErr.status, authErr.code, authErr.message, getCorrelationID(r))
+		return
+	}
+	if !hasAnyScope(claims.Scopes, "admin:read", "admin:replay") {
+		writeError(w, http.StatusForbidden, "forbidden", "missing required scope: admin:read", getCorrelationID(r))
+		return
+	}
+	correlationID := getCorrelationID(r)
+	if correlationID == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "missing X-Correlation-Id header", "")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.store.GetCheckpointSealRetentionSummary(r.URL.Query().Get("workspaceId"), time.Now().UTC()))
+}
+
+func (s *Server) handleAdminCheckpointSealReconcile(w http.ResponseWriter, r *http.Request, sealID string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusNotFound, "not_found", "route not found", getCorrelationID(r))
+		return
+	}
+	if _, authErr := authorizeBearer(r.Header.Get("Authorization"), s.bearerVerifier, "", "admin:replay", "", time.Now().UTC()); authErr != nil {
+		writeError(w, authErr.status, authErr.code, authErr.message, getCorrelationID(r))
+		return
+	}
+	correlationID := getCorrelationID(r)
+	if correlationID == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "missing X-Correlation-Id header", "")
+		return
+	}
+	var body relayfile.CheckpointSealAdminReconcileRequest
+	if !s.decodeStrictJSONBody(w, r, correlationID, &body) {
+		return
+	}
+	record, err := s.store.ReconcileCheckpointSealSource(sealID, body, time.Now().UTC())
+	if err != nil {
+		switch {
+		case errors.Is(err, relayfile.ErrInvalidInput):
+			writeError(w, http.StatusBadRequest, "bad_request", "invalid checkpoint reconciliation request", correlationID)
+		case errors.Is(err, relayfile.ErrNotFound):
+			writeError(w, http.StatusNotFound, "checkpoint_seal_not_found", "checkpoint seal not found", correlationID)
+		case errors.Is(err, relayfile.ErrCheckpointHandbackRequired):
+			writeError(w, http.StatusConflict, "checkpoint_handback_required", "consumed destination ownership must be handed back before source reconciliation", correlationID)
+		case errors.Is(err, relayfile.ErrCheckpointAdminConflict):
+			writeError(w, http.StatusConflict, "checkpoint_admin_conflict", "checkpoint reconciliation identity conflicts with durable state", correlationID)
+		default:
+			log.Printf("checkpoint administrative reconciliation failed (correlationId=%s sealId=%s): %v", correlationID, sealID, err)
+			writeError(w, http.StatusInternalServerError, "internal_error", "checkpoint reconciliation failed", correlationID)
+		}
+		return
+	}
+	log.Printf("checkpoint administrative reconciliation completed (correlationId=%s sealId=%s workspaceId=%s status=%s)", correlationID, record.SealID, record.WorkspaceID, record.OwnershipStatus)
+	writeJSON(w, http.StatusOK, record)
 }
 
 func (s *Server) handleAdminIngress(w http.ResponseWriter, r *http.Request) {
@@ -2223,6 +2319,194 @@ func (s *Server) handleSyncRefresh(w http.ResponseWriter, r *http.Request, works
 	writeJSON(w, http.StatusAccepted, resp)
 }
 
+func (s *Server) handleCheckpointSealIssue(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
+	var body relayfile.CheckpointSealRequest
+	if !s.decodeStrictJSONBody(w, r, correlationID, &body) {
+		return
+	}
+	if strings.TrimSpace(body.IssuanceIdempotencyKey) == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "issuanceIdempotencyKey is required", correlationID)
+		return
+	}
+	root, err := relayfile.NormalizeCheckpointRoot(body.Root)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid checkpoint root", correlationID)
+		return
+	}
+	// A seal certifies the complete root, not a caller-selected projection.
+	// Require both read and write authority over that root; path-scoped tokens
+	// remain supported when they cover the exact subtree. If ACLs hide any
+	// descendant, the server-computed digest cannot match the mount's digest and
+	// issuance fails closed as checkpoint_diverged.
+	if !scopeMatchesPath(claims.Scopes, "fs:read", root) || !scopeMatchesPath(claims.Scopes, "fs:write", root) {
+		writeError(w, http.StatusForbidden, "forbidden", "checkpoint sealing requires fs:read and fs:write authority for the complete root", correlationID)
+		return
+	}
+	body.Root = root
+	body.Issuer = claims.AgentName
+	seal, err := s.store.IssueCheckpointSeal(workspaceID, body, time.Now().UTC())
+	if err != nil {
+		writeCheckpointSealError(w, err, correlationID)
+		return
+	}
+	writeJSON(w, http.StatusCreated, seal)
+}
+
+func (s *Server) handleCheckpointSealConsume(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
+	var body relayfile.CheckpointSealConsumeRequest
+	if !s.decodeStrictJSONBody(w, r, correlationID, &body) {
+		return
+	}
+	root, err := relayfile.NormalizeCheckpointRoot(body.Root)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid checkpoint root", correlationID)
+		return
+	}
+	if !scopeMatchesPath(claims.Scopes, "fs:read", root) || !scopeMatchesPath(claims.Scopes, "fs:write", root) {
+		writeError(w, http.StatusForbidden, "forbidden", "checkpoint consume requires fs:read and fs:write authority for the complete root", correlationID)
+		return
+	}
+	body.Root = root
+	body.ConsumerPrincipal = claims.AgentName
+	seal, err := s.store.ConsumeCheckpointSeal(workspaceID, body, time.Now().UTC())
+	if err != nil {
+		writeCheckpointSealError(w, err, correlationID)
+		return
+	}
+	writeJSON(w, http.StatusOK, seal)
+}
+
+func (s *Server) handleCheckpointSealRecoverConsume(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
+	var body relayfile.CheckpointSealConsumeRecoveryRequest
+	if !s.decodeStrictJSONBody(w, r, correlationID, &body) {
+		return
+	}
+	root, err := relayfile.NormalizeCheckpointRoot(body.Root)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid checkpoint root", correlationID)
+		return
+	}
+	if !scopeMatchesPath(claims.Scopes, "fs:read", root) {
+		writeError(w, http.StatusForbidden, "forbidden", "consume recovery requires fs:read authority for the complete root", correlationID)
+		return
+	}
+	body.Root = root
+	body.ConsumerPrincipal = claims.AgentName
+	seal, err := s.store.RecoverConsumedCheckpointSeal(workspaceID, body, time.Now().UTC())
+	if err != nil {
+		writeCheckpointSealError(w, err, correlationID)
+		return
+	}
+	writeJSON(w, http.StatusOK, seal)
+}
+
+func (s *Server) handleCheckpointSealVerify(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
+	var body relayfile.CheckpointSealVerifyRequest
+	if !s.decodeStrictJSONBodyWithMessage(w, r, correlationID, &body, "invalid checkpoint verification body") {
+		return
+	}
+	root, err := relayfile.NormalizeCheckpointRoot(body.Root)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid checkpoint root", correlationID)
+		return
+	}
+	if !scopeMatchesPath(claims.Scopes, "fs:read", root) {
+		writeError(w, http.StatusForbidden, "forbidden", "checkpoint verification requires fs:read authority for the complete root", correlationID)
+		return
+	}
+	body.Root = root
+	body.ConsumerPrincipal = claims.AgentName
+	seal, err := s.store.VerifyConsumedCheckpointSeal(workspaceID, body, time.Now().UTC())
+	if err != nil {
+		writeCheckpointSealError(w, err, correlationID)
+		return
+	}
+	writeJSON(w, http.StatusOK, seal)
+}
+
+func (s *Server) handleCheckpointSealHandback(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
+	var body relayfile.CheckpointSealHandbackRequest
+	if !s.decodeStrictJSONBody(w, r, correlationID, &body) {
+		return
+	}
+	root, err := relayfile.NormalizeCheckpointRoot(body.Root)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid checkpoint root", correlationID)
+		return
+	}
+	if !scopeMatchesPath(claims.Scopes, "fs:read", root) || !scopeMatchesPath(claims.Scopes, "fs:write", root) {
+		writeError(w, http.StatusForbidden, "forbidden", "checkpoint handback requires fs:read and fs:write authority for the complete root", correlationID)
+		return
+	}
+	body.Root = root
+	body.ConsumerPrincipal = claims.AgentName
+	proof, err := s.store.HandbackCheckpointSeal(workspaceID, body, time.Now().UTC())
+	if err != nil {
+		writeCheckpointSealError(w, err, correlationID)
+		return
+	}
+	writeJSON(w, http.StatusOK, proof)
+}
+
+func (s *Server) handleCheckpointSealResume(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
+	var body relayfile.CheckpointSealResumeRequest
+	if !s.decodeStrictJSONBody(w, r, correlationID, &body) {
+		return
+	}
+	root, err := relayfile.NormalizeCheckpointRoot(body.Root)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid checkpoint root", correlationID)
+		return
+	}
+	if !scopeMatchesPath(claims.Scopes, "fs:read", root) || !scopeMatchesPath(claims.Scopes, "fs:write", root) {
+		writeError(w, http.StatusForbidden, "forbidden", "checkpoint source resume requires fs:read and fs:write authority for the complete root", correlationID)
+		return
+	}
+	body.Root = root
+	proof, err := s.store.ResumeCheckpointSeal(workspaceID, body, time.Now().UTC())
+	if err != nil {
+		writeCheckpointSealError(w, err, correlationID)
+		return
+	}
+	writeJSON(w, http.StatusOK, proof)
+}
+
+func writeCheckpointSealError(w http.ResponseWriter, err error, correlationID string) {
+	switch {
+	case errors.Is(err, relayfile.ErrInvalidInput):
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), correlationID)
+	case errors.Is(err, relayfile.ErrNotFound):
+		writeError(w, http.StatusNotFound, "checkpoint_seal_not_found", err.Error(), correlationID)
+	case errors.Is(err, relayfile.ErrCheckpointDiverged):
+		writeError(w, http.StatusConflict, "checkpoint_diverged", err.Error(), correlationID)
+	case errors.Is(err, relayfile.ErrCheckpointGenerationStale):
+		writeError(w, http.StatusConflict, "checkpoint_generation_stale", err.Error(), correlationID)
+	case errors.Is(err, relayfile.ErrCheckpointIssuanceConflict):
+		writeError(w, http.StatusConflict, "checkpoint_issuance_conflict", err.Error(), correlationID)
+	case errors.Is(err, relayfile.ErrCheckpointConsumerConflict):
+		writeError(w, http.StatusConflict, "checkpoint_consumer_conflict", err.Error(), correlationID)
+	case errors.Is(err, relayfile.ErrCheckpointUnconsumed):
+		writeError(w, http.StatusConflict, "checkpoint_unconsumed", err.Error(), correlationID)
+	case errors.Is(err, relayfile.ErrCheckpointHandbackRequired):
+		writeError(w, http.StatusConflict, "checkpoint_handback_required", err.Error(), correlationID)
+	case errors.Is(err, relayfile.ErrCheckpointHandbackUnprepared):
+		writeError(w, http.StatusConflict, "checkpoint_handback_unprepared", err.Error(), correlationID)
+	case errors.Is(err, relayfile.ErrCheckpointHandbackConflict):
+		writeError(w, http.StatusConflict, "checkpoint_handback_conflict", err.Error(), correlationID)
+	case errors.Is(err, relayfile.ErrCheckpointResumeConflict):
+		writeError(w, http.StatusConflict, "checkpoint_resume_conflict", err.Error(), correlationID)
+	case errors.Is(err, relayfile.ErrCheckpointExpired):
+		writeError(w, http.StatusConflict, "checkpoint_expired", err.Error(), correlationID)
+	case errors.Is(err, relayfile.ErrCheckpointReplay):
+		writeError(w, http.StatusConflict, "checkpoint_replayed", err.Error(), correlationID)
+	case errors.Is(err, relayfile.ErrCheckpointStale):
+		writeError(w, http.StatusConflict, "checkpoint_stale", err.Error(), correlationID)
+	default:
+		log.Printf("checkpoint seal operation failed (correlationId=%s): %v", correlationID, err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "checkpoint seal operation failed", correlationID)
+	}
+}
+
 func (s *Server) handleOpsList(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string) {
 	limit := parseBoundedInt(r.URL.Query().Get("limit"), 100, 1, 1000)
 	feed, err := s.store.ListOperations(
@@ -2481,6 +2765,24 @@ func (s *Server) decodeJSONBody(w http.ResponseWriter, r *http.Request, correlat
 	}
 	if err := json.Unmarshal(body, dst); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid json body", correlationID)
+		return false
+	}
+	return true
+}
+
+func (s *Server) decodeStrictJSONBody(w http.ResponseWriter, r *http.Request, correlationID string, dst any) bool {
+	return s.decodeStrictJSONBodyWithMessage(w, r, correlationID, dst, "invalid json body")
+}
+
+func (s *Server) decodeStrictJSONBodyWithMessage(w http.ResponseWriter, r *http.Request, correlationID string, dst any, invalidMessage string) bool {
+	body, ok := s.readRequestBody(w, r, correlationID)
+	if !ok {
+		return false
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		writeError(w, http.StatusBadRequest, "bad_request", invalidMessage, correlationID)
 		return false
 	}
 	return true

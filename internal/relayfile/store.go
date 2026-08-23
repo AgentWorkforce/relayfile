@@ -553,6 +553,9 @@ type Store struct {
 	envelopeAttempts        map[string]int
 	envelopeNextAttempt     map[string]time.Time
 	deadLetters             map[string]EnvelopeDeadLetter
+	checkpointSeals         map[string]checkpointSealRecord
+	checkpointGenerations   map[string]uint64
+	checkpointConsumerKeys  map[string]checkpointConsumerBinding
 	providerWrite           ProviderWriteFunc
 	providerWriteConfigured bool
 	providerWriteAction     ProviderWriteActionFunc
@@ -631,19 +634,22 @@ type providerIngressCounter struct {
 }
 
 type persistedState struct {
-	RevCounter          uint64                            `json:"revCounter"`
-	OpCounter           uint64                            `json:"opCounter"`
-	EventCounter        uint64                            `json:"eventCounter"`
-	Workspaces          map[string]*workspaceState        `json:"workspaces"`
-	Forks               map[string]*forkState             `json:"forks,omitempty"`
-	EnvelopesByID       map[string]WebhookEnvelopeRequest `json:"envelopesById"`
-	DeliveryIndex       map[string]string                 `json:"deliveryIndex"`
-	ProcessedEnvs       map[string]bool                   `json:"processedEnvs"`
-	IngressByWorkspace  map[string]ingressCounter         `json:"ingressByWorkspace"`
-	EnvelopeAttempts    map[string]int                    `json:"envelopeAttempts"`
-	EnvelopeNextAttempt map[string]time.Time              `json:"envelopeNextAttempt"`
-	DeadLetters         map[string]EnvelopeDeadLetter     `json:"deadLetters"`
-	Suppressions        map[string]time.Time              `json:"suppressions"`
+	RevCounter             uint64                               `json:"revCounter"`
+	OpCounter              uint64                               `json:"opCounter"`
+	EventCounter           uint64                               `json:"eventCounter"`
+	Workspaces             map[string]*workspaceState           `json:"workspaces"`
+	Forks                  map[string]*forkState                `json:"forks,omitempty"`
+	EnvelopesByID          map[string]WebhookEnvelopeRequest    `json:"envelopesById"`
+	DeliveryIndex          map[string]string                    `json:"deliveryIndex"`
+	ProcessedEnvs          map[string]bool                      `json:"processedEnvs"`
+	IngressByWorkspace     map[string]ingressCounter            `json:"ingressByWorkspace"`
+	EnvelopeAttempts       map[string]int                       `json:"envelopeAttempts"`
+	EnvelopeNextAttempt    map[string]time.Time                 `json:"envelopeNextAttempt"`
+	DeadLetters            map[string]EnvelopeDeadLetter        `json:"deadLetters"`
+	Suppressions           map[string]time.Time                 `json:"suppressions"`
+	CheckpointSeals        map[string]checkpointSealRecord      `json:"checkpointSeals,omitempty"`
+	CheckpointGenerations  map[string]uint64                    `json:"checkpointGenerations,omitempty"`
+	CheckpointConsumerKeys map[string]checkpointConsumerBinding `json:"checkpointConsumerKeys,omitempty"`
 }
 
 type StateBackend interface {
@@ -971,6 +977,9 @@ func NewStoreWithOptions(opts StoreOptions) *Store {
 		envelopeAttempts:        map[string]int{},
 		envelopeNextAttempt:     map[string]time.Time{},
 		deadLetters:             map[string]EnvelopeDeadLetter{},
+		checkpointSeals:         map[string]checkpointSealRecord{},
+		checkpointGenerations:   map[string]uint64{},
+		checkpointConsumerKeys:  map[string]checkpointConsumerBinding{},
 		revisionProvenance:      map[string][]revisionProvenanceEntry{},
 		providerWrite:           writer,
 		providerWriteConfigured: legacyWriterConfigured,
@@ -4699,6 +4708,15 @@ func (s *Store) loadFromDisk() error {
 	if snapshot.Suppressions != nil {
 		s.suppressions = snapshot.Suppressions
 	}
+	if snapshot.CheckpointSeals != nil {
+		s.checkpointSeals = snapshot.CheckpointSeals
+	}
+	if snapshot.CheckpointGenerations != nil {
+		s.checkpointGenerations = snapshot.CheckpointGenerations
+	}
+	if snapshot.CheckpointConsumerKeys != nil {
+		s.checkpointConsumerKeys = snapshot.CheckpointConsumerKeys
+	}
 	s.revCounter = snapshot.RevCounter
 	s.opCounter = snapshot.OpCounter
 	s.eventCounter = snapshot.EventCounter
@@ -4710,19 +4728,22 @@ func (s *Store) saveLocked() error {
 		return nil
 	}
 	snapshot := persistedState{
-		RevCounter:          s.revCounter,
-		OpCounter:           s.opCounter,
-		EventCounter:        s.eventCounter,
-		Workspaces:          s.workspaces,
-		Forks:               s.forks,
-		EnvelopesByID:       s.envelopesByID,
-		DeliveryIndex:       s.deliveryIndex,
-		ProcessedEnvs:       s.processedEnvs,
-		IngressByWorkspace:  s.ingressByWS,
-		EnvelopeAttempts:    s.envelopeAttempts,
-		EnvelopeNextAttempt: s.envelopeNextAttempt,
-		DeadLetters:         s.deadLetters,
-		Suppressions:        s.suppressions,
+		RevCounter:             s.revCounter,
+		OpCounter:              s.opCounter,
+		EventCounter:           s.eventCounter,
+		Workspaces:             s.workspaces,
+		Forks:                  s.forks,
+		EnvelopesByID:          s.envelopesByID,
+		DeliveryIndex:          s.deliveryIndex,
+		ProcessedEnvs:          s.processedEnvs,
+		IngressByWorkspace:     s.ingressByWS,
+		EnvelopeAttempts:       s.envelopeAttempts,
+		EnvelopeNextAttempt:    s.envelopeNextAttempt,
+		DeadLetters:            s.deadLetters,
+		Suppressions:           s.suppressions,
+		CheckpointSeals:        s.checkpointSeals,
+		CheckpointGenerations:  s.checkpointGenerations,
+		CheckpointConsumerKeys: s.checkpointConsumerKeys,
 	}
 	return s.stateBackend.Save(&snapshot)
 }

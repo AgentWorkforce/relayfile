@@ -17,6 +17,30 @@ type BulkWriteResult = relayfile.BulkWriteResult
 
 type OperationStatus = relayfile.OperationStatus
 
+type CheckpointSeal = relayfile.CheckpointSeal
+
+type CheckpointSealRequest = relayfile.CheckpointSealRequest
+
+type CheckpointSealConsumeRequest = relayfile.CheckpointSealConsumeRequest
+
+type CheckpointSealConsumeRecoveryRequest = relayfile.CheckpointSealConsumeRecoveryRequest
+
+type CheckpointSealVerifyRequest = relayfile.CheckpointSealVerifyRequest
+
+type CheckpointSealHandbackRequest = relayfile.CheckpointSealHandbackRequest
+
+type CheckpointSealResumeRequest = relayfile.CheckpointSealResumeRequest
+
+type CheckpointSealOwnership = relayfile.CheckpointSealOwnership
+
+const DefaultCheckpointSealTTL = relayfile.DefaultCheckpointSealTTL
+
+const MaxCheckpointSealTTL = relayfile.MaxCheckpointSealTTL
+
+const CheckpointHandbackPhasePrepare = relayfile.CheckpointHandbackPhasePrepare
+
+const CheckpointHandbackPhaseCommit = relayfile.CheckpointHandbackPhaseCommit
+
 type BulkWriteResponse struct {
 	Written       int               `json:"written"`
 	ErrorCount    int               `json:"errorCount"`

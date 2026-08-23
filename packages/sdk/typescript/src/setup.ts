@@ -32,6 +32,7 @@ import {
   type AgentWorkspaceScopedInviteOptions,
   type ConnectIntegrationOptions,
   type ConnectIntegrationResult,
+  type CheckpointAndSealInput,
   type CreateWorkspaceOptions,
   type JoinWorkspaceOptions,
   type MountLauncher,
@@ -55,6 +56,7 @@ import {
   type WorkspaceIntegrationProvider,
   type WorkspacePermissions
 } from "./setup-types.js"
+import type { CheckpointSeal } from "./types.js"
 import { RELAYFILE_SDK_VERSION } from "./version.js"
 
 export { RELAYFILE_SDK_VERSION } from "./version.js"
@@ -76,6 +78,17 @@ const DEFAULT_MOUNT_SYNC_MODE: MountSyncMode = "mirror"
 const DEFAULT_MOUNT_HEALTH_INTERVAL_MS = 30_000
 const DEFAULT_MOUNT_REFRESH_RETRY_BASE_MS = 1_000
 const DEFAULT_MOUNT_REFRESH_RETRY_MAX_MS = 60_000
+const confirmedMountStop = Symbol("confirmedMountStop")
+
+interface ConfirmedMountStopHandle {
+  [confirmedMountStop](): boolean
+}
+
+function hasConfirmedMountStop(handle: MountedWorkspaceHandle): boolean {
+  const candidate = handle as MountedWorkspaceHandle &
+    Partial<ConfirmedMountStopHandle>
+  return candidate[confirmedMountStop]?.() === true
+}
 const TOKEN_REFRESH_AGE_MS = 55 * 60 * 1000
 
 const nodeOnlyMountLauncher: MountLauncher = {
@@ -1155,6 +1168,8 @@ class MountedWorkspaceHandleImpl implements MountedWorkspaceHandle {
 
   private readySnapshot = true
   private stopPromise?: Promise<void>
+  private checkpointPromise?: Promise<CheckpointSeal>
+  private checkpointStopped = false
 
   constructor(input: {
     mountSession: MountSessionResult
@@ -1220,6 +1235,48 @@ class MountedWorkspaceHandleImpl implements MountedWorkspaceHandle {
     await this.stopPromise
   }
 
+  async checkpointAndSeal(input: CheckpointAndSealInput): Promise<CheckpointSeal> {
+    if (!this.checkpointPromise) {
+      if (this.probeOnly || !this.launcherInstance?.checkpointAndSeal) {
+        throw new RelayfileSetupError(
+          "checkpointAndSeal requires a locally managed relayfile-mount launcher.",
+          "checkpoint_seal_unavailable"
+        )
+      }
+      if (typeof this.launcherInstance.stopped !== "boolean") {
+        throw new RelayfileSetupError(
+          "checkpointAndSeal requires a launcher that reports physical stop state.",
+          "checkpoint_seal_launcher_contract_invalid"
+        )
+      }
+      this.checkpointPromise = this.performCheckpointAndSeal(input)
+    }
+    return this.checkpointPromise
+  }
+
+  [confirmedMountStop](): boolean {
+    return this.checkpointStopped
+  }
+
+  private async performCheckpointAndSeal(input: CheckpointAndSealInput): Promise<CheckpointSeal> {
+    try {
+      const seal = await this.launcherInstance!.checkpointAndSeal!(input)
+      this.checkpointStopped = true
+      this.readySnapshot = false
+      return seal
+    } catch (error) {
+      if (this.launcherInstance?.stopped === true) {
+        this.checkpointStopped = true
+        this.readySnapshot = false
+      } else {
+        // A launcher precondition can reject before touching the daemon. Keep
+        // both readiness and retryability when no physical stop was confirmed.
+        this.checkpointPromise = undefined
+      }
+      throw error
+    }
+  }
+
   private async performStop(): Promise<void> {
     this.readySnapshot = false
     if (this.probeOnly || !this.launcherInstance) {
@@ -1278,6 +1335,16 @@ class SharedMountedWorkspaceHandle implements MountedWorkspaceHandle {
     return this.mounted.status()
   }
 
+  async checkpointAndSeal(input: CheckpointAndSealInput): Promise<CheckpointSeal> {
+    try {
+      return await this.mounted.checkpointAndSeal(input)
+    } finally {
+      if (hasConfirmedMountStop(this.mounted)) {
+        this.onStopped()
+      }
+    }
+  }
+
   async stop(): Promise<void> {
     if (!this.stopPromise) this.stopPromise = this.performStop()
     await this.stopPromise
@@ -1304,6 +1371,8 @@ class SupervisedMountedWorkspaceHandle implements MountedWorkspaceHandle {
   private refreshPromise?: Promise<void>
   private stopPromise?: Promise<void>
   private stopped = false
+  private checkpointing = false
+  private supervisorEpoch = 0
   private supervisorReady = true
   private refreshAttempts = 0
 
@@ -1378,8 +1447,51 @@ class SupervisedMountedWorkspaceHandle implements MountedWorkspaceHandle {
     await this.stopPromise
   }
 
+  async checkpointAndSeal(input: CheckpointAndSealInput): Promise<CheckpointSeal> {
+    this.checkpointing = true
+    this.supervisorEpoch += 1
+    this.supervisorReady = false
+    if (this.timer) clearTimeout(this.timer)
+    this.timer = undefined
+    await this.refreshPromise?.catch(() => {})
+    try {
+      const seal = await this.mounted.checkpointAndSeal(input)
+      this.retireAfterCheckpointStop()
+      return seal
+    } catch (error) {
+      if (hasConfirmedMountStop(this.mounted)) {
+        this.retireAfterCheckpointStop()
+      } else {
+        // Validation/mode failures occur before the daemon is stopped. Restore
+        // the supervisor with a fresh epoch and leave the shared ensured
+        // handle reusable. Work from the fenced epoch cannot replace it.
+        this.checkpointing = false
+        this.supervisorEpoch += 1
+        this.supervisorReady = this.mounted.ready
+        this.schedule()
+      }
+      throw error
+    }
+  }
+
+  [confirmedMountStop](): boolean {
+    return this.stopped && hasConfirmedMountStop(this.mounted)
+  }
+
+  private retireAfterCheckpointStop(): void {
+    this.stopped = true
+    this.checkpointing = false
+    this.supervisorEpoch += 1
+    this.supervisorReady = false
+    this.signal?.removeEventListener("abort", this.handleAbort)
+    if (this.timer) clearTimeout(this.timer)
+    this.timer = undefined
+  }
+
   private async performStop(): Promise<void> {
     this.stopped = true
+    this.checkpointing = false
+    this.supervisorEpoch += 1
     this.supervisorReady = false
     this.signal?.removeEventListener("abort", this.handleAbort)
     if (this.timer) clearTimeout(this.timer)
@@ -1393,7 +1505,8 @@ class SupervisedMountedWorkspaceHandle implements MountedWorkspaceHandle {
   }
 
   private schedule(delayOverrideMs?: number): void {
-    if (this.stopped || this.timer) return
+    if (this.stopped || this.checkpointing || this.timer) return
+    const epoch = this.supervisorEpoch
     const suggestedRefreshAtMs = Date.parse(this.mounted.suggestedRefreshAt ?? "")
     const untilRefresh = Number.isFinite(suggestedRefreshAtMs)
       ? Math.max(0, suggestedRefreshAtMs - Date.now())
@@ -1401,20 +1514,24 @@ class SupervisedMountedWorkspaceHandle implements MountedWorkspaceHandle {
     const delayMs = delayOverrideMs ?? Math.min(this.healthCheckIntervalMs, untilRefresh)
     this.timer = setTimeout(() => {
       this.timer = undefined
-      this.refreshPromise = this.checkAndRefresh().finally(() => {
-        this.refreshPromise = undefined
+      if (!this.isActiveEpoch(epoch)) return
+      const refresh = this.checkAndRefresh(epoch)
+      const tracked = refresh.finally(() => {
+        if (this.refreshPromise === tracked) this.refreshPromise = undefined
       })
+      this.refreshPromise = tracked
     }, Math.max(1_000, delayMs))
     this.timer.unref?.()
   }
 
-  private async checkAndRefresh(): Promise<void> {
-    if (this.stopped) return
+  private async checkAndRefresh(epoch: number): Promise<void> {
+    if (!this.isActiveEpoch(epoch)) return
     try {
       const suggestedRefreshAtMs = Date.parse(this.mounted.suggestedRefreshAt ?? "")
       const refreshDue = Number.isFinite(suggestedRefreshAtMs) && Date.now() >= suggestedRefreshAtMs
       if (!refreshDue) {
         const status = await this.mounted.status()
+        if (!this.isActiveEpoch(epoch)) return
         if (status.ready) {
           this.supervisorReady = true
           this.refreshAttempts = 0
@@ -1422,8 +1539,8 @@ class SupervisedMountedWorkspaceHandle implements MountedWorkspaceHandle {
           return
         }
       }
-      await this.replaceMount()
-      if (this.stopped) return
+      await this.replaceMount(epoch)
+      if (!this.isActiveEpoch(epoch)) return
       this.supervisorReady = true
       this.refreshAttempts = 0
       this.emit({
@@ -1434,7 +1551,7 @@ class SupervisedMountedWorkspaceHandle implements MountedWorkspaceHandle {
       })
       this.schedule()
     } catch (error) {
-      if (this.stopped) return
+      if (!this.isActiveEpoch(epoch)) return
       this.supervisorReady = false
       this.refreshAttempts += 1
       const retryInMs = Math.min(
@@ -1453,17 +1570,21 @@ class SupervisedMountedWorkspaceHandle implements MountedWorkspaceHandle {
     }
   }
 
-  private async replaceMount(): Promise<void> {
+  private async replaceMount(epoch: number): Promise<void> {
     const previous = this.mounted
-    if (this.stopped) return
+    if (!this.isActiveEpoch(epoch)) return
     await previous.stop().catch(() => {})
-    if (this.stopped) return
+    if (!this.isActiveEpoch(epoch)) return
     const replacement = await this.launch()
-    if (this.stopped) {
+    if (!this.isActiveEpoch(epoch)) {
       await replacement.stop().catch(() => {})
       return
     }
     this.mounted = replacement
+  }
+
+  private isActiveEpoch(epoch: number): boolean {
+    return !this.stopped && !this.checkpointing && epoch === this.supervisorEpoch
   }
 
   private emit(event: MountSupervisorEvent): void {

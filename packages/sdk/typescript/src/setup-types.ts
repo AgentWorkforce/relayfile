@@ -1,5 +1,6 @@
 import type { WorkspaceHandle } from "./setup.js"
 import type { AccessTokenProvider } from "./client.js"
+import type { CheckpointSeal } from "./types.js"
 
 export const WORKSPACE_INTEGRATION_PROVIDERS = [
   "github",
@@ -148,6 +149,14 @@ export interface MountedWorkspaceStatus {
   pendingConflicts?: number
 }
 
+export interface CheckpointAndSealInput {
+  sessionId: string
+  generation: number
+  timeoutMs?: number
+  ttlSeconds?: number
+  signal?: AbortSignal
+}
+
 export interface ReadMountedWorkspaceStatusInput {
   localDir: string
   workspaceId: string
@@ -173,6 +182,7 @@ export interface MountedWorkspaceHandle {
 
   env(): Record<string, string>
   status(): Promise<MountedWorkspaceStatus>
+  checkpointAndSeal(input: CheckpointAndSealInput): Promise<CheckpointSeal>
   stop(): Promise<void>
 }
 
@@ -199,12 +209,32 @@ export interface MountLauncherStart {
   background?: boolean
 }
 
-export interface MountLauncherInstance {
+interface MountLauncherInstanceBase {
   pid?: number
   ready: Promise<void>
   status(): Promise<MountedWorkspaceStatus>
   stop(): Promise<void>
 }
+
+/** A launcher without checkpoint support may report stop state optionally. */
+export interface BasicMountLauncherInstance extends MountLauncherInstanceBase {
+  readonly stopped?: boolean
+  checkpointAndSeal?: never
+}
+
+/**
+ * Checkpoint-capable launchers must report whether the physical daemon stopped.
+ * The SDK uses this signal to retire a failed checkpoint safely.
+ */
+export interface CheckpointCapableMountLauncherInstance
+  extends MountLauncherInstanceBase {
+  readonly stopped: boolean
+  checkpointAndSeal(input: CheckpointAndSealInput): Promise<CheckpointSeal>
+}
+
+export type MountLauncherInstance =
+  | BasicMountLauncherInstance
+  | CheckpointCapableMountLauncherInstance
 
 export interface MountLauncher {
   start(input: MountLauncherStart): Promise<MountLauncherInstance>

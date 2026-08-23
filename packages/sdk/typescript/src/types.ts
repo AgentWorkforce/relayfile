@@ -140,6 +140,152 @@ export interface BulkWriteResponse {
   correlationId: string;
 }
 
+export interface CheckpointSeal {
+  sealId: string;
+  sealToken?: string;
+  workspaceId: string;
+  root: string;
+  sessionId: string;
+  generation: number;
+  digest: string;
+  workspaceRevision: string;
+  eventCursor: string;
+  issuedAt: string;
+  expiresAt: string;
+  consumedAt?: string;
+}
+
+export type CheckpointSealOwnershipStatus =
+  | "unconsumed"
+  | "consumed"
+  | "released"
+  | "source-resumed";
+
+export interface CheckpointSealRetentionRecord {
+  sealId: string;
+  workspaceId: string;
+  root: string;
+  sessionId: string;
+  generation: number;
+  ownershipStatus: CheckpointSealOwnershipStatus;
+  issuedAt: string;
+  expiresAt: string;
+  consumedAt?: string;
+  handbackReleasedAt?: string;
+  sourceResumedAt?: string;
+  adminReconciledAt?: string;
+}
+
+export interface CheckpointSealRetentionSummary {
+  generatedAt: string;
+  unresumedTotal: number;
+  unresumedByWorkspace: Record<string, number>;
+  records: CheckpointSealRetentionRecord[];
+}
+
+export interface GetAdminCheckpointSealRetentionOptions {
+  workspaceId?: string;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface ReconcileAdminCheckpointSealSourceInput {
+  sealId: string;
+  workspaceId: string;
+  root: string;
+  sessionId: string;
+  generation: number;
+  expectedOwnershipStatus: "unconsumed" | "released";
+  reconciliationIdempotencyKey: string;
+  confirmSourceReady: true;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface ConsumedCheckpointSeal extends Omit<CheckpointSeal, "sealToken" | "consumedAt"> {
+  sealToken?: never;
+  consumedAt: string;
+}
+
+export interface IssueCheckpointSealInput {
+  workspaceId: string;
+  root: string;
+  sessionId: string;
+  generation: number;
+  expectedDigest: string;
+  /** Stable per-attempt key. Response-loss retries rotate the lost bearer safely. */
+  issuanceIdempotencyKey: string;
+  ttlSeconds?: number;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface ConsumeCheckpointSealInput {
+  workspaceId: string;
+  sealToken: string;
+  root: string;
+  sessionId: string;
+  generation: number;
+  consumerIdempotencyKey: string;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface RecoverConsumedCheckpointSealInput {
+  workspaceId: string;
+  root: string;
+  sessionId: string;
+  generation: number;
+  consumerIdempotencyKey: string;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface VerifyCheckpointSealInput {
+  workspaceId: string;
+  receipt: ConsumedCheckpointSeal;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface CheckpointSealOwnership {
+  sealId: string;
+  workspaceId: string;
+  root: string;
+  sessionId: string;
+  generation: number;
+  status: "prepared" | "released" | "source-resumed";
+  digest: string;
+  workspaceRevision: string;
+  eventCursor: string;
+  consumedAt?: string;
+  preparedAt?: string;
+  releasedAt?: string;
+  sourceResumedAt?: string;
+}
+
+export interface HandbackCheckpointSealInput {
+  workspaceId: string;
+  phase: "prepare" | "commit";
+  receipt: ConsumedCheckpointSeal;
+  consumerIdempotencyKey: string;
+  handbackIdempotencyKey: string;
+  expectedDigest: string;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface ResumeCheckpointSealInput {
+  workspaceId: string;
+  sealToken: string;
+  root: string;
+  sessionId: string;
+  generation: number;
+  resumeIdempotencyKey: string;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
 export interface FileQueryItem {
   path: string;
   revision: string;

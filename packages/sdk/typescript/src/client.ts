@@ -3,6 +3,19 @@ import {
   type AdminSyncStatusResponse,
   type BulkWriteInput,
   type BulkWriteResponse,
+  type CheckpointSeal,
+  type CheckpointSealRetentionRecord,
+  type CheckpointSealRetentionSummary,
+  type GetAdminCheckpointSealRetentionOptions,
+  type ReconcileAdminCheckpointSealSourceInput,
+  type ConsumedCheckpointSeal,
+  type IssueCheckpointSealInput,
+  type ConsumeCheckpointSealInput,
+  type RecoverConsumedCheckpointSealInput,
+  type VerifyCheckpointSealInput,
+  type CheckpointSealOwnership,
+  type HandbackCheckpointSealInput,
+  type ResumeCheckpointSealInput,
   type BackendStatusResponse,
   type AckResponse,
   type CommitForkInput,
@@ -1651,6 +1664,113 @@ export class RelayFileClient {
     return result;
   }
 
+  async issueCheckpointSeal(input: IssueCheckpointSealInput): Promise<CheckpointSeal> {
+    return this.request<CheckpointSeal>({
+      method: "POST",
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/sync/checkpoint-seals`,
+      correlationId: input.correlationId,
+      body: {
+        root: input.root,
+        sessionId: input.sessionId,
+        generation: input.generation,
+        expectedDigest: input.expectedDigest,
+        issuanceIdempotencyKey: input.issuanceIdempotencyKey,
+        ttlSeconds: input.ttlSeconds
+      },
+      signal: input.signal
+    });
+  }
+
+  async consumeCheckpointSeal(input: ConsumeCheckpointSealInput): Promise<ConsumedCheckpointSeal> {
+    return this.request<ConsumedCheckpointSeal>({
+      method: "POST",
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/sync/checkpoint-seals/consume`,
+      correlationId: input.correlationId,
+      body: {
+        sealToken: input.sealToken,
+        root: input.root,
+        sessionId: input.sessionId,
+        generation: input.generation,
+        consumerIdempotencyKey: input.consumerIdempotencyKey
+      },
+      signal: input.signal
+    });
+  }
+
+  async recoverConsumedCheckpointSeal(input: RecoverConsumedCheckpointSealInput): Promise<ConsumedCheckpointSeal> {
+    return this.request<ConsumedCheckpointSeal>({
+      method: "POST",
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/sync/checkpoint-seals/recover-consume`,
+      correlationId: input.correlationId,
+      body: {
+        root: input.root,
+        sessionId: input.sessionId,
+        generation: input.generation,
+        consumerIdempotencyKey: input.consumerIdempotencyKey
+      },
+      signal: input.signal
+    });
+  }
+
+  async verifyCheckpointSeal(input: VerifyCheckpointSealInput): Promise<ConsumedCheckpointSeal> {
+    const receipt = input.receipt;
+    return this.request<ConsumedCheckpointSeal>({
+      method: "POST",
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/sync/checkpoint-seals/verify`,
+      correlationId: input.correlationId,
+      body: {
+        sealId: receipt.sealId,
+        root: receipt.root,
+        sessionId: receipt.sessionId,
+        generation: receipt.generation,
+        digest: receipt.digest,
+        workspaceRevision: receipt.workspaceRevision,
+        eventCursor: receipt.eventCursor,
+        issuedAt: receipt.issuedAt,
+        expiresAt: receipt.expiresAt,
+        consumedAt: receipt.consumedAt
+      },
+      signal: input.signal
+    });
+  }
+
+  async handbackCheckpointSeal(input: HandbackCheckpointSealInput): Promise<CheckpointSealOwnership> {
+    const receipt = input.receipt;
+    return this.request<CheckpointSealOwnership>({
+      method: "POST",
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/sync/checkpoint-seals/handback`,
+      correlationId: input.correlationId,
+      body: {
+        phase: input.phase,
+        sealId: receipt.sealId,
+        root: receipt.root,
+        sessionId: receipt.sessionId,
+        generation: receipt.generation,
+        consumedAt: receipt.consumedAt,
+        consumerIdempotencyKey: input.consumerIdempotencyKey,
+        handbackIdempotencyKey: input.handbackIdempotencyKey,
+        expectedDigest: input.expectedDigest
+      },
+      signal: input.signal
+    });
+  }
+
+  async resumeCheckpointSeal(input: ResumeCheckpointSealInput): Promise<CheckpointSealOwnership> {
+    return this.request<CheckpointSealOwnership>({
+      method: "POST",
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/sync/checkpoint-seals/resume`,
+      correlationId: input.correlationId,
+      body: {
+        sealToken: input.sealToken,
+        root: input.root,
+        sessionId: input.sessionId,
+        generation: input.generation,
+        resumeIdempotencyKey: input.resumeIdempotencyKey
+      },
+      signal: input.signal
+    });
+  }
+
   async deleteFile(input: DeleteFileInput): Promise<WriteQueuedResponse> {
     const query = buildQuery({ path: input.path, forkId: input.forkId });
     const result = await this.request<WriteQueuedResponse>({
@@ -2093,6 +2213,38 @@ export class RelayFileClient {
       path: `/v1/admin/sync${query}`,
       correlationId: options.correlationId,
       signal: options.signal
+    });
+  }
+
+  async getAdminCheckpointSealRetention(
+    options: GetAdminCheckpointSealRetentionOptions = {}
+  ): Promise<CheckpointSealRetentionSummary> {
+    const query = buildQuery({ workspaceId: options.workspaceId });
+    return this.request<CheckpointSealRetentionSummary>({
+      method: "GET",
+      path: `/v1/admin/checkpoint-seals${query}`,
+      correlationId: options.correlationId,
+      signal: options.signal
+    });
+  }
+
+  async reconcileAdminCheckpointSealSource(
+    input: ReconcileAdminCheckpointSealSourceInput
+  ): Promise<CheckpointSealRetentionRecord> {
+    return this.request<CheckpointSealRetentionRecord>({
+      method: "POST",
+      path: `/v1/admin/checkpoint-seals/${encodeURIComponent(input.sealId)}/reconcile-source`,
+      correlationId: input.correlationId,
+      body: {
+        workspaceId: input.workspaceId,
+        root: input.root,
+        sessionId: input.sessionId,
+        generation: input.generation,
+        expectedOwnershipStatus: input.expectedOwnershipStatus,
+        reconciliationIdempotencyKey: input.reconciliationIdempotencyKey,
+        confirmSourceReady: input.confirmSourceReady
+      },
+      signal: input.signal
     });
   }
 

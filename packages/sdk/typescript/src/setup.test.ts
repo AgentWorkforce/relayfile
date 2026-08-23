@@ -112,6 +112,7 @@ function createLauncherStub(
     pid: number
     ready: Promise<void>
     status: ReturnType<typeof vi.fn>
+    checkpointAndSeal: ReturnType<typeof vi.fn>
     stop: ReturnType<typeof vi.fn>
   }
   readyControl: ReturnType<typeof deferred<void>>
@@ -119,6 +120,7 @@ function createLauncherStub(
   const readyControl = deferred<void>()
   const instance = {
     pid: 4321,
+    stopped: false,
     ready: readyControl.promise,
     status: vi.fn().mockResolvedValue({
       ready: true,
@@ -127,12 +129,29 @@ function createLauncherStub(
       suggestedRefreshAt: null,
       ...status
     } satisfies MountedWorkspaceStatus),
+    checkpointAndSeal: vi.fn().mockResolvedValue(validCheckpointSeal()),
     stop: vi.fn().mockResolvedValue(undefined)
   }
   const launcher: MountLauncher = {
     start: vi.fn().mockResolvedValue(instance)
   }
   return { launcher, instance, readyControl }
+}
+
+function validCheckpointSeal() {
+  return {
+    sealId: "seal_123",
+    sealToken: "one-use-secret",
+    workspaceId: "ws_123",
+    root: "/notion",
+    sessionId: "session-123",
+    generation: 7,
+    digest: `sha256:${"a".repeat(64)}`,
+    workspaceRevision: "rev_123",
+    eventCursor: "evt_123",
+    issuedAt: "2026-08-23T10:00:00.000Z",
+    expiresAt: "2026-08-23T10:01:00.000Z"
+  }
 }
 
 async function flushPromises(times = 3): Promise<void> {
@@ -1248,6 +1267,99 @@ describe("RelayfileSetup", () => {
     }
   })
 
+  it("delegates checkpointAndSeal to the owned launcher and retires readiness", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-sdk-mount-checkpoint-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    queueFetch(
+      makeJoinResponse("rf_jwt_joined"),
+      makeMountSessionResponse()
+    )
+    const { launcher, instance, readyControl } = createLauncherStub()
+
+    try {
+      const setup = new RelayfileSetup()
+      const workspace = await setup.joinWorkspace("ws_123")
+      readyControl.resolve()
+      const handle = await setup.mountWorkspace({
+        workspace,
+        localDir,
+        remotePath: "/notion",
+        mode: "poll",
+        launcher
+      })
+
+      await expect(handle.checkpointAndSeal({
+        sessionId: "session-123",
+        generation: 7,
+        ttlSeconds: 60
+      })).resolves.toEqual(validCheckpointSeal())
+      expect(instance.checkpointAndSeal).toHaveBeenCalledWith({
+        sessionId: "session-123",
+        generation: 7,
+        ttlSeconds: 60
+      })
+      expect(handle.ready).toBe(false)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("rejects a checkpoint-capable launcher that cannot prove it stopped", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-sdk-mount-checkpoint-contract-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const checkpointAndSeal = vi.fn().mockResolvedValue(validCheckpointSeal())
+    const stop = vi.fn().mockResolvedValue(undefined)
+    const launcher = {
+      start: vi.fn().mockResolvedValue({
+        pid: 4321,
+        ready: Promise.resolve(),
+        status: vi.fn().mockResolvedValue({
+          ready: true,
+          mode: "poll",
+          expiresAt: null,
+          suggestedRefreshAt: null
+        } satisfies MountedWorkspaceStatus),
+        checkpointAndSeal,
+        stop
+      })
+    } as unknown as MountLauncher
+    queueFetch(
+      makeJoinResponse("rf_jwt_joined"),
+      makeMountSessionResponse()
+    )
+
+    try {
+      const setup = new RelayfileSetup()
+      const workspace = await setup.joinWorkspace("ws_123")
+      const handle = await setup.mountWorkspace({
+        workspace,
+        localDir,
+        remotePath: "/notion",
+        mode: "poll",
+        launcher
+      })
+
+      await expect(handle.checkpointAndSeal({
+        sessionId: "session-123",
+        generation: 7,
+        ttlSeconds: 60
+      })).rejects.toMatchObject({
+        code: "checkpoint_seal_launcher_contract_invalid"
+      })
+      expect(checkpointAndSeal).not.toHaveBeenCalled()
+      expect(handle.ready).toBe(true)
+
+      await handle.stop()
+      expect(stop).toHaveBeenCalledTimes(1)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
   it.each(["pull-only", "write-only"] as const)(
     "passes explicit local layout and %s sync mode only to the local mount launcher",
     async (syncMode) => {
@@ -1648,6 +1760,192 @@ describe("RelayfileSetup", () => {
     }
   })
 
+  it.each([
+    {
+      name: "invalid input",
+      mode: "poll" as const,
+      syncMode: "mirror" as const,
+      code: "checkpoint_seal_invalid_input"
+    },
+    {
+      name: "FUSE mode",
+      mode: "fuse" as const,
+      syncMode: "mirror" as const,
+      code: "checkpoint_seal_mode_unavailable"
+    },
+    {
+      name: "pull-only mode",
+      mode: "poll" as const,
+      syncMode: "pull-only" as const,
+      code: "checkpoint_seal_mode_unavailable"
+    }
+  ])(
+    "ensureMountedWorkspace preserves its shared handle when checkpoint rejects $name before stop",
+    async ({ mode, syncMode, code }) => {
+      const tempRoot = await mkdtemp(
+        path.join(os.tmpdir(), "relayfile-sdk-ensure-checkpoint-preflight-")
+      )
+      const localDir = path.join(tempRoot, "mirror")
+      const fetchMock = queueFetch(
+        makeJoinResponse("rf_jwt_joined"),
+        makeMountSessionResponse({ mode, syncMode })
+      )
+      let stopped = false
+      const instance = {
+        pid: 4321,
+        get stopped() {
+          return stopped
+        },
+        ready: Promise.resolve(),
+        status: vi.fn().mockResolvedValue({
+          ready: true,
+          mode,
+          expiresAt: null,
+          suggestedRefreshAt: null
+        } satisfies MountedWorkspaceStatus),
+        checkpointAndSeal: vi.fn().mockRejectedValue(Object.assign(
+          new Error("checkpoint rejected before daemon stop"),
+          { code }
+        )),
+        stop: vi.fn().mockImplementation(async () => {
+          stopped = true
+        })
+      }
+      const launcher: MountLauncher = {
+        start: vi.fn().mockResolvedValue(instance)
+      }
+      const ensureInput = {
+        localDir,
+        mode,
+        syncMode,
+        verifyProvider: false,
+        launcher
+      }
+
+      try {
+        const setup = new RelayfileSetup()
+        const workspace = await setup.joinWorkspace("ws_123")
+        const first = await setup.ensureMountedWorkspace({
+          workspace,
+          ...ensureInput
+        })
+        const checkpointInput = {
+          sessionId:
+            mode === "poll" && syncMode === "mirror" ? "" : "session-123",
+          generation: 7
+        }
+
+        await expect(first.checkpointAndSeal(checkpointInput))
+          .rejects.toMatchObject({ code })
+
+        expect(first.ready).toBe(true)
+        expect(instance.stop).not.toHaveBeenCalled()
+        const reused = await setup.ensureMountedWorkspace({
+          workspace,
+          ...ensureInput
+        })
+        expect(reused).toBe(first)
+        expect(launcher.start).toHaveBeenCalledTimes(1)
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+        await expect(reused.checkpointAndSeal(checkpointInput))
+          .rejects.toMatchObject({ code })
+        expect(instance.checkpointAndSeal).toHaveBeenCalledTimes(2)
+        expect(reused.ready).toBe(true)
+
+        await reused.stop()
+        expect(instance.stop).toHaveBeenCalledTimes(1)
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true })
+      }
+    }
+  )
+
+  it("ensureMountedWorkspace evicts after a checkpoint failure with a confirmed daemon stop", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-sdk-ensure-checkpoint-stopped-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const fetchMock = queueFetch(
+      makeJoinResponse("rf_jwt_joined"),
+      makeMountSessionResponse(),
+      makeMountSessionResponse({
+        relayfileToken: "rf_mount_after_checkpoint_failure"
+      })
+    )
+    let firstStopped = false
+    const instances = [
+      {
+        pid: 4321,
+        get stopped() {
+          return firstStopped
+        },
+        ready: Promise.resolve(),
+        status: vi.fn().mockResolvedValue({
+          ready: true,
+          mode: "poll",
+          expiresAt: null,
+          suggestedRefreshAt: null
+        }),
+        checkpointAndSeal: vi.fn().mockImplementation(async () => {
+          firstStopped = true
+          throw Object.assign(new Error("seal command failed after stop"), {
+            code: "checkpoint_seal_failed"
+          })
+        }),
+        stop: vi.fn().mockImplementation(async () => {
+          firstStopped = true
+        })
+      },
+      {
+        pid: 4322,
+        stopped: false,
+        ready: Promise.resolve(),
+        status: vi.fn().mockResolvedValue({
+          ready: true,
+          mode: "poll",
+          expiresAt: null,
+          suggestedRefreshAt: null
+        }),
+        checkpointAndSeal: vi.fn().mockResolvedValue(validCheckpointSeal()),
+        stop: vi.fn().mockResolvedValue(undefined)
+      }
+    ]
+    const launcher: MountLauncher = {
+      start: vi.fn()
+        .mockResolvedValueOnce(instances[0])
+        .mockResolvedValueOnce(instances[1])
+    }
+
+    try {
+      const setup = new RelayfileSetup()
+      const workspace = await setup.joinWorkspace("ws_123")
+      const first = await setup.ensureMountedWorkspace({
+        workspace,
+        localDir,
+        verifyProvider: false,
+        launcher
+      })
+      await expect(first.checkpointAndSeal({
+        sessionId: "session-123",
+        generation: 7
+      })).rejects.toMatchObject({ code: "checkpoint_seal_failed" })
+      expect(first.ready).toBe(false)
+
+      const restarted = await setup.ensureMountedWorkspace({
+        workspace,
+        localDir,
+        verifyProvider: false,
+        launcher
+      })
+      expect(restarted).not.toBe(first)
+      expect(launcher.start).toHaveBeenCalledTimes(2)
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+      await restarted.stop()
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
   it("lets the creating waiter abort without cancelling shared physical startup", async () => {
     const tempRoot = await mkdtemp(
       path.join(os.tmpdir(), "relayfile-sdk-ensure-waiter-abort-")
@@ -1965,6 +2263,74 @@ describe("RelayfileSetup", () => {
       releaseStop()
       await stopping
 
+      expect(launcher.start).toHaveBeenCalledTimes(1)
+      expect(handle.ready).toBe(false)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("fences an in-flight health refresh before checkpoint can stop the mount", async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime("2026-05-09T10:00:00.000Z")
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-sdk-supervised-checkpoint-refresh-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    queueFetch(
+      makeJoinResponse("rf_jwt_joined"),
+      makeMountSessionResponse({
+        suggestedRefreshAt: "2026-05-09T11:00:00.000Z"
+      })
+    )
+    let releaseStatus!: (status: MountedWorkspaceStatus) => void
+    const pendingStatus = new Promise<MountedWorkspaceStatus>((resolve) => {
+      releaseStatus = resolve
+    })
+    let stopped = false
+    const checkpointAndSeal = vi.fn().mockImplementation(async () => {
+      stopped = true
+      return validCheckpointSeal()
+    })
+    const launcher: MountLauncher = {
+      start: vi.fn().mockResolvedValue({
+        pid: 4321,
+        get stopped() {
+          return stopped
+        },
+        ready: Promise.resolve(),
+        status: vi.fn().mockReturnValue(pendingStatus),
+        checkpointAndSeal,
+        stop: vi.fn().mockImplementation(async () => {
+          stopped = true
+        })
+      })
+    }
+
+    try {
+      const setup = new RelayfileSetup({ retry: { maxRetries: 0 } })
+      const handle = await setup.ensureMountedWorkspace({
+        workspaceId: "ws_123",
+        localDir,
+        verifyProvider: false,
+        launcher,
+        healthCheckIntervalMs: 1_000
+      })
+
+      await vi.advanceTimersByTimeAsync(1_000)
+      const checkpoint = handle.checkpointAndSeal({
+        sessionId: "session-refresh-race",
+        generation: 8
+      })
+      releaseStatus({
+        ready: false,
+        mode: "poll",
+        expiresAt: null,
+        suggestedRefreshAt: null
+      })
+
+      await expect(checkpoint).resolves.toEqual(validCheckpointSeal())
+      expect(checkpointAndSeal).toHaveBeenCalledTimes(1)
       expect(launcher.start).toHaveBeenCalledTimes(1)
       expect(handle.ready).toBe(false)
     } finally {

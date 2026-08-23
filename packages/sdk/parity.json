@@ -155,6 +155,28 @@
       ]
     },
     {
+      "id": "checkpoint-seals",
+      "status": "ts-only",
+      "summary": "Authoritative checkpoint ownership, one-use consume, destination handback, and source resume for live migration.",
+      "tsExports": [
+        "CheckpointSeal",
+        "CheckpointSealOwnershipStatus",
+        "CheckpointSealOwnership",
+        "CheckpointSealRetentionRecord",
+        "CheckpointSealRetentionSummary",
+        "ConsumedCheckpointSeal",
+        "ConsumeCheckpointSealInput",
+        "GetAdminCheckpointSealRetentionOptions",
+        "HandbackCheckpointSealInput",
+        "IssueCheckpointSealInput",
+        "RecoverConsumedCheckpointSealInput",
+        "ReconcileAdminCheckpointSealSourceInput",
+        "ResumeCheckpointSealInput",
+        "VerifyCheckpointSealInput"
+      ],
+      "pyExports": []
+    },
+    {
       "id": "on-write-subscriptions",
       "status": "both",
       "summary": "Subscribe to write events by path pattern.",
@@ -442,6 +464,7 @@
       "status": "ts-only",
       "summary": "Node process launcher and optional native relayfile-mount binary resolution.",
       "tsExports": [
+        "CheckpointAndSealInput",
         "defaultMountLauncher",
         "ensureRelayfileMount",
         "getRelayfileMountBinaryPath"
