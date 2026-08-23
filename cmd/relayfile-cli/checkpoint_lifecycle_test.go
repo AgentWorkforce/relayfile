@@ -215,6 +215,25 @@ func TestMountResumeSealIsCrashRecoverableIdempotentAndRootBound(t *testing.T) {
 	}
 }
 
+func TestMountResumeSealRejectsNonExactJSONDocument(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	for name, input := range map[string]string{
+		"malformed":              `{"resumeId":`,
+		"trailing second object": `{"resumeId":"rsm_exact"}{"resumeId":"rsm_other"}`,
+		"trailing garbage":       `{"resumeId":"rsm_exact"}not-json`,
+		"unknown field":          `{"resumeId":"rsm_exact","extra":true}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var output bytes.Buffer
+			err := runMountResumeSeal([]string{"--root", root, "--json"}, strings.NewReader(input), &output)
+			if checkpointExitCode(err) != 2 || !strings.Contains(err.Error(), "exactly one JSON object") || output.Len() != 0 {
+				t.Fatalf("non-exact JSON err=%v output=%q", err, output.String())
+			}
+		})
+	}
+}
+
 func TestMountResumeSealCannotReportReadyBeforeResumeProofMaterializes(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	active, receipt := checkpointTestActive(t)
@@ -452,6 +471,89 @@ func TestMountHandbackFailureRecoveryDistinguishesDefinitiveFromAmbiguous(t *tes
 			t.Fatalf("ambiguous lifecycle=%+v ok=%v err=%v", state, ok, loadErr)
 		}
 	})
+
+	t.Run("503 after application commit stays stopped and exact retry recovers proof", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		active, issued := checkpointTestActive(t)
+		receipt := consumedCheckpointTestReceipt(issued)
+		lease, ensureCalls, _ := installCheckpointLifecycleSeams(t, active, receipt)
+		committed := false
+		handbackCalls := 0
+		checkpointHandbackStopped = func(_ context.Context, _ checkpointMountConfig, consumed mountsync.CheckpointSeal, consumerKey, handbackKey string) (mountsync.CheckpointSealOwnership, mountsync.CheckpointVerificationHealth, error) {
+			handbackCalls++
+			if consumerKey != "cutover-503-after-commit" || handbackKey != "handback-503-after-commit" {
+				t.Fatalf("changed idempotency identity consumer=%q handback=%q", consumerKey, handbackKey)
+			}
+			proof := mountsync.CheckpointSealOwnership{
+				SealID: consumed.SealID, WorkspaceID: consumed.WorkspaceID, Root: consumed.Root,
+				SessionID: consumed.SessionID, Generation: consumed.Generation, Status: "released",
+				Digest: consumed.Digest, WorkspaceRevision: "rev_3", EventCursor: consumed.EventCursor,
+				ConsumedAt: consumed.ConsumedAt, ReleasedAt: "2026-08-23T12:00:10Z",
+			}
+			if !committed {
+				committed = true
+				return mountsync.CheckpointSealOwnership{}, mountsync.CheckpointVerificationHealth{}, &mountsync.HTTPError{StatusCode: 503, Code: "upstream_unavailable", Message: "gateway lost committed response"}
+			}
+			return proof, mountsync.CheckpointVerificationHealth{}, nil
+		}
+		input := checkpointHandbackInput{HandbackID: "handback-503-after-commit", ConsumerIdempotencyKey: "cutover-503-after-commit", Receipt: receipt}
+		payload, _ := json.Marshal(input)
+		args := []string{"--root", active.config.LocalRoot, "--json"}
+		var first bytes.Buffer
+		err := runMountHandbackSeal(args, bytes.NewReader(payload), &first)
+		if checkpointExitCode(err) != 4 || !strings.Contains(err.Error(), "handback_result_unknown") || first.Len() != 0 || *ensureCalls != 0 || !lease.released || !committed {
+			t.Fatalf("503-after-commit err=%v output=%q restart=%d lease=%v committed=%v", err, first.String(), *ensureCalls, lease.released, committed)
+		}
+		state, ok, loadErr := loadCheckpointHandbackIfExists(input.HandbackID)
+		if loadErr != nil || !ok || state.Status != "handback-unknown" || state.Result != nil {
+			t.Fatalf("ambiguous 503 lifecycle=%+v ok=%v err=%v", state, ok, loadErr)
+		}
+		var retry bytes.Buffer
+		if err := runMountHandbackSeal(args, bytes.NewReader(payload), &retry); err != nil {
+			t.Fatalf("idempotent handback recovery: %v", err)
+		}
+		if *ensureCalls != 0 || handbackCalls != 2 || !strings.Contains(retry.String(), `"status": "released"`) {
+			t.Fatalf("recovered handback restart=%d calls=%d output=%s", *ensureCalls, handbackCalls, retry.String())
+		}
+		state, ok, loadErr = loadCheckpointHandbackIfExists(input.HandbackID)
+		if loadErr != nil || !ok || state.Status != "released" || state.Result == nil {
+			t.Fatalf("recovered lifecycle=%+v ok=%v err=%v", state, ok, loadErr)
+		}
+	})
+}
+
+func TestCheckpointHandbackHTTPFailureClassification(t *testing.T) {
+	for _, httpErr := range []*mountsync.HTTPError{
+		{StatusCode: 400, Code: "bad_request"},
+		{StatusCode: 401, Code: "unauthorized"},
+		{StatusCode: 403, Code: "forbidden"},
+		{StatusCode: 404, Code: "checkpoint_seal_not_found"},
+		{StatusCode: 409, Code: "checkpoint_diverged"},
+		{StatusCode: 413, Code: "payload_too_large"},
+	} {
+		if !definitiveCheckpointHandbackHTTPFailure(httpErr) {
+			t.Errorf("HTTP %d/%s should be definitive", httpErr.StatusCode, httpErr.Code)
+		}
+	}
+	for _, httpErr := range []*mountsync.HTTPError{
+		{StatusCode: 0},
+		{StatusCode: 400, Code: "gateway_bad_request"},
+		{StatusCode: 404, Code: "not_found"},
+		{StatusCode: 408, Code: "request_timeout"},
+		{StatusCode: 425, Code: "too_early"},
+		{StatusCode: 429, Code: "rate_limited"},
+		{StatusCode: 500, Code: "internal_error"},
+		{StatusCode: 502, Code: "bad_gateway"},
+		{StatusCode: 503, Code: "upstream_unavailable"},
+		{StatusCode: 504, Code: "gateway_timeout"},
+	} {
+		if definitiveCheckpointHandbackHTTPFailure(httpErr) {
+			t.Errorf("HTTP %d/%s should remain ambiguous", httpErr.StatusCode, httpErr.Code)
+		}
+	}
+	if definitiveCheckpointHandbackHTTPFailure(errors.New("connection reset after POST")) {
+		t.Error("transport failure should remain ambiguous")
+	}
 }
 
 func TestCheckpointAbortAndImmediateResumeSerializeAndRecover(t *testing.T) {

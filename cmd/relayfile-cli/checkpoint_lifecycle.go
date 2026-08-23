@@ -379,8 +379,8 @@ func runMountResumeSeal(args []string, stdin io.Reader, stdout io.Writer) error 
 	var input checkpointResumeInput
 	decoder := json.NewDecoder(io.LimitReader(stdin, 16*1024))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&input); err != nil || !checkpointLifecycleIDPattern.MatchString(strings.TrimSpace(input.ResumeID)) {
-		return checkpointError("resume_invalid_input", 2, errors.New("stdin must be JSON containing a valid resumeId"))
+	if err := decoder.Decode(&input); err != nil || decoder.Decode(&struct{}{}) != io.EOF || !checkpointLifecycleIDPattern.MatchString(strings.TrimSpace(input.ResumeID)) {
+		return checkpointError("resume_invalid_input", 2, errors.New("stdin must contain exactly one JSON object with a valid resumeId"))
 	}
 	lockCtx, lockCancel := context.WithTimeout(context.Background(), *timeout)
 	release, err := acquireCheckpointLifecycleLockWait(lockCtx, root)
@@ -721,8 +721,7 @@ func finishCheckpointHandback(state checkpointHandbackLifecycle, lease checkpoin
 	if handbackErr != nil {
 		_ = lease.Release()
 		state.LastError = handbackErr.Error()
-		var httpErr *mountsync.HTTPError
-		if errors.As(handbackErr, &httpErr) {
+		if definitiveCheckpointHandbackHTTPFailure(handbackErr) {
 			if recoveryErr := checkpointEnsureSource(state.Config, timeout); recoveryErr != nil {
 				state.Status = "recovery-failed"
 				state.LastError += "; destination recovery: " + recoveryErr.Error()
@@ -733,11 +732,14 @@ func finishCheckpointHandback(state checkpointHandbackLifecycle, lease checkpoin
 			_ = saveCheckpointHandback(state)
 			return checkpointError("handback_nonconverged", 5, handbackErr)
 		}
-		// A transport failure after POST is ambiguous: the server may have
-		// committed the release. Leave the destination stopped and require an
-		// exact retry with the same handbackId; never restart into split-brain.
+		// A transport failure or exhausted retryable HTTP response after POST is
+		// ambiguous: the application may have committed before a proxy/gateway
+		// emitted 5xx. Leave the destination stopped and require an exact retry
+		// with the same handbackId; never restart into split-brain.
 		state.Status = "handback-unknown"
-		_ = saveCheckpointHandback(state)
+		if err := saveCheckpointHandback(state); err != nil {
+			return checkpointError("handback_lifecycle_state_failed", 4, fmt.Errorf("persist ambiguous handback while destination remains stopped: %w", err))
+		}
 		return checkpointError("handback_result_unknown", 4, handbackErr)
 	}
 	result := checkpointHandbackEnvelope{
@@ -757,6 +759,32 @@ func finishCheckpointHandback(state checkpointHandbackLifecycle, lease checkpoin
 		return checkpointError("handback_lease_release_failed", 4, err)
 	}
 	return writeJSON(stdout, result)
+}
+
+func definitiveCheckpointHandbackHTTPFailure(err error) bool {
+	var httpErr *mountsync.HTTPError
+	if !errors.As(err, &httpErr) {
+		return false
+	}
+	code := strings.TrimSpace(httpErr.Code)
+	switch {
+	case httpErr.StatusCode == 400 && code == "bad_request":
+		return true
+	case httpErr.StatusCode == 401 && code == "unauthorized":
+		return true
+	case httpErr.StatusCode == 403 && code == "forbidden":
+		return true
+	case httpErr.StatusCode == 404 && code == "checkpoint_seal_not_found":
+		return true
+	case httpErr.StatusCode == 409 && strings.HasPrefix(code, "checkpoint_"):
+		return true
+	case httpErr.StatusCode == 413 && code == "payload_too_large":
+		return true
+	default:
+		// Unknown/gateway 4xx, retry-class 408/425/429, transport failures,
+		// and every 5xx remain ambiguous after an exhausted POST.
+		return false
+	}
 }
 
 func continueStoppedDestinationVerification(state checkpointVerificationLifecycle, timeout time.Duration, stdout io.Writer) error {
