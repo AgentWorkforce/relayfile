@@ -820,6 +820,47 @@ func TestCheckpointRestartContractRejectsScopedRootBeforeStop(t *testing.T) {
 	}
 }
 
+func TestCheckpointRestartContractNormalizesMissingRemotePathsToRoot(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	active, receipt := checkpointTestActive(t)
+	active.config.RemotePaths = nil
+	active.record.RemotePaths = nil
+	if err := validateCheckpointMountConfig(active.config, active.record, active.config.LocalRoot); err != nil {
+		t.Fatalf("legacy root mount validation: %v", err)
+	}
+	installCheckpointLifecycleSeams(t, active, receipt)
+
+	var output bytes.Buffer
+	err := runMountCheckpointSeal([]string{
+		"--root", active.config.LocalRoot,
+		"--lifecycle-id", "rsm_controller_legacy_root",
+		"--session", receipt.SessionID,
+		"--generation", "2",
+		"--json",
+	}, &output)
+	if err != nil {
+		t.Fatalf("checkpoint with omitted remotePaths: %v", err)
+	}
+	var envelope checkpointSealEnvelope
+	if err := json.Unmarshal(output.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode checkpoint envelope: %v", err)
+	}
+	state, err := loadCheckpointLifecycle("rsm_controller_legacy_root")
+	if err != nil {
+		t.Fatalf("load checkpoint lifecycle: %v", err)
+	}
+	if state.RemoteRoot != "/" || envelope.Receipt.Root != "/" {
+		t.Fatalf("omitted remotePaths did not normalize to root: %+v", envelope)
+	}
+}
+
+func TestCheckpointLifecycleWaitLockRejectsNilContext(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if _, err := acquireCheckpointLifecycleLockWait(nil, t.TempDir()); err == nil || !strings.Contains(err.Error(), "requires a context") {
+		t.Fatalf("nil wait context error = %v", err)
+	}
+}
+
 func TestStopCheckpointMountSignalsRealProcessAndWaitsForLease(t *testing.T) {
 	if os.Getenv("RELAYFILE_CHECKPOINT_HELPER") == "1" {
 		t.Skip("helper branch is handled by TestCheckpointLifecycleHelperProcess")

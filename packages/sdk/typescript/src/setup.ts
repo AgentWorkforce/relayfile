@@ -1243,6 +1243,12 @@ class MountedWorkspaceHandleImpl implements MountedWorkspaceHandle {
           "checkpoint_seal_unavailable"
         )
       }
+      if (typeof this.launcherInstance.stopped !== "boolean") {
+        throw new RelayfileSetupError(
+          "checkpointAndSeal requires a launcher that reports physical stop state.",
+          "checkpoint_seal_launcher_contract_invalid"
+        )
+      }
       this.checkpointPromise = this.performCheckpointAndSeal(input)
     }
     return this.checkpointPromise

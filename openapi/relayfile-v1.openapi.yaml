@@ -1327,11 +1327,13 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
         '409':
-          description: Digest divergence or stale generation
+          description: Digest divergence, stale generation, or conflicting issuance retry identity
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
@@ -1383,6 +1385,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
@@ -1431,6 +1435,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
@@ -1481,6 +1487,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
@@ -1534,6 +1542,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
@@ -1581,6 +1591,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
@@ -2112,6 +2124,93 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/admin/checkpoint-seals:
+    get:
+      tags: [Admin]
+      operationId: getAdminCheckpointSealRetention
+      summary: Inspect fail-closed checkpoint seals awaiting source resume
+      description: >-
+        Returns a bearer-free per-workspace count and deterministic record list
+        for checkpoint seals whose source has not durably resumed. Records are
+        never removed merely because a lease or seal expired.
+      security:
+        - BearerAuth: [admin:read]
+        - BearerAuth: [admin:replay]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: workspaceId
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Unresumed checkpoint ownership metrics and records
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckpointSealRetentionSummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/admin/checkpoint-seals/{sealId}/reconcile-source:
+    post:
+      tags: [Admin]
+      operationId: reconcileAdminCheckpointSealSource
+      summary: Break-glass reconciliation after externally proving source readiness
+      description: >-
+        Requires admin:replay, an exact durable identity/status fence, a stable
+        idempotency key, and confirmSourceReady=true. Consumed and unreleased
+        destination ownership can never be overridden here. Eligible
+        unconsumed or destination-released records become bounded
+        source-resumed tombstones and their consumer-key binding is removed.
+      security:
+        - BearerAuth: [admin:replay]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: sealId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CheckpointSealAdminReconcileRequest'
+      responses:
+        '200':
+          description: Exact reconciled source-resumed tombstone
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckpointSealRetentionRecord'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Identity/status conflict or destination ownership remains unreleased
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -3613,10 +3712,99 @@ components:
           type: string
           maxLength: 1000
 
+    CheckpointSealRetentionRecord:
+      type: object
+      additionalProperties: false
+      required: [sealId, workspaceId, root, sessionId, generation, ownershipStatus, issuedAt, expiresAt]
+      properties:
+        sealId:
+          type: string
+        workspaceId:
+          type: string
+        root:
+          type: string
+        sessionId:
+          type: string
+        generation:
+          type: integer
+          format: uint64
+          minimum: 1
+          maximum: 18446744073709551615
+        ownershipStatus:
+          type: string
+          enum: [unconsumed, consumed, released, source-resumed]
+        issuedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        consumedAt:
+          type: string
+          format: date-time
+        handbackReleasedAt:
+          type: string
+          format: date-time
+        sourceResumedAt:
+          type: string
+          format: date-time
+        adminReconciledAt:
+          type: string
+          format: date-time
+
+    CheckpointSealRetentionSummary:
+      type: object
+      additionalProperties: false
+      required: [generatedAt, unresumedTotal, unresumedByWorkspace, records]
+      properties:
+        generatedAt:
+          type: string
+          format: date-time
+        unresumedTotal:
+          type: integer
+          minimum: 0
+        unresumedByWorkspace:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+        records:
+          type: array
+          items:
+            $ref: '#/components/schemas/CheckpointSealRetentionRecord'
+
+    CheckpointSealAdminReconcileRequest:
+      type: object
+      additionalProperties: false
+      required: [workspaceId, root, sessionId, generation, expectedOwnershipStatus, reconciliationIdempotencyKey, confirmSourceReady]
+      properties:
+        workspaceId:
+          type: string
+        root:
+          type: string
+          pattern: '^/'
+        sessionId:
+          type: string
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$'
+        generation:
+          type: integer
+          format: uint64
+          minimum: 1
+          maximum: 18446744073709551615
+        expectedOwnershipStatus:
+          type: string
+          enum: [unconsumed, released]
+        reconciliationIdempotencyKey:
+          type: string
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$'
+        confirmSourceReady:
+          type: boolean
+          const: true
+
     CheckpointSealRequest:
       type: object
       additionalProperties: false
-      required: [root, sessionId, generation, expectedDigest]
+      required: [root, sessionId, generation, expectedDigest, issuanceIdempotencyKey]
       properties:
         root:
           type: string
@@ -3626,15 +3814,24 @@ components:
           pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$'
         generation:
           type: integer
-          format: int64
+          format: uint64
           minimum: 1
+          maximum: 18446744073709551615
         expectedDigest:
           type: string
           pattern: '^sha256:[0-9a-f]{64}$'
           description: Local convergence assertion; the server independently computes and seals its own digest.
+        issuanceIdempotencyKey:
+          type: string
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$'
+          description: >-
+            Stable source-attempt identity persisted before issuance. If a
+            response is lost, an exact retry preserves the seal attestation,
+            atomically rotates its one-use bearer, and invalidates the lost
+            token. Reusing the key for another request or issuer conflicts.
         ttlSeconds:
           type: integer
-          minimum: 1
+          minimum: 0
           maximum: 300
 
     CheckpointSealConsumeRequest:
@@ -3653,8 +3850,9 @@ components:
           pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$'
         generation:
           type: integer
-          format: int64
+          format: uint64
           minimum: 1
+          maximum: 18446744073709551615
         consumerIdempotencyKey:
           type: string
           pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$'
@@ -3673,8 +3871,9 @@ components:
           pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$'
         generation:
           type: integer
-          format: int64
+          format: uint64
           minimum: 1
+          maximum: 18446744073709551615
         consumerIdempotencyKey:
           type: string
           pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$'
@@ -3695,8 +3894,9 @@ components:
           pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$'
         generation:
           type: integer
-          format: int64
+          format: uint64
           minimum: 1
+          maximum: 18446744073709551615
         digest:
           type: string
           pattern: '^sha256:[0-9a-f]{64}$'
@@ -3735,8 +3935,9 @@ components:
           pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$'
         generation:
           type: integer
-          format: int64
+          format: uint64
           minimum: 1
+          maximum: 18446744073709551615
         consumedAt:
           type: string
           format: date-time
@@ -3766,8 +3967,9 @@ components:
           pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$'
         generation:
           type: integer
-          format: int64
+          format: uint64
           minimum: 1
+          maximum: 18446744073709551615
         resumeIdempotencyKey:
           type: string
           pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$'
@@ -3787,8 +3989,9 @@ components:
           type: string
         generation:
           type: integer
-          format: int64
+          format: uint64
           minimum: 1
+          maximum: 18446744073709551615
         status:
           type: string
           enum: [prepared, released, source-resumed]
@@ -3832,8 +4035,9 @@ components:
           type: string
         generation:
           type: integer
-          format: int64
+          format: uint64
           minimum: 1
+          maximum: 18446744073709551615
         digest:
           type: string
           pattern: '^sha256:[0-9a-f]{64}$'

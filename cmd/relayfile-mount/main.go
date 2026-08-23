@@ -490,7 +490,7 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 		return fmt.Errorf("start diagnostics: %w", err)
 	}
 	if cfg.checkpointAndSeal {
-		ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
+		ctx, cancel := context.WithTimeout(rootCtx, checkpointOperationTimeout(cfg.timeout))
 		defer cancel()
 		seal, err := syncer.CheckpointAndSeal(ctx, mountsync.CheckpointAndSealOptions{
 			SessionID: cfg.checkpointSession, Generation: cfg.checkpointGeneration,
@@ -644,6 +644,14 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 			timer.Reset(jitteredIntervalWithSample(cfg.interval, cfg.intervalJitter, rng.Float64()))
 		}
 	}
+}
+
+func checkpointOperationTimeout(configured time.Duration) time.Duration {
+	const minimum = 30 * time.Second
+	if configured < minimum {
+		return minimum
+	}
+	return configured
 }
 
 type mountCredsFile struct {

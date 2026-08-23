@@ -209,15 +209,32 @@ export interface MountLauncherStart {
   background?: boolean
 }
 
-export interface MountLauncherInstance {
+interface MountLauncherInstanceBase {
   pid?: number
-  /** True only after the owned daemon process is confirmed stopped. */
-  readonly stopped?: boolean
   ready: Promise<void>
   status(): Promise<MountedWorkspaceStatus>
-  checkpointAndSeal?(input: CheckpointAndSealInput): Promise<CheckpointSeal>
   stop(): Promise<void>
 }
+
+/** A launcher without checkpoint support may report stop state optionally. */
+export interface BasicMountLauncherInstance extends MountLauncherInstanceBase {
+  readonly stopped?: boolean
+  checkpointAndSeal?: never
+}
+
+/**
+ * Checkpoint-capable launchers must report whether the physical daemon stopped.
+ * The SDK uses this signal to retire a failed checkpoint safely.
+ */
+export interface CheckpointCapableMountLauncherInstance
+  extends MountLauncherInstanceBase {
+  readonly stopped: boolean
+  checkpointAndSeal(input: CheckpointAndSealInput): Promise<CheckpointSeal>
+}
+
+export type MountLauncherInstance =
+  | BasicMountLauncherInstance
+  | CheckpointCapableMountLauncherInstance
 
 export interface MountLauncher {
   start(input: MountLauncherStart): Promise<MountLauncherInstance>

@@ -235,6 +235,22 @@ func TestCheckpointAndSealCLIValidationFailsBeforeStartingMount(t *testing.T) {
 	}
 }
 
+func TestCheckpointOperationTimeoutHasThirtySecondFloor(t *testing.T) {
+	for _, tc := range []struct {
+		configured time.Duration
+		want       time.Duration
+	}{
+		{configured: 0, want: 30 * time.Second},
+		{configured: 15 * time.Second, want: 30 * time.Second},
+		{configured: 30 * time.Second, want: 30 * time.Second},
+		{configured: 45 * time.Second, want: 45 * time.Second},
+	} {
+		if got := checkpointOperationTimeout(tc.configured); got != tc.want {
+			t.Fatalf("checkpointOperationTimeout(%s) = %s, want %s", tc.configured, got, tc.want)
+		}
+	}
+}
+
 func TestResolveLocalLayout(t *testing.T) {
 	tests := []struct {
 		name    string

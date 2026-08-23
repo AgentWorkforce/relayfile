@@ -120,6 +120,7 @@ function createLauncherStub(
   const readyControl = deferred<void>()
   const instance = {
     pid: 4321,
+    stopped: false,
     ready: readyControl.promise,
     status: vi.fn().mockResolvedValue({
       ready: true,
@@ -1300,6 +1301,60 @@ describe("RelayfileSetup", () => {
         ttlSeconds: 60
       })
       expect(handle.ready).toBe(false)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("rejects a checkpoint-capable launcher that cannot prove it stopped", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-sdk-mount-checkpoint-contract-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const checkpointAndSeal = vi.fn().mockResolvedValue(validCheckpointSeal())
+    const stop = vi.fn().mockResolvedValue(undefined)
+    const launcher = {
+      start: vi.fn().mockResolvedValue({
+        pid: 4321,
+        ready: Promise.resolve(),
+        status: vi.fn().mockResolvedValue({
+          ready: true,
+          mode: "poll",
+          expiresAt: null,
+          suggestedRefreshAt: null
+        } satisfies MountedWorkspaceStatus),
+        checkpointAndSeal,
+        stop
+      })
+    } as unknown as MountLauncher
+    queueFetch(
+      makeJoinResponse("rf_jwt_joined"),
+      makeMountSessionResponse()
+    )
+
+    try {
+      const setup = new RelayfileSetup()
+      const workspace = await setup.joinWorkspace("ws_123")
+      const handle = await setup.mountWorkspace({
+        workspace,
+        localDir,
+        remotePath: "/notion",
+        mode: "poll",
+        launcher
+      })
+
+      await expect(handle.checkpointAndSeal({
+        sessionId: "session-123",
+        generation: 7,
+        ttlSeconds: 60
+      })).rejects.toMatchObject({
+        code: "checkpoint_seal_launcher_contract_invalid"
+      })
+      expect(checkpointAndSeal).not.toHaveBeenCalled()
+      expect(handle.ready).toBe(true)
+
+      await handle.stop()
+      expect(stop).toHaveBeenCalledTimes(1)
     } finally {
       await rm(tempRoot, { recursive: true, force: true })
     }

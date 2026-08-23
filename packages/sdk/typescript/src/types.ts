@@ -155,6 +155,53 @@ export interface CheckpointSeal {
   consumedAt?: string;
 }
 
+export type CheckpointSealOwnershipStatus =
+  | "unconsumed"
+  | "consumed"
+  | "released"
+  | "source-resumed";
+
+export interface CheckpointSealRetentionRecord {
+  sealId: string;
+  workspaceId: string;
+  root: string;
+  sessionId: string;
+  generation: number;
+  ownershipStatus: CheckpointSealOwnershipStatus;
+  issuedAt: string;
+  expiresAt: string;
+  consumedAt?: string;
+  handbackReleasedAt?: string;
+  sourceResumedAt?: string;
+  adminReconciledAt?: string;
+}
+
+export interface CheckpointSealRetentionSummary {
+  generatedAt: string;
+  unresumedTotal: number;
+  unresumedByWorkspace: Record<string, number>;
+  records: CheckpointSealRetentionRecord[];
+}
+
+export interface GetAdminCheckpointSealRetentionOptions {
+  workspaceId?: string;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface ReconcileAdminCheckpointSealSourceInput {
+  sealId: string;
+  workspaceId: string;
+  root: string;
+  sessionId: string;
+  generation: number;
+  expectedOwnershipStatus: "unconsumed" | "released";
+  reconciliationIdempotencyKey: string;
+  confirmSourceReady: true;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
 export interface ConsumedCheckpointSeal extends Omit<CheckpointSeal, "sealToken" | "consumedAt"> {
   sealToken?: never;
   consumedAt: string;
@@ -166,6 +213,8 @@ export interface IssueCheckpointSealInput {
   sessionId: string;
   generation: number;
   expectedDigest: string;
+  /** Stable per-attempt key. Response-loss retries rotate the lost bearer safely. */
+  issuanceIdempotencyKey: string;
   ttlSeconds?: number;
   correlationId?: string;
   signal?: AbortSignal;

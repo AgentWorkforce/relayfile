@@ -4,6 +4,10 @@ import {
   type BulkWriteInput,
   type BulkWriteResponse,
   type CheckpointSeal,
+  type CheckpointSealRetentionRecord,
+  type CheckpointSealRetentionSummary,
+  type GetAdminCheckpointSealRetentionOptions,
+  type ReconcileAdminCheckpointSealSourceInput,
   type ConsumedCheckpointSeal,
   type IssueCheckpointSealInput,
   type ConsumeCheckpointSealInput,
@@ -1670,6 +1674,7 @@ export class RelayFileClient {
         sessionId: input.sessionId,
         generation: input.generation,
         expectedDigest: input.expectedDigest,
+        issuanceIdempotencyKey: input.issuanceIdempotencyKey,
         ttlSeconds: input.ttlSeconds
       },
       signal: input.signal
@@ -2208,6 +2213,38 @@ export class RelayFileClient {
       path: `/v1/admin/sync${query}`,
       correlationId: options.correlationId,
       signal: options.signal
+    });
+  }
+
+  async getAdminCheckpointSealRetention(
+    options: GetAdminCheckpointSealRetentionOptions = {}
+  ): Promise<CheckpointSealRetentionSummary> {
+    const query = buildQuery({ workspaceId: options.workspaceId });
+    return this.request<CheckpointSealRetentionSummary>({
+      method: "GET",
+      path: `/v1/admin/checkpoint-seals${query}`,
+      correlationId: options.correlationId,
+      signal: options.signal
+    });
+  }
+
+  async reconcileAdminCheckpointSealSource(
+    input: ReconcileAdminCheckpointSealSourceInput
+  ): Promise<CheckpointSealRetentionRecord> {
+    return this.request<CheckpointSealRetentionRecord>({
+      method: "POST",
+      path: `/v1/admin/checkpoint-seals/${encodeURIComponent(input.sealId)}/reconcile-source`,
+      correlationId: input.correlationId,
+      body: {
+        workspaceId: input.workspaceId,
+        root: input.root,
+        sessionId: input.sessionId,
+        generation: input.generation,
+        expectedOwnershipStatus: input.expectedOwnershipStatus,
+        reconciliationIdempotencyKey: input.reconciliationIdempotencyKey,
+        confirmSourceReady: input.confirmSourceReady
+      },
+      signal: input.signal
     });
   }
 

@@ -27,12 +27,14 @@ var (
 	ErrCheckpointReplay             = errors.New("checkpoint seal already consumed")
 	ErrCheckpointStale              = errors.New("checkpoint seal is stale")
 	ErrCheckpointGenerationStale    = errors.New("checkpoint generation is not newer than the last issued generation")
+	ErrCheckpointIssuanceConflict   = errors.New("checkpoint issuance idempotency key is bound to a different request or issuer")
 	ErrCheckpointConsumerConflict   = errors.New("checkpoint consumer idempotency key is bound to a different seal or identity")
 	ErrCheckpointUnconsumed         = errors.New("checkpoint seal has not been consumed")
 	ErrCheckpointHandbackRequired   = errors.New("checkpoint ownership has not been released by the destination")
 	ErrCheckpointHandbackUnprepared = errors.New("checkpoint handback has not been prepared")
 	ErrCheckpointHandbackConflict   = errors.New("checkpoint handback idempotency key is bound to a different release")
 	ErrCheckpointResumeConflict     = errors.New("checkpoint source resume idempotency key is bound to a different claim")
+	ErrCheckpointAdminConflict      = errors.New("checkpoint administrative reconciliation identity conflicts with durable state")
 	checkpointSessionPattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$`)
 	checkpointRevisionPattern       = regexp.MustCompile(`^(?:0|rev_[0-9]+)$`)
 	checkpointEventCursorPattern    = regexp.MustCompile(`^(?:0|evt_[0-9]+)$`)
@@ -50,12 +52,13 @@ type CheckpointDigestEntry struct {
 }
 
 type CheckpointSealRequest struct {
-	Root           string `json:"root"`
-	SessionID      string `json:"sessionId"`
-	Generation     uint64 `json:"generation"`
-	ExpectedDigest string `json:"expectedDigest"`
-	TTLSeconds     int    `json:"ttlSeconds,omitempty"`
-	Issuer         string `json:"-"`
+	Root                   string `json:"root"`
+	SessionID              string `json:"sessionId"`
+	Generation             uint64 `json:"generation"`
+	ExpectedDigest         string `json:"expectedDigest"`
+	TTLSeconds             int    `json:"ttlSeconds,omitempty"`
+	IssuanceIdempotencyKey string `json:"issuanceIdempotencyKey"`
+	Issuer                 string `json:"-"`
 }
 
 type CheckpointSealConsumeRequest struct {
@@ -160,19 +163,23 @@ type CheckpointSeal struct {
 
 type checkpointSealRecord struct {
 	CheckpointSeal
-	TokenHash            string `json:"tokenHash"`
-	Issuer               string `json:"issuer,omitempty"`
-	ConsumerKeyHash      string `json:"consumerKeyHash,omitempty"`
-	ConsumerPrincipal    string `json:"consumerPrincipal,omitempty"`
-	HandbackKeyHash      string `json:"handbackKeyHash,omitempty"`
-	HandbackDigest       string `json:"handbackDigest,omitempty"`
-	HandbackRevision     string `json:"handbackRevision,omitempty"`
-	HandbackEventCursor  string `json:"handbackEventCursor,omitempty"`
-	HandbackPreparedAt   string `json:"handbackPreparedAt,omitempty"`
-	HandbackReleasedAt   string `json:"handbackReleasedAt,omitempty"`
-	SourceResumeKeyHash  string `json:"sourceResumeKeyHash,omitempty"`
-	SourceResumedAt      string `json:"sourceResumedAt,omitempty"`
-	IdempotencyExpiresAt string `json:"idempotencyExpiresAt,omitempty"`
+	IssuanceKeyHash       string `json:"issuanceKeyHash,omitempty"`
+	IssuanceRequestHash   string `json:"issuanceRequestHash,omitempty"`
+	TokenHash             string `json:"tokenHash"`
+	Issuer                string `json:"issuer,omitempty"`
+	ConsumerKeyHash       string `json:"consumerKeyHash,omitempty"`
+	ConsumerPrincipal     string `json:"consumerPrincipal,omitempty"`
+	HandbackKeyHash       string `json:"handbackKeyHash,omitempty"`
+	HandbackDigest        string `json:"handbackDigest,omitempty"`
+	HandbackRevision      string `json:"handbackRevision,omitempty"`
+	HandbackEventCursor   string `json:"handbackEventCursor,omitempty"`
+	HandbackPreparedAt    string `json:"handbackPreparedAt,omitempty"`
+	HandbackReleasedAt    string `json:"handbackReleasedAt,omitempty"`
+	SourceResumeKeyHash   string `json:"sourceResumeKeyHash,omitempty"`
+	SourceResumedAt       string `json:"sourceResumedAt,omitempty"`
+	AdminReconcileKeyHash string `json:"adminReconcileKeyHash,omitempty"`
+	AdminReconciledAt     string `json:"adminReconciledAt,omitempty"`
+	IdempotencyExpiresAt  string `json:"idempotencyExpiresAt,omitempty"`
 }
 
 type checkpointConsumerBinding struct {
@@ -183,6 +190,38 @@ type checkpointConsumerBinding struct {
 	Generation  uint64 `json:"generation"`
 	Principal   string `json:"principal"`
 	ReplayUntil string `json:"replayUntil"`
+}
+
+type CheckpointSealRetentionRecord struct {
+	SealID             string `json:"sealId"`
+	WorkspaceID        string `json:"workspaceId"`
+	Root               string `json:"root"`
+	SessionID          string `json:"sessionId"`
+	Generation         uint64 `json:"generation"`
+	OwnershipStatus    string `json:"ownershipStatus"`
+	IssuedAt           string `json:"issuedAt"`
+	ExpiresAt          string `json:"expiresAt"`
+	ConsumedAt         string `json:"consumedAt,omitempty"`
+	HandbackReleasedAt string `json:"handbackReleasedAt,omitempty"`
+	SourceResumedAt    string `json:"sourceResumedAt,omitempty"`
+	AdminReconciledAt  string `json:"adminReconciledAt,omitempty"`
+}
+
+type CheckpointSealRetentionSummary struct {
+	GeneratedAt          string                          `json:"generatedAt"`
+	UnresumedTotal       int                             `json:"unresumedTotal"`
+	UnresumedByWorkspace map[string]int                  `json:"unresumedByWorkspace"`
+	Records              []CheckpointSealRetentionRecord `json:"records"`
+}
+
+type CheckpointSealAdminReconcileRequest struct {
+	WorkspaceID                  string `json:"workspaceId"`
+	Root                         string `json:"root"`
+	SessionID                    string `json:"sessionId"`
+	Generation                   uint64 `json:"generation"`
+	ExpectedOwnershipStatus      string `json:"expectedOwnershipStatus"`
+	ReconciliationIdempotencyKey string `json:"reconciliationIdempotencyKey"`
+	ConfirmSourceReady           bool   `json:"confirmSourceReady"`
 }
 
 func NormalizeCheckpointRoot(raw string) (string, error) {
@@ -242,6 +281,8 @@ func writeDigestField(w digestWriter, value string) {
 func (s *Store) IssueCheckpointSeal(workspaceID string, req CheckpointSealRequest, now time.Time) (CheckpointSeal, error) {
 	workspaceID = strings.TrimSpace(workspaceID)
 	sessionID := strings.TrimSpace(req.SessionID)
+	issuanceKey := strings.TrimSpace(req.IssuanceIdempotencyKey)
+	issuer := strings.TrimSpace(req.Issuer)
 	root, err := NormalizeCheckpointRoot(req.Root)
 	if err != nil || workspaceID == "" || !checkpointSessionPattern.MatchString(sessionID) || req.Generation == 0 {
 		return CheckpointSeal{}, ErrInvalidInput
@@ -260,11 +301,61 @@ func (s *Store) IssueCheckpointSeal(workspaceID string, req CheckpointSealReques
 	if req.TTLSeconds > 0 {
 		ttl = time.Duration(req.TTLSeconds) * time.Second
 	}
+	issuanceRequestHash := checkpointIssuanceRequestHash(workspaceID, root, sessionID, req.Generation, expectedDigest, int(ttl/time.Second))
+	issuanceKeyHash := ""
+	if issuanceKey != "" && !checkpointSessionPattern.MatchString(issuanceKey) {
+		return CheckpointSeal{}, ErrInvalidInput
+	}
+	if issuanceKey != "" {
+		issuanceKeyHash = checkpointTokenHash(issuanceKey)
+	}
+	persistedIssuanceRequestHash := issuanceRequestHash
+	if issuanceKeyHash == "" {
+		persistedIssuanceRequestHash = ""
+	}
 	now = now.UTC()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.purgeCheckpointSealsLocked(now)
+	if oldTokenHash, replay, ok := s.checkpointSealByIssuanceKeyLocked(issuanceKeyHash); issuanceKeyHash != "" && ok {
+		if replay.IssuanceRequestHash != issuanceRequestHash || replay.Issuer != issuer {
+			return CheckpointSeal{}, ErrCheckpointIssuanceConflict
+		}
+		if replay.ConsumedAt != "" || replay.HandbackReleasedAt != "" || replay.SourceResumedAt != "" {
+			return CheckpointSeal{}, ErrCheckpointReplay
+		}
+		expiresAt, parseErr := time.Parse(time.RFC3339Nano, replay.ExpiresAt)
+		if parseErr != nil || !now.Before(expiresAt) {
+			return CheckpointSeal{}, ErrCheckpointExpired
+		}
+		digest, workspaceRevision, cursor, stateErr := s.checkpointStateLocked(workspaceID, root)
+		if stateErr != nil {
+			return CheckpointSeal{}, stateErr
+		}
+		if digest != replay.Digest || workspaceRevision != replay.WorkspaceRevision || cursor != replay.EventCursor {
+			return CheckpointSeal{}, ErrCheckpointStale
+		}
+		// A response-loss retry cannot recover a plaintext bearer from its
+		// stored hash. Rotate it atomically while preserving the seal identity
+		// and immutable attestation; the lost token becomes unusable.
+		token, tokenErr := newCheckpointToken()
+		if tokenErr != nil {
+			return CheckpointSeal{}, tokenErr
+		}
+		rotated := replay
+		rotated.TokenHash = checkpointTokenHash(token)
+		delete(s.checkpointSeals, oldTokenHash)
+		s.checkpointSeals[rotated.TokenHash] = rotated
+		if saveErr := s.saveLocked(); saveErr != nil {
+			delete(s.checkpointSeals, rotated.TokenHash)
+			s.checkpointSeals[oldTokenHash] = replay
+			return CheckpointSeal{}, saveErr
+		}
+		response := rotated.CheckpointSeal
+		response.SealToken = token
+		return response, nil
+	}
 	key := checkpointGenerationKey(workspaceID, root, sessionID)
 	previousGeneration := s.checkpointGenerations[key]
 	if req.Generation <= previousGeneration {
@@ -295,8 +386,10 @@ func (s *Store) IssueCheckpointSeal(workspaceID string, req CheckpointSealReques
 			IssuedAt:          now.Format(time.RFC3339Nano),
 			ExpiresAt:         now.Add(ttl).Format(time.RFC3339Nano),
 		},
-		TokenHash: checkpointTokenHash(token),
-		Issuer:    strings.TrimSpace(req.Issuer),
+		IssuanceKeyHash:     issuanceKeyHash,
+		IssuanceRequestHash: persistedIssuanceRequestHash,
+		TokenHash:           checkpointTokenHash(token),
+		Issuer:              issuer,
 	}
 	if s.checkpointSeals == nil {
 		s.checkpointSeals = map[string]checkpointSealRecord{}
@@ -519,11 +612,11 @@ func (s *Store) HandbackCheckpointSeal(workspaceID string, req CheckpointSealHan
 	if !ok {
 		return CheckpointSealOwnership{}, ErrNotFound
 	}
-	if record.WorkspaceID != workspaceID || record.Root != root || record.SessionID != sessionID || record.Generation != req.Generation || record.ConsumedAt != consumedAt {
-		return CheckpointSealOwnership{}, ErrCheckpointStale
-	}
 	if record.ConsumedAt == "" {
 		return CheckpointSealOwnership{}, ErrCheckpointUnconsumed
+	}
+	if record.WorkspaceID != workspaceID || record.Root != root || record.SessionID != sessionID || record.Generation != req.Generation || record.ConsumedAt != consumedAt {
+		return CheckpointSealOwnership{}, ErrCheckpointStale
 	}
 	if record.ConsumerKeyHash != consumerKeyHash || record.ConsumerPrincipal != consumerPrincipal {
 		return CheckpointSealOwnership{}, ErrCheckpointConsumerConflict
@@ -650,6 +743,18 @@ func (s *Store) checkpointSealByIDLocked(sealID string) (string, checkpointSealR
 	return "", checkpointSealRecord{}, false
 }
 
+func (s *Store) checkpointSealByIssuanceKeyLocked(keyHash string) (string, checkpointSealRecord, bool) {
+	if keyHash == "" {
+		return "", checkpointSealRecord{}, false
+	}
+	for tokenHash, record := range s.checkpointSeals {
+		if record.IssuanceKeyHash == keyHash {
+			return tokenHash, record, true
+		}
+	}
+	return "", checkpointSealRecord{}, false
+}
+
 func checkpointOwnershipFromRecord(record checkpointSealRecord, status string) CheckpointSealOwnership {
 	return CheckpointSealOwnership{
 		SealID: record.SealID, WorkspaceID: record.WorkspaceID, Root: record.Root,
@@ -672,6 +777,131 @@ func validCheckpointDigest(value string) bool {
 
 func checkpointConsumerBindingMatches(binding checkpointConsumerBinding, tokenHash, workspaceID, root, sessionID string, generation uint64, principal string) bool {
 	return binding.TokenHash == tokenHash && binding.WorkspaceID == workspaceID && binding.Root == root && binding.SessionID == sessionID && binding.Generation == generation && binding.Principal == principal
+}
+
+// GetCheckpointSealRetentionSummary exposes bounded operational visibility
+// without returning bearer material or internal hashes. Unresumed records are
+// intentionally retained fail-closed until an ordinary source resume or an
+// explicit break-glass administrative reconciliation proves source readiness.
+func (s *Store) GetCheckpointSealRetentionSummary(workspaceID string, now time.Time) CheckpointSealRetentionSummary {
+	workspaceID = strings.TrimSpace(workspaceID)
+	now = now.UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.purgeCheckpointSealsLocked(now)
+	summary := CheckpointSealRetentionSummary{
+		GeneratedAt:          now.Format(time.RFC3339Nano),
+		UnresumedByWorkspace: map[string]int{},
+		Records:              []CheckpointSealRetentionRecord{},
+	}
+	for _, record := range s.checkpointSeals {
+		if record.SourceResumedAt != "" || (workspaceID != "" && record.WorkspaceID != workspaceID) {
+			continue
+		}
+		summary.UnresumedTotal++
+		summary.UnresumedByWorkspace[record.WorkspaceID]++
+		summary.Records = append(summary.Records, checkpointRetentionRecord(record))
+	}
+	sort.Slice(summary.Records, func(i, j int) bool {
+		if summary.Records[i].WorkspaceID != summary.Records[j].WorkspaceID {
+			return summary.Records[i].WorkspaceID < summary.Records[j].WorkspaceID
+		}
+		if summary.Records[i].IssuedAt != summary.Records[j].IssuedAt {
+			return summary.Records[i].IssuedAt < summary.Records[j].IssuedAt
+		}
+		return summary.Records[i].SealID < summary.Records[j].SealID
+	})
+	return summary
+}
+
+// ReconcileCheckpointSealSource is a break-glass administrative path. It can
+// resolve only states where destination ownership is absent (never a consumed,
+// unreleased seal), requires an exact durable identity/status fence and an
+// explicit assertion that the source is ready, and is idempotent across lost
+// responses. The record becomes a bounded tombstone; any consumer-key binding
+// is removed immediately and the tombstone expires after replay retention.
+func (s *Store) ReconcileCheckpointSealSource(sealID string, req CheckpointSealAdminReconcileRequest, now time.Time) (CheckpointSealRetentionRecord, error) {
+	sealID = strings.TrimSpace(sealID)
+	workspaceID := strings.TrimSpace(req.WorkspaceID)
+	sessionID := strings.TrimSpace(req.SessionID)
+	expectedStatus := strings.TrimSpace(req.ExpectedOwnershipStatus)
+	reconciliationKey := strings.TrimSpace(req.ReconciliationIdempotencyKey)
+	root, err := NormalizeCheckpointRoot(req.Root)
+	if err != nil || sealID == "" || workspaceID == "" || !checkpointSessionPattern.MatchString(sessionID) || req.Generation == 0 ||
+		(expectedStatus != "unconsumed" && expectedStatus != "released") || !checkpointSessionPattern.MatchString(reconciliationKey) || !req.ConfirmSourceReady {
+		return CheckpointSealRetentionRecord{}, ErrInvalidInput
+	}
+	now = now.UTC()
+	reconciliationKeyHash := checkpointTokenHash(reconciliationKey)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.purgeCheckpointSealsLocked(now)
+	tokenHash, record, ok := s.checkpointSealByIDLocked(sealID)
+	if !ok {
+		return CheckpointSealRetentionRecord{}, ErrNotFound
+	}
+	if record.WorkspaceID != workspaceID || record.Root != root || record.SessionID != sessionID || record.Generation != req.Generation {
+		return CheckpointSealRetentionRecord{}, ErrCheckpointAdminConflict
+	}
+	if record.SourceResumedAt != "" {
+		if record.AdminReconcileKeyHash == reconciliationKeyHash {
+			return checkpointRetentionRecord(record), nil
+		}
+		return CheckpointSealRetentionRecord{}, ErrCheckpointAdminConflict
+	}
+	status := checkpointOwnershipStatus(record)
+	if status == "consumed" {
+		return CheckpointSealRetentionRecord{}, ErrCheckpointHandbackRequired
+	}
+	if status != expectedStatus {
+		return CheckpointSealRetentionRecord{}, ErrCheckpointAdminConflict
+	}
+	previous := record
+	var previousBinding checkpointConsumerBinding
+	hadBinding := false
+	if record.ConsumerKeyHash != "" {
+		previousBinding, hadBinding = s.checkpointConsumerKeys[record.ConsumerKeyHash]
+		delete(s.checkpointConsumerKeys, record.ConsumerKeyHash)
+	}
+	reconciledAt := now.Format(time.RFC3339Nano)
+	record.SourceResumedAt = reconciledAt
+	record.AdminReconciledAt = reconciledAt
+	record.AdminReconcileKeyHash = reconciliationKeyHash
+	record.IdempotencyExpiresAt = now.Add(CheckpointConsumeReplayRetention).Format(time.RFC3339Nano)
+	s.checkpointSeals[tokenHash] = record
+	if err := s.saveLocked(); err != nil {
+		s.checkpointSeals[tokenHash] = previous
+		if hadBinding {
+			s.checkpointConsumerKeys[record.ConsumerKeyHash] = previousBinding
+		}
+		return CheckpointSealRetentionRecord{}, err
+	}
+	return checkpointRetentionRecord(record), nil
+}
+
+func checkpointRetentionRecord(record checkpointSealRecord) CheckpointSealRetentionRecord {
+	return CheckpointSealRetentionRecord{
+		SealID: record.SealID, WorkspaceID: record.WorkspaceID, Root: record.Root,
+		SessionID: record.SessionID, Generation: record.Generation,
+		OwnershipStatus: checkpointOwnershipStatus(record), IssuedAt: record.IssuedAt,
+		ExpiresAt: record.ExpiresAt, ConsumedAt: record.ConsumedAt,
+		HandbackReleasedAt: record.HandbackReleasedAt, SourceResumedAt: record.SourceResumedAt,
+		AdminReconciledAt: record.AdminReconciledAt,
+	}
+}
+
+func checkpointOwnershipStatus(record checkpointSealRecord) string {
+	if record.SourceResumedAt != "" {
+		return "source-resumed"
+	}
+	if record.HandbackReleasedAt != "" {
+		return "released"
+	}
+	if record.ConsumedAt != "" {
+		return "consumed"
+	}
+	return "unconsumed"
 }
 
 func (s *Store) purgeCheckpointSealsLocked(now time.Time) {
@@ -722,6 +952,17 @@ func (s *Store) checkpointStateLocked(workspaceID, root string) (digest, workspa
 
 func checkpointGenerationKey(workspaceID, root, sessionID string) string {
 	return strings.Join([]string{strings.TrimSpace(workspaceID), root, strings.TrimSpace(sessionID)}, "\x00")
+}
+
+func checkpointIssuanceRequestHash(workspaceID, root, sessionID string, generation uint64, expectedDigest string, ttlSeconds int) string {
+	h := sha256.New()
+	for _, value := range []string{
+		strings.TrimSpace(workspaceID), root, strings.TrimSpace(sessionID),
+		strconv.FormatUint(generation, 10), strings.TrimSpace(expectedDigest), strconv.Itoa(ttlSeconds),
+	} {
+		writeDigestField(h, value)
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func newCheckpointToken() (string, error) {

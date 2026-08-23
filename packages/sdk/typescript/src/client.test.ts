@@ -1440,6 +1440,7 @@ describe("RelayFileClient — existing methods", () => {
         sessionId: "thread-1",
         generation: 4,
         expectedDigest: seal.digest,
+        issuanceIdempotencyKey: "source-issue-attempt-1",
         ttlSeconds: 60,
       })).resolves.toEqual(seal);
       expect(f.mock.calls[0]![0]).toContain("/v1/workspaces/ws_acme/sync/checkpoint-seals");
@@ -1449,8 +1450,46 @@ describe("RelayFileClient — existing methods", () => {
         sessionId: "thread-1",
         generation: 4,
         expectedDigest: seal.digest,
+        issuanceIdempotencyKey: "source-issue-attempt-1",
         ttlSeconds: 60,
       });
+    });
+
+    it("reuses the persisted issuance key on a response-loss retry", async () => {
+      const fetchImpl = vi.fn()
+        .mockResolvedValueOnce(new Response(JSON.stringify({
+          code: "internal_error",
+          message: "response lost"
+        }), {
+          status: 500,
+          headers: { "content-type": "application/json" }
+        }))
+        .mockResolvedValueOnce(new Response(JSON.stringify(seal), {
+          status: 201,
+          headers: { "content-type": "application/json" }
+        })) as unknown as typeof fetch;
+      const client = new RelayFileClient({
+        baseUrl: "https://relay.test",
+        token: "tok_test",
+        fetchImpl,
+        retry: { maxRetries: 1, baseDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 }
+      });
+
+      await expect(client.issueCheckpointSeal({
+        workspaceId: "ws_acme",
+        root: "/sessions",
+        sessionId: "thread-1",
+        generation: 4,
+        expectedDigest: seal.digest,
+        issuanceIdempotencyKey: "source-issue-attempt-1",
+        ttlSeconds: 60
+      })).resolves.toEqual(seal);
+
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+      const first = JSON.parse((fetchImpl.mock.calls[0]![1] as RequestInit).body as string);
+      const second = JSON.parse((fetchImpl.mock.calls[1]![1] as RequestInit).body as string);
+      expect(second).toEqual(first);
+      expect(second.issuanceIdempotencyKey).toBe("source-issue-attempt-1");
     });
 
     it("consumes by opaque token and bound identity without a caller digest", async () => {
@@ -1916,6 +1955,75 @@ describe("RelayFileClient — existing methods", () => {
       expect(res.status).toBe("queued");
       const url = f.mock.calls[0]![0] as string;
       expect(url).toContain("/v1/admin/replay/envelope/env_1");
+    });
+
+    it("gets bearer-free checkpoint retention metrics by workspace", async () => {
+      const payload = {
+        generatedAt: "2026-08-23T12:00:00Z",
+        unresumedTotal: 1,
+        unresumedByWorkspace: { ws_acme: 1 },
+        records: [{
+          sealId: "cps_1",
+          workspaceId: "ws_acme",
+          root: "/",
+          sessionId: "thread-1",
+          generation: 1,
+          ownershipStatus: "unconsumed",
+          issuedAt: "2026-08-23T11:59:00Z",
+          expiresAt: "2026-08-23T12:00:00Z"
+        }]
+      } as const;
+      const f = mockFetch(payload);
+      const client = makeClient(f);
+
+      await expect(client.getAdminCheckpointSealRetention({
+        workspaceId: "ws_acme",
+        correlationId: "corr-retention"
+      })).resolves.toEqual(payload);
+      expect(f.mock.calls[0]![0]).toBe(
+        "https://relay.test/v1/admin/checkpoint-seals?workspaceId=ws_acme"
+      );
+    });
+
+    it("posts an explicitly fenced checkpoint source reconciliation", async () => {
+      const payload = {
+        sealId: "cps_1",
+        workspaceId: "ws_acme",
+        root: "/",
+        sessionId: "thread-1",
+        generation: 1,
+        ownershipStatus: "source-resumed",
+        issuedAt: "2026-08-23T11:59:00Z",
+        expiresAt: "2026-08-23T12:00:00Z",
+        sourceResumedAt: "2026-08-23T12:05:00Z",
+        adminReconciledAt: "2026-08-23T12:05:00Z"
+      } as const;
+      const f = mockFetch(payload);
+      const client = makeClient(f);
+
+      await expect(client.reconcileAdminCheckpointSealSource({
+        sealId: "cps_1",
+        workspaceId: "ws_acme",
+        root: "/",
+        sessionId: "thread-1",
+        generation: 1,
+        expectedOwnershipStatus: "unconsumed",
+        reconciliationIdempotencyKey: "admin-reconcile-1",
+        confirmSourceReady: true
+      })).resolves.toEqual(payload);
+      expect(f.mock.calls[0]![0]).toBe(
+        "https://relay.test/v1/admin/checkpoint-seals/cps_1/reconcile-source"
+      );
+      expect(JSON.parse((f.mock.calls[0]![1] as RequestInit).body as string))
+        .toEqual({
+          workspaceId: "ws_acme",
+          root: "/",
+          sessionId: "thread-1",
+          generation: 1,
+          expectedOwnershipStatus: "unconsumed",
+          reconciliationIdempotencyKey: "admin-reconcile-1",
+          confirmSourceReady: true
+        });
     });
   });
 

@@ -3,12 +3,222 @@ package relayfile
 import (
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
 const checkpointTestConsumerPrincipal = "cloud-dashboard-observer"
+
+func TestCheckpointIssuanceResponseLossRotatesBearerAcrossRestart(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "relayfile-state.json")
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	first := NewStoreWithOptions(StoreOptions{StateFile: stateFile, DisableWorkers: true})
+	seedCheckpointFile(t, first, "ws_issue_retry", "/transcript.jsonl", "turn one\n")
+	digest := checkpointDigestForStore(t, first, "ws_issue_retry", "/")
+	request := CheckpointSealRequest{
+		Root: "/", SessionID: "thread-issue-retry", Generation: 9,
+		ExpectedDigest: digest, TTLSeconds: 60,
+		IssuanceIdempotencyKey: "source-issue-attempt-9", Issuer: "LocalController",
+	}
+	issued, err := first.IssueCheckpointSeal("ws_issue_retry", request, now)
+	if err != nil {
+		t.Fatalf("initial issue: %v", err)
+	}
+	first.Close()
+
+	second := NewStoreWithOptions(StoreOptions{StateFile: stateFile, DisableWorkers: true})
+	defer second.Close()
+	recovered, err := second.IssueCheckpointSeal("ws_issue_retry", request, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("response-loss recovery: %v", err)
+	}
+	if recovered.SealID != issued.SealID || recovered.Digest != issued.Digest || recovered.IssuedAt != issued.IssuedAt || recovered.ExpiresAt != issued.ExpiresAt {
+		t.Fatalf("retry changed immutable attestation: first=%+v retry=%+v", issued, recovered)
+	}
+	if recovered.SealToken == "" || recovered.SealToken == issued.SealToken {
+		t.Fatalf("retry did not rotate the lost bearer: first=%q retry=%q", issued.SealToken, recovered.SealToken)
+	}
+	changedRequest := request
+	changedRequest.TTLSeconds = 61
+	if _, err := second.IssueCheckpointSeal("ws_issue_retry", changedRequest, now.Add(2*time.Second)); !errors.Is(err, ErrCheckpointIssuanceConflict) {
+		t.Fatalf("changed request error = %v, want issuance conflict", err)
+	}
+	if _, err := second.ConsumeCheckpointSeal("ws_issue_retry", CheckpointSealConsumeRequest{
+		SealToken: issued.SealToken, Root: "/", SessionID: request.SessionID, Generation: request.Generation,
+		ConsumerIdempotencyKey: "consume-old-lost-token", ConsumerPrincipal: checkpointTestConsumerPrincipal,
+	}, now.Add(2*time.Second)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("lost bearer remained usable after retry rotation: %v", err)
+	}
+	if _, err := second.ConsumeCheckpointSeal("ws_issue_retry", CheckpointSealConsumeRequest{
+		SealToken: recovered.SealToken, Root: "/", SessionID: request.SessionID, Generation: request.Generation,
+		ConsumerIdempotencyKey: "consume-recovered-token", ConsumerPrincipal: checkpointTestConsumerPrincipal,
+	}, now.Add(2*time.Second)); err != nil {
+		t.Fatalf("rotated bearer was not consumable: %v", err)
+	}
+
+	persisted, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("read persisted state: %v", err)
+	}
+	for _, secret := range []string{request.IssuanceIdempotencyKey, issued.SealToken, recovered.SealToken} {
+		if strings.Contains(string(persisted), secret) {
+			t.Fatalf("persisted state leaked plaintext issuance material %q", secret)
+		}
+	}
+
+	changed := request
+	changed.Issuer = "OtherController"
+	if _, err := second.IssueCheckpointSeal("ws_issue_retry", changed, now.Add(3*time.Second)); !errors.Is(err, ErrCheckpointIssuanceConflict) {
+		t.Fatalf("changed issuer error = %v, want issuance conflict", err)
+	}
+}
+
+func TestCheckpointRetentionVisibilityAndBreakGlassReconciliation(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "relayfile-state.json")
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	store := NewStoreWithOptions(StoreOptions{StateFile: stateFile, DisableWorkers: true})
+	seedCheckpointFile(t, store, "ws_admin_reconcile", "/transcript.jsonl", "turn one\n")
+	digest := checkpointDigestForStore(t, store, "ws_admin_reconcile", "/")
+	issued, err := store.IssueCheckpointSeal("ws_admin_reconcile", CheckpointSealRequest{
+		Root: "/", SessionID: "thread-admin-reconcile", Generation: 1,
+		ExpectedDigest: digest, IssuanceIdempotencyKey: "issue-admin-reconcile-1", Issuer: "LocalController",
+	}, now)
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	consumeKey := "consume-admin-reconcile-1"
+	consumed, err := store.ConsumeCheckpointSeal("ws_admin_reconcile", CheckpointSealConsumeRequest{
+		SealToken: issued.SealToken, Root: "/", SessionID: issued.SessionID, Generation: issued.Generation,
+		ConsumerIdempotencyKey: consumeKey, ConsumerPrincipal: checkpointTestConsumerPrincipal,
+	}, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+	handback := CheckpointSealHandbackRequest{
+		Phase: CheckpointHandbackPhasePrepare, SealID: consumed.SealID, Root: "/",
+		SessionID: consumed.SessionID, Generation: consumed.Generation, ConsumedAt: consumed.ConsumedAt,
+		ConsumerIdempotencyKey: consumeKey, HandbackIdempotencyKey: "handback-admin-reconcile-1",
+		ExpectedDigest: digest, ConsumerPrincipal: checkpointTestConsumerPrincipal,
+	}
+	if _, err := store.HandbackCheckpointSeal("ws_admin_reconcile", handback, now.Add(2*time.Second)); err != nil {
+		t.Fatalf("prepare handback: %v", err)
+	}
+	handback.Phase = CheckpointHandbackPhaseCommit
+	if _, err := store.HandbackCheckpointSeal("ws_admin_reconcile", handback, now.Add(3*time.Second)); err != nil {
+		t.Fatalf("commit handback: %v", err)
+	}
+
+	summary := store.GetCheckpointSealRetentionSummary("", now.Add(4*time.Second))
+	if summary.UnresumedTotal != 1 || summary.UnresumedByWorkspace["ws_admin_reconcile"] != 1 || len(summary.Records) != 1 || summary.Records[0].OwnershipStatus != "released" {
+		t.Fatalf("unexpected retention visibility: %+v", summary)
+	}
+	payload, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(payload), issued.SealToken) || strings.Contains(string(payload), consumeKey) {
+		t.Fatalf("retention visibility leaked bearer/idempotency material: %s", payload)
+	}
+
+	reconcile := CheckpointSealAdminReconcileRequest{
+		WorkspaceID: "ws_admin_reconcile", Root: "/", SessionID: consumed.SessionID,
+		Generation: consumed.Generation, ExpectedOwnershipStatus: "released",
+		ReconciliationIdempotencyKey: "admin-reconcile-source-1", ConfirmSourceReady: true,
+	}
+	reconciled, err := store.ReconcileCheckpointSealSource(consumed.SealID, reconcile, now.Add(5*time.Second))
+	if err != nil || reconciled.OwnershipStatus != "source-resumed" || reconciled.AdminReconciledAt == "" {
+		t.Fatalf("administrative reconciliation = %+v err=%v", reconciled, err)
+	}
+	replayed, err := store.ReconcileCheckpointSealSource(consumed.SealID, reconcile, now.Add(6*time.Second))
+	if err != nil || replayed.AdminReconciledAt != reconciled.AdminReconciledAt {
+		t.Fatalf("reconciliation response-loss replay = %+v err=%v", replayed, err)
+	}
+	changedKey := reconcile
+	changedKey.ReconciliationIdempotencyKey = "admin-reconcile-source-2"
+	if _, err := store.ReconcileCheckpointSealSource(consumed.SealID, changedKey, now.Add(6*time.Second)); !errors.Is(err, ErrCheckpointAdminConflict) {
+		t.Fatalf("changed reconciliation key error = %v", err)
+	}
+	store.mu.Lock()
+	_, consumerBindingRetained := store.checkpointConsumerKeys[checkpointTokenHash(consumeKey)]
+	store.mu.Unlock()
+	if consumerBindingRetained {
+		t.Fatal("administrative reconciliation retained the associated consumer binding")
+	}
+	if got := store.GetCheckpointSealRetentionSummary("ws_admin_reconcile", now.Add(7*time.Second)); got.UnresumedTotal != 0 || len(got.Records) != 0 {
+		t.Fatalf("reconciled seal remained in unresumed metrics: %+v", got)
+	}
+	store.Close()
+
+	restarted := NewStoreWithOptions(StoreOptions{StateFile: stateFile, DisableWorkers: true})
+	defer restarted.Close()
+	replayed, err = restarted.ReconcileCheckpointSealSource(consumed.SealID, reconcile, now.Add(8*time.Second))
+	if err != nil || replayed.AdminReconciledAt != reconciled.AdminReconciledAt {
+		t.Fatalf("restart reconciliation replay = %+v err=%v", replayed, err)
+	}
+	restarted.GetCheckpointSealRetentionSummary("", now.Add(CheckpointConsumeReplayRetention+6*time.Second))
+	restarted.mu.Lock()
+	_, _, retained := restarted.checkpointSealByIDLocked(consumed.SealID)
+	restarted.mu.Unlock()
+	if retained {
+		t.Fatal("reconciled tombstone survived beyond bounded replay retention")
+	}
+}
+
+func TestCheckpointAdminReconciliationCannotOverrideConsumedOwnership(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	defer store.Close()
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	seedCheckpointFile(t, store, "ws_admin_owned", "/transcript.jsonl", "turn one\n")
+	digest := checkpointDigestForStore(t, store, "ws_admin_owned", "/")
+	issued, err := store.IssueCheckpointSeal("ws_admin_owned", CheckpointSealRequest{
+		Root: "/", SessionID: "thread-admin-owned", Generation: 1, ExpectedDigest: digest,
+		IssuanceIdempotencyKey: "issue-admin-owned-1", Issuer: "LocalController",
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ConsumeCheckpointSeal("ws_admin_owned", CheckpointSealConsumeRequest{
+		SealToken: issued.SealToken, Root: "/", SessionID: issued.SessionID, Generation: issued.Generation,
+		ConsumerIdempotencyKey: "consume-admin-owned-1", ConsumerPrincipal: checkpointTestConsumerPrincipal,
+	}, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.ReconcileCheckpointSealSource(issued.SealID, CheckpointSealAdminReconcileRequest{
+		WorkspaceID: "ws_admin_owned", Root: "/", SessionID: issued.SessionID, Generation: issued.Generation,
+		ExpectedOwnershipStatus: "released", ReconciliationIdempotencyKey: "admin-reconcile-owned-1", ConfirmSourceReady: true,
+	}, now.Add(2*time.Second))
+	if !errors.Is(err, ErrCheckpointHandbackRequired) {
+		t.Fatalf("consumed ownership override error = %v, want handback required", err)
+	}
+}
+
+func TestCheckpointHandbackReportsUnconsumedBeforeReceiptMismatch(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	defer store.Close()
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	seedCheckpointFile(t, store, "ws_unconsumed_code", "/transcript.jsonl", "turn\n")
+	digest := checkpointDigestForStore(t, store, "ws_unconsumed_code", "/")
+	issued, err := store.IssueCheckpointSeal("ws_unconsumed_code", CheckpointSealRequest{
+		Root: "/", SessionID: "thread-unconsumed-code", Generation: 1, ExpectedDigest: digest,
+		IssuanceIdempotencyKey: "issue-unconsumed-code-1", Issuer: "LocalController",
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.HandbackCheckpointSeal("ws_unconsumed_code", CheckpointSealHandbackRequest{
+		Phase: CheckpointHandbackPhasePrepare, SealID: issued.SealID, Root: "/",
+		SessionID: issued.SessionID, Generation: issued.Generation,
+		ConsumedAt:             now.Add(time.Second).Format(time.RFC3339Nano),
+		ConsumerIdempotencyKey: "consume-unconsumed-code-1", HandbackIdempotencyKey: "handback-unconsumed-code-1",
+		ExpectedDigest: digest, ConsumerPrincipal: checkpointTestConsumerPrincipal,
+	}, now.Add(2*time.Second))
+	if !errors.Is(err, ErrCheckpointUnconsumed) {
+		t.Fatalf("handback error = %v, want checkpoint unconsumed", err)
+	}
+}
 
 func TestCheckpointSealOwnershipOmitsEmptyConsumedAt(t *testing.T) {
 	payload, err := json.Marshal(CheckpointSealOwnership{Status: "source-resumed"})

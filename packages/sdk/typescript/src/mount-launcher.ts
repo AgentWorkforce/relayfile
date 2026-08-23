@@ -23,6 +23,7 @@ import {
 import type {
   MountLocalLayout,
   MountLauncher,
+  CheckpointCapableMountLauncherInstance,
   MountLauncherInstance,
   MountLauncherStart,
   MountMode,
@@ -163,7 +164,8 @@ async function startRelayfileMount(
   })
 }
 
-class RelayfileMountProcessInstance implements MountLauncherInstance {
+class RelayfileMountProcessInstance
+  implements CheckpointCapableMountLauncherInstance {
   readonly pid?: number
   readonly ready: Promise<void>
 
@@ -268,6 +270,27 @@ class RelayfileMountProcessInstance implements MountLauncherInstance {
       throw new RelayfileSetupError(
         "checkpointAndSeal cannot drain a pull-only mount.",
         "checkpoint_seal_mode_unavailable"
+      )
+    }
+    if (normalizeRemotePath(this.input.env.RELAYFILE_REMOTE_PATH ?? "/") !== "/") {
+      throw new RelayfileSetupError(
+        "checkpointAndSeal v1 requires a full-root (/) mount.",
+        "checkpoint_seal_root_unavailable"
+      )
+    }
+    const scopes = (this.input.env.RELAYFILE_MOUNT_SCOPES ?? "")
+      .split(/\s+/)
+      .map((scope) => scope.trim())
+      .filter(Boolean)
+    if (
+      !scopeGrants(scopes, "sync", "trigger") ||
+      !scopeGrants(scopes, "ops", "read") ||
+      !scopeGrantsFullRoot(scopes, "read") ||
+      !scopeGrantsFullRoot(scopes, "write")
+    ) {
+      throw new RelayfileSetupError(
+        "checkpointAndSeal requires sync:trigger, ops:read, and full-root fs:read/fs:write scopes.",
+        "checkpoint_seal_scope_unavailable"
       )
     }
   }
@@ -450,7 +473,8 @@ function validateCheckpointInput(input: CheckpointAndSealInput): {
   timeoutMs: number
   ttlSeconds: number
 } {
-  const sessionId = input.sessionId.trim()
+  const sessionId =
+    typeof input.sessionId === "string" ? input.sessionId.trim() : ""
   const generation = input.generation
   const timeoutMs = input.timeoutMs ?? DEFAULT_CHECKPOINT_TIMEOUT_MS
   const ttlSeconds = input.ttlSeconds ?? 60
@@ -474,6 +498,56 @@ function validateCheckpointInput(input: CheckpointAndSealInput): {
     throw new CloudAbortError("checkpointAndSeal")
   }
   return { sessionId, generation, timeoutMs, ttlSeconds }
+}
+
+function scopeGrants(
+  scopes: string[],
+  resource: string,
+  action: string
+): boolean {
+  const bare = `${resource}:${action}`
+  return scopes.some((scope) => {
+    if (scope === bare) return true
+    const [plane, grantedResource, grantedAction] = scope.split(":", 4)
+    return (
+      (plane === "relayfile" || plane === "*") &&
+      (grantedResource === resource || grantedResource === "*") &&
+      (grantedAction === action || grantedAction === "*")
+    )
+  })
+}
+
+function scopeGrantsFullRoot(
+  scopes: string[],
+  action: "read" | "write"
+): boolean {
+  const relevantNarrowScopes: string[] = []
+  for (const scope of scopes) {
+    const segments = scope.split(":", 4)
+    if (segments.length < 3) continue
+    const [plane, resource, grantedAction, scopePath] = segments
+    const actionMatches =
+      grantedAction === action ||
+      grantedAction === "*" ||
+      grantedAction === "manage"
+    if (!actionMatches) continue
+    if (
+      (plane === "relayfile" || plane === "*") &&
+      (resource === "fs" || resource === "*")
+    ) {
+      if (scopePath === undefined || scopePath.trim() === "*") return true
+      relevantNarrowScopes.push(scopePath.trim())
+      continue
+    }
+    if (plane === "workspace") {
+      if (scopePath === undefined || scopePath.trim() === "*") return true
+      relevantNarrowScopes.push(scopePath.trim())
+    }
+  }
+  if (relevantNarrowScopes.some((scopePath) => scopePath === "/" || scopePath === "/**")) {
+    return true
+  }
+  return relevantNarrowScopes.length === 0 && scopes.includes(`fs:${action}`)
 }
 
 function validateCheckpointSeal(

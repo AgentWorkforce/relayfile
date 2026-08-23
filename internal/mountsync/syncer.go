@@ -2454,8 +2454,11 @@ func (s *Syncer) CheckpointAndSeal(ctx context.Context, options CheckpointAndSea
 	if !s.state.BootstrapComplete {
 		return CheckpointSeal{}, fmt.Errorf("%w: mount bootstrap is incomplete", ErrCheckpointNonConverged)
 	}
-	if len(s.state.QuarantinedPaths) > 0 || len(s.state.SkippedMaterializations) > 0 || s.state.IncrementalBacklogDraining {
-		return CheckpointSeal{}, fmt.Errorf("%w: mount has quarantined, skipped, or backlogged remote state", ErrCheckpointNonConverged)
+	if s.localWatcherActive {
+		return CheckpointSeal{}, fmt.Errorf("%w: sealing requires a stopped, watcherless mount", ErrCheckpointNonConverged)
+	}
+	if len(s.state.QuarantinedPaths) > 0 || len(s.state.SkippedMaterializations) > 0 || s.state.IncrementalBacklogDraining || s.state.IncrementalCheckpoint != nil || len(s.state.IncrementalReadNotReadySince) > 0 {
+		return CheckpointSeal{}, fmt.Errorf("%w: mount has quarantined, skipped, or incomplete remote state", ErrCheckpointNonConverged)
 	}
 
 	// The daemon may have been stopped before its watcher observed the final
@@ -2510,11 +2513,12 @@ func (s *Syncer) CheckpointAndSeal(ctx context.Context, options CheckpointAndSea
 	}
 
 	seal, err := issuer.IssueCheckpointSeal(ctx, s.workspace, CheckpointSealRequest{
-		Root:           s.remoteRoot,
-		SessionID:      sessionID,
-		Generation:     options.Generation,
-		ExpectedDigest: secondDigest,
-		TTLSeconds:     options.TTLSeconds,
+		Root:                   s.remoteRoot,
+		SessionID:              sessionID,
+		Generation:             options.Generation,
+		ExpectedDigest:         secondDigest,
+		TTLSeconds:             options.TTLSeconds,
+		IssuanceIdempotencyKey: checkpointIssuanceIdempotencyKey(s.workspace, s.remoteRoot, sessionID, options.Generation, secondDigest, options.TTLSeconds),
 	})
 	if err != nil {
 		return CheckpointSeal{}, fmt.Errorf("%w: issue authoritative server seal: %w", ErrCheckpointNonConverged, err)
@@ -2528,6 +2532,17 @@ func (s *Syncer) CheckpointAndSeal(ctx context.Context, options CheckpointAndSea
 		return CheckpointSeal{}, ErrCheckpointConcurrentMutation
 	}
 	return seal, nil
+}
+
+func checkpointIssuanceIdempotencyKey(workspaceID, root, sessionID string, generation uint64, digest string, ttlSeconds int) string {
+	h := sha256.New()
+	for _, value := range []string{
+		strings.TrimSpace(workspaceID), root, strings.TrimSpace(sessionID),
+		strconv.FormatUint(generation, 10), strings.TrimSpace(digest), strconv.Itoa(ttlSeconds),
+	} {
+		_, _ = fmt.Fprintf(h, "%d:%s\x00", len(value), value)
+	}
+	return "checkpoint-issue-" + hex.EncodeToString(h.Sum(nil)[:16])
 }
 
 // HandbackCheckpoint drains a stopped destination and atomically releases its

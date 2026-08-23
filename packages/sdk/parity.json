@@ -160,12 +160,17 @@
       "summary": "Authoritative checkpoint ownership, one-use consume, destination handback, and source resume for live migration.",
       "tsExports": [
         "CheckpointSeal",
+        "CheckpointSealOwnershipStatus",
         "CheckpointSealOwnership",
+        "CheckpointSealRetentionRecord",
+        "CheckpointSealRetentionSummary",
         "ConsumedCheckpointSeal",
         "ConsumeCheckpointSealInput",
+        "GetAdminCheckpointSealRetentionOptions",
         "HandbackCheckpointSealInput",
         "IssueCheckpointSealInput",
         "RecoverConsumedCheckpointSealInput",
+        "ReconcileAdminCheckpointSealSourceInput",
         "ResumeCheckpointSealInput",
         "VerifyCheckpointSealInput"
       ],

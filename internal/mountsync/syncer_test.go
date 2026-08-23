@@ -8447,6 +8447,13 @@ func TestCheckpointAndSealReturnsBoundAuthoritativeSeal(t *testing.T) {
 	if seal.WorkspaceID != "ws_checkpoint" || seal.Root != "/" || seal.SessionID != "thread-success" || seal.Generation != 9 || seal.SealToken == "" || !strings.HasPrefix(seal.Digest, "sha256:") {
 		t.Fatalf("bound seal = %+v", seal)
 	}
+	if len(client.checkpointIssueRequests) != 1 || !checkpointSessionPattern.MatchString(client.checkpointIssueRequests[0].IssuanceIdempotencyKey) {
+		t.Fatalf("checkpoint request lacks stable issuance identity: %+v", client.checkpointIssueRequests)
+	}
+	wantKey := checkpointIssuanceIdempotencyKey("ws_checkpoint", "/", "thread-success", 9, seal.Digest, 45)
+	if client.checkpointIssueRequests[0].IssuanceIdempotencyKey != wantKey {
+		t.Fatalf("issuance key = %q, want %q", client.checkpointIssueRequests[0].IssuanceIdempotencyKey, wantKey)
+	}
 }
 
 func TestCheckpointAndSealRejectsInvalidIdentityBeforeDraining(t *testing.T) {
@@ -8482,6 +8489,39 @@ func TestCheckpointAndHandbackRequireOpsReadBeforeDrain(t *testing.T) {
 	}
 	if client.checkpointIssueCalls != 0 || client.checkpointHandbackCalls != 0 || client.writeFileCalls != 0 || client.bulkWriteCalls != 0 {
 		t.Fatalf("missing ops:read reached drain/server: %+v", client)
+	}
+}
+
+func TestCheckpointAndSealRejectsNonQuiescentMountBeforeDrain(t *testing.T) {
+	for name, mutate := range map[string]func(*Syncer){
+		"active watcher": func(syncer *Syncer) {
+			syncer.localWatcherActive = true
+		},
+		"incremental checkpoint": func(syncer *Syncer) {
+			syncer.state.IncrementalCheckpoint = &incrementalCheckpoint{Cursor: "evt_1"}
+			if err := syncer.saveStateWithoutLocalScan(); err != nil {
+				t.Fatalf("persist incremental checkpoint: %v", err)
+			}
+		},
+		"read not ready marker": func(syncer *Syncer) {
+			syncer.state.IncrementalReadNotReadySince = map[string]string{"/transcript.jsonl": time.Now().UTC().Format(time.RFC3339Nano)}
+			if err := syncer.saveStateWithoutLocalScan(); err != nil {
+				t.Fatalf("persist read-not-ready marker: %v", err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := &fakeClient{}
+			syncer, _ := newManagedCheckpointSyncer(t, client)
+			mutate(syncer)
+			_, err := syncer.CheckpointAndSeal(context.Background(), CheckpointAndSealOptions{SessionID: "thread-quiescence", Generation: 1})
+			if !errors.Is(err, ErrCheckpointNonConverged) {
+				t.Fatalf("non-quiescent checkpoint error = %v", err)
+			}
+			if client.checkpointIssueCalls != 0 || client.writeFileCalls != 0 || client.bulkWriteCalls != 0 {
+				t.Fatalf("non-quiescent mount reached drain/server: issue=%d write=%d bulk=%d", client.checkpointIssueCalls, client.writeFileCalls, client.bulkWriteCalls)
+			}
+		})
 	}
 }
 
@@ -9031,6 +9071,7 @@ type fakeClient struct {
 	mergeFileCalls                 int
 	mergeFileFunc                  func(ctx context.Context, workspaceID, path, strategy, baseRevision, baseContent, content, contentType string) (MergeResult, error)
 	checkpointIssueCalls           int
+	checkpointIssueRequests        []CheckpointSealRequest
 	checkpointIssueFunc            func(context.Context, string, CheckpointSealRequest) (CheckpointSeal, error)
 	checkpointVerifyCalls          int
 	checkpointVerifyFunc           func(context.Context, string, CheckpointSealVerifyRequest) (CheckpointSeal, error)
@@ -9046,6 +9087,7 @@ type fakeClient struct {
 
 func (c *fakeClient) IssueCheckpointSeal(ctx context.Context, workspaceID string, request CheckpointSealRequest) (CheckpointSeal, error) {
 	c.checkpointIssueCalls++
+	c.checkpointIssueRequests = append(c.checkpointIssueRequests, request)
 	if c.checkpointIssueFunc != nil {
 		return c.checkpointIssueFunc(ctx, workspaceID, request)
 	}

@@ -322,7 +322,7 @@ func runMountCheckpointSeal(args []string, stdout io.Writer) error {
 	state := checkpointLifecycleState{
 		Version: checkpointLifecycleVersion, Kind: "relayfile-checkpoint-lifecycle",
 		ResumeID: controllerLifecycleID, WorkspaceID: active.config.WorkspaceID,
-		LocalRoot: root, RemoteRoot: active.config.RemotePaths[0],
+		LocalRoot: root, RemoteRoot: mountscope.FirstPath(active.config.RemotePaths, "/"),
 		SessionID: strings.TrimSpace(*sessionID), Generation: *generation,
 		Status: "preparing", Config: active.config,
 		CreatedAt: now.Format(time.RFC3339Nano), UpdatedAt: now.Format(time.RFC3339Nano),
@@ -580,7 +580,7 @@ func runMountVerifySeal(args []string, stdin io.Reader, stdout io.Writer) error 
 	if err != nil {
 		return err
 	}
-	if active.config.WorkspaceID != input.Receipt.WorkspaceID || active.config.RemotePaths[0] != input.Receipt.Root {
+	if active.config.WorkspaceID != input.Receipt.WorkspaceID || mountscope.FirstPath(active.config.RemotePaths, "/") != input.Receipt.Root {
 		return checkpointError("verification_identity_conflict", 3, errors.New("active destination mount does not match consumed receipt"))
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -669,7 +669,7 @@ func runMountHandbackSeal(args []string, stdin io.Reader, stdout io.Writer) erro
 	if err != nil {
 		return err
 	}
-	if active.config.WorkspaceID != input.Receipt.WorkspaceID || active.config.RemotePaths[0] != input.Receipt.Root {
+	if active.config.WorkspaceID != input.Receipt.WorkspaceID || mountscope.FirstPath(active.config.RemotePaths, "/") != input.Receipt.Root {
 		return checkpointError("handback_identity_conflict", 3, errors.New("active destination mount does not match consumed receipt"))
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -1023,7 +1023,7 @@ func issueCheckpointForStoppedMount(ctx context.Context, config checkpointMountC
 	cursorTimeout, _ := parseCheckpointDuration(config.CursorTimeout, false)
 	client := mountsync.NewHTTPClient(config.Server, bundle.BearerToken(), mountsync.NewSyncHTTPClient())
 	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
-		WorkspaceID: config.WorkspaceID, RemoteRoot: config.RemotePaths[0], EventProvider: config.EventProvider,
+		WorkspaceID: config.WorkspaceID, RemoteRoot: mountscope.FirstPath(config.RemotePaths, "/"), EventProvider: config.EventProvider,
 		LocalRoot: config.LocalRoot, StateFile: config.StateFile, StateDir: config.StateDir, MountKind: config.MountKind,
 		ValidateState: true, Scopes: delegatedBundleAvailableScopes(bundle), RootCtx: ctx, Mode: config.Mode,
 		Interval: interval, LowMemory: boolPtr(config.LowMemory), BootstrapTimeout: bootstrapTimeout,
@@ -1054,7 +1054,7 @@ func verifyCheckpointForStoppedMount(ctx context.Context, config checkpointMount
 	cursorTimeout, _ := parseCheckpointDuration(config.CursorTimeout, false)
 	client := mountsync.NewHTTPClient(config.Server, bundle.BearerToken(), mountsync.NewSyncHTTPClient())
 	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
-		WorkspaceID: config.WorkspaceID, RemoteRoot: config.RemotePaths[0], EventProvider: config.EventProvider,
+		WorkspaceID: config.WorkspaceID, RemoteRoot: mountscope.FirstPath(config.RemotePaths, "/"), EventProvider: config.EventProvider,
 		LocalRoot: config.LocalRoot, StateFile: config.StateFile, StateDir: config.StateDir, MountKind: config.MountKind,
 		ValidateState: true, Scopes: delegatedBundleAvailableScopes(bundle), RootCtx: ctx, Mode: config.Mode,
 		Interval: interval, LowMemory: boolPtr(config.LowMemory), BootstrapTimeout: bootstrapTimeout,
@@ -1085,7 +1085,7 @@ func handbackCheckpointForStoppedMount(ctx context.Context, config checkpointMou
 	cursorTimeout, _ := parseCheckpointDuration(config.CursorTimeout, false)
 	client := mountsync.NewHTTPClient(config.Server, bundle.BearerToken(), mountsync.NewSyncHTTPClient())
 	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
-		WorkspaceID: config.WorkspaceID, RemoteRoot: config.RemotePaths[0], EventProvider: config.EventProvider,
+		WorkspaceID: config.WorkspaceID, RemoteRoot: mountscope.FirstPath(config.RemotePaths, "/"), EventProvider: config.EventProvider,
 		LocalRoot: config.LocalRoot, StateFile: config.StateFile, StateDir: config.StateDir, MountKind: config.MountKind,
 		ValidateState: true, Scopes: delegatedBundleAvailableScopes(bundle), RootCtx: ctx, Mode: config.Mode,
 		Interval: interval, LowMemory: boolPtr(config.LowMemory), BootstrapTimeout: bootstrapTimeout,
@@ -1185,7 +1185,7 @@ func waitCheckpointMountReady(config checkpointMountConfig, timeout time.Duratio
 		if ok && pidState.Registered && pidState.WorkspaceID == config.WorkspaceID && processAlive(pidState.PID) && pidState.CheckpointConfig != nil {
 			payload, err := os.ReadFile(filepath.Join(config.LocalRoot, ".relay", "state.json"))
 			var state syncStateFile
-			if err == nil && json.Unmarshal(payload, &state) == nil && state.WorkspaceID == config.WorkspaceID && state.Mode == defaultMountMode && state.RemoteRoot == config.RemotePaths[0] && state.Daemon != nil && state.Daemon.PID == pidState.PID && state.LastSuccessfulReconcileAt != "" && state.LastError == nil && state.PendingConflicts == 0 {
+			if err == nil && json.Unmarshal(payload, &state) == nil && state.WorkspaceID == config.WorkspaceID && state.Mode == defaultMountMode && state.RemoteRoot == mountscope.FirstPath(config.RemotePaths, "/") && state.Daemon != nil && state.Daemon.PID == pidState.PID && state.LastSuccessfulReconcileAt != "" && state.LastError == nil && state.PendingConflicts == 0 {
 				return nil
 			}
 		}
@@ -1262,7 +1262,7 @@ func newCheckpointSourceProofVerifier(config checkpointMountConfig) (*mountsync.
 	cursorTimeout, _ := parseCheckpointDuration(config.CursorTimeout, false)
 	client := mountsync.NewHTTPClient(config.Server, bundle.BearerToken(), mountsync.NewSyncHTTPClient())
 	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
-		WorkspaceID: config.WorkspaceID, RemoteRoot: config.RemotePaths[0], EventProvider: config.EventProvider,
+		WorkspaceID: config.WorkspaceID, RemoteRoot: mountscope.FirstPath(config.RemotePaths, "/"), EventProvider: config.EventProvider,
 		LocalRoot: config.LocalRoot, StateFile: config.StateFile, StateDir: config.StateDir, MountKind: config.MountKind,
 		ValidateState: true, Scopes: delegatedBundleAvailableScopes(bundle), RootCtx: context.Background(), Mode: config.Mode,
 		Interval: interval, LowMemory: boolPtr(config.LowMemory), BootstrapTimeout: bootstrapTimeout,
@@ -1631,17 +1631,17 @@ func listCheckpointLifecycles() ([]checkpointLifecycleState, error) {
 }
 
 func acquireCheckpointLifecycleLock(localRoot string) (func(), error) {
-	return acquireCheckpointLifecycleLockContext(nil, localRoot)
+	return acquireCheckpointLifecycleLockContext(context.Background(), localRoot, false)
 }
 
 func acquireCheckpointLifecycleLockWait(ctx context.Context, localRoot string) (func(), error) {
 	if ctx == nil {
 		return nil, errors.New("checkpoint lifecycle wait requires a context")
 	}
-	return acquireCheckpointLifecycleLockContext(ctx, localRoot)
+	return acquireCheckpointLifecycleLockContext(ctx, localRoot, true)
 }
 
-func acquireCheckpointLifecycleLockContext(waitCtx context.Context, localRoot string) (func(), error) {
+func acquireCheckpointLifecycleLockContext(waitCtx context.Context, localRoot string, wait bool) (func(), error) {
 	if err := ensureCheckpointLifecycleDir(); err != nil {
 		return nil, err
 	}
@@ -1678,7 +1678,7 @@ func acquireCheckpointLifecycleLockContext(waitCtx context.Context, localRoot st
 		}
 		current, _ := os.ReadFile(lockPath)
 		if json.Unmarshal(current, &owner) == nil && processAlive(owner.PID) {
-			if waitCtx == nil {
+			if !wait {
 				return nil, fmt.Errorf("checkpoint lifecycle is active in pid %d", owner.PID)
 			}
 			select {
