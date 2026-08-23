@@ -8,11 +8,23 @@ const { spawnSync } = require("node:child_process");
 const test = require("node:test");
 
 const {
+  SETUP_INTENT,
+  SETUP_INTENT_PRINTED_ENV,
+  announceSetupIntent,
   hasValidSetupArguments,
   parseGoDurationMilliseconds,
   prepareCloudSession,
   shouldPrepareCloudSession,
 } = require("./cloud-preflight.js");
+
+test("SDK setup intent is announced once before authentication", () => {
+  const env = {};
+  const lines = [];
+  assert.equal(announceSetupIntent([], env, (line) => lines.push(line)), true);
+  assert.equal(announceSetupIntent([], env, (line) => lines.push(line)), true);
+  assert.deepEqual(lines, [SETUP_INTENT]);
+  assert.equal(env[SETUP_INTENT_PRINTED_ENV], "1");
+});
 
 test("bare relayfile prepares Cloud auth through the Agent Relay SDK", async () => {
   const env = {};

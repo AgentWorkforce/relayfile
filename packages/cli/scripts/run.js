@@ -12,7 +12,10 @@ if (args[0] === "--version") {
   process.exit(0);
 }
 
-const { prepareCloudSession } = require("./cloud-preflight.js");
+const {
+  announceSetupIntent,
+  prepareCloudSession,
+} = require("./cloud-preflight.js");
 
 const PLATFORM_MAP = {
   darwin: "darwin",
@@ -64,6 +67,7 @@ async function main() {
   // Agent Relay's Cloud SDK owns interactive login, token refresh, locking,
   // and the canonical session store. The native runtime reads that same store
   // directly instead of receiving copied tokens or invoking agent-relay CLI.
+  announceSetupIntent(args, process.env);
   await prepareCloudSession(args, process.env);
 
   let result;

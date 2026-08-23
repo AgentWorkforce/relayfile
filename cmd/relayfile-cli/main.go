@@ -58,9 +58,12 @@ const (
 	defaultMountMode                          = "poll"
 	defaultMountInterval                      = 30 * time.Second
 	defaultEventSilenceThreshold              = 24 * time.Hour
+	setupIntentPrintedEnv                     = "RELAYFILE_NPM_SETUP_INTENT_PRINTED"
 	minMountPollInterval                      = 5 * time.Second
 	defaultMountTimeout                       = 15 * time.Second
 )
+
+const setupIntent = "Relayfile setup. This signs you in, connects an integration, and prepares a local VFS mount."
 
 var relayfileVersion = relayfileDefaultVersion
 
@@ -1029,7 +1032,7 @@ func runSetupWithOptions(args []string, stdin io.Reader, stdout io.Writer, optio
 		cloudAPI = defaultCloudAPIURL
 	}
 
-	fmt.Fprintln(stdout, "Relayfile setup. This signs you in, connects an integration, and prepares a local VFS mount.")
+	printSetupIntent(stdout)
 
 	tokenSet, err := ensureCloudCredentials(cloudAPI, strings.TrimSpace(*cloudToken), *loginTimeout, !*noOpen, stdout)
 	if err != nil {
@@ -1167,6 +1170,13 @@ func runSetupWithOptions(args []string, stdin io.Reader, stdout io.Writer, optio
 		fmt.Fprintf(stdout, "  Use %s as our shared workspace. Read LAYOUT.md first.\n", absLocalDir)
 	}
 	return runMount(mountArgs)
+}
+
+func printSetupIntent(stdout io.Writer) {
+	if strings.TrimSpace(os.Getenv(setupIntentPrintedEnv)) == "1" {
+		return
+	}
+	fmt.Fprintln(stdout, setupIntent)
 }
 
 func resolveSetupTarget(workspaceName, requestedLocalDir string, preserveExisting bool) (string, string) {

@@ -226,6 +226,22 @@ func TestQuickStartUsesProjectNameGitHubAndLocalMountDefaults(t *testing.T) {
 	}
 }
 
+func TestSetupIntentPrintsOnceAcrossNPMAndNativeSetup(t *testing.T) {
+	var stdout bytes.Buffer
+	t.Setenv(setupIntentPrintedEnv, "")
+	printSetupIntent(&stdout)
+	if got := strings.TrimSpace(stdout.String()); got != setupIntent {
+		t.Fatalf("setup intent = %q, want %q", got, setupIntent)
+	}
+
+	stdout.Reset()
+	t.Setenv(setupIntentPrintedEnv, "1")
+	printSetupIntent(&stdout)
+	if stdout.Len() != 0 {
+		t.Fatalf("native setup duplicated npm intent: %q", stdout.String())
+	}
+}
+
 func TestQuickStartFallsBackToTimestampedWorkspaceOutsideAProject(t *testing.T) {
 	args := quickStartSetupArgsForDir(
 		string(filepath.Separator),
@@ -4238,6 +4254,7 @@ func clearRelayfileEnv(t *testing.T) {
 	t.Setenv("RELAY_BASE_URL", "")
 	t.Setenv("AGENT_RELAY_BIN", "")
 	t.Setenv("RELAYFILE_AGENT_RELAY_BIN", "")
+	t.Setenv(setupIntentPrintedEnv, "")
 	t.Setenv("CLOUD_API_URL", "")
 	t.Setenv("CLOUD_API_ACCESS_TOKEN", "")
 	t.Setenv("CLOUD_API_REFRESH_TOKEN", "")

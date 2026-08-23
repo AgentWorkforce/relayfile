@@ -3,6 +3,9 @@
 const path = require("path");
 
 const DEFAULT_CLOUD_API_URL = "https://agentrelay.com/cloud";
+const SETUP_INTENT =
+  "Relayfile setup. This signs you in, connects an integration, and prepares a local VFS mount.";
+const SETUP_INTENT_PRINTED_ENV = "RELAYFILE_NPM_SETUP_INTENT_PRINTED";
 const DEFAULT_LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_REFRESH_TIMEOUT_MS = 10 * 1000;
 const MAX_NODE_TIMER_DELAY_MS = 2_147_483_647;
@@ -206,6 +209,17 @@ function shouldPrepareCloudSession(args, env) {
   return true;
 }
 
+function announceSetupIntent(args, env, writeLine = console.log) {
+  if (!shouldPrepareCloudSession(args, env)) {
+    return false;
+  }
+  if (String(env[SETUP_INTENT_PRINTED_ENV] || "").trim() !== "1") {
+    writeLine(SETUP_INTENT);
+    env[SETUP_INTENT_PRINTED_ENV] = "1";
+  }
+  return true;
+}
+
 function loadCloudSessionSDK() {
   const bundlePath = path.join(__dirname, "cloud-auth.cjs");
   try {
@@ -282,6 +296,9 @@ async function prepareCloudSession(args, env = process.env, dependencies = {}) {
 
 module.exports = {
   DEFAULT_CLOUD_API_URL,
+  SETUP_INTENT,
+  SETUP_INTENT_PRINTED_ENV,
+  announceSetupIntent,
   hasValidSetupArguments,
   parseGoDurationMilliseconds,
   parseSetupArguments,
