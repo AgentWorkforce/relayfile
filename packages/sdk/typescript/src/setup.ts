@@ -1365,6 +1365,8 @@ class SupervisedMountedWorkspaceHandle implements MountedWorkspaceHandle {
   private refreshPromise?: Promise<void>
   private stopPromise?: Promise<void>
   private stopped = false
+  private checkpointing = false
+  private supervisorEpoch = 0
   private supervisorReady = true
   private refreshAttempts = 0
 
@@ -1440,6 +1442,8 @@ class SupervisedMountedWorkspaceHandle implements MountedWorkspaceHandle {
   }
 
   async checkpointAndSeal(input: CheckpointAndSealInput): Promise<CheckpointSeal> {
+    this.checkpointing = true
+    this.supervisorEpoch += 1
     this.supervisorReady = false
     if (this.timer) clearTimeout(this.timer)
     this.timer = undefined
@@ -1453,7 +1457,10 @@ class SupervisedMountedWorkspaceHandle implements MountedWorkspaceHandle {
         this.retireAfterCheckpointStop()
       } else {
         // Validation/mode failures occur before the daemon is stopped. Restore
-        // the supervisor and leave the shared ensured handle reusable.
+        // the supervisor with a fresh epoch and leave the shared ensured
+        // handle reusable. Work from the fenced epoch cannot replace it.
+        this.checkpointing = false
+        this.supervisorEpoch += 1
         this.supervisorReady = this.mounted.ready
         this.schedule()
       }
@@ -1467,6 +1474,8 @@ class SupervisedMountedWorkspaceHandle implements MountedWorkspaceHandle {
 
   private retireAfterCheckpointStop(): void {
     this.stopped = true
+    this.checkpointing = false
+    this.supervisorEpoch += 1
     this.supervisorReady = false
     this.signal?.removeEventListener("abort", this.handleAbort)
     if (this.timer) clearTimeout(this.timer)
@@ -1475,6 +1484,8 @@ class SupervisedMountedWorkspaceHandle implements MountedWorkspaceHandle {
 
   private async performStop(): Promise<void> {
     this.stopped = true
+    this.checkpointing = false
+    this.supervisorEpoch += 1
     this.supervisorReady = false
     this.signal?.removeEventListener("abort", this.handleAbort)
     if (this.timer) clearTimeout(this.timer)
@@ -1488,7 +1499,8 @@ class SupervisedMountedWorkspaceHandle implements MountedWorkspaceHandle {
   }
 
   private schedule(delayOverrideMs?: number): void {
-    if (this.stopped || this.timer) return
+    if (this.stopped || this.checkpointing || this.timer) return
+    const epoch = this.supervisorEpoch
     const suggestedRefreshAtMs = Date.parse(this.mounted.suggestedRefreshAt ?? "")
     const untilRefresh = Number.isFinite(suggestedRefreshAtMs)
       ? Math.max(0, suggestedRefreshAtMs - Date.now())
@@ -1496,20 +1508,24 @@ class SupervisedMountedWorkspaceHandle implements MountedWorkspaceHandle {
     const delayMs = delayOverrideMs ?? Math.min(this.healthCheckIntervalMs, untilRefresh)
     this.timer = setTimeout(() => {
       this.timer = undefined
-      this.refreshPromise = this.checkAndRefresh().finally(() => {
-        this.refreshPromise = undefined
+      if (!this.isActiveEpoch(epoch)) return
+      const refresh = this.checkAndRefresh(epoch)
+      const tracked = refresh.finally(() => {
+        if (this.refreshPromise === tracked) this.refreshPromise = undefined
       })
+      this.refreshPromise = tracked
     }, Math.max(1_000, delayMs))
     this.timer.unref?.()
   }
 
-  private async checkAndRefresh(): Promise<void> {
-    if (this.stopped) return
+  private async checkAndRefresh(epoch: number): Promise<void> {
+    if (!this.isActiveEpoch(epoch)) return
     try {
       const suggestedRefreshAtMs = Date.parse(this.mounted.suggestedRefreshAt ?? "")
       const refreshDue = Number.isFinite(suggestedRefreshAtMs) && Date.now() >= suggestedRefreshAtMs
       if (!refreshDue) {
         const status = await this.mounted.status()
+        if (!this.isActiveEpoch(epoch)) return
         if (status.ready) {
           this.supervisorReady = true
           this.refreshAttempts = 0
@@ -1517,8 +1533,8 @@ class SupervisedMountedWorkspaceHandle implements MountedWorkspaceHandle {
           return
         }
       }
-      await this.replaceMount()
-      if (this.stopped) return
+      await this.replaceMount(epoch)
+      if (!this.isActiveEpoch(epoch)) return
       this.supervisorReady = true
       this.refreshAttempts = 0
       this.emit({
@@ -1529,7 +1545,7 @@ class SupervisedMountedWorkspaceHandle implements MountedWorkspaceHandle {
       })
       this.schedule()
     } catch (error) {
-      if (this.stopped) return
+      if (!this.isActiveEpoch(epoch)) return
       this.supervisorReady = false
       this.refreshAttempts += 1
       const retryInMs = Math.min(
@@ -1548,17 +1564,21 @@ class SupervisedMountedWorkspaceHandle implements MountedWorkspaceHandle {
     }
   }
 
-  private async replaceMount(): Promise<void> {
+  private async replaceMount(epoch: number): Promise<void> {
     const previous = this.mounted
-    if (this.stopped) return
+    if (!this.isActiveEpoch(epoch)) return
     await previous.stop().catch(() => {})
-    if (this.stopped) return
+    if (!this.isActiveEpoch(epoch)) return
     const replacement = await this.launch()
-    if (this.stopped) {
+    if (!this.isActiveEpoch(epoch)) {
       await replacement.stop().catch(() => {})
       return
     }
     this.mounted = replacement
+  }
+
+  private isActiveEpoch(epoch: number): boolean {
+    return !this.stopped && !this.checkpointing && epoch === this.supervisorEpoch
   }
 
   private emit(event: MountSupervisorEvent): void {

@@ -1540,6 +1540,7 @@ describe("RelayFileClient — existing methods", () => {
       const client = makeClient(f);
       await expect(client.handbackCheckpointSeal({
         workspaceId: "ws_acme",
+        phase: "commit",
         receipt: consumed,
         consumerIdempotencyKey: "cloud-acquire-attempt-1",
         handbackIdempotencyKey: "cloud-handback-attempt-1",
@@ -1548,6 +1549,7 @@ describe("RelayFileClient — existing methods", () => {
       expect(f.mock.calls[0]![0]).toContain("/v1/workspaces/ws_acme/sync/checkpoint-seals/handback");
       const init = f.mock.calls[0]![1] as RequestInit;
       expect(JSON.parse(init.body as string)).toEqual({
+        phase: "commit",
         sealId: seal.sealId,
         root: seal.root,
         sessionId: seal.sessionId,

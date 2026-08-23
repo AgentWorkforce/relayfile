@@ -37,6 +37,10 @@ const DefaultCheckpointSealTTL = relayfile.DefaultCheckpointSealTTL
 
 const MaxCheckpointSealTTL = relayfile.MaxCheckpointSealTTL
 
+const CheckpointHandbackPhasePrepare = relayfile.CheckpointHandbackPhasePrepare
+
+const CheckpointHandbackPhaseCommit = relayfile.CheckpointHandbackPhaseCommit
+
 type BulkWriteResponse struct {
 	Written       int               `json:"written"`
 	ErrorCount    int               `json:"errorCount"`

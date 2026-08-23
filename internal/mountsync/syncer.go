@@ -2582,6 +2582,9 @@ func (s *Syncer) HandbackCheckpoint(ctx context.Context, consumed CheckpointSeal
 	if !s.state.BootstrapComplete {
 		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: destination mount bootstrap is incomplete", ErrCheckpointNonConverged)
 	}
+	if s.localWatcherActive {
+		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: handback requires a stopped, watcherless destination verifier", ErrCheckpointNonConverged)
+	}
 	if len(s.state.QuarantinedPaths) > 0 || len(s.state.SkippedMaterializations) > 0 || s.state.IncrementalBacklogDraining || s.state.IncrementalCheckpoint != nil || len(s.state.IncrementalReadNotReadySince) > 0 {
 		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: destination has quarantined, skipped, or incomplete remote state", ErrCheckpointNonConverged)
 	}
@@ -2630,17 +2633,53 @@ func (s *Syncer) HandbackCheckpoint(ctx context.Context, consumed CheckpointSeal
 	if err != nil || firstDigest != secondDigest {
 		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: destination changed during handback", ErrCheckpointConcurrentMutation)
 	}
-	proof, err := handbackClient.HandbackCheckpointSeal(ctx, s.workspace, CheckpointSealHandbackRequest{
+	request := CheckpointSealHandbackRequest{
+		Phase:  CheckpointHandbackPhasePrepare,
 		SealID: consumed.SealID, Root: consumed.Root, SessionID: consumed.SessionID,
 		Generation: consumed.Generation, ConsumedAt: consumed.ConsumedAt,
 		ConsumerIdempotencyKey: consumerKey, HandbackIdempotencyKey: handbackKey,
 		ExpectedDigest: secondDigest,
-	})
+	}
+	prepared, err := handbackClient.HandbackCheckpointSeal(ctx, s.workspace, request)
 	if err != nil {
-		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: release destination ownership: %w", ErrCheckpointNonConverged, err)
+		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: prepare destination handback: %w", ErrCheckpointNonConverged, err)
+	}
+	// A commit can succeed durably while its response is lost. Exact retries
+	// restart at prepare; the server returns the already-released proof bound to
+	// the same handback key and digest. Accept that terminal replay rather than
+	// requiring a second (impossible) transition.
+	if prepared.Status == "released" {
+		if prepared.SealID != consumed.SealID || prepared.WorkspaceID != s.workspace || prepared.Root != "/" || prepared.SessionID != consumed.SessionID || prepared.Generation != consumed.Generation ||
+			prepared.Digest != secondDigest || !checkpointEventCursorPattern.MatchString(strings.TrimSpace(prepared.EventCursor)) || !checkpointRevisionPattern.MatchString(strings.TrimSpace(prepared.WorkspaceRevision)) || prepared.ConsumedAt != consumed.ConsumedAt || strings.TrimSpace(prepared.PreparedAt) == "" || strings.TrimSpace(prepared.ReleasedAt) == "" || prepared.SourceResumedAt != "" {
+			return CheckpointSealOwnership{}, health, fmt.Errorf("%w: server returned a changed released handback replay", ErrCheckpointNonConverged)
+		}
+		for _, raw := range []string{prepared.PreparedAt, prepared.ReleasedAt} {
+			if _, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(raw)); err != nil {
+				return CheckpointSealOwnership{}, health, fmt.Errorf("%w: server returned malformed released handback replay time", ErrCheckpointNonConverged)
+			}
+		}
+		return prepared, health, nil
+	}
+	if prepared.Status != "prepared" || prepared.SealID != consumed.SealID || prepared.WorkspaceID != s.workspace || prepared.Root != "/" || prepared.SessionID != consumed.SessionID || prepared.Generation != consumed.Generation ||
+		prepared.Digest != secondDigest || !checkpointEventCursorPattern.MatchString(strings.TrimSpace(prepared.EventCursor)) || !checkpointRevisionPattern.MatchString(strings.TrimSpace(prepared.WorkspaceRevision)) || prepared.ConsumedAt != consumed.ConsumedAt || strings.TrimSpace(prepared.PreparedAt) == "" || prepared.ReleasedAt != "" || prepared.SourceResumedAt != "" {
+		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: server returned a changed handback preparation", ErrCheckpointNonConverged)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(prepared.PreparedAt)); err != nil {
+		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: server returned malformed handback preparation time", ErrCheckpointNonConverged)
+	}
+	s.runCheckpointTestHook("handback-after-prepare")
+	closingDigest, err := s.checkpointLocalDigestLocked()
+	if err != nil || closingDigest != secondDigest {
+		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: destination changed after handback preparation", ErrCheckpointConcurrentMutation)
+	}
+
+	request.Phase = CheckpointHandbackPhaseCommit
+	proof, err := handbackClient.HandbackCheckpointSeal(ctx, s.workspace, request)
+	if err != nil {
+		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: commit destination handback: %w", ErrCheckpointNonConverged, err)
 	}
 	if proof.Status != "released" || proof.SealID != consumed.SealID || proof.WorkspaceID != s.workspace || proof.Root != "/" || proof.SessionID != consumed.SessionID || proof.Generation != consumed.Generation ||
-		proof.Digest != secondDigest || !checkpointEventCursorPattern.MatchString(strings.TrimSpace(proof.EventCursor)) || !checkpointRevisionPattern.MatchString(strings.TrimSpace(proof.WorkspaceRevision)) || proof.ConsumedAt != consumed.ConsumedAt || strings.TrimSpace(proof.ReleasedAt) == "" || proof.SourceResumedAt != "" {
+		proof.Digest != secondDigest || proof.WorkspaceRevision != prepared.WorkspaceRevision || proof.EventCursor != prepared.EventCursor || proof.ConsumedAt != consumed.ConsumedAt || proof.PreparedAt != prepared.PreparedAt || strings.TrimSpace(proof.ReleasedAt) == "" || proof.SourceResumedAt != "" {
 		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: server returned a changed handback proof", ErrCheckpointNonConverged)
 	}
 	if _, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(proof.ReleasedAt)); err != nil {
@@ -2759,6 +2798,11 @@ func (s *Syncer) VerifyCheckpoint(ctx context.Context, expected CheckpointSeal) 
 	}
 	if !sameCheckpointReceiptIdentity(serverSeal, expected) || serverSeal.SealToken != "" {
 		return verification, fmt.Errorf("%w: server returned a changed or bearer-bearing verification receipt", ErrCheckpointNonConverged)
+	}
+	s.runCheckpointTestHook("verify-after-rpc")
+	closingDigest, err := s.checkpointLocalDigestLocked()
+	if err != nil || closingDigest != secondDigest {
+		return verification, fmt.Errorf("%w: destination changed after server re-attestation", ErrCheckpointConcurrentMutation)
 	}
 	verification.Observed.WorkspaceRevision = serverSeal.WorkspaceRevision
 	return verification, nil

@@ -2215,6 +2215,74 @@ describe("RelayfileSetup", () => {
     }
   })
 
+  it("fences an in-flight health refresh before checkpoint can stop the mount", async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime("2026-05-09T10:00:00.000Z")
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-sdk-supervised-checkpoint-refresh-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    queueFetch(
+      makeJoinResponse("rf_jwt_joined"),
+      makeMountSessionResponse({
+        suggestedRefreshAt: "2026-05-09T11:00:00.000Z"
+      })
+    )
+    let releaseStatus!: (status: MountedWorkspaceStatus) => void
+    const pendingStatus = new Promise<MountedWorkspaceStatus>((resolve) => {
+      releaseStatus = resolve
+    })
+    let stopped = false
+    const checkpointAndSeal = vi.fn().mockImplementation(async () => {
+      stopped = true
+      return validCheckpointSeal()
+    })
+    const launcher: MountLauncher = {
+      start: vi.fn().mockResolvedValue({
+        pid: 4321,
+        get stopped() {
+          return stopped
+        },
+        ready: Promise.resolve(),
+        status: vi.fn().mockReturnValue(pendingStatus),
+        checkpointAndSeal,
+        stop: vi.fn().mockImplementation(async () => {
+          stopped = true
+        })
+      })
+    }
+
+    try {
+      const setup = new RelayfileSetup({ retry: { maxRetries: 0 } })
+      const handle = await setup.ensureMountedWorkspace({
+        workspaceId: "ws_123",
+        localDir,
+        verifyProvider: false,
+        launcher,
+        healthCheckIntervalMs: 1_000
+      })
+
+      await vi.advanceTimersByTimeAsync(1_000)
+      const checkpoint = handle.checkpointAndSeal({
+        sessionId: "session-refresh-race",
+        generation: 8
+      })
+      releaseStatus({
+        ready: false,
+        mode: "poll",
+        expiresAt: null,
+        suggestedRefreshAt: null
+      })
+
+      await expect(checkpoint).resolves.toEqual(validCheckpointSeal())
+      expect(checkpointAndSeal).toHaveBeenCalledTimes(1)
+      expect(launcher.start).toHaveBeenCalledTimes(1)
+      expect(handle.ready).toBe(false)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
   it("mounted handle status reads .relay/state.json and keeps expiresAt fields stable", async () => {
     const tempRoot = await mkdtemp(
       path.join(os.tmpdir(), "relayfile-sdk-status-state-file-")

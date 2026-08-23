@@ -326,6 +326,7 @@ func TestCheckpointHandbackIsConsumerBoundDurableAndGatesSourceResume(t *testing
 	seedCheckpointFile(t, first, "ws_handback", "/destination.txt", "destination turn\n")
 	finalDigest, _, finalCursor := checkpointStateForTest(t, first, "ws_handback", "/")
 	handback := CheckpointSealHandbackRequest{
+		Phase:  CheckpointHandbackPhasePrepare,
 		SealID: issued.SealID, Root: "/", SessionID: issued.SessionID, Generation: issued.Generation,
 		ConsumedAt: consumed.ConsumedAt, ConsumerIdempotencyKey: consumerKey,
 		HandbackIdempotencyKey: "handback-job-4", ExpectedDigest: finalDigest, ConsumerPrincipal: checkpointTestConsumerPrincipal,
@@ -350,40 +351,68 @@ func TestCheckpointHandbackIsConsumerBoundDurableAndGatesSourceResume(t *testing
 	if _, err := first.HandbackCheckpointSeal("ws_handback", diverged, now.Add(3*time.Second)); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("malformed handback digest error = %v", err)
 	}
-	proof, err := first.HandbackCheckpointSeal("ws_handback", handback, now.Add(4*time.Second))
-	if err != nil {
-		t.Fatalf("handback: %v", err)
+	commitWithoutPrepare := handback
+	commitWithoutPrepare.Phase = CheckpointHandbackPhaseCommit
+	if _, err := first.HandbackCheckpointSeal("ws_handback", commitWithoutPrepare, now.Add(3*time.Second)); !errors.Is(err, ErrCheckpointHandbackUnprepared) {
+		t.Fatalf("commit without prepare error = %v", err)
 	}
-	if proof.Status != "released" || proof.Digest != finalDigest || proof.EventCursor != finalCursor || proof.ReleasedAt == "" || proof.SourceResumedAt != "" {
-		t.Fatalf("handback proof = %+v", proof)
+	prepared, err := first.HandbackCheckpointSeal("ws_handback", handback, now.Add(4*time.Second))
+	if err != nil {
+		t.Fatalf("prepare handback: %v", err)
+	}
+	if prepared.Status != "prepared" || prepared.Digest != finalDigest || prepared.EventCursor != finalCursor || prepared.PreparedAt == "" || prepared.ReleasedAt != "" || prepared.SourceResumedAt != "" {
+		t.Fatalf("handback preparation = %+v", prepared)
 	}
 	replayed, err := first.HandbackCheckpointSeal("ws_handback", handback, now.Add(5*time.Second))
-	if err != nil || replayed != proof {
-		t.Fatalf("handback replay = %+v err=%v, want %+v", replayed, err, proof)
+	if err != nil || replayed != prepared {
+		t.Fatalf("prepare replay = %+v err=%v, want %+v", replayed, err, prepared)
 	}
-	changedHandback := handback
-	changedHandback.HandbackIdempotencyKey = "handback-job-changed"
-	if _, err := first.HandbackCheckpointSeal("ws_handback", changedHandback, now.Add(5*time.Second)); !errors.Is(err, ErrCheckpointHandbackConflict) {
-		t.Fatalf("changed handback replay error = %v", err)
+	if _, err := first.ResumeCheckpointSeal("ws_handback", resumeRequest, now.Add(5*time.Second)); !errors.Is(err, ErrCheckpointHandbackRequired) {
+		t.Fatalf("prepared handback released ownership early: %v", err)
 	}
+	// Simulate a destination crash after the durable prepare response. The exact
+	// commit must remain recoverable after reopening the store.
 	first.Close()
 
 	second := NewStoreWithOptions(StoreOptions{StateFile: stateFile, DisableWorkers: true})
 	defer second.Close()
-	resumed, err := second.ResumeCheckpointSeal("ws_handback", resumeRequest, now.Add(6*time.Second))
+	handback.Phase = CheckpointHandbackPhaseCommit
+	proof, err := second.HandbackCheckpointSeal("ws_handback", handback, now.Add(6*time.Second))
+	if err != nil {
+		t.Fatalf("commit handback after reopen: %v", err)
+	}
+	if proof.Status != "released" || proof.Digest != finalDigest || proof.EventCursor != finalCursor || proof.PreparedAt != prepared.PreparedAt || proof.ReleasedAt == "" || proof.SourceResumedAt != "" {
+		t.Fatalf("handback proof = %+v", proof)
+	}
+	commitReplay, err := second.HandbackCheckpointSeal("ws_handback", handback, now.Add(7*time.Second))
+	if err != nil || commitReplay != proof {
+		t.Fatalf("commit replay = %+v err=%v, want %+v", commitReplay, err, proof)
+	}
+	handback.Phase = CheckpointHandbackPhasePrepare
+	releasedPrepareReplay, err := second.HandbackCheckpointSeal("ws_handback", handback, now.Add(7*time.Second))
+	if err != nil || releasedPrepareReplay != proof {
+		t.Fatalf("released prepare replay = %+v err=%v, want %+v", releasedPrepareReplay, err, proof)
+	}
+	handback.Phase = CheckpointHandbackPhaseCommit
+	changedHandback := handback
+	changedHandback.HandbackIdempotencyKey = "handback-job-changed"
+	if _, err := second.HandbackCheckpointSeal("ws_handback", changedHandback, now.Add(7*time.Second)); !errors.Is(err, ErrCheckpointHandbackConflict) {
+		t.Fatalf("changed handback replay error = %v", err)
+	}
+	resumed, err := second.ResumeCheckpointSeal("ws_handback", resumeRequest, now.Add(8*time.Second))
 	if err != nil {
 		t.Fatalf("resume after durable handback: %v", err)
 	}
 	if resumed.Status != "source-resumed" || resumed.Digest != proof.Digest || resumed.SourceResumedAt == "" {
 		t.Fatalf("source resume proof = %+v", resumed)
 	}
-	resumedReplay, err := second.ResumeCheckpointSeal("ws_handback", resumeRequest, now.Add(7*time.Second))
+	resumedReplay, err := second.ResumeCheckpointSeal("ws_handback", resumeRequest, now.Add(9*time.Second))
 	if err != nil || resumedReplay != resumed {
 		t.Fatalf("resume replay = %+v err=%v, want %+v", resumedReplay, err, resumed)
 	}
 	changedResume := resumeRequest
 	changedResume.ResumeIdempotencyKey = "source-resume-changed"
-	if _, err := second.ResumeCheckpointSeal("ws_handback", changedResume, now.Add(7*time.Second)); !errors.Is(err, ErrCheckpointResumeConflict) {
+	if _, err := second.ResumeCheckpointSeal("ws_handback", changedResume, now.Add(9*time.Second)); !errors.Is(err, ErrCheckpointResumeConflict) {
 		t.Fatalf("changed resume replay error = %v", err)
 	}
 	if _, err := second.ConsumeCheckpointSeal("ws_handback", CheckpointSealConsumeRequest{
@@ -417,6 +446,48 @@ func TestCheckpointUnconsumedSealCanBeCancelledBySource(t *testing.T) {
 	}
 }
 
+func TestCheckpointHandbackCommitRejectsDurableChangeAfterPrepare(t *testing.T) {
+	now := time.Date(2026, 8, 23, 14, 0, 0, 0, time.UTC)
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	defer store.Close()
+	seedCheckpointFile(t, store, "ws_handback_prepare_race", "/source.txt", "source turn\n")
+	digest := checkpointDigestForStore(t, store, "ws_handback_prepare_race", "/")
+	issued, err := store.IssueCheckpointSeal("ws_handback_prepare_race", CheckpointSealRequest{
+		Root: "/", SessionID: "thread-handback-prepare-race", Generation: 1, ExpectedDigest: digest,
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumed, err := store.ConsumeCheckpointSeal("ws_handback_prepare_race", CheckpointSealConsumeRequest{
+		SealToken: issued.SealToken, Root: "/", SessionID: issued.SessionID, Generation: issued.Generation,
+		ConsumerIdempotencyKey: "consume-handback-prepare-race", ConsumerPrincipal: checkpointTestConsumerPrincipal,
+	}, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handback := CheckpointSealHandbackRequest{
+		Phase:  CheckpointHandbackPhasePrepare,
+		SealID: consumed.SealID, Root: "/", SessionID: consumed.SessionID, Generation: consumed.Generation,
+		ConsumedAt: consumed.ConsumedAt, ConsumerIdempotencyKey: "consume-handback-prepare-race",
+		HandbackIdempotencyKey: "handback-prepare-race", ExpectedDigest: digest, ConsumerPrincipal: checkpointTestConsumerPrincipal,
+	}
+	prepared, err := store.HandbackCheckpointSeal("ws_handback_prepare_race", handback, now.Add(2*time.Second))
+	if err != nil || prepared.Status != "prepared" {
+		t.Fatalf("prepare=%+v err=%v", prepared, err)
+	}
+	seedCheckpointFile(t, store, "ws_handback_prepare_race", "/late.txt", "late callback bytes\n")
+	handback.Phase = CheckpointHandbackPhaseCommit
+	if _, err := store.HandbackCheckpointSeal("ws_handback_prepare_race", handback, now.Add(3*time.Second)); !errors.Is(err, ErrCheckpointDiverged) {
+		t.Fatalf("changed durable state commit error=%v", err)
+	}
+	if _, err := store.ResumeCheckpointSeal("ws_handback_prepare_race", CheckpointSealResumeRequest{
+		SealToken: issued.SealToken, Root: "/", SessionID: issued.SessionID, Generation: issued.Generation,
+		ResumeIdempotencyKey: "resume-handback-prepare-race",
+	}, now.Add(4*time.Second)); !errors.Is(err, ErrCheckpointHandbackRequired) {
+		t.Fatalf("diverged prepare released ownership: %v", err)
+	}
+}
+
 func TestCheckpointConsumedOwnershipSurvivesPastGatewayLeaseCap(t *testing.T) {
 	stateFile := filepath.Join(t.TempDir(), "relayfile-state.json")
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
@@ -440,15 +511,22 @@ func TestCheckpointConsumedOwnershipSurvivesPastGatewayLeaseCap(t *testing.T) {
 
 	second := NewStoreWithOptions(StoreOptions{StateFile: stateFile, DisableWorkers: true})
 	defer second.Close()
-	proof, err := second.HandbackCheckpointSeal("ws_long_owner", CheckpointSealHandbackRequest{
+	handback := CheckpointSealHandbackRequest{
+		Phase:  CheckpointHandbackPhasePrepare,
 		SealID: consumed.SealID, Root: "/", SessionID: consumed.SessionID, Generation: consumed.Generation,
 		ConsumedAt: consumed.ConsumedAt, ConsumerIdempotencyKey: consumerKey,
 		HandbackIdempotencyKey: "handback-after-cap", ExpectedDigest: digest, ConsumerPrincipal: checkpointTestConsumerPrincipal,
-	}, now.Add(25*time.Hour))
-	if err != nil {
-		t.Fatalf("handback after 24h lease cap: %v", err)
 	}
-	if proof.Status != "released" {
+	prepared, err := second.HandbackCheckpointSeal("ws_long_owner", handback, now.Add(25*time.Hour))
+	if err != nil {
+		t.Fatalf("prepare handback after 24h lease cap: %v", err)
+	}
+	if prepared.Status != "prepared" {
+		t.Fatalf("late handback preparation = %+v", prepared)
+	}
+	handback.Phase = CheckpointHandbackPhaseCommit
+	proof, err := second.HandbackCheckpointSeal("ws_long_owner", handback, now.Add(25*time.Hour+time.Second))
+	if err != nil || proof.Status != "released" {
 		t.Fatalf("late handback proof = %+v", proof)
 	}
 }
@@ -474,11 +552,17 @@ func TestCheckpointStoppedSourceOwnershipSurvivesPastDiagnosticRetention(t *test
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := store.HandbackCheckpointSeal("ws_offline_after_handback", CheckpointSealHandbackRequest{
+		handback := CheckpointSealHandbackRequest{
+			Phase:  CheckpointHandbackPhasePrepare,
 			SealID: issued.SealID, Root: "/", SessionID: issued.SessionID, Generation: issued.Generation,
 			ConsumedAt: consumed.ConsumedAt, ConsumerIdempotencyKey: "consume-offline-handback",
 			HandbackIdempotencyKey: "handback-offline-source", ExpectedDigest: digest, ConsumerPrincipal: checkpointTestConsumerPrincipal,
-		}, now.Add(2*time.Second)); err != nil {
+		}
+		if _, err := store.HandbackCheckpointSeal("ws_offline_after_handback", handback, now.Add(2*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		handback.Phase = CheckpointHandbackPhaseCommit
+		if _, err := store.HandbackCheckpointSeal("ws_offline_after_handback", handback, now.Add(3*time.Second)); err != nil {
 			t.Fatal(err)
 		}
 		proof, err := store.ResumeCheckpointSeal("ws_offline_after_handback", CheckpointSealResumeRequest{

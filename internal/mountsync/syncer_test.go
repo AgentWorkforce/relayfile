@@ -8516,7 +8516,7 @@ func TestHandbackCheckpointDrainsAndReturnsAuthoritativeRelease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handback: %v", err)
 	}
-	if client.checkpointHandbackCalls != 1 || client.writeFileCalls+client.bulkWriteCalls == 0 {
+	if client.checkpointHandbackCalls != 2 || client.checkpointHandbackRequest.Phase != CheckpointHandbackPhaseCommit || client.writeFileCalls+client.bulkWriteCalls == 0 {
 		t.Fatalf("handback calls=%d writes=%d bulkWrites=%d", client.checkpointHandbackCalls, client.writeFileCalls, client.bulkWriteCalls)
 	}
 	if proof.Status != "released" || proof.Digest != client.checkpointHandbackRequest.ExpectedDigest || !checkpointEventCursorPattern.MatchString(proof.EventCursor) || proof.SourceResumedAt != "" {
@@ -8524,6 +8524,30 @@ func TestHandbackCheckpointDrainsAndReturnsAuthoritativeRelease(t *testing.T) {
 	}
 	if health != (CheckpointVerificationHealth{}) {
 		t.Fatalf("handback health=%+v", health)
+	}
+}
+
+func TestHandbackCheckpointAcceptsReleasedPrepareReplayAfterLostCommitResponse(t *testing.T) {
+	client := &fakeClient{}
+	syncer, _ := newManagedCheckpointSyncer(t, client)
+	receipt := consumedCheckpointReceiptForTest(t, syncer)
+	preparedAt := time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano)
+	releasedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	client.checkpointHandbackProof = CheckpointSealOwnership{
+		SealID: receipt.SealID, WorkspaceID: receipt.WorkspaceID, Root: receipt.Root,
+		SessionID: receipt.SessionID, Generation: receipt.Generation, Status: "released",
+		Digest: receipt.Digest, WorkspaceRevision: "rev_3", EventCursor: "evt_3",
+		ConsumedAt: receipt.ConsumedAt, PreparedAt: preparedAt, ReleasedAt: releasedAt,
+	}
+	proof, health, err := syncer.HandbackCheckpoint(context.Background(), receipt, "cutover-lost-commit-response", "handback-lost-commit-response")
+	if err != nil {
+		t.Fatalf("recover released handback: %v", err)
+	}
+	if proof != client.checkpointHandbackProof || health != (CheckpointVerificationHealth{}) {
+		t.Fatalf("released replay proof=%+v health=%+v", proof, health)
+	}
+	if client.checkpointHandbackCalls != 1 || client.checkpointHandbackRequest.Phase != CheckpointHandbackPhasePrepare {
+		t.Fatalf("released replay calls=%d phase=%q", client.checkpointHandbackCalls, client.checkpointHandbackRequest.Phase)
 	}
 }
 
@@ -8544,6 +8568,38 @@ func TestHandbackCheckpointFailsBeforeReleaseOnMutationOrPendingHealth(t *testin
 		}
 		if client.checkpointHandbackCalls != 0 {
 			t.Fatalf("mutating handback reached server: %d", client.checkpointHandbackCalls)
+		}
+	})
+
+	t.Run("mutation during prepare never commits release", func(t *testing.T) {
+		client := &fakeClient{}
+		syncer, localPath := newManagedCheckpointSyncer(t, client)
+		receipt := consumedCheckpointReceiptForTest(t, syncer)
+		syncer.checkpointTestHook = func(stage string) {
+			if stage == "handback-after-prepare" {
+				if err := os.WriteFile(localPath, []byte("callback append during prepare\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		if _, _, err := syncer.HandbackCheckpoint(context.Background(), receipt, "cutover-job-prepare-race", "handback-job-prepare-race"); !errors.Is(err, ErrCheckpointConcurrentMutation) {
+			t.Fatalf("prepare race error=%v", err)
+		}
+		if client.checkpointHandbackCalls != 1 || client.checkpointHandbackRequest.Phase != CheckpointHandbackPhasePrepare {
+			t.Fatalf("unsafe handback calls=%d lastPhase=%q", client.checkpointHandbackCalls, client.checkpointHandbackRequest.Phase)
+		}
+	})
+
+	t.Run("active watcher is not safe handback quiescence", func(t *testing.T) {
+		client := &fakeClient{}
+		syncer, _ := newManagedCheckpointSyncer(t, client)
+		receipt := consumedCheckpointReceiptForTest(t, syncer)
+		syncer.localWatcherActive = true
+		if _, _, err := syncer.HandbackCheckpoint(context.Background(), receipt, "cutover-job-watcher", "handback-job-watcher"); !errors.Is(err, ErrCheckpointNonConverged) || !strings.Contains(err.Error(), "watcherless") {
+			t.Fatalf("watcher quiescence error=%v", err)
+		}
+		if client.checkpointHandbackCalls != 0 {
+			t.Fatalf("active watcher reached server: %d", client.checkpointHandbackCalls)
 		}
 	})
 
@@ -8776,6 +8832,30 @@ func TestVerifyCheckpointRequiresLocalExactnessAndServerReattestation(t *testing
 		}
 	})
 
+	t.Run("mutation during server re-attestation fails the closing scan", func(t *testing.T) {
+		client := &fakeClient{}
+		syncer, localPath := newManagedCheckpointSyncer(t, client)
+		receipt := consumedCheckpointReceiptForTest(t, syncer)
+		client.checkpointVerifyFunc = func(_ context.Context, workspaceID string, request CheckpointSealVerifyRequest) (CheckpointSeal, error) {
+			if err := os.WriteFile(localPath, []byte("callback append during verify RPC\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return CheckpointSeal{
+				SealID: request.SealID, WorkspaceID: workspaceID, Root: request.Root,
+				SessionID: request.SessionID, Generation: request.Generation,
+				Digest: request.Digest, WorkspaceRevision: request.WorkspaceRevision,
+				EventCursor: request.EventCursor, IssuedAt: request.IssuedAt,
+				ExpiresAt: request.ExpiresAt, ConsumedAt: request.ConsumedAt,
+			}, nil
+		}
+		if _, err := syncer.VerifyCheckpoint(context.Background(), receipt); !errors.Is(err, ErrCheckpointConcurrentMutation) || !strings.Contains(err.Error(), "after server re-attestation") {
+			t.Fatalf("closing scan error=%v", err)
+		}
+		if client.checkpointVerifyCalls != 1 {
+			t.Fatalf("verification RPC calls=%d", client.checkpointVerifyCalls)
+		}
+	})
+
 	t.Run("issued bearer is rejected", func(t *testing.T) {
 		client := &fakeClient{}
 		syncer, _ := newManagedCheckpointSyncer(t, client)
@@ -8893,12 +8973,15 @@ type fakeClient struct {
 	checkpointIssueCalls           int
 	checkpointIssueFunc            func(context.Context, string, CheckpointSealRequest) (CheckpointSeal, error)
 	checkpointVerifyCalls          int
+	checkpointVerifyFunc           func(context.Context, string, CheckpointSealVerifyRequest) (CheckpointSeal, error)
 	checkpointVerifySeal           CheckpointSeal
 	checkpointVerifyErr            error
 	checkpointHandbackCalls        int
+	checkpointHandbackFunc         func(context.Context, string, CheckpointSealHandbackRequest) (CheckpointSealOwnership, error)
 	checkpointHandbackRequest      CheckpointSealHandbackRequest
 	checkpointHandbackProof        CheckpointSealOwnership
 	checkpointHandbackErr          error
+	checkpointHandbackPreparedAt   string
 }
 
 func (c *fakeClient) IssueCheckpointSeal(ctx context.Context, workspaceID string, request CheckpointSealRequest) (CheckpointSeal, error) {
@@ -8914,8 +8997,11 @@ func (c *fakeClient) IssueCheckpointSeal(ctx context.Context, workspaceID string
 	}, nil
 }
 
-func (c *fakeClient) VerifyCheckpointSeal(_ context.Context, _ string, request CheckpointSealVerifyRequest) (CheckpointSeal, error) {
+func (c *fakeClient) VerifyCheckpointSeal(ctx context.Context, workspaceID string, request CheckpointSealVerifyRequest) (CheckpointSeal, error) {
 	c.checkpointVerifyCalls++
+	if c.checkpointVerifyFunc != nil {
+		return c.checkpointVerifyFunc(ctx, workspaceID, request)
+	}
 	if c.checkpointVerifyErr != nil {
 		return CheckpointSeal{}, c.checkpointVerifyErr
 	}
@@ -8929,20 +9015,32 @@ func (c *fakeClient) VerifyCheckpointSeal(_ context.Context, _ string, request C
 	}, nil
 }
 
-func (c *fakeClient) HandbackCheckpointSeal(_ context.Context, workspaceID string, request CheckpointSealHandbackRequest) (CheckpointSealOwnership, error) {
+func (c *fakeClient) HandbackCheckpointSeal(ctx context.Context, workspaceID string, request CheckpointSealHandbackRequest) (CheckpointSealOwnership, error) {
 	c.checkpointHandbackCalls++
 	c.checkpointHandbackRequest = request
+	if c.checkpointHandbackFunc != nil {
+		return c.checkpointHandbackFunc(ctx, workspaceID, request)
+	}
 	if c.checkpointHandbackErr != nil {
 		return CheckpointSealOwnership{}, c.checkpointHandbackErr
 	}
 	if c.checkpointHandbackProof.SealID != "" {
 		return c.checkpointHandbackProof, nil
 	}
+	if c.checkpointHandbackPreparedAt == "" {
+		c.checkpointHandbackPreparedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	status := "prepared"
+	releasedAt := ""
+	if request.Phase == CheckpointHandbackPhaseCommit {
+		status = "released"
+		releasedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
 	return CheckpointSealOwnership{
 		SealID: request.SealID, WorkspaceID: workspaceID, Root: request.Root,
-		SessionID: request.SessionID, Generation: request.Generation, Status: "released",
+		SessionID: request.SessionID, Generation: request.Generation, Status: status,
 		Digest: request.ExpectedDigest, WorkspaceRevision: "rev_3", EventCursor: "evt_3",
-		ConsumedAt: request.ConsumedAt, ReleasedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		ConsumedAt: request.ConsumedAt, PreparedAt: c.checkpointHandbackPreparedAt, ReleasedAt: releasedAt,
 	}, nil
 }
 

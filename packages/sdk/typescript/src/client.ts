@@ -1736,6 +1736,7 @@ export class RelayFileClient {
       path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/sync/checkpoint-seals/handback`,
       correlationId: input.correlationId,
       body: {
+        phase: input.phase,
         sealId: receipt.sealId,
         root: receipt.root,
         sessionId: receipt.sessionId,

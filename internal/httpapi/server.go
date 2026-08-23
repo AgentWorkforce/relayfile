@@ -2425,6 +2425,8 @@ func writeCheckpointSealError(w http.ResponseWriter, err error, correlationID st
 		writeError(w, http.StatusConflict, "checkpoint_unconsumed", err.Error(), correlationID)
 	case errors.Is(err, relayfile.ErrCheckpointHandbackRequired):
 		writeError(w, http.StatusConflict, "checkpoint_handback_required", err.Error(), correlationID)
+	case errors.Is(err, relayfile.ErrCheckpointHandbackUnprepared):
+		writeError(w, http.StatusConflict, "checkpoint_handback_unprepared", err.Error(), correlationID)
 	case errors.Is(err, relayfile.ErrCheckpointHandbackConflict):
 		writeError(w, http.StatusConflict, "checkpoint_handback_conflict", err.Error(), correlationID)
 	case errors.Is(err, relayfile.ErrCheckpointResumeConflict):

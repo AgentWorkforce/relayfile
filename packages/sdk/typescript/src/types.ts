@@ -205,17 +205,19 @@ export interface CheckpointSealOwnership {
   root: string;
   sessionId: string;
   generation: number;
-  status: "released" | "source-resumed";
+  status: "prepared" | "released" | "source-resumed";
   digest: string;
   workspaceRevision: string;
   eventCursor: string;
   consumedAt?: string;
-  releasedAt: string;
+  preparedAt?: string;
+  releasedAt?: string;
   sourceResumedAt?: string;
 }
 
 export interface HandbackCheckpointSealInput {
   workspaceId: string;
+  phase: "prepare" | "commit";
   receipt: ConsumedCheckpointSeal;
   consumerIdempotencyKey: string;
   handbackIdempotencyKey: string;

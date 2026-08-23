@@ -1492,13 +1492,16 @@ paths:
       operationId: handbackCheckpointSeal
       summary: Drain and release consumed destination ownership
       description: >-
-        The original destination consumer releases ownership with its exact
-        consumer idempotency key plus a separately stable handback key. The
-        authenticated AgentName must equal the principal that consumed it. The
-        server independently recomputes the final digest, workspace revision,
-        and event cursor under the mutation lock. Consumed+unreleased ownership
-        records do not expire; only explicit handback permits source resume.
-        The sealToken is neither accepted nor returned.
+        The original destination consumer first prepares ownership handback
+        with its exact consumer idempotency key plus a separately stable
+        handback key, then commits that same prepared state after a closing
+        local scan. Prepare does not release ownership. The authenticated
+        AgentName must equal the principal that consumed it. The server
+        independently recomputes the final digest, workspace revision, and
+        event cursor under the mutation lock in both phases.
+        Consumed+unreleased ownership records do not expire; only an explicit
+        commit permits source resume. The sealToken is neither accepted nor
+        returned.
       security:
         - BearerAuth: [sync:trigger, fs:read, fs:write]
       parameters:
@@ -1512,7 +1515,7 @@ paths:
               $ref: '#/components/schemas/CheckpointSealHandbackRequest'
       responses:
         '200':
-          description: Destination ownership released with authoritative final state
+          description: Handback durably prepared or destination ownership released with authoritative final state
           content:
             application/json:
               schema:
@@ -3716,8 +3719,11 @@ components:
     CheckpointSealHandbackRequest:
       type: object
       additionalProperties: false
-      required: [sealId, root, sessionId, generation, consumedAt, consumerIdempotencyKey, handbackIdempotencyKey, expectedDigest]
+      required: [phase, sealId, root, sessionId, generation, consumedAt, consumerIdempotencyKey, handbackIdempotencyKey, expectedDigest]
       properties:
+        phase:
+          type: string
+          enum: [prepare, commit]
         sealId:
           type: string
           minLength: 1
@@ -3769,7 +3775,7 @@ components:
     CheckpointSealOwnership:
       type: object
       additionalProperties: false
-      required: [sealId, workspaceId, root, sessionId, generation, status, digest, workspaceRevision, eventCursor, releasedAt]
+      required: [sealId, workspaceId, root, sessionId, generation, status, digest, workspaceRevision, eventCursor]
       properties:
         sealId:
           type: string
@@ -3785,7 +3791,7 @@ components:
           minimum: 1
         status:
           type: string
-          enum: [released, source-resumed]
+          enum: [prepared, released, source-resumed]
         digest:
           type: string
           pattern: '^sha256:[0-9a-f]{64}$'
@@ -3796,6 +3802,9 @@ components:
           type: string
           pattern: '^(0|evt_[0-9]+)$'
         consumedAt:
+          type: string
+          format: date-time
+        preparedAt:
           type: string
           format: date-time
         releasedAt:

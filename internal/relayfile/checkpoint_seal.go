@@ -22,19 +22,25 @@ const (
 )
 
 var (
-	ErrCheckpointDiverged         = errors.New("checkpoint digest does not match durable workspace state")
-	ErrCheckpointExpired          = errors.New("checkpoint seal expired")
-	ErrCheckpointReplay           = errors.New("checkpoint seal already consumed")
-	ErrCheckpointStale            = errors.New("checkpoint seal is stale")
-	ErrCheckpointGenerationStale  = errors.New("checkpoint generation is not newer than the last issued generation")
-	ErrCheckpointConsumerConflict = errors.New("checkpoint consumer idempotency key is bound to a different seal or identity")
-	ErrCheckpointUnconsumed       = errors.New("checkpoint seal has not been consumed")
-	ErrCheckpointHandbackRequired = errors.New("checkpoint ownership has not been released by the destination")
-	ErrCheckpointHandbackConflict = errors.New("checkpoint handback idempotency key is bound to a different release")
-	ErrCheckpointResumeConflict   = errors.New("checkpoint source resume idempotency key is bound to a different claim")
-	checkpointSessionPattern      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$`)
-	checkpointRevisionPattern     = regexp.MustCompile(`^(?:0|rev_[0-9]+)$`)
-	checkpointEventCursorPattern  = regexp.MustCompile(`^(?:0|evt_[0-9]+)$`)
+	ErrCheckpointDiverged           = errors.New("checkpoint digest does not match durable workspace state")
+	ErrCheckpointExpired            = errors.New("checkpoint seal expired")
+	ErrCheckpointReplay             = errors.New("checkpoint seal already consumed")
+	ErrCheckpointStale              = errors.New("checkpoint seal is stale")
+	ErrCheckpointGenerationStale    = errors.New("checkpoint generation is not newer than the last issued generation")
+	ErrCheckpointConsumerConflict   = errors.New("checkpoint consumer idempotency key is bound to a different seal or identity")
+	ErrCheckpointUnconsumed         = errors.New("checkpoint seal has not been consumed")
+	ErrCheckpointHandbackRequired   = errors.New("checkpoint ownership has not been released by the destination")
+	ErrCheckpointHandbackUnprepared = errors.New("checkpoint handback has not been prepared")
+	ErrCheckpointHandbackConflict   = errors.New("checkpoint handback idempotency key is bound to a different release")
+	ErrCheckpointResumeConflict     = errors.New("checkpoint source resume idempotency key is bound to a different claim")
+	checkpointSessionPattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$`)
+	checkpointRevisionPattern       = regexp.MustCompile(`^(?:0|rev_[0-9]+)$`)
+	checkpointEventCursorPattern    = regexp.MustCompile(`^(?:0|evt_[0-9]+)$`)
+)
+
+const (
+	CheckpointHandbackPhasePrepare = "prepare"
+	CheckpointHandbackPhaseCommit  = "commit"
 )
 
 type CheckpointDigestEntry struct {
@@ -90,14 +96,14 @@ type CheckpointSealVerifyRequest struct {
 	ConsumerPrincipal string `json:"-"`
 }
 
-// CheckpointSealHandbackRequest is the destination's final ownership-release
-// assertion. The original consumer key proves that the same cutover attempt
-// which acquired the seal is releasing it; the final digest proves the stopped
-// destination drained before the server changes ownership. Revision and cursor
-// are captured server-side in the resulting proof because the destination's
-// final write can advance them before its local mount observes the emitted event.
-// It deliberately contains no seal token.
+// CheckpointSealHandbackRequest is one phase of the destination's final
+// ownership-release assertion. Prepare durably binds the stopped destination's
+// drained digest without releasing ownership. Commit releases only that exact
+// prepared state after the destination performs its closing local scan. The
+// original consumer key proves that the same cutover attempt which acquired the
+// seal is releasing it. It deliberately contains no seal token.
 type CheckpointSealHandbackRequest struct {
+	Phase                  string `json:"phase"`
 	SealID                 string `json:"sealId"`
 	Root                   string `json:"root"`
 	SessionID              string `json:"sessionId"`
@@ -132,7 +138,8 @@ type CheckpointSealOwnership struct {
 	WorkspaceRevision string `json:"workspaceRevision"`
 	EventCursor       string `json:"eventCursor"`
 	ConsumedAt        string `json:"consumedAt"`
-	ReleasedAt        string `json:"releasedAt"`
+	PreparedAt        string `json:"preparedAt,omitempty"`
+	ReleasedAt        string `json:"releasedAt,omitempty"`
 	SourceResumedAt   string `json:"sourceResumedAt,omitempty"`
 }
 
@@ -161,6 +168,7 @@ type checkpointSealRecord struct {
 	HandbackDigest       string `json:"handbackDigest,omitempty"`
 	HandbackRevision     string `json:"handbackRevision,omitempty"`
 	HandbackEventCursor  string `json:"handbackEventCursor,omitempty"`
+	HandbackPreparedAt   string `json:"handbackPreparedAt,omitempty"`
 	HandbackReleasedAt   string `json:"handbackReleasedAt,omitempty"`
 	SourceResumeKeyHash  string `json:"sourceResumeKeyHash,omitempty"`
 	SourceResumedAt      string `json:"sourceResumedAt,omitempty"`
@@ -477,12 +485,14 @@ func (s *Store) VerifyConsumedCheckpointSeal(workspaceID string, req CheckpointS
 	return response, nil
 }
 
-// HandbackCheckpointSeal releases a consumed destination only after the same
-// consumer proves a stable, fully drained local view that matches current
-// durable Relayfile state. Exact retries return the original proof even if the
-// workspace subsequently changes; changed retry identities fail closed.
+// HandbackCheckpointSeal prepares or commits a consumed destination handback.
+// Prepare persists the exact durable state while ownership remains with the
+// destination. Commit releases ownership only if that prepared state is still
+// current. Exact retries return the durable phase result; changed retry
+// identities fail closed.
 func (s *Store) HandbackCheckpointSeal(workspaceID string, req CheckpointSealHandbackRequest, now time.Time) (CheckpointSealOwnership, error) {
 	workspaceID = strings.TrimSpace(workspaceID)
+	phase := strings.TrimSpace(req.Phase)
 	sealID := strings.TrimSpace(req.SealID)
 	sessionID := strings.TrimSpace(req.SessionID)
 	consumerKey := strings.TrimSpace(req.ConsumerIdempotencyKey)
@@ -491,7 +501,7 @@ func (s *Store) HandbackCheckpointSeal(workspaceID string, req CheckpointSealHan
 	consumedAt := strings.TrimSpace(req.ConsumedAt)
 	expectedDigest := strings.TrimSpace(req.ExpectedDigest)
 	root, err := NormalizeCheckpointRoot(req.Root)
-	if err != nil || workspaceID == "" || sealID == "" || !checkpointSessionPattern.MatchString(sessionID) || req.Generation == 0 ||
+	if err != nil || (phase != CheckpointHandbackPhasePrepare && phase != CheckpointHandbackPhaseCommit) || workspaceID == "" || sealID == "" || !checkpointSessionPattern.MatchString(sessionID) || req.Generation == 0 ||
 		!checkpointSessionPattern.MatchString(consumerKey) || !checkpointSessionPattern.MatchString(handbackKey) || consumerPrincipal == "" || !validCheckpointDigest(expectedDigest) || consumedAt == "" {
 		return CheckpointSealOwnership{}, ErrInvalidInput
 	}
@@ -519,7 +529,7 @@ func (s *Store) HandbackCheckpointSeal(workspaceID string, req CheckpointSealHan
 		return CheckpointSealOwnership{}, ErrCheckpointConsumerConflict
 	}
 	if record.HandbackReleasedAt != "" {
-		if record.HandbackKeyHash != handbackKeyHash {
+		if record.HandbackKeyHash != handbackKeyHash || record.HandbackDigest != expectedDigest {
 			return CheckpointSealOwnership{}, ErrCheckpointHandbackConflict
 		}
 		return checkpointOwnershipFromRecord(record, "released"), nil
@@ -531,6 +541,31 @@ func (s *Store) HandbackCheckpointSeal(workspaceID string, req CheckpointSealHan
 	if err != nil {
 		return CheckpointSealOwnership{}, err
 	}
+
+	if record.HandbackPreparedAt != "" {
+		if record.HandbackKeyHash != handbackKeyHash || record.HandbackDigest != expectedDigest {
+			return CheckpointSealOwnership{}, ErrCheckpointHandbackConflict
+		}
+		if digest != record.HandbackDigest || revision != record.HandbackRevision || cursor != record.HandbackEventCursor {
+			return CheckpointSealOwnership{}, ErrCheckpointDiverged
+		}
+		if phase == CheckpointHandbackPhasePrepare {
+			return checkpointOwnershipFromRecord(record, "prepared"), nil
+		}
+		previous := record
+		record.HandbackReleasedAt = now.Format(time.RFC3339Nano)
+		record.IdempotencyExpiresAt = now.Add(CheckpointConsumeReplayRetention).Format(time.RFC3339Nano)
+		s.checkpointSeals[tokenHash] = record
+		if err := s.saveLocked(); err != nil {
+			s.checkpointSeals[tokenHash] = previous
+			return CheckpointSealOwnership{}, err
+		}
+		return checkpointOwnershipFromRecord(record, "released"), nil
+	}
+
+	if phase == CheckpointHandbackPhaseCommit {
+		return CheckpointSealOwnership{}, ErrCheckpointHandbackUnprepared
+	}
 	if digest != expectedDigest {
 		return CheckpointSealOwnership{}, ErrCheckpointDiverged
 	}
@@ -539,14 +574,14 @@ func (s *Store) HandbackCheckpointSeal(workspaceID string, req CheckpointSealHan
 	record.HandbackDigest = digest
 	record.HandbackRevision = revision
 	record.HandbackEventCursor = cursor
-	record.HandbackReleasedAt = now.Format(time.RFC3339Nano)
+	record.HandbackPreparedAt = now.Format(time.RFC3339Nano)
 	record.IdempotencyExpiresAt = now.Add(CheckpointConsumeReplayRetention).Format(time.RFC3339Nano)
 	s.checkpointSeals[tokenHash] = record
 	if err := s.saveLocked(); err != nil {
 		s.checkpointSeals[tokenHash] = previous
 		return CheckpointSealOwnership{}, err
 	}
-	return checkpointOwnershipFromRecord(record, "released"), nil
+	return checkpointOwnershipFromRecord(record, "prepared"), nil
 }
 
 // ResumeCheckpointSeal returns ownership to the stopped source. An
@@ -621,7 +656,8 @@ func checkpointOwnershipFromRecord(record checkpointSealRecord, status string) C
 		SessionID: record.SessionID, Generation: record.Generation, Status: status,
 		Digest: record.HandbackDigest, WorkspaceRevision: record.HandbackRevision,
 		EventCursor: record.HandbackEventCursor, ConsumedAt: record.ConsumedAt,
-		ReleasedAt: record.HandbackReleasedAt, SourceResumedAt: record.SourceResumedAt,
+		PreparedAt: record.HandbackPreparedAt, ReleasedAt: record.HandbackReleasedAt,
+		SourceResumedAt: record.SourceResumedAt,
 	}
 }
 

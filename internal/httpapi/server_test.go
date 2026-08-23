@@ -7272,6 +7272,7 @@ func TestCheckpointHandbackHTTPIsStrictTokenlessAndSourceGated(t *testing.T) {
 		t.Fatalf("premature resume = %d %s", premature.Code, premature.Body.String())
 	}
 	handbackBody := map[string]any{
+		"phase":  "prepare",
 		"sealId": consumed.SealID, "root": "/", "sessionId": consumed.SessionID,
 		"generation": consumed.Generation, "consumedAt": consumed.ConsumedAt,
 		"consumerIdempotencyKey": consumerKey, "handbackIdempotencyKey": "handback-http-one",
@@ -7301,6 +7302,21 @@ func TestCheckpointHandbackHTTPIsStrictTokenlessAndSourceGated(t *testing.T) {
 	if wrongPrincipal.Code != http.StatusConflict || !strings.Contains(wrongPrincipal.Body.String(), "checkpoint_consumer_conflict") {
 		t.Fatalf("wrong-principal handback = %d %s", wrongPrincipal.Code, wrongPrincipal.Body.String())
 	}
+	prepare := doRequest(t, server, request{
+		method: http.MethodPost, path: "/v1/workspaces/ws_handback_http/sync/checkpoint-seals/handback",
+		headers: map[string]string{"Authorization": "Bearer " + fullToken, "X-Correlation-Id": "corr-handback-prepare"}, body: handbackBody,
+	})
+	if prepare.Code != http.StatusOK || strings.Contains(prepare.Body.String(), "sealToken") || !strings.Contains(prepare.Body.String(), `"status":"prepared"`) || strings.Contains(prepare.Body.String(), `"releasedAt"`) {
+		t.Fatalf("prepare handback = %d %s", prepare.Code, prepare.Body.String())
+	}
+	prematureAfterPrepare := doRequest(t, server, request{
+		method: http.MethodPost, path: "/v1/workspaces/ws_handback_http/sync/checkpoint-seals/resume",
+		headers: map[string]string{"Authorization": "Bearer " + fullToken, "X-Correlation-Id": "corr-handback-prepared-resume"}, body: resumeBody,
+	})
+	if prematureAfterPrepare.Code != http.StatusConflict || !strings.Contains(prematureAfterPrepare.Body.String(), "checkpoint_handback_required") {
+		t.Fatalf("resume after prepare = %d %s", prematureAfterPrepare.Code, prematureAfterPrepare.Body.String())
+	}
+	handbackBody["phase"] = "commit"
 	handback := doRequest(t, server, request{
 		method: http.MethodPost, path: "/v1/workspaces/ws_handback_http/sync/checkpoint-seals/handback",
 		headers: map[string]string{"Authorization": "Bearer " + fullToken, "X-Correlation-Id": "corr-handback-release"}, body: handbackBody,
