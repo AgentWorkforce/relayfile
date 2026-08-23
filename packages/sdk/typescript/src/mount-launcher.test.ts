@@ -456,6 +456,45 @@ describe("default mount launcher", () => {
     }
   })
 
+  it("checks inherited effective mount configuration before stopping the source", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-default-launcher-checkpoint-inherited-root-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const daemon = new FakeChildProcess()
+    const spawnImpl = vi.fn().mockReturnValue(daemon as never)
+    const launcher = createDefaultMountLauncher({ spawnImpl })
+    const previousRemotePath = process.env.RELAYFILE_REMOTE_PATH
+    const { RELAYFILE_REMOTE_PATH: _omittedRemotePath, ...inheritedEnv } =
+      createCheckpointMountEnv(localDir)
+
+    try {
+      process.env.RELAYFILE_REMOTE_PATH = "/inherited-scope"
+      await writeReadyState(localDir)
+      const instance = await launcher.start({
+        env: inheritedEnv,
+        readyTimeoutMs: 50
+      })
+      await instance.ready
+
+      await expect(instance.checkpointAndSeal?.({
+        sessionId: "session-123",
+        generation: 7
+      })).rejects.toMatchObject({ code: "checkpoint_seal_root_unavailable" })
+      expect(instance.stopped).toBe(false)
+      expect(daemon.killSignals).toEqual([])
+      expect(spawnImpl).toHaveBeenCalledTimes(1)
+      await instance.stop()
+    } finally {
+      if (previousRemotePath === undefined) {
+        delete process.env.RELAYFILE_REMOTE_PATH
+      } else {
+        process.env.RELAYFILE_REMOTE_PATH = previousRemotePath
+      }
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
   it.each([
     ["missing ops", "fs:read fs:write sync:trigger"],
     ["missing trigger", "fs:read fs:write ops:read"],

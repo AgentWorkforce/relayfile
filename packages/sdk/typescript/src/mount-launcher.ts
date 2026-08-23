@@ -260,25 +260,25 @@ class RelayfileMountProcessInstance
 
   private validateCheckpointPreconditions(input: CheckpointAndSealInput): void {
     validateCheckpointInput(input)
-    if (normalizeMountMode(this.input.env.RELAYFILE_MOUNT_MODE) !== "poll") {
+    if (normalizeMountMode(this.effectiveEnv.RELAYFILE_MOUNT_MODE) !== "poll") {
       throw new RelayfileSetupError(
         "checkpointAndSeal currently requires a poll-mode mount; a FUSE mount must remain running until daemon checkpoint IPC is available.",
         "checkpoint_seal_mode_unavailable"
       )
     }
-    if (normalizeMountSyncMode(this.input.env.RELAYFILE_MOUNT_SYNC_MODE) === "pull-only") {
+    if (normalizeMountSyncMode(this.effectiveEnv.RELAYFILE_MOUNT_SYNC_MODE) === "pull-only") {
       throw new RelayfileSetupError(
         "checkpointAndSeal cannot drain a pull-only mount.",
         "checkpoint_seal_mode_unavailable"
       )
     }
-    if (normalizeRemotePath(this.input.env.RELAYFILE_REMOTE_PATH ?? "/") !== "/") {
+    if (normalizeRemotePath(this.effectiveEnv.RELAYFILE_REMOTE_PATH ?? "/") !== "/") {
       throw new RelayfileSetupError(
         "checkpointAndSeal v1 requires a full-root (/) mount.",
         "checkpoint_seal_root_unavailable"
       )
     }
-    const scopes = (this.input.env.RELAYFILE_MOUNT_SCOPES ?? "")
+    const scopes = (this.effectiveEnv.RELAYFILE_MOUNT_SCOPES ?? "")
       .split(/\s+/)
       .map((scope) => scope.trim())
       .filter(Boolean)
