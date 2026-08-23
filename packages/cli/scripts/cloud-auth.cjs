@@ -485,6 +485,7 @@ async function startDeviceAuthorization(apiUrl, options = {}) {
   throwIfAborted(options.signal);
   const requestSignal = combinedRequestSignal(timeoutMs, options.signal);
   let response;
+  let payload;
   try {
     response = await fetchImpl(buildApiUrl(apiUrl, "/api/v1/auth/device/start"), {
       method: "POST",
@@ -494,6 +495,8 @@ async function startDeviceAuthorization(apiUrl, options = {}) {
       // user a bare cursor forever. Fail loudly instead.
       signal: requestSignal.signal
     });
+    payload = await response.json().catch(() => null);
+    throwIfAborted(options.signal);
   } catch (error) {
     throwIfAborted(options.signal);
     if (isRequestTimeout(error)) {
@@ -509,7 +512,6 @@ async function startDeviceAuthorization(apiUrl, options = {}) {
   } finally {
     requestSignal.cleanup();
   }
-  const payload = await response.json().catch(() => null);
   if (!response.ok) {
     if (response.status === 404) {
       throw deviceError(
@@ -556,6 +558,7 @@ async function pollForDeviceToken(apiUrl, authorization, hooks = {}) {
     const pollTimeoutMs = clampTimerDelay(Math.min(requestTimeoutMs, deadline - now()));
     const requestSignal = combinedRequestSignal(pollTimeoutMs, hooks.signal);
     let response;
+    let payload;
     try {
       response = await fetchImpl(buildApiUrl(apiUrl, "/api/v1/auth/device/token"), {
         method: "POST",
@@ -566,6 +569,8 @@ async function pollForDeviceToken(apiUrl, authorization, hooks = {}) {
         }),
         signal: requestSignal.signal
       });
+      payload = await response.json().catch(() => null);
+      throwIfAborted(hooks.signal);
     } catch (error) {
       throwIfAborted(hooks.signal);
       if (isRequestTimeout(error)) {
@@ -586,7 +591,6 @@ async function pollForDeviceToken(apiUrl, authorization, hooks = {}) {
     } finally {
       requestSignal.cleanup();
     }
-    const payload = await response.json().catch(() => null);
     if (response.ok) {
       if (!payload?.access_token || !payload.refresh_token || !payload.access_token_expires_at) {
         throw deviceError("Device login response was missing required fields");
