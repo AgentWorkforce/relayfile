@@ -7010,6 +7010,101 @@ func newForkTestServer(t *testing.T) http.Handler {
 	return NewServer(store)
 }
 
+func TestCheckpointSealHTTPServerComputesAndConsumesAuthoritativeSeal(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	write, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: "ws_checkpoint_http",
+		Path:        "/sessions/transcript.jsonl",
+		IfMatch:     "0",
+		Content:     "turn one\n",
+	})
+	if err != nil {
+		t.Fatalf("seed checkpoint file: %v", err)
+	}
+	contentHash := sha256.Sum256([]byte("turn one\n"))
+	digest, err := relayfile.ComputeCheckpointDigest("/sessions", []relayfile.CheckpointDigestEntry{{
+		Path: "/sessions/transcript.jsonl", Revision: write.TargetRevision, ContentHash: fmt.Sprintf("%x", contentHash[:]),
+	}})
+	if err != nil {
+		t.Fatalf("compute checkpoint digest: %v", err)
+	}
+	server := NewServer(store)
+	fullToken := mustTestJWT(t, "dev-secret", "ws_checkpoint_http", "LocalController", []string{"fs:read", "fs:write", "sync:trigger"}, time.Now().Add(time.Hour))
+	issue := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_checkpoint_http/sync/checkpoint-seals",
+		headers: map[string]string{
+			"Authorization": "Bearer " + fullToken, "X-Correlation-Id": "corr-checkpoint-issue",
+		},
+		body: map[string]any{"root": "/sessions", "sessionId": "thread-http", "generation": 4, "expectedDigest": digest},
+	})
+	if issue.Code != http.StatusCreated {
+		t.Fatalf("issue status = %d: %s", issue.Code, issue.Body.String())
+	}
+	var seal relayfile.CheckpointSeal
+	if err := json.NewDecoder(issue.Body).Decode(&seal); err != nil {
+		t.Fatalf("decode issued seal: %v", err)
+	}
+	if seal.Digest != digest || seal.SealToken == "" || seal.EventCursor == "" {
+		t.Fatalf("issued seal = %+v", seal)
+	}
+
+	cloudToken := mustTestJWT(t, "dev-secret", "ws_checkpoint_http", "CloudAcquire", []string{"sync:trigger"}, time.Now().Add(time.Hour))
+	consume := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_checkpoint_http/sync/checkpoint-seals/consume",
+		headers: map[string]string{
+			"Authorization": "Bearer " + cloudToken, "X-Correlation-Id": "corr-checkpoint-consume",
+		},
+		body: map[string]any{"sealToken": seal.SealToken, "root": "/sessions", "sessionId": "thread-http", "generation": 4},
+	})
+	if consume.Code != http.StatusOK {
+		t.Fatalf("consume status = %d: %s", consume.Code, consume.Body.String())
+	}
+	replay := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_checkpoint_http/sync/checkpoint-seals/consume",
+		headers: map[string]string{
+			"Authorization": "Bearer " + cloudToken, "X-Correlation-Id": "corr-checkpoint-replay",
+		},
+		body: map[string]any{"sealToken": seal.SealToken, "root": "/sessions", "sessionId": "thread-http", "generation": 4},
+	})
+	if replay.Code != http.StatusConflict || !strings.Contains(replay.Body.String(), "checkpoint_replayed") {
+		t.Fatalf("replay status = %d: %s", replay.Code, replay.Body.String())
+	}
+}
+
+func TestCheckpointSealHTTPRequiresCompleteRootAuthorityAndRejectsCallerDigest(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
+	readOnlyToken := mustTestJWT(t, "dev-secret", "ws_checkpoint_auth", "LocalController", []string{"fs:read", "sync:trigger"}, time.Now().Add(time.Hour))
+	denied := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_checkpoint_auth/sync/checkpoint-seals",
+		headers: map[string]string{
+			"Authorization": "Bearer " + readOnlyToken, "X-Correlation-Id": "corr-checkpoint-denied",
+		},
+		body: map[string]any{"root": "/", "sessionId": "thread-auth", "generation": 1, "expectedDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+	})
+	if denied.Code != http.StatusForbidden {
+		t.Fatalf("read-only issue status = %d: %s", denied.Code, denied.Body.String())
+	}
+	fullToken := mustTestJWT(t, "dev-secret", "ws_checkpoint_auth", "LocalController", []string{"fs:read", "fs:write", "sync:trigger"}, time.Now().Add(time.Hour))
+	diverged := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_checkpoint_auth/sync/checkpoint-seals",
+		headers: map[string]string{
+			"Authorization": "Bearer " + fullToken, "X-Correlation-Id": "corr-checkpoint-diverged",
+		},
+		body: map[string]any{"root": "/", "sessionId": "thread-auth", "generation": 1, "expectedDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+	})
+	if diverged.Code != http.StatusConflict || !strings.Contains(diverged.Body.String(), "checkpoint_diverged") {
+		t.Fatalf("caller digest status = %d: %s", diverged.Code, diverged.Body.String())
+	}
+}
+
 func newMergeTestServer(t *testing.T) http.Handler {
 	t.Helper()
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})

@@ -27,14 +27,18 @@ import type {
   MountLauncherStart,
   MountMode,
   MountSyncMode,
+  CheckpointAndSealInput,
   MountedWorkspaceStatus,
   ReadMountedWorkspaceStatusInput
 } from "./setup-types.js"
+import type { CheckpointSeal } from "./types.js"
 
 const DEFAULT_READY_POLL_INTERVAL_MS = 250
 const DEFAULT_STOP_TIMEOUT_MS = 10_000
 const LOG_ROTATION_MAX_BYTES = 10 * 1024 * 1024
 const LOG_ROTATION_FILES = 3
+const DEFAULT_CHECKPOINT_TIMEOUT_MS = 30_000
+const MAX_CHECKPOINT_OUTPUT_BYTES = 1024 * 1024
 const FUSE_UNAVAILABLE_SIGNATURE = "fuse mode is not available in this build"
 
 interface DefaultMountLauncherOptions {
@@ -149,6 +153,10 @@ async function startRelayfileMount(
     outputBuffer,
     input,
     localDir: mountLocalDir,
+    command,
+    effectiveEnv,
+    cwd: input.cwd ?? mountLocalDir,
+    spawnImpl: options.spawnImpl ?? spawn,
     now: options.now ?? Date.now,
     readyPollIntervalMs:
       options.readyPollIntervalMs ?? DEFAULT_READY_POLL_INTERVAL_MS
@@ -167,10 +175,15 @@ class RelayfileMountProcessInstance implements MountLauncherInstance {
   private readonly localDir: string
   private readonly now: () => number
   private readonly readyPollIntervalMs: number
+  private readonly command: string
+  private readonly effectiveEnv: NodeJS.ProcessEnv
+  private readonly cwd: string
+  private readonly spawnImpl: typeof spawn
 
   private exited = false
   private stopping?: Promise<void>
   private readyResolved = false
+  private checkpointPromise?: Promise<CheckpointSeal>
 
   constructor(input: {
     child: ChildProcess
@@ -179,6 +192,10 @@ class RelayfileMountProcessInstance implements MountLauncherInstance {
     outputBuffer: string[]
     input: MountLauncherStart
     localDir: string
+    command: string
+    effectiveEnv: NodeJS.ProcessEnv
+    cwd: string
+    spawnImpl: typeof spawn
     now: () => number
     readyPollIntervalMs: number
   }) {
@@ -188,6 +205,10 @@ class RelayfileMountProcessInstance implements MountLauncherInstance {
     this.outputBuffer = input.outputBuffer
     this.input = input.input
     this.localDir = input.localDir
+    this.command = input.command
+    this.effectiveEnv = input.effectiveEnv
+    this.cwd = input.cwd
+    this.spawnImpl = input.spawnImpl
     this.pid = input.child.pid ?? undefined
     this.now = input.now
     this.readyPollIntervalMs = input.readyPollIntervalMs
@@ -221,6 +242,38 @@ class RelayfileMountProcessInstance implements MountLauncherInstance {
       this.stopping = this.performStop()
     }
     await this.stopping
+  }
+
+  async checkpointAndSeal(input: CheckpointAndSealInput): Promise<CheckpointSeal> {
+    if (!this.checkpointPromise) {
+      this.checkpointPromise = this.performCheckpointAndSeal(input)
+    }
+    return this.checkpointPromise
+  }
+
+  private async performCheckpointAndSeal(input: CheckpointAndSealInput): Promise<CheckpointSeal> {
+    validateCheckpointInput(input)
+    if (normalizeMountMode(this.input.env.RELAYFILE_MOUNT_MODE) !== "poll") {
+      throw new RelayfileSetupError(
+        "checkpointAndSeal currently requires a poll-mode mount; a FUSE mount must remain running until daemon checkpoint IPC is available.",
+        "checkpoint_seal_mode_unavailable"
+      )
+    }
+    if (normalizeMountSyncMode(this.input.env.RELAYFILE_MOUNT_SYNC_MODE) === "pull-only") {
+      throw new RelayfileSetupError(
+        "checkpointAndSeal cannot drain a pull-only mount.",
+        "checkpoint_seal_mode_unavailable"
+      )
+    }
+    await this.ready
+    await this.stop()
+    return runCheckpointSealProcess({
+      command: this.command,
+      cwd: this.cwd,
+      env: this.effectiveEnv,
+      spawnImpl: this.spawnImpl,
+      input
+    })
   }
 
   private async waitForReady(): Promise<void> {
@@ -292,6 +345,155 @@ class RelayfileMountProcessInstance implements MountLauncherInstance {
     this.logStream.end()
     await unlinkIfExists(this.pidPath)
   }
+}
+
+async function runCheckpointSealProcess(input: {
+  command: string
+  cwd: string
+  env: NodeJS.ProcessEnv
+  spawnImpl: typeof spawn
+  input: CheckpointAndSealInput
+}): Promise<CheckpointSeal> {
+  const { sessionId, generation, timeoutMs, ttlSeconds } = validateCheckpointInput(input.input)
+  const workspaceId = input.env.RELAYFILE_WORKSPACE?.trim() ?? ""
+  const root = normalizeRemotePath(input.env.RELAYFILE_REMOTE_PATH)
+
+  const args = [
+    "--checkpoint-and-seal",
+    "--checkpoint-session", sessionId,
+    "--checkpoint-generation", String(generation),
+    "--checkpoint-seal-ttl", `${ttlSeconds}s`,
+    "--timeout", `${timeoutMs}ms`
+  ]
+  const child = input.spawnImpl(input.command, args, {
+    cwd: input.cwd,
+    env: input.env,
+    stdio: ["ignore", "pipe", "pipe"]
+  })
+
+  return new Promise<CheckpointSeal>((resolve, reject) => {
+    let stdout = ""
+    let stderr = ""
+    let settled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const finish = (error?: Error, seal?: CheckpointSeal): void => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      input.input.signal?.removeEventListener("abort", onAbort)
+      if (error) reject(error)
+      else resolve(seal!)
+    }
+    const append = (current: string, chunk: unknown): string => {
+      const next = current + (Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk))
+      if (Buffer.byteLength(next) > MAX_CHECKPOINT_OUTPUT_BYTES) {
+        child.kill("SIGKILL")
+        finish(new RelayfileSetupError("relayfile-mount checkpoint output exceeded 1 MiB.", "checkpoint_seal_invalid_output"))
+      }
+      return next
+    }
+    child.stdout?.on("data", (chunk) => { stdout = append(stdout, chunk) })
+    child.stderr?.on("data", (chunk) => { stderr = append(stderr, chunk) })
+    child.once("error", (error) => {
+      finish(new RelayfileSetupError(`relayfile-mount checkpoint failed to start: ${error.message}`, "checkpoint_seal_failed"))
+    })
+    child.once("exit", (code, signal) => {
+      if (settled) return
+      if (code !== 0) {
+        const detail = stderr.trim().slice(-2_000)
+        finish(new RelayfileSetupError(
+          `relayfile-mount checkpoint failed (${signal ?? `exit ${code ?? "unknown"}`})${detail ? `: ${detail}` : ""}`,
+          "checkpoint_seal_failed"
+        ))
+        return
+      }
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(stdout.trim())
+      } catch {
+        finish(new RelayfileSetupError("relayfile-mount returned malformed checkpoint JSON.", "checkpoint_seal_invalid_output"))
+        return
+      }
+      try {
+        finish(
+          undefined,
+          validateCheckpointSeal(parsed, workspaceId, root, sessionId, generation)
+        )
+      } catch (error) {
+        finish(error instanceof Error ? error : new Error(String(error)))
+      }
+    })
+    const onAbort = (): void => {
+      child.kill("SIGKILL")
+      finish(new CloudAbortError("checkpointAndSeal"))
+    }
+    input.input.signal?.addEventListener("abort", onAbort, { once: true })
+    timer = setTimeout(() => {
+      child.kill("SIGKILL")
+      finish(new RelayfileSetupError(`checkpointAndSeal timed out after ${timeoutMs}ms.`, "checkpoint_seal_timeout"))
+    }, timeoutMs)
+    timer.unref?.()
+  })
+}
+
+function validateCheckpointInput(input: CheckpointAndSealInput): {
+  sessionId: string
+  generation: number
+  timeoutMs: number
+  ttlSeconds: number
+} {
+  const sessionId = input.sessionId.trim()
+  const generation = input.generation
+  const timeoutMs = input.timeoutMs ?? DEFAULT_CHECKPOINT_TIMEOUT_MS
+  const ttlSeconds = input.ttlSeconds ?? 60
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(sessionId)) {
+    throw new RelayfileSetupError(
+      "checkpointAndSeal requires a valid sessionId.",
+      "checkpoint_seal_invalid_input"
+    )
+  }
+  if (
+    !Number.isSafeInteger(generation) || generation <= 0 ||
+    !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 ||
+    !Number.isSafeInteger(ttlSeconds) || ttlSeconds <= 0 || ttlSeconds > 300
+  ) {
+    throw new RelayfileSetupError(
+      "checkpointAndSeal requires positive safe generation/timeout values and ttlSeconds <= 300.",
+      "checkpoint_seal_invalid_input"
+    )
+  }
+  if (input.signal?.aborted) {
+    throw new CloudAbortError("checkpointAndSeal")
+  }
+  return { sessionId, generation, timeoutMs, ttlSeconds }
+}
+
+function validateCheckpointSeal(
+  value: unknown,
+  workspaceId: string,
+  root: string,
+  sessionId: string,
+  generation: number
+): CheckpointSeal {
+  if (!value || typeof value !== "object") {
+    throw new RelayfileSetupError("relayfile-mount returned an invalid checkpoint seal.", "checkpoint_seal_invalid_output")
+  }
+  const seal = value as Partial<CheckpointSeal>
+  const strings = [seal.sealId, seal.sealToken, seal.workspaceId, seal.root, seal.digest, seal.workspaceRevision, seal.eventCursor, seal.issuedAt, seal.expiresAt]
+  if (
+    strings.some((field) => typeof field !== "string") ||
+    seal.sealToken!.trim() === "" ||
+    seal.workspaceId !== workspaceId ||
+    normalizeRemotePath(seal.root) !== root ||
+    seal.sessionId !== sessionId ||
+    seal.generation !== generation ||
+    !seal.digest!.startsWith("sha256:") ||
+    Number.isNaN(Date.parse(seal.issuedAt!)) ||
+    Number.isNaN(Date.parse(seal.expiresAt!))
+  ) {
+    throw new RelayfileSetupError("relayfile-mount returned an unbound or incomplete checkpoint seal.", "checkpoint_seal_invalid_output")
+  }
+  return seal as CheckpointSeal
 }
 
 function pipeChildOutput(

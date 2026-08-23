@@ -3,6 +3,9 @@ import {
   type AdminSyncStatusResponse,
   type BulkWriteInput,
   type BulkWriteResponse,
+  type CheckpointSeal,
+  type IssueCheckpointSealInput,
+  type ConsumeCheckpointSealInput,
   type BackendStatusResponse,
   type AckResponse,
   type CommitForkInput,
@@ -1649,6 +1652,37 @@ export class RelayFileClient {
       }
     }
     return result;
+  }
+
+  async issueCheckpointSeal(input: IssueCheckpointSealInput): Promise<CheckpointSeal> {
+    return this.request<CheckpointSeal>({
+      method: "POST",
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/sync/checkpoint-seals`,
+      correlationId: input.correlationId,
+      body: {
+        root: input.root,
+        sessionId: input.sessionId,
+        generation: input.generation,
+        expectedDigest: input.expectedDigest,
+        ttlSeconds: input.ttlSeconds
+      },
+      signal: input.signal
+    });
+  }
+
+  async consumeCheckpointSeal(input: ConsumeCheckpointSealInput): Promise<CheckpointSeal> {
+    return this.request<CheckpointSeal>({
+      method: "POST",
+      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/sync/checkpoint-seals/consume`,
+      correlationId: input.correlationId,
+      body: {
+        sealToken: input.sealToken,
+        root: input.root,
+        sessionId: input.sessionId,
+        generation: input.generation
+      },
+      signal: input.signal
+    });
   }
 
   async deleteFile(input: DeleteFileInput): Promise<WriteQueuedResponse> {

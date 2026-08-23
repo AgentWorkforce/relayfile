@@ -46,6 +46,37 @@ function createMountEnv(localDir: string, mode: "poll" | "fuse" = "poll") {
   }
 }
 
+async function writeReadyState(localDir: string, mode: "poll" | "fuse" = "poll") {
+  await mkdir(path.join(localDir, ".relay"), { recursive: true })
+  await writeFile(
+    path.join(localDir, ".relay", "state.json"),
+    JSON.stringify({
+      mode,
+      intervalMs: 30_000,
+      lastReconcileAt: new Date().toISOString(),
+      providers: [{ status: "ready" }]
+    }),
+    "utf8"
+  )
+}
+
+function validCheckpointSeal(overrides: Record<string, unknown> = {}) {
+  return {
+    sealId: "seal_123",
+    sealToken: "one-use-secret",
+    workspaceId: "ws_123",
+    root: "/notion",
+    sessionId: "session-123",
+    generation: 7,
+    digest: `sha256:${"a".repeat(64)}`,
+    workspaceRevision: "rev_123",
+    eventCursor: "evt_123",
+    issuedAt: "2026-08-23T10:00:00.000Z",
+    expiresAt: "2026-08-23T10:01:00.000Z",
+    ...overrides
+  }
+}
+
 describe("default mount launcher", () => {
   beforeEach(() => {
     vi.restoreAllMocks()
@@ -242,6 +273,161 @@ describe("default mount launcher", () => {
       ).toContain("mount ready")
       expect((await stat(path.join(localDir, ".relay"))).isDirectory()).toBe(true)
       await expect(stat(path.join(localDir, ".relay", "mount.pid"))).rejects.toBeTruthy()
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("stops a ready poll daemon before running the one-shot checkpoint command", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-default-launcher-checkpoint-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const daemon = new FakeChildProcess()
+    const checkpoint = new FakeChildProcess()
+    const events: string[] = []
+    const spawnImpl = vi.fn().mockImplementation((_command, args: string[]) => {
+      if (spawnImpl.mock.calls.length === 1) {
+        events.push("daemon-started")
+        return daemon as never
+      }
+      events.push(`checkpoint-started:${daemon.killSignals.join(",")}`)
+      queueMicrotask(() => {
+        checkpoint.stdout.write(`${JSON.stringify(validCheckpointSeal())}\n`)
+        checkpoint.exitCode = 0
+        checkpoint.emit("exit", 0, null)
+      })
+      return checkpoint as never
+    })
+    const launcher = createDefaultMountLauncher({ spawnImpl })
+
+    try {
+      await writeReadyState(localDir)
+      const instance = await launcher.start({
+        env: createMountEnv(localDir),
+        readyTimeoutMs: 50
+      })
+      await instance.ready
+
+      const seal = await instance.checkpointAndSeal?.({
+        sessionId: "session-123",
+        generation: 7,
+        timeoutMs: 250,
+        ttlSeconds: 45
+      })
+
+      expect(seal).toMatchObject(validCheckpointSeal())
+      expect(events).toEqual(["daemon-started", "checkpoint-started:SIGTERM"])
+      expect(spawnImpl).toHaveBeenNthCalledWith(
+        2,
+        expect.any(String),
+        [
+          "--checkpoint-and-seal",
+          "--checkpoint-session", "session-123",
+          "--checkpoint-generation", "7",
+          "--checkpoint-seal-ttl", "45s",
+          "--timeout", "250ms"
+        ],
+        expect.objectContaining({
+          cwd: localDir,
+          stdio: ["ignore", "pipe", "pipe"]
+        })
+      )
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("rejects FUSE checkpoints before unmounting the source", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-default-launcher-checkpoint-fuse-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const daemon = new FakeChildProcess()
+    const spawnImpl = vi.fn().mockReturnValue(daemon as never)
+    const launcher = createDefaultMountLauncher({ spawnImpl })
+
+    try {
+      await writeReadyState(localDir, "fuse")
+      const instance = await launcher.start({
+        env: createMountEnv(localDir, "fuse"),
+        readyTimeoutMs: 50
+      })
+      await instance.ready
+
+      await expect(instance.checkpointAndSeal?.({
+        sessionId: "session-123",
+        generation: 7
+      })).rejects.toMatchObject({ code: "checkpoint_seal_mode_unavailable" })
+      expect(daemon.killSignals).toEqual([])
+      expect(spawnImpl).toHaveBeenCalledTimes(1)
+      await instance.stop()
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("rejects a server seal bound to a different workspace", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-default-launcher-checkpoint-binding-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const daemon = new FakeChildProcess()
+    const checkpoint = new FakeChildProcess()
+    const spawnImpl = vi.fn().mockImplementation(() => {
+      if (spawnImpl.mock.calls.length === 1) return daemon as never
+      queueMicrotask(() => {
+        checkpoint.stdout.write(JSON.stringify(validCheckpointSeal({ workspaceId: "ws_other" })))
+        checkpoint.exitCode = 0
+        checkpoint.emit("exit", 0, null)
+      })
+      return checkpoint as never
+    })
+    const launcher = createDefaultMountLauncher({ spawnImpl })
+
+    try {
+      await writeReadyState(localDir)
+      const instance = await launcher.start({
+        env: createMountEnv(localDir),
+        readyTimeoutMs: 50
+      })
+      await instance.ready
+
+      await expect(instance.checkpointAndSeal?.({
+        sessionId: "session-123",
+        generation: 7
+      })).rejects.toMatchObject({ code: "checkpoint_seal_invalid_output" })
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("kills a checkpoint command that exceeds its deadline", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-default-launcher-checkpoint-timeout-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const daemon = new FakeChildProcess()
+    const checkpoint = new FakeChildProcess()
+    const spawnImpl = vi.fn().mockImplementation(() =>
+      spawnImpl.mock.calls.length === 1 ? daemon as never : checkpoint as never
+    )
+    const launcher = createDefaultMountLauncher({ spawnImpl })
+
+    try {
+      await writeReadyState(localDir)
+      const instance = await launcher.start({
+        env: createMountEnv(localDir),
+        readyTimeoutMs: 50
+      })
+      await instance.ready
+
+      await expect(instance.checkpointAndSeal?.({
+        sessionId: "session-123",
+        generation: 7,
+        timeoutMs: 5
+      })).rejects.toMatchObject({ code: "checkpoint_seal_timeout" })
+      expect(checkpoint.killSignals).toContain("SIGKILL")
     } finally {
       await rm(tempRoot, { recursive: true, force: true })
     }

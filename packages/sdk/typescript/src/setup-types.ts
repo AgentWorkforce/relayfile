@@ -1,5 +1,6 @@
 import type { WorkspaceHandle } from "./setup.js"
 import type { AccessTokenProvider } from "./client.js"
+import type { CheckpointSeal } from "./types.js"
 
 export const WORKSPACE_INTEGRATION_PROVIDERS = [
   "github",
@@ -148,6 +149,14 @@ export interface MountedWorkspaceStatus {
   pendingConflicts?: number
 }
 
+export interface CheckpointAndSealInput {
+  sessionId: string
+  generation: number
+  timeoutMs?: number
+  ttlSeconds?: number
+  signal?: AbortSignal
+}
+
 export interface ReadMountedWorkspaceStatusInput {
   localDir: string
   workspaceId: string
@@ -173,6 +182,7 @@ export interface MountedWorkspaceHandle {
 
   env(): Record<string, string>
   status(): Promise<MountedWorkspaceStatus>
+  checkpointAndSeal(input: CheckpointAndSealInput): Promise<CheckpointSeal>
   stop(): Promise<void>
 }
 
@@ -203,6 +213,7 @@ export interface MountLauncherInstance {
   pid?: number
   ready: Promise<void>
   status(): Promise<MountedWorkspaceStatus>
+  checkpointAndSeal?(input: CheckpointAndSealInput): Promise<CheckpointSeal>
   stop(): Promise<void>
 }
 

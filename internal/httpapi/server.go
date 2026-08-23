@@ -222,6 +222,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 5 && parts[3] == "sync" && parts[4] == "refresh" && r.Method == http.MethodPost:
 		requiredScope = "sync:trigger"
 		route = "sync_refresh"
+	case len(parts) == 5 && parts[3] == "sync" && parts[4] == "checkpoint-seals" && r.Method == http.MethodPost:
+		requiredScope = "sync:trigger"
+		route = "checkpoint_seal_issue"
+	case len(parts) == 6 && parts[3] == "sync" && parts[4] == "checkpoint-seals" && parts[5] == "consume" && r.Method == http.MethodPost:
+		requiredScope = "sync:trigger"
+		route = "checkpoint_seal_consume"
 	case len(parts) == 4 && parts[3] == "ops" && r.Method == http.MethodGet:
 		requiredScope = "ops:read"
 		route = "ops_list"
@@ -354,6 +360,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleSyncDeadLetterReplay(w, r, workspaceID, parts[5], correlationID)
 	case "sync_refresh":
 		s.handleSyncRefresh(w, r, workspaceID, correlationID)
+	case "checkpoint_seal_issue":
+		s.handleCheckpointSealIssue(w, r, workspaceID, correlationID, claims)
+	case "checkpoint_seal_consume":
+		s.handleCheckpointSealConsume(w, r, workspaceID, correlationID)
 	case "ops_list":
 		s.handleOpsList(w, r, workspaceID, correlationID)
 	case "op_replay":
@@ -2221,6 +2231,69 @@ func (s *Server) handleSyncRefresh(w http.ResponseWriter, r *http.Request, works
 		return
 	}
 	writeJSON(w, http.StatusAccepted, resp)
+}
+
+func (s *Server) handleCheckpointSealIssue(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
+	var body relayfile.CheckpointSealRequest
+	if !s.decodeJSONBody(w, r, correlationID, &body) {
+		return
+	}
+	root, err := relayfile.NormalizeCheckpointRoot(body.Root)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid checkpoint root", correlationID)
+		return
+	}
+	// A seal certifies the complete root, not a caller-selected projection.
+	// Require both read and write authority over that root; path-scoped tokens
+	// remain supported when they cover the exact subtree. If ACLs hide any
+	// descendant, the server-computed digest cannot match the mount's digest and
+	// issuance fails closed as checkpoint_diverged.
+	if !scopeMatchesPath(claims.Scopes, "fs:read", root) || !scopeMatchesPath(claims.Scopes, "fs:write", root) {
+		writeError(w, http.StatusForbidden, "forbidden", "checkpoint sealing requires fs:read and fs:write authority for the complete root", correlationID)
+		return
+	}
+	body.Root = root
+	body.Issuer = claims.AgentName
+	seal, err := s.store.IssueCheckpointSeal(workspaceID, body, time.Now().UTC())
+	if err != nil {
+		writeCheckpointSealError(w, err, correlationID)
+		return
+	}
+	writeJSON(w, http.StatusCreated, seal)
+}
+
+func (s *Server) handleCheckpointSealConsume(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string) {
+	var body relayfile.CheckpointSealConsumeRequest
+	if !s.decodeJSONBody(w, r, correlationID, &body) {
+		return
+	}
+	seal, err := s.store.ConsumeCheckpointSeal(workspaceID, body, time.Now().UTC())
+	if err != nil {
+		writeCheckpointSealError(w, err, correlationID)
+		return
+	}
+	writeJSON(w, http.StatusOK, seal)
+}
+
+func writeCheckpointSealError(w http.ResponseWriter, err error, correlationID string) {
+	switch {
+	case errors.Is(err, relayfile.ErrInvalidInput):
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), correlationID)
+	case errors.Is(err, relayfile.ErrNotFound):
+		writeError(w, http.StatusNotFound, "checkpoint_seal_not_found", err.Error(), correlationID)
+	case errors.Is(err, relayfile.ErrCheckpointDiverged):
+		writeError(w, http.StatusConflict, "checkpoint_diverged", err.Error(), correlationID)
+	case errors.Is(err, relayfile.ErrCheckpointGenerationStale):
+		writeError(w, http.StatusConflict, "checkpoint_generation_stale", err.Error(), correlationID)
+	case errors.Is(err, relayfile.ErrCheckpointExpired):
+		writeError(w, http.StatusConflict, "checkpoint_expired", err.Error(), correlationID)
+	case errors.Is(err, relayfile.ErrCheckpointReplay):
+		writeError(w, http.StatusConflict, "checkpoint_replayed", err.Error(), correlationID)
+	case errors.Is(err, relayfile.ErrCheckpointStale):
+		writeError(w, http.StatusConflict, "checkpoint_stale", err.Error(), correlationID)
+	default:
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
+	}
 }
 
 func (s *Server) handleOpsList(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string) {

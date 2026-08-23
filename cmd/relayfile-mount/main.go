@@ -75,6 +75,10 @@ type mountConfig struct {
 	once                  bool
 	flushOutboxOnce       bool
 	pushLocalOnce         bool
+	checkpointAndSeal     bool
+	checkpointSession     string
+	checkpointGeneration  uint64
+	checkpointSealTTL     time.Duration
 	mode                  string
 	fuseContentTTL        time.Duration
 }
@@ -125,6 +129,10 @@ func main() {
 	once := flag.Bool("once", false, "run one sync cycle and exit")
 	flushOutboxOnce := flag.Bool("flush-outbox-once", false, "flush durable writeback outbox once and exit without reconciling the local mirror")
 	pushLocalOnce := flag.Bool("push-local-once", false, "ingest pending local writeback drafts (one pushLocal pass) then flush the outbox once and exit; no pullRemote/digest/reconcile — the teardown drain for last-moment drafts")
+	checkpointAndSeal := flag.Bool("checkpoint-and-seal", false, "drain a managed mount, verify durable convergence, emit a one-use server checkpoint seal as JSON, and exit")
+	checkpointSession := flag.String("checkpoint-session", "", "session identifier bound into --checkpoint-and-seal")
+	checkpointGeneration := flag.Uint64("checkpoint-generation", 0, "strictly increasing migration generation bound into --checkpoint-and-seal")
+	checkpointSealTTL := flag.Duration("checkpoint-seal-ttl", mountsync.DefaultCheckpointSealTTL, "one-use checkpoint seal lifetime (maximum 5m)")
 	flag.Parse()
 	fullPullMinInterval, err := parseDurationWithNegativeOne(*fullPullMinIntervalArg)
 	if err != nil {
@@ -220,6 +228,10 @@ func main() {
 		once:                  *once,
 		flushOutboxOnce:       *flushOutboxOnce,
 		pushLocalOnce:         *pushLocalOnce,
+		checkpointAndSeal:     *checkpointAndSeal,
+		checkpointSession:     strings.TrimSpace(*checkpointSession),
+		checkpointGeneration:  *checkpointGeneration,
+		checkpointSealTTL:     *checkpointSealTTL,
 		mode:                  resolvedMode,
 		fuseContentTTL:        *fuseContentTTL,
 	}
@@ -276,6 +288,18 @@ func resolveSyncMode(mode string) (string, error) {
 }
 
 func executeMount(rootCtx context.Context, cfg mountConfig, runPoll pollRunner, runFuse fuseRunner) error {
+	if cfg.checkpointAndSeal && cfg.mode != mountModePoll {
+		return fmt.Errorf("--checkpoint-and-seal requires --mode=%s", mountModePoll)
+	}
+	if cfg.checkpointAndSeal && (cfg.once || cfg.flushOutboxOnce || cfg.pushLocalOnce) {
+		return errors.New("--checkpoint-and-seal cannot be combined with --once, --flush-outbox-once, or --push-local-once")
+	}
+	if cfg.checkpointAndSeal && (cfg.checkpointSession == "" || cfg.checkpointGeneration == 0) {
+		return errors.New("--checkpoint-and-seal requires --checkpoint-session and a positive --checkpoint-generation")
+	}
+	if cfg.checkpointAndSeal && (cfg.checkpointSealTTL < time.Second || cfg.checkpointSealTTL > mountsync.MaxCheckpointSealTTL) {
+		return fmt.Errorf("--checkpoint-seal-ttl must be between 1s and %s", mountsync.MaxCheckpointSealTTL)
+	}
 	if cfg.mode == mountModeFuse && cfg.syncMode == syncModePullOnly {
 		return fmt.Errorf("--sync-mode=%s is not supported with --mode=%s; use --mode=%s", syncModePullOnly, mountModeFuse, mountModePoll)
 	}
@@ -464,6 +488,21 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 	}
 	if _, err := mountsync.StartDiagnostics(rootCtx, cfg.pprofAddr, cfg.memlogInterval, log.Default()); err != nil {
 		return fmt.Errorf("start diagnostics: %w", err)
+	}
+	if cfg.checkpointAndSeal {
+		ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
+		defer cancel()
+		seal, err := syncer.CheckpointAndSeal(ctx, mountsync.CheckpointAndSealOptions{
+			SessionID: cfg.checkpointSession, Generation: cfg.checkpointGeneration,
+			TTLSeconds: int(cfg.checkpointSealTTL / time.Second),
+		})
+		if err != nil {
+			return fmt.Errorf("checkpoint and seal: %w", err)
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(seal); err != nil {
+			return fmt.Errorf("encode checkpoint seal: %w", err)
+		}
+		return nil
 	}
 	if cfg.pushLocalOnce {
 		ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)

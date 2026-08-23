@@ -188,6 +188,53 @@ func TestResolveMountMode(t *testing.T) {
 	}
 }
 
+func TestCheckpointAndSealCLIValidationFailsBeforeStartingMount(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  mountConfig
+		want string
+	}{
+		{
+			name: "fuse stays mounted",
+			cfg:  mountConfig{checkpointAndSeal: true, mode: mountModeFuse, checkpointSession: "session-1", checkpointGeneration: 1, checkpointSealTTL: time.Minute},
+			want: "requires --mode=poll",
+		},
+		{
+			name: "identity required",
+			cfg:  mountConfig{checkpointAndSeal: true, mode: mountModePoll, checkpointSealTTL: time.Minute},
+			want: "requires --checkpoint-session",
+		},
+		{
+			name: "ttl bounded",
+			cfg:  mountConfig{checkpointAndSeal: true, mode: mountModePoll, checkpointSession: "session-1", checkpointGeneration: 1, checkpointSealTTL: mountsync.MaxCheckpointSealTTL + time.Second},
+			want: "--checkpoint-seal-ttl must be between",
+		},
+		{
+			name: "one-shot modes are exclusive",
+			cfg:  mountConfig{checkpointAndSeal: true, once: true, mode: mountModePoll, checkpointSession: "session-1", checkpointGeneration: 1, checkpointSealTTL: time.Minute},
+			want: "cannot be combined",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pollCalled := false
+			fuseCalled := false
+			err := executeMount(
+				context.Background(),
+				tc.cfg,
+				func(context.Context, mountConfig) error { pollCalled = true; return nil },
+				func(context.Context, mountConfig) error { fuseCalled = true; return nil },
+			)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected error containing %q, got %v", tc.want, err)
+			}
+			if pollCalled || fuseCalled {
+				t.Fatal("invalid checkpoint request must fail before starting a mount")
+			}
+		})
+	}
+}
+
 func TestResolveLocalLayout(t *testing.T) {
 	tests := []struct {
 		name    string

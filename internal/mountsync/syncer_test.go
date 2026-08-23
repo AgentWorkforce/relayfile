@@ -8334,6 +8334,168 @@ func TestAtomicTempPatternHidesTempForDotPrefixedTarget(t *testing.T) {
 	}
 }
 
+func TestCheckpointAndSealDetectsConcurrentAppendBeforeIssuance(t *testing.T) {
+	client := &fakeClient{}
+	syncer, localPath := newManagedCheckpointSyncer(t, client)
+	mutated := false
+	syncer.checkpointTestHook = func(stage string) {
+		if stage == "after-first-scan" && !mutated {
+			mutated = true
+			if err := os.WriteFile(localPath, []byte("turn one\nturn two\n"), 0o644); err != nil {
+				t.Fatalf("concurrent append: %v", err)
+			}
+		}
+	}
+	_, err := syncer.CheckpointAndSeal(context.Background(), CheckpointAndSealOptions{SessionID: "thread-append", Generation: 1})
+	if !errors.Is(err, ErrCheckpointConcurrentMutation) {
+		t.Fatalf("checkpoint error = %v, want concurrent mutation", err)
+	}
+	if client.checkpointIssueCalls != 0 {
+		t.Fatalf("server seal was issued before local stability: %d calls", client.checkpointIssueCalls)
+	}
+}
+
+func TestCheckpointAndSealDetectsConcurrentAppendAfterIssuance(t *testing.T) {
+	client := &fakeClient{}
+	syncer, localPath := newManagedCheckpointSyncer(t, client)
+	syncer.checkpointTestHook = func(stage string) {
+		if stage == "after-issue" {
+			if err := os.WriteFile(localPath, []byte("turn one\nlate append\n"), 0o644); err != nil {
+				t.Fatalf("late concurrent append: %v", err)
+			}
+		}
+	}
+	_, err := syncer.CheckpointAndSeal(context.Background(), CheckpointAndSealOptions{SessionID: "thread-late", Generation: 2})
+	if !errors.Is(err, ErrCheckpointConcurrentMutation) {
+		t.Fatalf("checkpoint error = %v, want concurrent mutation", err)
+	}
+	if client.checkpointIssueCalls != 1 {
+		t.Fatalf("server issue calls = %d, want 1", client.checkpointIssueCalls)
+	}
+}
+
+func TestCheckpointAndSealHonorsDeadlineAndRemoteNonConvergence(t *testing.T) {
+	t.Run("deadline", func(t *testing.T) {
+		client := &fakeClient{checkpointIssueFunc: func(ctx context.Context, _ string, _ CheckpointSealRequest) (CheckpointSeal, error) {
+			<-ctx.Done()
+			return CheckpointSeal{}, ctx.Err()
+		}}
+		syncer, _ := newManagedCheckpointSyncer(t, client)
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+		defer cancel()
+		started := time.Now()
+		_, err := syncer.CheckpointAndSeal(ctx, CheckpointAndSealOptions{SessionID: "thread-timeout", Generation: 3})
+		if !errors.Is(err, ErrCheckpointNonConverged) || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("deadline error = %v", err)
+		}
+		if elapsed := time.Since(started); elapsed > time.Second {
+			t.Fatalf("checkpoint ignored deadline: %s", elapsed)
+		}
+	})
+
+	t.Run("server divergence", func(t *testing.T) {
+		client := &fakeClient{checkpointIssueFunc: func(context.Context, string, CheckpointSealRequest) (CheckpointSeal, error) {
+			return CheckpointSeal{}, &HTTPError{StatusCode: http.StatusConflict, Code: "checkpoint_diverged", Message: "server digest differs"}
+		}}
+		syncer, _ := newManagedCheckpointSyncer(t, client)
+		_, err := syncer.CheckpointAndSeal(context.Background(), CheckpointAndSealOptions{SessionID: "thread-diverged", Generation: 4})
+		if !errors.Is(err, ErrCheckpointNonConverged) || !strings.Contains(err.Error(), "checkpoint_diverged") {
+			t.Fatalf("divergence error = %v", err)
+		}
+	})
+}
+
+func TestCheckpointAndSealRejectsUnmanagedOrMismatchedRoot(t *testing.T) {
+	localRoot := t.TempDir()
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{WorkspaceID: "ws_unmanaged", RemoteRoot: "/sessions", LocalRoot: localRoot, StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("new unmanaged syncer: %v", err)
+	}
+	if _, err := syncer.CheckpointAndSeal(context.Background(), CheckpointAndSealOptions{SessionID: "thread-unmanaged", Generation: 1}); !errors.Is(err, ErrCheckpointUnmanagedRoot) {
+		t.Fatalf("unmanaged root error = %v", err)
+	}
+
+	managed, _ := newManagedCheckpointSyncer(t, &fakeClient{})
+	payload, err := os.ReadFile(managed.publicStatePath)
+	if err != nil {
+		t.Fatalf("read public state: %v", err)
+	}
+	var public map[string]any
+	if err := json.Unmarshal(payload, &public); err != nil {
+		t.Fatalf("decode public state: %v", err)
+	}
+	public["workspaceId"] = "ws_other"
+	payload, err = json.Marshal(public)
+	if err != nil {
+		t.Fatalf("encode altered public state: %v", err)
+	}
+	if err := os.WriteFile(managed.publicStatePath, payload, 0o600); err != nil {
+		t.Fatalf("write altered public state: %v", err)
+	}
+	if _, err := managed.CheckpointAndSeal(context.Background(), CheckpointAndSealOptions{SessionID: "thread-mismatch", Generation: 1}); !errors.Is(err, ErrCheckpointUnmanagedRoot) {
+		t.Fatalf("mismatched root error = %v", err)
+	}
+}
+
+func TestCheckpointAndSealReturnsBoundAuthoritativeSeal(t *testing.T) {
+	client := &fakeClient{}
+	syncer, _ := newManagedCheckpointSyncer(t, client)
+	seal, err := syncer.CheckpointAndSeal(context.Background(), CheckpointAndSealOptions{SessionID: "thread-success", Generation: 9, TTLSeconds: 45})
+	if err != nil {
+		t.Fatalf("checkpoint and seal: %v", err)
+	}
+	if seal.WorkspaceID != "ws_checkpoint" || seal.Root != "/sessions" || seal.SessionID != "thread-success" || seal.Generation != 9 || seal.SealToken == "" || !strings.HasPrefix(seal.Digest, "sha256:") {
+		t.Fatalf("bound seal = %+v", seal)
+	}
+}
+
+func TestCheckpointAndSealRejectsInvalidIdentityBeforeDraining(t *testing.T) {
+	client := &fakeClient{}
+	syncer, _ := newManagedCheckpointSyncer(t, client)
+	for name, options := range map[string]CheckpointAndSealOptions{
+		"bad session":     {SessionID: "bad session", Generation: 1},
+		"zero generation": {SessionID: "thread-valid"},
+		"negative ttl":    {SessionID: "thread-valid", Generation: 1, TTLSeconds: -1},
+		"oversize ttl":    {SessionID: "thread-valid", Generation: 1, TTLSeconds: 301},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := syncer.CheckpointAndSeal(context.Background(), options); !errors.Is(err, ErrCheckpointNonConverged) {
+				t.Fatalf("invalid identity error = %v", err)
+			}
+		})
+	}
+	if client.checkpointIssueCalls != 0 || client.writeFileCalls != 0 || client.bulkWriteCalls != 0 {
+		t.Fatalf("invalid input reached drain/server path: issue=%d write=%d bulk=%d", client.checkpointIssueCalls, client.writeFileCalls, client.bulkWriteCalls)
+	}
+}
+
+func newManagedCheckpointSyncer(t *testing.T, client *fakeClient) (*Syncer, string) {
+	t.Helper()
+	localRoot := t.TempDir()
+	localPath := filepath.Join(localRoot, "transcript.jsonl")
+	content := []byte("turn one\n")
+	if err := os.WriteFile(localPath, content, 0o644); err != nil {
+		t.Fatalf("write checkpoint fixture: %v", err)
+	}
+	remotePath := "/sessions/transcript.jsonl"
+	client.files = map[string]RemoteFile{remotePath: {
+		Path: remotePath, Revision: "rev_1", ContentType: "application/octet-stream", Content: string(content), ContentHash: hashBytes(content),
+	}}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_checkpoint", RemoteRoot: "/sessions", LocalRoot: localRoot,
+		StateDir: t.TempDir(), RootCtx: context.Background(), FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("new checkpoint syncer: %v", err)
+	}
+	syncer.state.Files[remotePath] = trackedFile{Revision: "rev_1", ContentType: detectContentType(localPath), Hash: hashBytes(content)}
+	syncer.state.BootstrapComplete = true
+	if err := syncer.saveState(); err != nil {
+		t.Fatalf("persist managed checkpoint state: %v", err)
+	}
+	return syncer, localPath
+}
+
 type fakeClient struct {
 	mu                             sync.Mutex
 	files                          map[string]RemoteFile
@@ -8368,6 +8530,21 @@ type fakeClient struct {
 	readFileErrByPath              map[string]error
 	mergeFileCalls                 int
 	mergeFileFunc                  func(ctx context.Context, workspaceID, path, strategy, baseRevision, baseContent, content, contentType string) (MergeResult, error)
+	checkpointIssueCalls           int
+	checkpointIssueFunc            func(context.Context, string, CheckpointSealRequest) (CheckpointSeal, error)
+}
+
+func (c *fakeClient) IssueCheckpointSeal(ctx context.Context, workspaceID string, request CheckpointSealRequest) (CheckpointSeal, error) {
+	c.checkpointIssueCalls++
+	if c.checkpointIssueFunc != nil {
+		return c.checkpointIssueFunc(ctx, workspaceID, request)
+	}
+	return CheckpointSeal{
+		SealID: "cps_fake", SealToken: "fake-one-use-token", WorkspaceID: workspaceID,
+		Root: request.Root, SessionID: request.SessionID, Generation: request.Generation,
+		Digest: request.ExpectedDigest, WorkspaceRevision: "rev_workspace", EventCursor: "evt_checkpoint",
+		IssuedAt: time.Now().UTC().Format(time.RFC3339Nano), ExpiresAt: time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano),
+	}, nil
 }
 
 // requestedReadCalls returns the cumulative number of ReadFile calls made

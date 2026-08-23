@@ -32,6 +32,7 @@ import {
   type AgentWorkspaceScopedInviteOptions,
   type ConnectIntegrationOptions,
   type ConnectIntegrationResult,
+  type CheckpointAndSealInput,
   type CreateWorkspaceOptions,
   type JoinWorkspaceOptions,
   type MountLauncher,
@@ -55,6 +56,7 @@ import {
   type WorkspaceIntegrationProvider,
   type WorkspacePermissions
 } from "./setup-types.js"
+import type { CheckpointSeal } from "./types.js"
 import { RELAYFILE_SDK_VERSION } from "./version.js"
 
 export { RELAYFILE_SDK_VERSION } from "./version.js"
@@ -1155,6 +1157,7 @@ class MountedWorkspaceHandleImpl implements MountedWorkspaceHandle {
 
   private readySnapshot = true
   private stopPromise?: Promise<void>
+  private checkpointPromise?: Promise<CheckpointSeal>
 
   constructor(input: {
     mountSession: MountSessionResult
@@ -1220,6 +1223,20 @@ class MountedWorkspaceHandleImpl implements MountedWorkspaceHandle {
     await this.stopPromise
   }
 
+  async checkpointAndSeal(input: CheckpointAndSealInput): Promise<CheckpointSeal> {
+    if (!this.checkpointPromise) {
+      this.readySnapshot = false
+      if (this.probeOnly || !this.launcherInstance?.checkpointAndSeal) {
+        throw new RelayfileSetupError(
+          "checkpointAndSeal requires a locally managed relayfile-mount launcher.",
+          "checkpoint_seal_unavailable"
+        )
+      }
+      this.checkpointPromise = this.launcherInstance.checkpointAndSeal(input)
+    }
+    return this.checkpointPromise
+  }
+
   private async performStop(): Promise<void> {
     this.readySnapshot = false
     if (this.probeOnly || !this.launcherInstance) {
@@ -1276,6 +1293,14 @@ class SharedMountedWorkspaceHandle implements MountedWorkspaceHandle {
 
   status(): Promise<MountedWorkspaceStatus> {
     return this.mounted.status()
+  }
+
+  async checkpointAndSeal(input: CheckpointAndSealInput): Promise<CheckpointSeal> {
+    try {
+      return await this.mounted.checkpointAndSeal(input)
+    } finally {
+      this.onStopped()
+    }
   }
 
   async stop(): Promise<void> {
@@ -1376,6 +1401,16 @@ class SupervisedMountedWorkspaceHandle implements MountedWorkspaceHandle {
   async stop(): Promise<void> {
     if (!this.stopPromise) this.stopPromise = this.performStop()
     await this.stopPromise
+  }
+
+  async checkpointAndSeal(input: CheckpointAndSealInput): Promise<CheckpointSeal> {
+    this.stopped = true
+    this.supervisorReady = false
+    this.signal?.removeEventListener("abort", this.handleAbort)
+    if (this.timer) clearTimeout(this.timer)
+    this.timer = undefined
+    await this.refreshPromise?.catch(() => {})
+    return this.mounted.checkpointAndSeal(input)
   }
 
   private async performStop(): Promise<void> {

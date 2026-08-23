@@ -112,6 +112,7 @@ function createLauncherStub(
     pid: number
     ready: Promise<void>
     status: ReturnType<typeof vi.fn>
+    checkpointAndSeal: ReturnType<typeof vi.fn>
     stop: ReturnType<typeof vi.fn>
   }
   readyControl: ReturnType<typeof deferred<void>>
@@ -127,12 +128,29 @@ function createLauncherStub(
       suggestedRefreshAt: null,
       ...status
     } satisfies MountedWorkspaceStatus),
+    checkpointAndSeal: vi.fn().mockResolvedValue(validCheckpointSeal()),
     stop: vi.fn().mockResolvedValue(undefined)
   }
   const launcher: MountLauncher = {
     start: vi.fn().mockResolvedValue(instance)
   }
   return { launcher, instance, readyControl }
+}
+
+function validCheckpointSeal() {
+  return {
+    sealId: "seal_123",
+    sealToken: "one-use-secret",
+    workspaceId: "ws_123",
+    root: "/notion",
+    sessionId: "session-123",
+    generation: 7,
+    digest: `sha256:${"a".repeat(64)}`,
+    workspaceRevision: "rev_123",
+    eventCursor: "evt_123",
+    issuedAt: "2026-08-23T10:00:00.000Z",
+    expiresAt: "2026-08-23T10:01:00.000Z"
+  }
 }
 
 async function flushPromises(times = 3): Promise<void> {
@@ -1243,6 +1261,45 @@ describe("RelayfileSetup", () => {
 
       await handle.stop()
       expect(instance.stop).toHaveBeenCalledTimes(1)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("delegates checkpointAndSeal to the owned launcher and retires readiness", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-sdk-mount-checkpoint-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    queueFetch(
+      makeJoinResponse("rf_jwt_joined"),
+      makeMountSessionResponse()
+    )
+    const { launcher, instance, readyControl } = createLauncherStub()
+
+    try {
+      const setup = new RelayfileSetup()
+      const workspace = await setup.joinWorkspace("ws_123")
+      readyControl.resolve()
+      const handle = await setup.mountWorkspace({
+        workspace,
+        localDir,
+        remotePath: "/notion",
+        mode: "poll",
+        launcher
+      })
+
+      await expect(handle.checkpointAndSeal({
+        sessionId: "session-123",
+        generation: 7,
+        ttlSeconds: 60
+      })).resolves.toEqual(validCheckpointSeal())
+      expect(instance.checkpointAndSeal).toHaveBeenCalledWith({
+        sessionId: "session-123",
+        generation: 7,
+        ttlSeconds: 60
+      })
+      expect(handle.ready).toBe(false)
     } finally {
       await rm(tempRoot, { recursive: true, force: true })
     }

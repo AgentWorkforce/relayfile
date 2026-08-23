@@ -1291,6 +1291,98 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /v1/workspaces/{workspaceId}/sync/checkpoint-seals:
+    post:
+      tags: [Sync]
+      operationId: issueCheckpointSeal
+      summary: Atomically certify a caller digest against durable workspace state
+      description: >-
+        Computes the canonical digest, workspace revision, and event cursor on
+        the server under the workspace mutation lock. The caller digest is only
+        a convergence assertion and is never copied into the seal. Issuance
+        requires sync:trigger plus fs:read and fs:write authority for the full
+        requested root. Generations are monotonic per workspace/root/session.
+      security:
+        - BearerAuth: [sync:trigger, fs:read, fs:write]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CheckpointSealRequest'
+      responses:
+        '201':
+          description: One-use checkpoint seal issued from durable server state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckpointSeal'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Digest divergence or stale generation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/sync/checkpoint-seals/consume:
+    post:
+      tags: [Sync]
+      operationId: consumeCheckpointSeal
+      summary: Verify and consume a one-use checkpoint seal
+      description: >-
+        Recomputes durable digest, workspace revision, and event cursor before
+        atomically marking the seal consumed. Expired, replayed, identity-
+        mismatched, or remotely stale seals fail closed.
+      security:
+        - BearerAuth: [sync:trigger]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CheckpointSealConsumeRequest'
+      responses:
+        '200':
+          description: Seal verified against current durable state and consumed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckpointSeal'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Seal expired, replayed, or stale against durable state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /v1/workspaces/{workspaceId}/sync/status:
     get:
       tags: [Sync]
@@ -3317,6 +3409,86 @@ components:
         reason:
           type: string
           maxLength: 1000
+
+    CheckpointSealRequest:
+      type: object
+      additionalProperties: false
+      required: [root, sessionId, generation, expectedDigest]
+      properties:
+        root:
+          type: string
+          pattern: '^/'
+        sessionId:
+          type: string
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$'
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        expectedDigest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+          description: Local convergence assertion; the server independently computes and seals its own digest.
+        ttlSeconds:
+          type: integer
+          minimum: 1
+          maximum: 300
+
+    CheckpointSealConsumeRequest:
+      type: object
+      additionalProperties: false
+      required: [sealToken, root, sessionId, generation]
+      properties:
+        sealToken:
+          type: string
+          minLength: 32
+        root:
+          type: string
+          pattern: '^/'
+        sessionId:
+          type: string
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$'
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+
+    CheckpointSeal:
+      type: object
+      additionalProperties: false
+      required: [sealId, workspaceId, root, sessionId, generation, digest, workspaceRevision, eventCursor, issuedAt, expiresAt]
+      properties:
+        sealId:
+          type: string
+        sealToken:
+          type: string
+          description: Opaque one-use bearer returned only at issuance; omitted after consume.
+        workspaceId:
+          type: string
+        root:
+          type: string
+        sessionId:
+          type: string
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        digest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        workspaceRevision:
+          type: string
+        eventCursor:
+          type: string
+        issuedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        consumedAt:
+          type: string
+          format: date-time
 
     SyncStatusResponse:
       type: object

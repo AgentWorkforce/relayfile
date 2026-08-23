@@ -42,6 +42,13 @@ import (
 
 var ErrConflict = errors.New("revision conflict")
 
+var (
+	ErrCheckpointConcurrentMutation = errors.New("local workspace changed while checkpoint seal was being created")
+	ErrCheckpointUnmanagedRoot      = errors.New("checkpoint sealing requires an existing managed Relayfile mount")
+	ErrCheckpointNonConverged       = errors.New("local and durable Relayfile state did not converge")
+	checkpointSessionPattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$`)
+)
+
 var sensitiveLogQueryValue = regexp.MustCompile(`(?i)([?&](?:token|access_token|api_key)=)[^&#\s"']*`)
 
 // ErrSchemaValidation is returned when the cloud rejects a writeback because
@@ -446,6 +453,16 @@ type RemoteClient interface {
 	MergeFile(ctx context.Context, workspaceID, path, strategy, baseRevision, baseContent, content, contentType string) (MergeResult, error)
 }
 
+type checkpointSealClient interface {
+	IssueCheckpointSeal(ctx context.Context, workspaceID string, request CheckpointSealRequest) (CheckpointSeal, error)
+}
+
+type CheckpointAndSealOptions struct {
+	SessionID  string
+	Generation uint64
+	TTLSeconds int
+}
+
 // Merge strategy constants mirror the server's internal/relayfile package.
 // They are duplicated here rather than imported to keep internal/mountsync
 // free of a dependency on the store package.
@@ -752,6 +769,12 @@ func (c *HTTPClient) DeleteFile(ctx context.Context, workspaceID, path, baseRevi
 		"If-Match": baseRevision,
 	}
 	return c.doJSON(ctx, http.MethodDelete, fmt.Sprintf("/v1/workspaces/%s/fs/file?%s", url.PathEscape(workspaceID), q.Encode()), headers, nil, nil)
+}
+
+func (c *HTTPClient) IssueCheckpointSeal(ctx context.Context, workspaceID string, request CheckpointSealRequest) (CheckpointSeal, error) {
+	var out CheckpointSeal
+	err := c.doJSON(ctx, http.MethodPost, fmt.Sprintf("/v1/workspaces/%s/sync/checkpoint-seals", url.PathEscape(workspaceID)), nil, request, &out)
+	return out, err
 }
 
 func (c *HTTPClient) ExportFiles(ctx context.Context, workspaceID, path string) ([]RemoteFile, error) {
@@ -1320,6 +1343,7 @@ type Syncer struct {
 	// Test seam for proving that background local-tree hashing yields the
 	// real-time state lock. Production uses readLocalSnapshot directly.
 	readLocalSnapshotFn func(string, bool) (localSnapshot, error)
+	checkpointTestHook  func(string)
 	// credExpiresAt is the RFC3339 expiry of the delegated access token,
 	// set by the CLI layer via SetCredentialExpiry and included in the
 	// public state as credExpiresInSecs so operators get advance warning.
@@ -2316,6 +2340,195 @@ func (s *Syncer) PushLocalAndFlushOnce(ctx context.Context) error {
 	}
 	s.markSyncSuccess()
 	return s.saveState()
+}
+
+// CheckpointAndSeal is the teardown boundary for a managed mount. It drains
+// missed local writes (including deletes), proves the local tree is stable
+// across repeated hash scans, and asks Relayfile to issue a one-use seal from
+// its own durable digest/cursor under the server mutation lock.
+//
+// The caller must already have stopped the agent at a turn boundary. No
+// filesystem API can prevent an unrelated process from writing after this
+// method returns; changes during the operation are detected and fail closed.
+func (s *Syncer) CheckpointAndSeal(ctx context.Context, options CheckpointAndSealOptions) (CheckpointSeal, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	sessionID := strings.TrimSpace(options.SessionID)
+	if !checkpointSessionPattern.MatchString(sessionID) || options.Generation == 0 || options.TTLSeconds < 0 || options.TTLSeconds > int(MaxCheckpointSealTTL/time.Second) {
+		return CheckpointSeal{}, fmt.Errorf("%w: invalid checkpoint session, generation, or TTL", ErrCheckpointNonConverged)
+	}
+	if err := ctx.Err(); err != nil {
+		return CheckpointSeal{}, fmt.Errorf("%w: %v", ErrCheckpointNonConverged, err)
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+	}
+	if s.pullOnly {
+		return CheckpointSeal{}, fmt.Errorf("%w: pull-only mounts cannot drain local changes", ErrCheckpointNonConverged)
+	}
+	issuer, ok := s.client.(checkpointSealClient)
+	if !ok {
+		return CheckpointSeal{}, fmt.Errorf("%w: server/client checkpoint seal contract unavailable", ErrCheckpointNonConverged)
+	}
+	if err := s.assertManagedCheckpointRoot(); err != nil {
+		return CheckpointSeal{}, err
+	}
+	if err := s.assertMountRootInvariant(); err != nil {
+		return CheckpointSeal{}, err
+	}
+
+	s.localMutationMu.Lock()
+	defer s.localMutationMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.loadState(); err != nil {
+		return CheckpointSeal{}, fmt.Errorf("%w: load private mount state: %v", ErrCheckpointUnmanagedRoot, err)
+	}
+	if !s.state.BootstrapComplete {
+		return CheckpointSeal{}, fmt.Errorf("%w: mount bootstrap is incomplete", ErrCheckpointNonConverged)
+	}
+	if len(s.state.QuarantinedPaths) > 0 || len(s.state.SkippedMaterializations) > 0 || s.state.IncrementalBacklogDraining {
+		return CheckpointSeal{}, fmt.Errorf("%w: mount has quarantined, skipped, or backlogged remote state", ErrCheckpointNonConverged)
+	}
+
+	// The daemon may have been stopped before its watcher observed the final
+	// mutation. Force watcherless detection and run two passes so missing-file
+	// deletion uses its existing two-observation safety gate.
+	previousPolling := s.pollLocalChanges
+	previousRecovery := s.recoverStartupDrift
+	previousRootCtx := s.rootCtx
+	s.pollLocalChanges = true
+	s.recoverStartupDrift = true
+	s.rootCtx = ctx
+	defer func() {
+		s.pollLocalChanges = previousPolling
+		s.recoverStartupDrift = previousRecovery
+		s.rootCtx = previousRootCtx
+	}()
+	for pass := 0; pass < 2; pass++ {
+		conflicted, err := s.pushLocal(ctx)
+		if err != nil {
+			return CheckpointSeal{}, fmt.Errorf("%w: drain local changes: %v", ErrCheckpointNonConverged, err)
+		}
+		if len(conflicted) > 0 {
+			return CheckpointSeal{}, fmt.Errorf("%w: %d conflict(s) materialized during drain", ErrCheckpointNonConverged, len(conflicted))
+		}
+		if err := s.flushOutboxRecords(ctx, nil, true, true); err != nil {
+			return CheckpointSeal{}, fmt.Errorf("%w: flush durable outbox: %v", ErrCheckpointNonConverged, err)
+		}
+		outbox := s.summarizeOutbox()
+		if outbox.Pending > 0 || outbox.NeedsAttention > 0 {
+			return CheckpointSeal{}, fmt.Errorf("%w: outbox pending=%d needsAttention=%d", ErrCheckpointNonConverged, outbox.Pending, outbox.NeedsAttention)
+		}
+	}
+	if err := s.saveStateWithoutLocalScan(); err != nil {
+		return CheckpointSeal{}, fmt.Errorf("persist drained mount state: %w", err)
+	}
+
+	firstDigest, err := s.checkpointLocalDigestLocked()
+	if err != nil {
+		return CheckpointSeal{}, err
+	}
+	s.runCheckpointTestHook("after-first-scan")
+	secondDigest, err := s.checkpointLocalDigestLocked()
+	if err != nil {
+		return CheckpointSeal{}, fmt.Errorf("%w: %v", ErrCheckpointConcurrentMutation, err)
+	}
+	if firstDigest != secondDigest {
+		return CheckpointSeal{}, ErrCheckpointConcurrentMutation
+	}
+
+	seal, err := issuer.IssueCheckpointSeal(ctx, s.workspace, CheckpointSealRequest{
+		Root:           s.remoteRoot,
+		SessionID:      sessionID,
+		Generation:     options.Generation,
+		ExpectedDigest: secondDigest,
+		TTLSeconds:     options.TTLSeconds,
+	})
+	if err != nil {
+		return CheckpointSeal{}, fmt.Errorf("%w: issue authoritative server seal: %w", ErrCheckpointNonConverged, err)
+	}
+	s.runCheckpointTestHook("after-issue")
+	finalDigest, err := s.checkpointLocalDigestLocked()
+	if err != nil {
+		return CheckpointSeal{}, fmt.Errorf("%w: %v", ErrCheckpointConcurrentMutation, err)
+	}
+	if finalDigest != secondDigest || seal.Digest != secondDigest || seal.WorkspaceID != s.workspace || seal.Root != s.remoteRoot || seal.SessionID != sessionID || seal.Generation != options.Generation || strings.TrimSpace(seal.SealToken) == "" {
+		return CheckpointSeal{}, ErrCheckpointConcurrentMutation
+	}
+	return seal, nil
+}
+
+func (s *Syncer) assertManagedCheckpointRoot() error {
+	private, err := os.Stat(s.stateFile)
+	if err != nil || !private.Mode().IsRegular() {
+		return fmt.Errorf("%w: private mount state is missing", ErrCheckpointUnmanagedRoot)
+	}
+	payload, err := os.ReadFile(s.publicStatePath)
+	if err != nil {
+		return fmt.Errorf("%w: public mount identity is missing", ErrCheckpointUnmanagedRoot)
+	}
+	var state publicState
+	if err := json.Unmarshal(payload, &state); err != nil {
+		return fmt.Errorf("%w: malformed public mount identity", ErrCheckpointUnmanagedRoot)
+	}
+	if strings.TrimSpace(state.LocalRoot) == "" || strings.TrimSpace(state.WorkspaceID) == "" || strings.TrimSpace(state.RemoteRoot) == "" {
+		return fmt.Errorf("%w: public mount identity is incomplete", ErrCheckpointUnmanagedRoot)
+	}
+	wantRoot, err := filepath.Abs(s.localRoot)
+	if err != nil {
+		return fmt.Errorf("%w: resolve local root", ErrCheckpointUnmanagedRoot)
+	}
+	gotRoot, err := filepath.Abs(strings.TrimSpace(state.LocalRoot))
+	if err != nil || state.WorkspaceID != s.workspace || normalizeRemotePath(state.RemoteRoot) != s.remoteRoot || filepath.Clean(gotRoot) != filepath.Clean(wantRoot) {
+		return fmt.Errorf("%w: mount identity does not match workspace/root", ErrCheckpointUnmanagedRoot)
+	}
+	return nil
+}
+
+func (s *Syncer) checkpointLocalDigestLocked() (string, error) {
+	localFiles, err := s.scanLocalFiles()
+	if err != nil {
+		return "", fmt.Errorf("%w: scan local root: %v", ErrCheckpointNonConverged, err)
+	}
+	entries := make([]relayfile.CheckpointDigestEntry, 0, len(localFiles))
+	seen := make(map[string]struct{}, len(localFiles))
+	for remotePath, snapshot := range localFiles {
+		if !isUnderRemoteRoot(s.remoteRoot, remotePath) || snapshot.SkipWriteback {
+			return "", fmt.Errorf("%w: unsealable local path %s", ErrCheckpointNonConverged, remotePath)
+		}
+		tracked, ok := s.state.Files[remotePath]
+		if !ok || tracked.Denied || tracked.WriteDenied || tracked.Dirty || tracked.DeletePending || strings.TrimSpace(tracked.Revision) == "" || strings.TrimSpace(tracked.Hash) == "" || tracked.Hash != snapshot.Hash {
+			return "", fmt.Errorf("%w: local path %s is not tracked at its durable hash/revision (tracked=%t dirty=%t deletePending=%t denied=%t writeDenied=%t hashMatch=%t revisionPresent=%t)", ErrCheckpointNonConverged, remotePath, ok, tracked.Dirty, tracked.DeletePending, tracked.Denied, tracked.WriteDenied, tracked.Hash == snapshot.Hash, strings.TrimSpace(tracked.Revision) != "")
+		}
+		seen[remotePath] = struct{}{}
+		entries = append(entries, relayfile.CheckpointDigestEntry{Path: remotePath, Revision: tracked.Revision, ContentHash: snapshot.Hash})
+	}
+	for remotePath, tracked := range s.state.Files {
+		if !isUnderRemoteRoot(s.remoteRoot, remotePath) {
+			continue
+		}
+		if tracked.Denied || tracked.WriteDenied || tracked.Dirty || tracked.DeletePending {
+			return "", fmt.Errorf("%w: tracked path %s is denied or unsettled", ErrCheckpointNonConverged, remotePath)
+		}
+		if _, ok := seen[remotePath]; !ok {
+			return "", fmt.Errorf("%w: tracked durable path %s is missing locally", ErrCheckpointNonConverged, remotePath)
+		}
+	}
+	digest, err := relayfile.ComputeCheckpointDigest(s.remoteRoot, entries)
+	if err != nil {
+		return "", fmt.Errorf("%w: canonical digest: %v", ErrCheckpointNonConverged, err)
+	}
+	return digest, nil
+}
+
+func (s *Syncer) runCheckpointTestHook(stage string) {
+	if s.checkpointTestHook != nil {
+		s.checkpointTestHook(stage)
+	}
 }
 
 // HandleLocalChange routes a local filesystem event to the appropriate

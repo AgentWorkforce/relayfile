@@ -1416,6 +1416,65 @@ describe("RelayFileClient — existing methods", () => {
     });
   });
 
+  describe("checkpoint seals", () => {
+    const seal = {
+      sealId: "cps_123",
+      sealToken: "opaque-token",
+      workspaceId: "ws_acme",
+      root: "/sessions",
+      sessionId: "thread-1",
+      generation: 4,
+      digest: `sha256:${"a".repeat(64)}`,
+      workspaceRevision: "rev_9",
+      eventCursor: "evt_9",
+      issuedAt: "2026-08-23T12:00:00Z",
+      expiresAt: "2026-08-23T12:01:00Z",
+    };
+
+    it("issues using a convergence assertion while preserving the server response", async () => {
+      const f = mockFetch(seal, 201);
+      const client = makeClient(f);
+      await expect(client.issueCheckpointSeal({
+        workspaceId: "ws_acme",
+        root: "/sessions",
+        sessionId: "thread-1",
+        generation: 4,
+        expectedDigest: seal.digest,
+        ttlSeconds: 60,
+      })).resolves.toEqual(seal);
+      expect(f.mock.calls[0]![0]).toContain("/v1/workspaces/ws_acme/sync/checkpoint-seals");
+      const init = f.mock.calls[0]![1] as RequestInit;
+      expect(JSON.parse(init.body as string)).toEqual({
+        root: "/sessions",
+        sessionId: "thread-1",
+        generation: 4,
+        expectedDigest: seal.digest,
+        ttlSeconds: 60,
+      });
+    });
+
+    it("consumes by opaque token and bound identity without a caller digest", async () => {
+      const consumed = { ...seal, sealToken: undefined, consumedAt: "2026-08-23T12:00:05Z" };
+      const f = mockFetch(consumed);
+      const client = makeClient(f);
+      await expect(client.consumeCheckpointSeal({
+        workspaceId: "ws_acme",
+        sealToken: "opaque-token",
+        root: "/sessions",
+        sessionId: "thread-1",
+        generation: 4,
+      })).resolves.toEqual(consumed);
+      expect(f.mock.calls[0]![0]).toContain("/v1/workspaces/ws_acme/sync/checkpoint-seals/consume");
+      const init = f.mock.calls[0]![1] as RequestInit;
+      expect(JSON.parse(init.body as string)).toEqual({
+        sealToken: "opaque-token",
+        root: "/sessions",
+        sessionId: "thread-1",
+        generation: 4,
+      });
+    });
+  });
+
   // ---- exportWorkspace ----
   describe("exportWorkspace", () => {
     it("wraps JSON export arrays in a files object", async () => {

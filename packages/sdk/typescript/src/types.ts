@@ -140,6 +140,42 @@ export interface BulkWriteResponse {
   correlationId: string;
 }
 
+export interface CheckpointSeal {
+  sealId: string;
+  sealToken?: string;
+  workspaceId: string;
+  root: string;
+  sessionId: string;
+  generation: number;
+  digest: string;
+  workspaceRevision: string;
+  eventCursor: string;
+  issuedAt: string;
+  expiresAt: string;
+  consumedAt?: string;
+}
+
+export interface IssueCheckpointSealInput {
+  workspaceId: string;
+  root: string;
+  sessionId: string;
+  generation: number;
+  expectedDigest: string;
+  ttlSeconds?: number;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
+export interface ConsumeCheckpointSealInput {
+  workspaceId: string;
+  sealToken: string;
+  root: string;
+  sessionId: string;
+  generation: number;
+  correlationId?: string;
+  signal?: AbortSignal;
+}
+
 export interface FileQueryItem {
   path: string;
   revision: string;

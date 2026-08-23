@@ -155,6 +155,17 @@
       ]
     },
     {
+      "id": "checkpoint-seals",
+      "status": "ts-only",
+      "summary": "Authoritative server-issued checkpoint seals and one-use consume verification for live migration.",
+      "tsExports": [
+        "CheckpointSeal",
+        "ConsumeCheckpointSealInput",
+        "IssueCheckpointSealInput"
+      ],
+      "pyExports": []
+    },
+    {
       "id": "on-write-subscriptions",
       "status": "both",
       "summary": "Subscribe to write events by path pattern.",
@@ -442,6 +453,7 @@
       "status": "ts-only",
       "summary": "Node process launcher and optional native relayfile-mount binary resolution.",
       "tsExports": [
+        "CheckpointAndSealInput",
         "defaultMountLauncher",
         "ensureRelayfileMount",
         "getRelayfileMountBinaryPath"
