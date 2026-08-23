@@ -329,7 +329,7 @@ If the mount has not reconciled for ≥10 minutes it logs `mount stalled: <reaso
 ### Token expired
 
 ```
-error: cloud session expired. Run 'agent-relay cloud login' to sign in again.
+error: cloud session expired. Run 'npx relayfile@latest' to sign in again.
 ```
 
 Rerun `npx relayfile@latest` to refresh the shared Cloud session and resume the

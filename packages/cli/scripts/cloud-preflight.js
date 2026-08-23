@@ -259,6 +259,7 @@ async function prepareCloudSession(args, env = process.env, dependencies = {}) {
     DEFAULT_CLOUD_API_URL;
   const loginTimeoutMs =
     parsed.durations.get("login-timeout") || DEFAULT_LOGIN_TIMEOUT_MS;
+  const loginAbort = new AbortController();
   let timer;
   try {
     await Promise.race([
@@ -271,17 +272,16 @@ async function prepareCloudSession(args, env = process.env, dependencies = {}) {
           1,
           Math.min(loginTimeoutMs, DEFAULT_REFRESH_TIMEOUT_MS),
         ),
+        signal: loginAbort.signal,
       }),
       new Promise((_, reject) => {
-        timer = setTimeout(
-          () =>
-            reject(
-              new Error(
-                `Cloud sign-in timed out after ${parsed.values.get("login-timeout") || "5m"}`,
-              ),
-            ),
-          Math.min(loginTimeoutMs, MAX_NODE_TIMER_DELAY_MS),
-        );
+        timer = setTimeout(() => {
+          const error = new Error(
+            `Cloud sign-in timed out after ${parsed.values.get("login-timeout") || "5m"}`,
+          );
+          loginAbort.abort(error);
+          reject(error);
+        }, Math.min(loginTimeoutMs, MAX_NODE_TIMER_DELAY_MS));
       }),
     ]);
   } finally {

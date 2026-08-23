@@ -312,6 +312,32 @@ func TestQuickStartDisambiguatesSameNamedProjectDirectories(t *testing.T) {
 	}
 }
 
+func TestQuickStartReusesWorkspaceThroughSymlinkAlias(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	projectDir := t.TempDir()
+	existingDir := filepath.Join(projectDir, "relayfile-mount")
+	if err := os.MkdirAll(existingDir, 0o755); err != nil {
+		t.Fatalf("create existing mirror: %v", err)
+	}
+	aliasDir := filepath.Join(t.TempDir(), "mirror-alias")
+	if err := os.Symlink(existingDir, aliasDir); err != nil {
+		t.Skipf("create symlink alias: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:     "frontend",
+		ID:       "ws_frontend",
+		LocalDir: existingDir,
+	}); err != nil {
+		t.Fatalf("store existing workspace: %v", err)
+	}
+
+	gotName, gotDir := resolveSetupTarget("frontend", aliasDir, true)
+	if gotName != "frontend" || gotDir != existingDir {
+		t.Fatalf("quickstart target = (%q, %q), want existing workspace (%q, %q)", gotName, gotDir, "frontend", existingDir)
+	}
+}
+
 func TestHelpFlagPrintsUsageForCommandsAndSubcommands(t *testing.T) {
 	cases := []struct {
 		name string

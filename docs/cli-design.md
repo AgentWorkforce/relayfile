@@ -12,7 +12,7 @@ The `relayfile` CLI is the primary interface for humans and CI systems to intera
 ### Design principles
 
 - **Minimal flags, sensible defaults.** The happy path should require as few arguments as possible.
-- **Canonical auth over local fallbacks.** The npm entrypoint uses a bundled, login-only slice of `@agent-relay/cloud` to establish or refresh the shared session before setup starts. It never invokes the `agent-relay` CLI. Explicit Relayfile tokens (`--token`, `RELAYFILE_TOKEN`, or self-hosted `relayfile login --api-key`) remain available for CI and self-hosted deployments.
+- **Canonical auth over local fallbacks.** The npm entrypoint uses a bundled, login-only slice of `@agent-relay/cloud` to establish or refresh the shared session before setup starts. That setup-auth path never invokes the `agent-relay` CLI. The legacy explicit `relayfile login` command may still delegate to an installed Agent Relay CLI; it is not part of the zero-install setup path. Explicit Relayfile tokens (`--token`, `RELAYFILE_TOKEN`, or self-hosted `relayfile login --api-key`) remain available for CI and self-hosted deployments.
 - **Composable with pipes and scripts.** All commands emit structured JSON when `--json` is passed; human-readable tables otherwise.
 - **No implicit destructive actions.** Deletes require confirmation unless `--yes` is passed.
 
@@ -151,8 +151,9 @@ explicit `relayfile setup` wizard.
 6. Start the existing `relayfile mount` sync loop so the user and agent see ordinary files.
 
 Re-running `relayfile setup` with the same workspace name reuses the locally
-tracked workspace ID, refreshes the Cloud session if needed, re-joins to mint a
-fresh Relayfile JWT, preserves the existing local mirror directory, and only
+tracked workspace ID, refreshes the Cloud session if needed, mints a fresh
+Relayfile JWT through the client-specific renewal route, preserves the existing
+local mirror directory, and only
 opens a new integration connect flow when the requested provider is not already
 connected.
 
@@ -614,8 +615,11 @@ The CLI resolves tokens in this order, first match wins:
 If no token is found, the CLI prints:
 
 ```
-Error: not authenticated. Run 'agent-relay cloud login' for Cloud or set RELAYFILE_TOKEN.
+Error: not authenticated. Run 'npx relayfile@latest' for Cloud or set RELAYFILE_TOKEN.
 ```
+
+An existing Agent Relay installation may use `agent-relay cloud login` as a
+legacy alternative.
 
 ---
 

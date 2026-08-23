@@ -1184,19 +1184,19 @@ func resolveSetupTarget(workspaceName, requestedLocalDir string, preserveExistin
 		return workspaceName, requestedLocalDir
 	}
 
-	requestedAbs := absolutePathIfSet(requestedLocalDir)
+	requestedIdentity := setupTargetPathIdentity(requestedLocalDir)
 	existing, ok := workspaceRecordByName(workspaceName)
 	if !ok {
 		return workspaceName, requestedLocalDir
 	}
-	if existingAbs := absolutePathIfSet(existing.LocalDir); existingAbs != "" && existingAbs == requestedAbs {
+	if existingIdentity := setupTargetPathIdentity(existing.LocalDir); existingIdentity != "" && existingIdentity == requestedIdentity {
 		return workspaceName, existing.LocalDir
 	}
 
 	// Quickstart names normally stay human-readable (the project basename).
 	// If another local project already claimed that name, add a stable path
 	// discriminator so we never mount or connect the other project's workspace.
-	digest := sha256.Sum256([]byte(filepath.Clean(requestedAbs)))
+	digest := sha256.Sum256([]byte(filepath.Clean(requestedIdentity)))
 	digestHex := hex.EncodeToString(digest[:])
 	for width := 8; width <= len(digestHex); width += 4 {
 		candidate := workspaceName + "-" + digestHex[:width]
@@ -1204,12 +1204,24 @@ func resolveSetupTarget(workspaceName, requestedLocalDir string, preserveExistin
 		if !exists {
 			return candidate, requestedLocalDir
 		}
-		if candidateAbs := absolutePathIfSet(candidateRecord.LocalDir); candidateAbs != "" && candidateAbs == requestedAbs {
+		if candidateIdentity := setupTargetPathIdentity(candidateRecord.LocalDir); candidateIdentity != "" && candidateIdentity == requestedIdentity {
 			return candidate, candidateRecord.LocalDir
 		}
 	}
 
 	return workspaceName + "-" + digestHex, requestedLocalDir
+}
+
+func setupTargetPathIdentity(value string) string {
+	absolute := absolutePathIfSet(value)
+	if absolute == "" {
+		return ""
+	}
+	canonical, err := canonicalMountStartLockRoot(absolute)
+	if err != nil {
+		return filepath.Clean(absolute)
+	}
+	return canonical
 }
 
 func setupAgentPromptPath(absLocalDir, provider string) string {

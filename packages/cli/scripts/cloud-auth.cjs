@@ -442,6 +442,33 @@ function clampInterval(seconds) {
   }
   return Math.min(MAX_INTERVAL_SECONDS, Math.ceil(seconds));
 }
+function throwIfAborted(signal) {
+  if (signal?.aborted) {
+    throw signal.reason ?? new Error("Cloud login aborted");
+  }
+}
+function combinedRequestSignal(timeoutMs, callerSignal) {
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  if (!callerSignal) {
+    return { signal: timeoutSignal, cleanup: () => {
+    } };
+  }
+  const controller = new AbortController();
+  const abortFromCaller = () => controller.abort(callerSignal.reason);
+  const abortFromTimeout = () => controller.abort(timeoutSignal.reason);
+  callerSignal.addEventListener("abort", abortFromCaller, { once: true });
+  timeoutSignal.addEventListener("abort", abortFromTimeout, { once: true });
+  if (callerSignal.aborted) {
+    abortFromCaller();
+  }
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      callerSignal.removeEventListener("abort", abortFromCaller);
+      timeoutSignal.removeEventListener("abort", abortFromTimeout);
+    }
+  };
+}
 function isHeadlessEnvironment(env = process.env, platform = import_node_os3.default.platform()) {
   if (env.SSH_CONNECTION || env.SSH_TTY || env.SSH_CLIENT) {
     return true;
@@ -455,6 +482,8 @@ async function startDeviceAuthorization(apiUrl, options = {}) {
   const fetchImpl = options.fetchImpl ?? fetch;
   const clientName = options.clientName ?? import_node_os3.default.hostname();
   const timeoutMs = normalizeTimeout(options.requestTimeoutMs);
+  throwIfAborted(options.signal);
+  const requestSignal = combinedRequestSignal(timeoutMs, options.signal);
   let response;
   try {
     response = await fetchImpl(buildApiUrl(apiUrl, "/api/v1/auth/device/start"), {
@@ -463,9 +492,10 @@ async function startDeviceAuthorization(apiUrl, options = {}) {
       body: JSON.stringify({ client_name: clientName }),
       // Nothing has been printed yet at this point, so a hang here shows the
       // user a bare cursor forever. Fail loudly instead.
-      signal: AbortSignal.timeout(timeoutMs)
+      signal: requestSignal.signal
     });
   } catch (error) {
+    throwIfAborted(options.signal);
     if (isRequestTimeout(error)) {
       throw new CloudAuthError(
         "AUTH_DEVICE_FLOW_FAILED",
@@ -476,6 +506,8 @@ async function startDeviceAuthorization(apiUrl, options = {}) {
     throw new CloudAuthError("AUTH_DEVICE_FLOW_FAILED", `Could not reach ${apiUrl} to start device login`, {
       cause: error
     });
+  } finally {
+    requestSignal.cleanup();
   }
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
@@ -501,20 +533,28 @@ async function startDeviceAuthorization(apiUrl, options = {}) {
 }
 async function pollForDeviceToken(apiUrl, authorization, hooks = {}) {
   const fetchImpl = hooks.fetchImpl ?? fetch;
-  const sleep = hooks.sleep ?? ((ms) => (0, import_promises2.setTimeout)(ms));
+  const sleep = hooks.sleep ?? ((ms) => (0, import_promises2.setTimeout)(ms, void 0, { signal: hooks.signal }));
   const now = hooks.now ?? (() => Date.now());
   const log = hooks.log ?? ((message) => console.log(message));
   const requestTimeoutMs = normalizeTimeout(hooks.requestTimeoutMs);
   let intervalSeconds = authorization.intervalSeconds;
   const deadline = now() + authorization.expiresInSeconds * 1e3;
   for (; ; ) {
-    await sleep(Math.min(intervalSeconds * 1e3, Math.max(0, deadline - now())));
+    throwIfAborted(hooks.signal);
+    try {
+      await sleep(Math.min(intervalSeconds * 1e3, Math.max(0, deadline - now())));
+    } catch (error) {
+      throwIfAborted(hooks.signal);
+      throw error;
+    }
+    throwIfAborted(hooks.signal);
     if (now() >= deadline) {
       throw deviceError(
         "Device login expired before it was approved. Run the command again to get a new code."
       );
     }
     const pollTimeoutMs = clampTimerDelay(Math.min(requestTimeoutMs, deadline - now()));
+    const requestSignal = combinedRequestSignal(pollTimeoutMs, hooks.signal);
     let response;
     try {
       response = await fetchImpl(buildApiUrl(apiUrl, "/api/v1/auth/device/token"), {
@@ -524,9 +564,10 @@ async function pollForDeviceToken(apiUrl, authorization, hooks = {}) {
           grant_type: DEVICE_GRANT_TYPE,
           device_code: authorization.deviceCode
         }),
-        signal: AbortSignal.timeout(pollTimeoutMs)
+        signal: requestSignal.signal
       });
     } catch (error) {
+      throwIfAborted(hooks.signal);
       if (isRequestTimeout(error)) {
         if (now() >= deadline) {
           throw deviceError(
@@ -542,6 +583,8 @@ async function pollForDeviceToken(apiUrl, authorization, hooks = {}) {
         `Lost connection to ${apiUrl} while waiting for approval`,
         { cause: error }
       );
+    } finally {
+      requestSignal.cleanup();
     }
     const payload = await response.json().catch(() => null);
     if (response.ok) {
@@ -610,7 +653,8 @@ async function runDeviceAuthorizationFlow(apiUrl, options = {}) {
   const authorization = await startDeviceAuthorization(apiUrl, {
     ...options.clientName ? { clientName: options.clientName } : {},
     ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {},
-    ...options.requestTimeoutMs !== void 0 ? { requestTimeoutMs: options.requestTimeoutMs } : {}
+    ...options.requestTimeoutMs !== void 0 ? { requestTimeoutMs: options.requestTimeoutMs } : {},
+    ...options.signal ? { signal: options.signal } : {}
   });
   log(formatDeviceInstructions(authorization));
   log("Waiting for authorization...");
@@ -694,7 +738,8 @@ async function readStoredAuth(env = process.env) {
   }
   return readCanonicalStoredAuth();
 }
-async function writeStoredAuth(auth) {
+async function writeStoredAuth(auth, options = {}) {
+  throwIfAborted(options.signal);
   await import_promises3.default.mkdir(AUTH_DIR_PATH, {
     recursive: true,
     mode: 448
@@ -704,12 +749,14 @@ async function writeStoredAuth(auth) {
     `.${import_node_path3.default.basename(AUTH_FILE_PATH)}.${process.pid}.${Date.now()}.${(0, import_node_crypto.randomUUID)()}.tmp`
   );
   try {
+    throwIfAborted(options.signal);
     await import_promises3.default.writeFile(temporaryPath, `${JSON.stringify(auth, null, 2)}
 `, {
       encoding: "utf8",
       mode: 384
     });
     await import_promises3.default.chmod(temporaryPath, 384);
+    throwIfAborted(options.signal);
     await import_promises3.default.rename(temporaryPath, AUTH_FILE_PATH);
   } finally {
     await import_promises3.default.rm(temporaryPath, { force: true });
@@ -721,7 +768,7 @@ async function refreshStoredCloudIdentity(auth, options = {}) {
     const { response } = await authorizedApiFetch(
       auth,
       "/api/v1/auth/whoami",
-      { method: "GET" },
+      { method: "GET", signal: options.signal },
       { interactive: false }
     );
     if (!response.ok) return null;
@@ -902,9 +949,29 @@ function redirectToHostedCliAuthPage(response, apiUrl, options) {
   response.end();
 }
 async function beginBrowserLogin(apiUrl, options = {}) {
+  throwIfAborted(options.signal);
   const state = (0, import_node_crypto.randomUUID)();
   return new Promise((resolve, reject) => {
     let settled = false;
+    let timeout;
+    let removeAbort = () => {
+    };
+    const finish = (callback, value) => {
+      if (settled) {
+        return false;
+      }
+      settled = true;
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      removeAbort();
+      try {
+        server.close();
+      } catch {
+      }
+      callback(value);
+      return true;
+    };
     const server = import_node_http.default.createServer((request, response) => {
       const requestUrl = new URL(request.url || "/", "http://127.0.0.1");
       if (requestUrl.pathname !== "/callback") {
@@ -925,11 +992,7 @@ async function beginBrowserLogin(apiUrl, options = {}) {
           status: "error",
           detail: error
         });
-        if (!settled) {
-          settled = true;
-          server.close();
-          reject(new Error(error));
-        }
+        finish(reject, new Error(error));
         return;
       }
       const accessToken = requestUrl.searchParams.get("access_token");
@@ -942,37 +1005,25 @@ async function beginBrowserLogin(apiUrl, options = {}) {
           status: "error",
           detail: "Expected access token, refresh token, API URL, and expiration timestamp."
         });
-        if (!settled) {
-          settled = true;
-          server.close();
-          reject(new Error("CLI login callback was missing required fields"));
-        }
+        finish(reject, new Error("CLI login callback was missing required fields"));
         return;
       }
       redirectToHostedCliAuthPage(response, returnedApiUrl, {
         status: "success",
         detail: `API endpoint: ${returnedApiUrl}`
       });
-      if (!settled) {
-        settled = true;
-        server.close();
-        resolve({
-          accessToken,
-          refreshToken,
-          accessTokenExpiresAt,
-          ...refreshTokenExpiresAt ? { refreshTokenExpiresAt } : {},
-          apiUrl: returnedApiUrl
-        });
-      }
+      finish(resolve, {
+        accessToken,
+        refreshToken,
+        accessTokenExpiresAt,
+        ...refreshTokenExpiresAt ? { refreshTokenExpiresAt } : {},
+        apiUrl: returnedApiUrl
+      });
     });
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
       if (!address || typeof address === "string") {
-        if (!settled) {
-          settled = true;
-          server.close();
-          reject(new Error("Failed to start local callback server"));
-        }
+        finish(reject, new Error("Failed to start local callback server"));
         return;
       }
       const callbackUrl = new URL("/callback", `http://127.0.0.1:${address.port}`);
@@ -991,18 +1042,22 @@ async function beginBrowserLogin(apiUrl, options = {}) {
       }
     });
     server.on("error", (error) => {
-      if (!settled) {
-        settled = true;
-        reject(error);
-      }
+      finish(reject, error);
     });
-    setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        server.close();
-        reject(new Error("Timed out waiting for browser login"));
+    if (options.signal) {
+      const abortLogin = () => finish(reject, options.signal.reason ?? new Error("Cloud login aborted"));
+      options.signal.addEventListener("abort", abortLogin, { once: true });
+      removeAbort = () => options.signal.removeEventListener("abort", abortLogin);
+      if (options.signal.aborted) {
+        abortLogin();
       }
-    }, 5 * 6e4).unref();
+    }
+    if (!settled) {
+      timeout = setTimeout(() => {
+        finish(reject, new Error("Timed out waiting for browser login"));
+      }, 5 * 6e4);
+      timeout.unref();
+    }
   });
 }
 async function refreshStoredAuth(auth, options = {}) {
@@ -1016,7 +1071,7 @@ async function refreshStoredAuth(auth, options = {}) {
       return latestAuth;
     }
     const nextAuth = await requestStoredAuthRefresh(refreshSource, options);
-    await writeStoredAuth(nextAuth);
+    await writeStoredAuth(nextAuth, options);
     return nextAuth;
   }, options);
 }
@@ -1046,9 +1101,12 @@ async function requestStoredAuthRefresh(auth, options = {}) {
   };
   return nextAuth;
 }
-async function completeLogin(auth) {
-  await writeStoredAuth(auth);
-  const identity = await refreshStoredCloudIdentity(auth);
+async function completeLogin(auth, options = {}) {
+  throwIfAborted(options.signal);
+  await writeStoredAuth(auth, options);
+  throwIfAborted(options.signal);
+  const identity = await refreshStoredCloudIdentity(auth, options);
+  throwIfAborted(options.signal);
   console.log(`Logged in to ${auth.apiUrl}`);
   if (identity?.email) {
     const org = identity.organizationName ?? identity.organizationSlug;
@@ -1057,29 +1115,33 @@ async function completeLogin(auth) {
   return auth;
 }
 async function loginWithBrowser(apiUrl, options = {}) {
-  return completeLogin(await beginBrowserLogin(apiUrl, options));
+  return completeLogin(await beginBrowserLogin(apiUrl, options), options);
 }
 async function loginWithDevice(apiUrl, options = {}) {
-  return completeLogin(await runDeviceAuthorizationFlow(apiUrl, options));
+  return completeLogin(await runDeviceAuthorizationFlow(apiUrl, options), options);
 }
 async function loginInteractive(apiUrl, options = {}) {
   const env = options.env ?? process.env;
   if (options.device === true || isHeadlessEnvironment(env)) {
     return loginWithDevice(apiUrl, {
+      ...options,
       ...options.client ? { clientName: options.client } : {}
     });
   }
   return loginWithBrowser(apiUrl, {
+    ...options,
     ...options.client ? { client: options.client } : {}
   });
 }
 async function ensureCloudSession(options = {}) {
+  throwIfAborted(options.signal);
   const env = options.env ?? process.env;
   const apiUrl = options.apiUrl || env.CLOUD_API_URL?.trim() || defaultApiUrl();
   const force = options.force === true;
   const interactive = options.interactive !== false;
   const refreshTimeoutMs = options.refreshTimeoutMs;
   const stored = !force ? await readStoredAuth(env) : null;
+  throwIfAborted(options.signal);
   if (!stored) {
     if (!interactive) {
       throw browserRequired(
@@ -1089,17 +1151,20 @@ async function ensureCloudSession(options = {}) {
     const auth = await loginInteractive(apiUrl, {
       device: options.device,
       env,
-      client: options.client
+      client: options.client,
+      signal: options.signal
     });
     return createCloudSession(auth, { refreshTimeoutMs });
   }
   if (!shouldRefreshStoredAuth(stored)) {
+    throwIfAborted(options.signal);
     return createCloudSession(stored, { refreshTimeoutMs });
   }
   try {
-    const auth = await refreshStoredAuth(stored, { refreshTimeoutMs });
+    const auth = await refreshStoredAuth(stored, { refreshTimeoutMs, signal: options.signal });
     return createCloudSession(auth, { refreshTimeoutMs });
   } catch (error) {
+    throwIfAborted(options.signal);
     if (isEnvBackedAuth(stored)) {
       throw toEnvAuthRefreshError(error);
     }
@@ -1109,7 +1174,8 @@ async function ensureCloudSession(options = {}) {
     const auth = await loginInteractive(stored.apiUrl, {
       device: options.device,
       env,
-      client: options.client
+      client: options.client,
+      signal: options.signal
     });
     return createCloudSession(auth, { refreshTimeoutMs });
   }

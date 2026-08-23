@@ -45,6 +45,8 @@ test("bare relayfile prepares Cloud auth through the Agent Relay SDK", async () 
   });
 
   assert.equal(prepared, true);
+  assert.equal(calls[0].signal instanceof AbortSignal, true);
+  assert.equal(calls[0].signal.aborted, false);
   assert.deepEqual(calls, [
     {
       apiUrl: "https://agentrelay.com/cloud",
@@ -52,6 +54,7 @@ test("bare relayfile prepares Cloud auth through the Agent Relay SDK", async () 
       interactive: true,
       device: false,
       refreshTimeoutMs: 10000,
+      signal: calls[0].signal,
     },
   ]);
   assert.deepEqual(env, {});
@@ -89,7 +92,9 @@ test("setup forwards its Cloud URL and no-open mode to the SDK", async () => {
     interactive: true,
     device: true,
     refreshTimeoutMs: 10000,
+    signal: received.signal,
   });
+  assert.equal(received.signal instanceof AbortSignal, true);
   assert.deepEqual(env, {});
 });
 
@@ -103,6 +108,49 @@ test("bundled SDK carries the Relayfile marker through both login modes", () => 
     /loginUrl\.searchParams\.set\("client", options\.client\)/,
   );
   assert.match(bundledSdk, /clientName: options\.client/);
+  assert.match(bundledSdk, /signal: options\.signal/);
+  assert.match(bundledSdk, /throwIfAborted\(options\.signal\)/);
+});
+
+test("bundled SDK aborts device polling without issuing or storing credentials", () => {
+  const modulePath = path.join(__dirname, "cloud-auth.cjs");
+  const script = `
+    const { ensureCloudSession } = require(${JSON.stringify(modulePath)});
+    const controller = new AbortController();
+    let fetchCalls = 0;
+    global.fetch = async () => {
+      fetchCalls += 1;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          device_code: "device-test",
+          user_code: "TEST-CODE",
+          verification_uri: "https://example.test/device",
+          expires_in: 600,
+          interval: 5,
+        }),
+      };
+    };
+    console.log = () => {};
+    const auth = ensureCloudSession({
+      apiUrl: "https://example.test/cloud",
+      client: "relayfile",
+      device: true,
+      force: true,
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(new Error("preflight cancelled")), 10);
+    auth.then(
+      () => process.exit(2),
+      (error) => process.exit(error.message === "preflight cancelled" && fetchCalls === 1 ? 0 : 3),
+    );
+  `;
+  const result = spawnSync(process.execPath, ["-e", script], {
+    encoding: "utf8",
+    timeout: 2000,
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 
 test("help and caller-owned tokens do not start interactive auth", () => {
@@ -243,14 +291,38 @@ test("Go durations are validated and converted for SDK login", () => {
 });
 
 test("login timeout bounds SDK authentication", async () => {
+  let receivedSignal;
+  let lateCredentialWrite = false;
   await assert.rejects(
     prepareCloudSession(
       ["setup", "--login-timeout=1ms"],
       {},
-      { ensureCloudSession: () => new Promise(() => {}) },
+      {
+        ensureCloudSession: ({ signal }) => {
+          receivedSignal = signal;
+          return new Promise((resolve, reject) => {
+            const lateWrite = setTimeout(() => {
+              lateCredentialWrite = true;
+              resolve();
+            }, 25);
+            signal.addEventListener(
+              "abort",
+              () => {
+                clearTimeout(lateWrite);
+                reject(signal.reason);
+              },
+              { once: true },
+            );
+          });
+        },
+      },
     ),
     /Cloud sign-in timed out after 1ms/,
   );
+  assert.equal(receivedSignal.aborted, true);
+  assert.match(receivedSignal.reason.message, /timed out after 1ms/);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(lateCredentialWrite, false);
 });
 
 test("false no-open values keep browser login enabled", async () => {

@@ -137,7 +137,8 @@ Re-running `relayfile setup` against the same `--workspace` name
 
 - Reuse the locally tracked workspace ID if present in
   `~/.relayfile/workspaces.json` rather than minting a duplicate.
-- Refresh the Relayfile VFS token via Cloud `join` before mount.
+- Refresh the Relayfile VFS token before mount: the native CLI calls Cloud's
+  `relayfile/delegated-token` route, while `@relayfile/sdk` calls Cloud `join`.
 - Skip integration connect if the integration status endpoint already
   returns `ready=true`.
 
@@ -458,29 +459,39 @@ executing a Node CLI — and, because the binary was selected by `AGENT_RELAY_BI
 (the *broker* variable), relay-spawned agents could not auto-recover at all.
 The clause is retired.
 
-### 5.3 Relayfile VFS token rejoin
+### 5.3 Relayfile VFS token renewal
 
-The Relayfile VFS token used by the mount **MUST** be refreshed by
-re-issuing the workspace `join` call:
+The native Relayfile CLI **MUST** renew its delegated runtime bundle through
+the bundle's Relayfile refresh endpoint first. If that refresh is rejected or
+cannot rotate the bundle, it **MUST** re-mint through Cloud:
+
+```
+POST ${cloud-api-url}/api/v1/workspaces/{id}/relayfile/delegated-token
+  { "agentName": "relayfile-cli", "scopes": ["fs:read","fs:write"] }
+```
+
+`@relayfile/sdk`'s `RelayfileSetup` / `WorkspaceHandle` **MUST** renew its VFS
+token by re-issuing the workspace `join` call:
 
 ```
 POST ${cloud-api-url}/api/v1/workspaces/{id}/join
-  { "agentName": "relayfile-cli", "scopes": ["fs:read","fs:write"] }
+  { "agentName": "<configured agent name>", "scopes": ["fs:read","fs:write"] }
 ```
 
 Triggers:
 
-- The mount **MUST** preemptively rejoin when the JWT's `exp` is within
+- The mount **MUST** preemptively renew when the JWT's `exp` is within
   10 % of its lifetime, with a floor of 5 minutes.
 - Any 401/403 from a Relayfile API call **MUST** trigger a single
-  rejoin attempt before the call is retried. A second 401 fails the
+  renewal attempt before the call is retried. A second 401 fails the
   cycle and is logged.
 
-The rejoin **MUST**:
+Renewal **MUST**:
 
 - Use the Cloud access token from the canonical session (§5.2).
-- Keep the minted Relayfile runtime token in memory; do not write it to
-  `~/.relayfile/credentials.json`.
+- Keep the minted Relayfile runtime token in memory or in the native CLI's
+  mode-`0600` delegated credentials file; do not write it to the legacy
+  `~/.relayfile/credentials.json` API-key store.
 - Update the in-memory token of the running syncer/HTTP client without
   killing the process or losing the websocket.
 
@@ -797,6 +808,7 @@ against realistic mocks of Cloud, Nango, and Relayfile services.
 - **Mock Cloud** — `httptest` server in Go (CLI tests) and a
   `node:http` server in TS (SDK tests) implementing `/api/v1/cli/login`,
   `/api/v1/auth/token/refresh`, `/api/v1/workspaces`,
+  `/api/v1/workspaces/{id}/relayfile/delegated-token`,
   `/api/v1/workspaces/{id}/join`,
   `/api/v1/workspaces/{id}/integrations/connect-session`,
   `/api/v1/workspaces/{id}/integrations/{provider}/status`,
@@ -824,7 +836,7 @@ lives in.
 | A5 | Mirror conflict: local edit + remote edit with new revision yields `.relay/conflicts/<path>.<rev>.local` and a refreshed local file. | `internal/mountsync/syncer_conflict_test.go`     |
 | A6 | Schema validation failure on writeback: file lands in `.relay/conflicts/<path>.invalid.<ts>`, original restored, exit code 0 in CLI status. | `internal/mountsync/syncer_writeback_test.go`    |
 | A7 | Dead-letter surfacing: a 422 from Cloud during writeback creates `.relay/dead-letter/<opId>.json`; `relayfile ops replay` clears it on success. | `cmd/relayfile/ops_e2e_test.go`                  |
-| A8 | Token refresh: VFS token expires mid-mount; mount calls `/join` with the cloud access token, replaces credentials, continues without dropping websocket. | `internal/mountsync/syncer_refresh_test.go`      |
+| A8 | Token refresh: VFS token expires mid-mount; the native CLI rotates the delegated bundle, falls back to Cloud `/relayfile/delegated-token` when rotation is rejected, replaces credentials, and continues without dropping websocket. The SDK parity test separately covers `/join`. | `internal/mountsync/syncer_refresh_test.go`      |
 | A9 | Cloud refresh token expired: mount enters read-only degraded state, prints recovery instruction once per minute, no exit. | `internal/mountsync/syncer_refresh_test.go`      |
 | A10 | Initial sync gate: Cloud reports `cataloging`; CLI waits, polls `/sync`, exits 0 once `ready`. With a forced timeout it exits 0 with the resume hint. | `cmd/relayfile/setup_e2e_test.go`                |
 | A11 | Webhook unhealthy: Cloud returns `webhookHealthy=false, lagSeconds=80`; `relayfile status` includes the warning row. | `cmd/relayfile/status_e2e_test.go`               |
