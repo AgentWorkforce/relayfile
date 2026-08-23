@@ -269,6 +269,7 @@ async function prepareCloudSession(args, env = process.env, dependencies = {}) {
         client: "relayfile",
         interactive: true,
         device: parsed.values.get("no-open") === true,
+        loginTimeoutMs,
         refreshTimeoutMs: Math.max(
           1,
           Math.min(loginTimeoutMs, DEFAULT_REFRESH_TIMEOUT_MS),

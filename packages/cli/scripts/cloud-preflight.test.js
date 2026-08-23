@@ -53,6 +53,7 @@ test("bare relayfile prepares Cloud auth through the Agent Relay SDK", async () 
       client: "relayfile",
       interactive: true,
       device: false,
+      loginTimeoutMs: 300000,
       refreshTimeoutMs: 10000,
       signal: calls[0].signal,
     },
@@ -91,6 +92,7 @@ test("setup forwards its Cloud URL and no-open mode to the SDK", async () => {
     client: "relayfile",
     interactive: true,
     device: true,
+    loginTimeoutMs: 10000,
     refreshTimeoutMs: 10000,
     signal: received.signal,
   });
@@ -144,6 +146,41 @@ test("bundled SDK aborts device polling without issuing or storing credentials",
     auth.then(
       () => process.exit(2),
       (error) => process.exit(error.message === "preflight cancelled" && fetchCalls === 1 ? 0 : 3),
+    );
+  `;
+  const result = spawnSync(process.execPath, ["-e", script], {
+    encoding: "utf8",
+    timeout: 2000,
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+});
+
+test("bundled SDK handles browser-launch errors and honors the login timeout", () => {
+  const modulePath = path.join(__dirname, "cloud-auth.cjs");
+  const script = `
+    const os = require("node:os");
+    os.platform = () => "linux";
+    process.env.PATH = "";
+    const { ensureCloudSession } = require(${JSON.stringify(modulePath)});
+    console.log = () => {};
+    const startedAt = Date.now();
+    ensureCloudSession({
+      apiUrl: "https://example.test/cloud",
+      client: "relayfile",
+      interactive: true,
+      device: false,
+      force: true,
+      env: { DISPLAY: ":99" },
+      loginTimeoutMs: 25,
+    }).then(
+      () => process.exit(2),
+      (error) => {
+        const elapsedMs = Date.now() - startedAt;
+        const passed =
+          error.message === "Timed out waiting for browser login" &&
+          elapsedMs < 1000;
+        setTimeout(() => process.exit(passed ? 0 : 3), 25);
+      },
     );
   `;
   const result = spawnSync(process.execPath, ["-e", script], {

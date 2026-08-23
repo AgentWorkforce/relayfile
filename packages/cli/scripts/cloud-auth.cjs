@@ -955,6 +955,7 @@ function redirectToHostedCliAuthPage(response, apiUrl, options) {
 async function beginBrowserLogin(apiUrl, options = {}) {
   throwIfAborted(options.signal);
   const state = (0, import_node_crypto.randomUUID)();
+  const loginTimeoutMs = typeof options.loginTimeoutMs === "number" && Number.isFinite(options.loginTimeoutMs) && options.loginTimeoutMs > 0 ? Math.min(options.loginTimeoutMs, 2147483647) : 5 * 6e4;
   return new Promise((resolve, reject) => {
     let settled = false;
     let timeout;
@@ -1041,6 +1042,8 @@ async function beginBrowserLogin(apiUrl, options = {}) {
       console.log("If the browser does not open, paste this URL into your browser.");
       try {
         const child = openBrowser(loginUrl.toString());
+        child.once("error", () => {
+        });
         child.unref();
       } catch {
       }
@@ -1059,7 +1062,7 @@ async function beginBrowserLogin(apiUrl, options = {}) {
     if (!settled) {
       timeout = setTimeout(() => {
         finish(reject, new Error("Timed out waiting for browser login"));
-      }, 5 * 6e4);
+      }, loginTimeoutMs);
       timeout.unref();
     }
   });
@@ -1156,6 +1159,7 @@ async function ensureCloudSession(options = {}) {
       device: options.device,
       env,
       client: options.client,
+      loginTimeoutMs: options.loginTimeoutMs,
       signal: options.signal
     });
     return createCloudSession(auth, { refreshTimeoutMs });
@@ -1179,6 +1183,7 @@ async function ensureCloudSession(options = {}) {
       device: options.device,
       env,
       client: options.client,
+      loginTimeoutMs: options.loginTimeoutMs,
       signal: options.signal
     });
     return createCloudSession(auth, { refreshTimeoutMs });
