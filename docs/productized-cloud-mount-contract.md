@@ -29,7 +29,9 @@ mitigation. We do not paper over the difference.
 
 ### 1.1 Invocation forms
 
-The CLI **MUST** support these equivalent first-run forms:
+The CLI **MUST** support these first-run forms. Bare `relayfile` is the
+zero-prompt quickstart; explicit `relayfile setup` retains its prompt-driven
+defaults and flag overrides:
 
 ```
 relayfile
@@ -55,6 +57,10 @@ below are normative for `setup`; defaults are listed in parentheses.
 | `--login-timeout`   | `5m`                                   | OAuth callback timeout                                             |
 | `--connect-timeout` | `5m`                                   | Integration readiness timeout                                      |
 
+The bare `relayfile` quickstart supplies GitHub, the current directory name,
+and `./relayfile-mount` as explicit setup values. The prompt defaults above
+apply when a user invokes `relayfile setup` without those flags.
+
 ### 1.2 Required ordered steps
 
 `relayfile setup` **MUST** execute these steps in this order, and every
@@ -63,11 +69,17 @@ step **MUST** be idempotent on re-run:
 1. **Print intent.** A single line stating: "Relayfile setup. This signs
    you in, connects an integration, and prepares a local VFS mount."
 2. **Cloud login.**
-   - Cloud authentication is owned by `agent-relay cloud login` and the
-     `@agent-relay/cloud` session store.
-   - Relayfile obtains Cloud auth by reading that store's canonical credential
-     file, `~/.agentworkforce/relay/cloud-auth.json` — never by invoking the
-     `agent-relay` CLI.
+   - Cloud authentication is owned by `@agent-relay/cloud` and its canonical
+     session store. The npm launcher calls its `ensureCloudSession` surface;
+     it never invokes the `agent-relay` CLI for setup authentication.
+   - The published npm package contains a tree-shaken login-only SDK bundle,
+     so a clean-machine `npx relayfile@latest` does not install the Agent Relay
+     CLI or the Cloud SDK's unrelated storage dependencies.
+   - The SDK reads or writes `~/.agentworkforce/relay/cloud-auth.json` at
+     `0600`; the native Relayfile process reads the same canonical file. The
+     launcher does not copy file-backed credentials into inherited
+     `CLOUD_API_*` variables, argv, or stdout, so either runtime can safely
+     persist refresh-token rotation under the shared lock.
    - Relayfile does not persist `~/.relayfile/cloud-credentials.json` as a
      Cloud session source of truth.
 3. **Workspace name.** Use `--workspace`, else prompt. Default suggestion:
@@ -77,11 +89,11 @@ step **MUST** be idempotent on re-run:
 5. **Local dir.** Use `--local-dir`, else prompt; default
    `./relayfile-mount`. The directory **MUST** be created with `0o755`
    and a `.relay/` subdir with `0o755`.
-6. **Workspace create + join.** Resolve the canonical active workspace via
-   `agent-relay workspace active --json`, then `POST
-   /api/v1/workspaces/{cloudWorkspaceId}/join` with `{agentName:
-   "relayfile-cli", scopes: ["fs:read", "fs:write"]}`. Use the returned
-   Relayfile VFS token in memory and add/update local workspace metadata in
+6. **Workspace create + join.** Reuse the locally tracked named workspace or
+   `POST /api/v1/workspaces` to create it, then mint a scoped runtime bundle at
+   `/api/v1/workspaces/{cloudWorkspaceId}/relayfile/delegated-token` with
+   `agentName: "relayfile-cli"`. Use the returned Relayfile VFS token in memory
+   and add/update local workspace metadata in
    `~/.relayfile/workspaces.json` without marking a separate Relayfile
    workspace default.
 7. **Integration connect.** If a provider was chosen and not `none`:
@@ -125,7 +137,8 @@ Re-running `relayfile setup` against the same `--workspace` name
 
 - Reuse the locally tracked workspace ID if present in
   `~/.relayfile/workspaces.json` rather than minting a duplicate.
-- Refresh the Relayfile VFS token via Cloud `join` before mount.
+- Refresh the Relayfile VFS token before mount: the native CLI calls Cloud's
+  `relayfile/delegated-token` route, while `@relayfile/sdk` calls Cloud `join`.
 - Skip integration connect if the integration status endpoint already
   returns `ready=true`.
 
@@ -369,8 +382,8 @@ two layers: Cloud login tokens (user identity) and Relayfile VFS tokens
 
 ### 5.1 Credential files
 
-- `~/.agentworkforce/relay/cloud-auth.json` (`0600`, written by
-  `agent-relay cloud login`; read but never created by Relayfile):
+- `~/.agentworkforce/relay/cloud-auth.json` (`0600`, written by the Agent Relay
+  Cloud SDK used by either Agent Relay or Relayfile's npm quickstart):
   ```json
   {
     "apiUrl": "https://agentrelay.com/cloud",
@@ -384,7 +397,7 @@ two layers: Cloud login tokens (user identity) and Relayfile VFS tokens
   `relayfileWorkspaceId` used by Relayfile data-plane calls.
 - The cloud session itself is read from the canonical credential file
   (`~/.agentworkforce/relay/cloud-auth.json`, `0600`) that
-  `agent-relay cloud login` writes, or from `CLOUD_API_URL` /
+  the SDK writes, or from `CLOUD_API_URL` /
   `CLOUD_API_ACCESS_TOKEN` / `CLOUD_API_REFRESH_TOKEN` /
   `CLOUD_API_ACCESS_TOKEN_EXPIRES_AT`. Relayfile refreshes an expiring access
   token through Cloud's `/api/v1/auth/token/refresh` and writes the rotated
@@ -395,9 +408,9 @@ two layers: Cloud login tokens (user identity) and Relayfile VFS tokens
   `RELAYFILE_AGENT_RELAY_BIN` when set, for **workspace resolution only**. It
   must never read `AGENT_RELAY_BIN`: across Agent Relay that variable names the
   broker binary, and reading it here made relayfile exec `agent-relay-broker`.
-  The runtime environment, including sandbox and
-  Daytona/base images, must provide `agent-relay` CLI `8.7.0` or newer before
-  using the Cloud-hosted path. Relayfile must fail fast with an actionable
+  Setup itself does not require this binary. Runtime environments only need
+  `agent-relay` CLI `8.7.0` or newer when a command explicitly resolves or
+  switches an Agent Relay workspace. Relayfile must fail fast with an actionable
   message naming the argv it probed, the binary it used, and how that binary
   was resolved, when the binary is missing, stale, or lacks the required
   `workspace active` or `workspace switch` commands.
@@ -419,9 +432,10 @@ two layers: Cloud login tokens (user identity) and Relayfile VFS tokens
 
 ### 5.2 Cloud token refresh
 
-Relayfile **MUST NOT** own a Cloud session of its own. It reads the canonical
-session and refreshes it in place, against the same endpoint and with the same
-windows as `@agent-relay/cloud`:
+Relayfile **MUST NOT** create a second Cloud session store. The npm setup path
+uses `@agent-relay/cloud` itself to establish or refresh the canonical session;
+the native runtime retains compatible in-place refresh behavior for long-lived
+mounts and direct-token environments:
 
 - Read `~/.agentworkforce/relay/cloud-auth.json` (or the `CLOUD_API_*`
   environment). Never write a second session store.
@@ -434,9 +448,9 @@ windows as `@agent-relay/cloud`:
   would invalidate the copy `agent-relay` reads.
 - A session supplied through the environment is owned by whoever exported it:
   refresh it in memory, never to disk.
-- When refresh is refused, surface an actionable `agent-relay cloud login`
-  recovery hint. The mount process **MUST** keep running on the existing VFS
-  token until that token also expires.
+- When refresh is refused, surface an actionable `npx relayfile@latest` or
+  `agent-relay cloud login` recovery hint. The mount process **MUST** keep
+  running on the existing VFS token until that token also expires.
 
 An earlier revision of this contract required Relayfile to obtain Cloud
 credentials by invoking `agent-relay cloud session --json` and forbade it from
@@ -445,29 +459,39 @@ executing a Node CLI — and, because the binary was selected by `AGENT_RELAY_BI
 (the *broker* variable), relay-spawned agents could not auto-recover at all.
 The clause is retired.
 
-### 5.3 Relayfile VFS token rejoin
+### 5.3 Relayfile VFS token renewal
 
-The Relayfile VFS token used by the mount **MUST** be refreshed by
-re-issuing the workspace `join` call:
+The native Relayfile CLI **MUST** renew its delegated runtime bundle through
+the bundle's Relayfile refresh endpoint first. If that refresh is rejected or
+cannot rotate the bundle, it **MUST** re-mint through Cloud:
+
+```
+POST ${cloud-api-url}/api/v1/workspaces/{id}/relayfile/delegated-token
+  { "agentName": "relayfile-cli", "scopes": ["fs:read","fs:write"] }
+```
+
+`@relayfile/sdk`'s `RelayfileSetup` / `WorkspaceHandle` **MUST** renew its VFS
+token by re-issuing the workspace `join` call:
 
 ```
 POST ${cloud-api-url}/api/v1/workspaces/{id}/join
-  { "agentName": "relayfile-cli", "scopes": ["fs:read","fs:write"] }
+  { "agentName": "<configured agent name>", "scopes": ["fs:read","fs:write"] }
 ```
 
 Triggers:
 
-- The mount **MUST** preemptively rejoin when the JWT's `exp` is within
+- The mount **MUST** preemptively renew when the JWT's `exp` is within
   10 % of its lifetime, with a floor of 5 minutes.
 - Any 401/403 from a Relayfile API call **MUST** trigger a single
-  rejoin attempt before the call is retried. A second 401 fails the
+  renewal attempt before the call is retried. A second 401 fails the
   cycle and is logged.
 
-The rejoin **MUST**:
+Renewal **MUST**:
 
 - Use the Cloud access token from the canonical session (§5.2).
-- Keep the minted Relayfile runtime token in memory; do not write it to
-  `~/.relayfile/credentials.json`.
+- Keep the minted Relayfile runtime token in memory or in the native CLI's
+  mode-`0600` delegated credentials file; do not write it to the legacy
+  `~/.relayfile/credentials.json` API-key store.
 - Update the in-memory token of the running syncer/HTTP client without
   killing the process or losing the websocket.
 
@@ -482,9 +506,9 @@ If the refresh token also expires (default 7 days), the mount **MUST**:
 - Continue serving local reads from disk (already-synced state).
 - Refuse local writes for affected paths and place them in
   `.relay/permissions-denied.log` with reason `cloud_session_expired`.
-- Print one stderr line per minute (capped) directing the user to run
-  `agent-relay cloud login`. This is the only condition under which v1 mounts
-  enter a degraded read-only state.
+- Print one stderr line per minute (capped) directing the user to rerun
+  `npx relayfile@latest` or `agent-relay cloud login`. This is the only
+  condition under which v1 mounts enter a degraded read-only state.
 
 ---
 
@@ -784,6 +808,7 @@ against realistic mocks of Cloud, Nango, and Relayfile services.
 - **Mock Cloud** — `httptest` server in Go (CLI tests) and a
   `node:http` server in TS (SDK tests) implementing `/api/v1/cli/login`,
   `/api/v1/auth/token/refresh`, `/api/v1/workspaces`,
+  `/api/v1/workspaces/{id}/relayfile/delegated-token`,
   `/api/v1/workspaces/{id}/join`,
   `/api/v1/workspaces/{id}/integrations/connect-session`,
   `/api/v1/workspaces/{id}/integrations/{provider}/status`,
@@ -811,7 +836,7 @@ lives in.
 | A5 | Mirror conflict: local edit + remote edit with new revision yields `.relay/conflicts/<path>.<rev>.local` and a refreshed local file. | `internal/mountsync/syncer_conflict_test.go`     |
 | A6 | Schema validation failure on writeback: file lands in `.relay/conflicts/<path>.invalid.<ts>`, original restored, exit code 0 in CLI status. | `internal/mountsync/syncer_writeback_test.go`    |
 | A7 | Dead-letter surfacing: a 422 from Cloud during writeback creates `.relay/dead-letter/<opId>.json`; `relayfile ops replay` clears it on success. | `cmd/relayfile/ops_e2e_test.go`                  |
-| A8 | Token refresh: VFS token expires mid-mount; mount calls `/join` with the cloud access token, replaces credentials, continues without dropping websocket. | `internal/mountsync/syncer_refresh_test.go`      |
+| A8 | Token refresh: VFS token expires mid-mount; the native CLI rotates the delegated bundle, falls back to Cloud `/relayfile/delegated-token` when rotation is rejected, replaces credentials, and continues without dropping websocket. The SDK parity test separately covers `/join`. | `internal/mountsync/syncer_refresh_test.go`      |
 | A9 | Cloud refresh token expired: mount enters read-only degraded state, prints recovery instruction once per minute, no exit. | `internal/mountsync/syncer_refresh_test.go`      |
 | A10 | Initial sync gate: Cloud reports `cataloging`; CLI waits, polls `/sync`, exits 0 once `ready`. With a forced timeout it exits 0 with the resume hint. | `cmd/relayfile/setup_e2e_test.go`                |
 | A11 | Webhook unhealthy: Cloud returns `webhookHealthy=false, lagSeconds=80`; `relayfile status` includes the warning row. | `cmd/relayfile/status_e2e_test.go`               |

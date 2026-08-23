@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -208,6 +209,133 @@ func parseBrowserFragment(t *testing.T, rawURL string) url.Values {
 		t.Fatalf("parse observer fragment failed: %v", err)
 	}
 	return fragment
+}
+
+func TestQuickStartUsesProjectNameGitHubAndLocalMountDefaults(t *testing.T) {
+	args := quickStartSetupArgsForDir(
+		filepath.Join(string(filepath.Separator), "workspaces", "acme-api"),
+		time.Date(2026, time.August, 23, 12, 0, 0, 0, time.UTC),
+	)
+	want := []string{
+		"--provider", "github",
+		"--workspace", "acme-api",
+		"--local-dir", "./relayfile-mount",
+	}
+	if !slices.Equal(args, want) {
+		t.Fatalf("quick-start args = %#v, want %#v", args, want)
+	}
+}
+
+func TestSetupIntentPrintsOnceAcrossNPMAndNativeSetup(t *testing.T) {
+	var stdout bytes.Buffer
+	t.Setenv(setupIntentPrintedEnv, "")
+	printSetupIntent(&stdout)
+	if got := strings.TrimSpace(stdout.String()); got != setupIntent {
+		t.Fatalf("setup intent = %q, want %q", got, setupIntent)
+	}
+
+	stdout.Reset()
+	t.Setenv(setupIntentPrintedEnv, "1")
+	printSetupIntent(&stdout)
+	if stdout.Len() != 0 {
+		t.Fatalf("native setup duplicated npm intent: %q", stdout.String())
+	}
+}
+
+func TestQuickStartFallsBackToTimestampedWorkspaceOutsideAProject(t *testing.T) {
+	args := quickStartSetupArgsForDir(
+		string(filepath.Separator),
+		time.Date(2026, time.August, 23, 12, 34, 56, 0, time.UTC),
+	)
+	if got, want := args[3], "relayfile-20260823-123456"; got != want {
+		t.Fatalf("fallback workspace = %q, want %q", got, want)
+	}
+}
+
+func TestSetupAgentPromptUsesProviderMountRoot(t *testing.T) {
+	got := setupAgentPromptPath(
+		filepath.Join(string(filepath.Separator), "workspace", "relayfile-mount"),
+		"slack-my-senior-dev",
+	)
+	want := filepath.Join(string(filepath.Separator), "workspace", "relayfile-mount", "slack-msd")
+	if got != want {
+		t.Fatalf("setup agent prompt path = %q, want %q", got, want)
+	}
+}
+
+func TestQuickStartPreservesExistingWorkspaceMirror(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	projectDir := t.TempDir()
+	existingDir := filepath.Join(projectDir, "relayfile-mount")
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:     "acme-api",
+		ID:       "ws_acme",
+		LocalDir: existingDir,
+	}); err != nil {
+		t.Fatalf("store existing workspace: %v", err)
+	}
+
+	gotName, gotDir := resolveSetupTarget("acme-api", existingDir, true)
+	if gotName != "acme-api" || gotDir != existingDir {
+		t.Fatalf("quickstart target = (%q, %q), want (%q, %q)", gotName, gotDir, "acme-api", existingDir)
+	}
+	gotName, gotDir = resolveSetupTarget("acme-api", "./explicit-mount", false)
+	if gotName != "acme-api" || gotDir != "./explicit-mount" {
+		t.Fatalf("explicit setup target = (%q, %q), want caller values", gotName, gotDir)
+	}
+}
+
+func TestQuickStartDisambiguatesSameNamedProjectDirectories(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	existingDir := filepath.Join(t.TempDir(), "frontend", "relayfile-mount")
+	requestedDir := filepath.Join(t.TempDir(), "frontend", "relayfile-mount")
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:     "frontend",
+		ID:       "ws_existing_frontend",
+		LocalDir: existingDir,
+	}); err != nil {
+		t.Fatalf("store existing workspace: %v", err)
+	}
+
+	firstName, firstDir := resolveSetupTarget("frontend", requestedDir, true)
+	secondName, secondDir := resolveSetupTarget("frontend", requestedDir, true)
+	if firstName == "frontend" || !strings.HasPrefix(firstName, "frontend-") {
+		t.Fatalf("disambiguated workspace name = %q, want stable frontend suffix", firstName)
+	}
+	if firstName != secondName {
+		t.Fatalf("disambiguated workspace changed from %q to %q", firstName, secondName)
+	}
+	if firstDir != requestedDir || secondDir != requestedDir {
+		t.Fatalf("quickstart reused wrong mirror: first=%q second=%q want=%q", firstDir, secondDir, requestedDir)
+	}
+}
+
+func TestQuickStartReusesWorkspaceThroughSymlinkAlias(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	projectDir := t.TempDir()
+	existingDir := filepath.Join(projectDir, "relayfile-mount")
+	if err := os.MkdirAll(existingDir, 0o755); err != nil {
+		t.Fatalf("create existing mirror: %v", err)
+	}
+	aliasDir := filepath.Join(t.TempDir(), "mirror-alias")
+	if err := os.Symlink(existingDir, aliasDir); err != nil {
+		t.Skipf("create symlink alias: %v", err)
+	}
+	if _, err := upsertWorkspaceDetails(workspaceRecord{
+		Name:     "frontend",
+		ID:       "ws_frontend",
+		LocalDir: existingDir,
+	}); err != nil {
+		t.Fatalf("store existing workspace: %v", err)
+	}
+
+	gotName, gotDir := resolveSetupTarget("frontend", aliasDir, true)
+	if gotName != "frontend" || gotDir != existingDir {
+		t.Fatalf("quickstart target = (%q, %q), want existing workspace (%q, %q)", gotName, gotDir, "frontend", existingDir)
+	}
 }
 
 func TestHelpFlagPrintsUsageForCommandsAndSubcommands(t *testing.T) {
@@ -4152,6 +4280,7 @@ func clearRelayfileEnv(t *testing.T) {
 	t.Setenv("RELAY_BASE_URL", "")
 	t.Setenv("AGENT_RELAY_BIN", "")
 	t.Setenv("RELAYFILE_AGENT_RELAY_BIN", "")
+	t.Setenv(setupIntentPrintedEnv, "")
 	t.Setenv("CLOUD_API_URL", "")
 	t.Setenv("CLOUD_API_ACCESS_TOKEN", "")
 	t.Setenv("CLOUD_API_REFRESH_TOKEN", "")

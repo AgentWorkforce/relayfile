@@ -4,17 +4,19 @@ Hosted Agent Relay is the managed cloud path for provider-backed files. Agent Re
 
 ## Hosted Agent Relay
 
-Use the `setting-up-relayfile` skill from [AgentWorkforce/skills#28](https://github.com/AgentWorkforce/skills/pull/28) when an agent needs provider-backed files from `agentrelay.com`.
+From the project where the agent will work, run the clean-machine quickstart:
 
 ```bash
-relayfile setup \
-  --provider notion \
-  --workspace my-agent \
-  --local-dir ./relayfile-mount \
-  --no-open
+npx relayfile@latest
 ```
 
-The skill covers the full hosted flow: cloud login, workspace creation, provider OAuth, initial sync, local mount verification, writeback checks, and recovery guidance. No relayfile server, relayauth service, Nango instance, adapter, or worker has to run on the user's machine.
+Relayfile owns the full hosted flow: Google sign-in, automatic account and workspace creation, GitHub OAuth, initial sync, and the local mount. No invite code, separate Agent Relay CLI, copied token, relayfile server, relayauth service, Nango instance, adapter, or worker has to run on the user's machine.
+
+Use the explicit form for a different provider or workspace:
+
+```bash
+npx relayfile@latest setup --provider notion --workspace my-agent --local-dir ./relayfile-mount
+```
 
 After setup, hand the agent the mount path:
 
