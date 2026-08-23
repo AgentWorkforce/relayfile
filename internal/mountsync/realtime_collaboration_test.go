@@ -840,7 +840,9 @@ func TestLocalChangeBatcherCoalescesBurst(t *testing.T) {
 
 func TestLocalChangeBatcherUsesQuietWindowAcrossStaggeredSave(t *testing.T) {
 	batches := make(chan []LocalChange, 2)
-	batcher := NewLocalChangeBatcher(5*time.Millisecond, func(changes []LocalChange) {
+	// Keep a wide scheduling margin: this test is about resetting the quiet
+	// deadline, not whether a loaded host can resume a 3ms sleep within 5ms.
+	batcher := NewLocalChangeBatcher(50*time.Millisecond, func(changes []LocalChange) {
 		batches <- changes
 	})
 	defer batcher.Close()
@@ -861,6 +863,35 @@ func TestLocalChangeBatcherUsesQuietWindowAcrossStaggeredSave(t *testing.T) {
 	case extra := <-batches:
 		t.Fatalf("staggered save produced an extra batch: %+v", extra)
 	case <-time.After(20 * time.Millisecond):
+	}
+}
+
+func TestLocalChangeBatcherReschedulesInactiveTimer(t *testing.T) {
+	batches := make(chan []LocalChange, 1)
+	batcher := NewLocalChangeBatcher(50*time.Millisecond, func(changes []LocalChange) {
+		batches <- changes
+	})
+
+	batcher.Add("shared/one.txt", fsnotify.Write)
+	batcher.mu.Lock()
+	if !batcher.timer.Stop() {
+		batcher.mu.Unlock()
+		t.Fatal("timer expired before deterministic race setup")
+	}
+	batcher.mu.Unlock()
+
+	// This is the state Add observes when an AfterFunc callback has expired or
+	// started: timer is non-nil, but Stop returns false. The Add must still
+	// reschedule it and eventually flush both changes.
+	batcher.Add("shared/two.txt", fsnotify.Write)
+	select {
+	case batch := <-batches:
+		if len(batch) != 2 {
+			t.Fatalf("batch size = %d, want 2", len(batch))
+		}
+		batcher.Close()
+	case <-time.After(time.Second):
+		t.Fatal("inactive timer was not rescheduled")
 	}
 }
 
