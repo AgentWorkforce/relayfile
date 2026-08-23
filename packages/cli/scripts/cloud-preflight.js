@@ -61,18 +61,6 @@ function hasFlag(args, name) {
   return args.some((arg) => arg === name || arg.startsWith(`${name}=`));
 }
 
-function hasEnabledBooleanFlag(args, name) {
-  return args.some((arg) => {
-    if (arg === name) {
-      return true;
-    }
-    if (!arg.startsWith(`${name}=`)) {
-      return false;
-    }
-    return GO_TRUE_VALUES.has(arg.slice(name.length + 1));
-  });
-}
-
 function parseGoDurationMilliseconds(value) {
   let remaining = String(value);
   let sign = 1;
@@ -140,7 +128,7 @@ function parseSetupArguments(args) {
       let value = inlineValue;
       if (inlineValue === undefined) {
         const next = setupArgs[index + 1];
-        if (next === undefined || next.startsWith("-")) {
+        if (next === undefined) {
           return { valid: false, error: `--${name} requires a value` };
         }
         value = next;
@@ -204,10 +192,7 @@ function shouldPrepareCloudSession(args, env) {
   if (!parsed.valid) {
     return false;
   }
-  if (
-    parsed.values.get("help") === true ||
-    parsed.values.get("h") === true
-  ) {
+  if (parsed.values.has("help") || parsed.values.has("h")) {
     return false;
   }
   // Explicit credentials are caller-owned. Let the Go CLI validate and use
@@ -252,8 +237,8 @@ function loadCloudSessionSDK() {
 async function prepareCloudSession(args, env = process.env, dependencies = {}) {
   const setupCommand = args.length === 0 || args[0] === "setup";
   const skipsValidation =
-    hasEnabledBooleanFlag(args, "--help") ||
-    hasEnabledBooleanFlag(args, "-h") ||
+    hasFlag(args, "--help") ||
+    hasFlag(args, "-h") ||
     hasFlag(args, "--version") ||
     args[0] === "version";
   const parsed =

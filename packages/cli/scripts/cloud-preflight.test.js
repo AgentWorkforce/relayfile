@@ -108,8 +108,8 @@ test("bundled SDK carries the Relayfile marker through both login modes", () => 
 test("help and caller-owned tokens do not start interactive auth", () => {
   assert.equal(shouldPrepareCloudSession(["setup", "--help"], {}), false);
   assert.equal(shouldPrepareCloudSession(["setup", "--help=true"], {}), false);
-  assert.equal(shouldPrepareCloudSession(["setup", "--help=false"], {}), true);
-  assert.equal(shouldPrepareCloudSession(["setup", "-h=0"], {}), true);
+  assert.equal(shouldPrepareCloudSession(["setup", "--help=false"], {}), false);
+  assert.equal(shouldPrepareCloudSession(["setup", "-h=0"], {}), false);
   assert.equal(
     shouldPrepareCloudSession(["setup", "--cloud-token", "explicit"], {}),
     false,
@@ -147,27 +147,37 @@ test("help and caller-owned tokens do not start interactive auth", () => {
   assert.equal(shouldPrepareCloudSession(["status"], {}), false);
 });
 
-test("false help and an empty token override still prepare SDK auth", async () => {
-  for (const { args, env } of [
-    { args: ["setup", "--help=false"], env: {} },
-    {
-      args: ["setup", "-h=0", "--cloud-token="],
-      env: { RELAYFILE_CLOUD_TOKEN: "inherited-token" },
-    },
+test("pseudo-help values never start SDK auth", async () => {
+  for (const args of [
+    ["setup", "--help=false"],
+    ["setup", "-h=0", "--cloud-token="],
   ]) {
     let calls = 0;
     const prepared = await prepareCloudSession(
       args,
-      env,
+      { RELAYFILE_CLOUD_TOKEN: "inherited-token" },
       {
         ensureCloudSession: async () => {
           calls += 1;
         },
       },
     );
-    assert.equal(prepared, true);
-    assert.equal(calls, 1);
+    assert.equal(prepared, false);
+    assert.equal(calls, 0);
   }
+});
+
+test("dash-prefixed values follow the native setup grammar", async () => {
+  const args = ["setup", "--local-dir", "-mirror"];
+  assert.equal(hasValidSetupArguments(args), true);
+  let calls = 0;
+  const prepared = await prepareCloudSession(args, {}, {
+    ensureCloudSession: async () => {
+      calls += 1;
+    },
+  });
+  assert.equal(prepared, true);
+  assert.equal(calls, 1);
 });
 
 test("malformed setup arguments fail before interactive auth", async () => {
