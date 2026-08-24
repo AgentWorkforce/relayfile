@@ -2,6 +2,7 @@ package mountlease
 
 import (
 	"errors"
+	"os"
 	"testing"
 )
 
@@ -51,6 +52,86 @@ func TestAcquireCanonicalizesEquivalentServerURLs(t *testing.T) {
 
 	if _, err := acquireAt(cacheDir, "https://file.example.test", "rw_shared", localRoot); !errors.Is(err, ErrHeld) {
 		t.Fatalf("equivalent server URL bypassed lease: %v", err)
+	}
+}
+
+func TestInspectReadsHeldLeaseWithoutAcquiring(t *testing.T) {
+	cacheDir := t.TempDir()
+	localRoot := t.TempDir()
+	first, err := acquireAt(cacheDir, "https://file.example.test", "rw_shared", localRoot)
+	if err != nil {
+		t.Fatalf("acquire first lease: %v", err)
+	}
+	defer first.Release()
+
+	info, err := inspectAt(cacheDir, "https://file.example.test", "rw_shared", localRoot)
+	if err != nil {
+		t.Fatalf("inspect held lease: %v", err)
+	}
+	if info.PID != os.Getpid() {
+		t.Fatalf("inspect PID = %d, want %d", info.PID, os.Getpid())
+	}
+
+	if _, err := acquireAt(cacheDir, "https://file.example.test", "rw_shared", localRoot); !errors.Is(err, ErrHeld) {
+		t.Fatalf("inspect must not release or steal the lease, got %v", err)
+	}
+}
+
+func TestInspectMissingLease(t *testing.T) {
+	_, err := inspectAt(t.TempDir(), "https://file.example.test", "rw_missing", t.TempDir())
+	if !errors.Is(err, ErrNotHeld) {
+		t.Fatalf("expected ErrNotHeld, got %v", err)
+	}
+}
+
+func TestInspectReleasedLeaseIsNotHeld(t *testing.T) {
+	cacheDir := t.TempDir()
+	localRoot := t.TempDir()
+	first, err := acquireAt(cacheDir, "https://file.example.test", "rw_shared", localRoot)
+	if err != nil {
+		t.Fatalf("acquire first lease: %v", err)
+	}
+	if err := first.Release(); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	_, err = inspectAt(cacheDir, "https://file.example.test", "rw_shared", localRoot)
+	if !errors.Is(err, ErrNotHeld) {
+		t.Fatalf("released lease with leftover PID metadata must be ErrNotHeld, got %v", err)
+	}
+}
+
+func TestInspectEmptyLockFileIsNotHeld(t *testing.T) {
+	cacheDir := t.TempDir()
+	localRoot := t.TempDir()
+	id, err := resolveLeaseIdentity(cacheDir, "https://file.example.test", "rw_shared", localRoot)
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	if err := ensureLeaseDir(id.dir); err != nil {
+		t.Fatalf("lease dir: %v", err)
+	}
+	if err := os.WriteFile(id.lockPath, nil, 0o600); err != nil {
+		t.Fatalf("write empty lock: %v", err)
+	}
+	_, err = inspectAt(cacheDir, "https://file.example.test", "rw_shared", localRoot)
+	if !errors.Is(err, ErrNotHeld) {
+		t.Fatalf("empty lock payload must be ErrNotHeld, got %v", err)
+	}
+}
+
+func TestFlushAckRoundTrip(t *testing.T) {
+	cacheDir := t.TempDir()
+	localRoot := t.TempDir()
+	if err := writeFlushAckAt(cacheDir, "https://file.example.test", "rw_shared", localRoot, FlushAck{Seq: 3, PID: 99, At: "t"}); err != nil {
+		t.Fatalf("write ack: %v", err)
+	}
+	got, err := readFlushAckAt(cacheDir, "https://file.example.test", "rw_shared", localRoot)
+	if err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+	if got.Seq != 3 || got.PID != 99 {
+		t.Fatalf("ack = %+v", got)
 	}
 }
 
