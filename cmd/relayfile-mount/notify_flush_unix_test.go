@@ -7,9 +7,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
-	"syscall"
 	"testing"
 	"time"
 
@@ -83,7 +81,12 @@ func TestNotifyFlushKicksHeldLeaseDaemon(t *testing.T) {
 		t.Fatal("helper never published a mount lease")
 	}
 
-	err := executeMount(context.Background(), mountConfig{
+	before, err := mountlease.ReadFlushAck("https://file.example.test", "rw_notify", localRoot)
+	if err != nil {
+		t.Fatalf("read ack before: %v", err)
+	}
+
+	err = executeMount(context.Background(), mountConfig{
 		notifyFlush: true,
 		baseURL:     "https://file.example.test",
 		workspaceID: "rw_notify",
@@ -104,8 +107,8 @@ func TestNotifyFlushKicksHeldLeaseDaemon(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read ack: %v", err)
 	}
-	if ack.Seq != 1 || ack.PID != cmd.Process.Pid {
-		t.Fatalf("ack = %+v, want seq=1 pid=%d", ack, cmd.Process.Pid)
+	if ack.Seq != before.Seq+1 || ack.PID != cmd.Process.Pid || !ack.OK {
+		t.Fatalf("ack = %+v, want seq=%d pid=%d ok", ack, before.Seq+1, cmd.Process.Pid)
 	}
 
 	if _, err := mountlease.Acquire("https://file.example.test", "rw_notify", localRoot); !errors.Is(err, mountlease.ErrHeld) {
@@ -116,20 +119,22 @@ func TestNotifyFlushKicksHeldLeaseDaemon(t *testing.T) {
 func runNotifyFlushHelper(t *testing.T) {
 	t.Helper()
 	localRoot := os.Getenv("RELAYFILE_NOTIFY_FLUSH_LOCAL_ROOT")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	flushReq := listenFlushRequests(ctx)
 	lease, err := mountlease.Acquire("https://file.example.test", "rw_notify", localRoot)
 	if err != nil {
 		t.Fatalf("helper acquire: %v", err)
 	}
 	defer lease.Release()
 
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGUSR1)
-	<-sigs
-	if err := mountlease.WriteFlushAck("https://file.example.test", "rw_notify", localRoot, mountlease.FlushAck{
-		Seq: 1,
-		PID: os.Getpid(),
-		At:  time.Now().UTC().Format(time.RFC3339Nano),
-	}); err != nil {
+	<-flushReq
+	cfg := mountConfig{
+		baseURL:     "https://file.example.test",
+		workspaceID: "rw_notify",
+		localDir:    localRoot,
+	}
+	if err := recordFlushAck(cfg, nil); err != nil {
 		t.Fatalf("helper ack: %v", err)
 	}
 	select {}

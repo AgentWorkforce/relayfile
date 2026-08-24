@@ -35,6 +35,10 @@ func listenFlushRequests(ctx context.Context) <-chan struct{} {
 	return req
 }
 
+func ignoreNotifyFlushSignal() {
+	signal.Ignore(syscall.SIGUSR1)
+}
+
 func notifyRunningMountFlush(ctx context.Context, cfg mountConfig) error {
 	info, err := mountlease.Inspect(cfg.baseURL, cfg.workspaceID, cfg.localDir)
 	if err != nil {
@@ -59,6 +63,12 @@ func notifyRunningMountFlush(ctx context.Context, cfg mountConfig) error {
 			return fmt.Errorf("notify flush: read ack: %w", err)
 		}
 		if ack.Seq > before.Seq && ack.PID == info.PID {
+			if !ack.OK {
+				if ack.Error == "" {
+					return fmt.Errorf("notify flush: daemon pid %d flush failed", info.PID)
+				}
+				return fmt.Errorf("notify flush: daemon pid %d flush failed: %s", info.PID, ack.Error)
+			}
 			log.Printf("notified mount daemon pid %d; flush ack seq %d", info.PID, ack.Seq)
 			return nil
 		}
@@ -71,23 +81,4 @@ func notifyRunningMountFlush(ctx context.Context, cfg mountConfig) error {
 		case <-ticker.C:
 		}
 	}
-}
-
-func recordFlushAck(cfg mountConfig) error {
-	prev, err := mountlease.ReadFlushAck(cfg.baseURL, cfg.workspaceID, cfg.localDir)
-	if err != nil {
-		return err
-	}
-	return mountlease.WriteFlushAck(cfg.baseURL, cfg.workspaceID, cfg.localDir, mountlease.FlushAck{
-		Seq: prev.Seq + 1,
-		PID: os.Getpid(),
-		At:  time.Now().UTC().Format(time.RFC3339Nano),
-	})
-}
-
-func notifyFlushWait(cfg mountConfig) time.Duration {
-	if cfg.timeout > 0 {
-		return cfg.timeout
-	}
-	return 120 * time.Second
 }

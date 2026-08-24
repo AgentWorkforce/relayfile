@@ -82,6 +82,7 @@ type mountConfig struct {
 	checkpointSealTTL     time.Duration
 	mode                  string
 	fuseContentTTL        time.Duration
+	flushReq              <-chan struct{}
 }
 
 type pollRunner func(context.Context, mountConfig) error
@@ -311,6 +312,14 @@ func executeMount(rootCtx context.Context, cfg mountConfig, runPoll pollRunner, 
 			return fmt.Errorf("--notify-flush cannot be combined with --once, --flush-outbox-once, or --push-local-once")
 		}
 		return notifyRunningMountFlush(rootCtx, cfg)
+	}
+	// SIGUSR1 terminates by default. The lease is about to be published, so
+	// either listen for --notify-flush or ignore the signal. One-shot and
+	// FUSE supervisors ignore it; a poll daemon queues it before Acquire.
+	if acceptsNotifyFlush(cfg) {
+		cfg.flushReq = listenFlushRequests(rootCtx)
+	} else {
+		ignoreNotifyFlushSignal()
 	}
 	if strings.TrimSpace(cfg.baseURL) != "" && strings.TrimSpace(cfg.workspaceID) != "" {
 		lease, err := mountlease.Acquire(cfg.baseURL, cfg.workspaceID, cfg.localDir)
@@ -611,21 +620,23 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 	defer timer.Stop()
 	wsTicker := time.NewTicker(mountsync.DefaultWebSocketMaintenanceEvery)
 	defer wsTicker.Stop()
-	flushReq := listenFlushRequests(rootCtx)
 	cycle := 0
 	for {
 		select {
 		case <-rootCtx.Done():
 			log.Printf("mount sync stopping: %v", rootCtx.Err())
 			return nil
-		case <-flushReq:
-			if err := run(true); err != nil {
-				return err
-			}
-			if err := recordFlushAck(cfg); err != nil {
-				log.Printf("mount flush ack failed: %v", err)
+		case <-cfg.flushReq:
+			kickErr := kickReconcile(rootCtx, cfg, syncer)
+			if recErr := recordFlushAck(cfg, kickErr); recErr != nil {
+				log.Printf("mount flush ack failed: %v", recErr)
+			} else if kickErr != nil {
+				log.Printf("mount flush requested via SIGUSR1; failed: %v", kickErr)
 			} else {
 				log.Printf("mount flush requested via SIGUSR1; ack recorded")
+			}
+			if kickErr != nil && mountsync.IsBootstrapTerminalError(kickErr) {
+				return kickErr
 			}
 		case <-wsTicker.C:
 			if mountWebSocketEnabled(cfg) {

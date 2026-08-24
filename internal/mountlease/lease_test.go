@@ -84,6 +84,42 @@ func TestInspectMissingLease(t *testing.T) {
 	}
 }
 
+func TestInspectReleasedLeaseIsNotHeld(t *testing.T) {
+	cacheDir := t.TempDir()
+	localRoot := t.TempDir()
+	first, err := acquireAt(cacheDir, "https://file.example.test", "rw_shared", localRoot)
+	if err != nil {
+		t.Fatalf("acquire first lease: %v", err)
+	}
+	if err := first.Release(); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	_, err = inspectAt(cacheDir, "https://file.example.test", "rw_shared", localRoot)
+	if !errors.Is(err, ErrNotHeld) {
+		t.Fatalf("released lease with leftover PID metadata must be ErrNotHeld, got %v", err)
+	}
+}
+
+func TestInspectEmptyLockFileIsNotHeld(t *testing.T) {
+	cacheDir := t.TempDir()
+	localRoot := t.TempDir()
+	id, err := resolveLeaseIdentity(cacheDir, "https://file.example.test", "rw_shared", localRoot)
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	if err := ensureLeaseDir(id.dir); err != nil {
+		t.Fatalf("lease dir: %v", err)
+	}
+	if err := os.WriteFile(id.lockPath, nil, 0o600); err != nil {
+		t.Fatalf("write empty lock: %v", err)
+	}
+	_, err = inspectAt(cacheDir, "https://file.example.test", "rw_shared", localRoot)
+	if !errors.Is(err, ErrNotHeld) {
+		t.Fatalf("empty lock payload must be ErrNotHeld, got %v", err)
+	}
+}
+
 func TestFlushAckRoundTrip(t *testing.T) {
 	cacheDir := t.TempDir()
 	localRoot := t.TempDir()

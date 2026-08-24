@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -34,11 +35,14 @@ type Info struct {
 
 // FlushAck is written by the running daemon after a SIGUSR1-triggered
 // reconcile. --notify-flush waits for Seq to advance rather than taking
-// the lease itself.
+// the lease itself. OK is false when the kicked cycle failed; waiters
+// must not treat that as a successful barrier.
 type FlushAck struct {
-	Seq int    `json:"seq"`
-	PID int    `json:"pid"`
-	At  string `json:"at"`
+	Seq   int    `json:"seq"`
+	PID   int    `json:"pid"`
+	At    string `json:"at"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
 }
 
 // Lease is a process-lifetime singleton for one local workspace mirror. Both
@@ -181,18 +185,31 @@ func inspectAt(cacheDir, server, workspaceID, localRoot string) (*Info, error) {
 	if err != nil {
 		return nil, err
 	}
-	payload, err := os.ReadFile(id.lockPath)
+	file, err := os.OpenFile(id.lockPath, os.O_RDWR, 0)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("%w for workspace %s at %s using local root %s", ErrNotHeld, id.workspaceID, id.server, id.localRoot)
 		}
+		return nil, fmt.Errorf("open mount lease: %w", err)
+	}
+	defer file.Close()
+	unlock, acquired, err := tryLockFile(file)
+	if err != nil {
+		return nil, fmt.Errorf("probe mount lease: %w", err)
+	}
+	if acquired {
+		unlock()
+		return nil, fmt.Errorf("%w for workspace %s at %s using local root %s", ErrNotHeld, id.workspaceID, id.server, id.localRoot)
+	}
+	if _, err := file.Seek(0, 0); err != nil {
+		return nil, fmt.Errorf("seek mount lease: %w", err)
+	}
+	payload, err := io.ReadAll(file)
+	if err != nil {
 		return nil, fmt.Errorf("read mount lease: %w", err)
 	}
 	var meta metadata
-	if err := json.Unmarshal(payload, &meta); err != nil {
-		return nil, fmt.Errorf("decode mount lease: %w", err)
-	}
-	if meta.PID <= 0 {
+	if err := json.Unmarshal(payload, &meta); err != nil || meta.PID <= 0 {
 		return nil, fmt.Errorf("%w for workspace %s at %s using local root %s", ErrNotHeld, id.workspaceID, id.server, id.localRoot)
 	}
 	return &Info{
