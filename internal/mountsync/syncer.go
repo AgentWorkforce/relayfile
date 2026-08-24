@@ -79,11 +79,9 @@ func (e *SchemaValidationError) Is(target error) bool {
 
 const (
 	defaultBulkFlushThreshold = 256
-	// maxBulkWriteFilesPerRequest keeps caller-sized /fs/bulk payloads well
-	// below SQLite's conservative 999-variable build limit. The cloud storage
-	// layer may bind one variable per file while committing a bulk mutation, so
-	// the byte-size cap alone is insufficient for large workspaces of small
-	// files.
+	// maxBulkWriteFilesPerRequest is client request-size hardening only. It is
+	// not derived from Cloudflare's SQL limits: relayfile-cloud#180 was caused by
+	// the server's export-manifest read path, not the /fs/bulk request size.
 	maxBulkWriteFilesPerRequest = 200
 )
 
