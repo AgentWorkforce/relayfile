@@ -128,6 +128,44 @@ class TestRelayFileClient:
         assert json.loads(req.content)["files"][0]["path"] == "/a.md"
 
     @respx.mock
+    def test_bulk_write_chunks_large_caller_slice(self) -> None:
+        batch_sizes: list[int] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            files = json.loads(request.content)["files"]
+            batch_sizes.append(len(files))
+            if len(files) > 999:
+                return httpx.Response(
+                    500,
+                    json={
+                        "code": "internal_error",
+                        "message": "too many SQL variables at offset 412: SQLITE_ERROR",
+                    },
+                )
+            return httpx.Response(
+                202,
+                json={
+                    "written": len(files),
+                    "errorCount": 0,
+                    "errors": [],
+                    "correlationId": f"corr_{len(batch_sizes)}",
+                },
+            )
+
+        respx.post(f"{BASE}/v1/workspaces/ws_acme/fs/bulk").mock(
+            side_effect=handler
+        )
+        files = [
+            {"path": f"/docs/File{index + 1:04d}.md", "content": "small"}
+            for index in range(1001)
+        ]
+
+        result = self._client().bulk_write("ws_acme", files)
+
+        assert result["written"] == len(files)
+        assert batch_sizes == [200, 200, 200, 200, 200, 1]
+
+    @respx.mock
     def test_query_files(self) -> None:
         payload = {"items": [], "nextCursor": None}
         respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/query").mock(
@@ -674,6 +712,38 @@ class TestAsyncClient:
                 correlation_id="corr_bulk",
             )
             assert res["written"] == 1
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_bulk_write_chunks_large_caller_slice(self) -> None:
+        batch_sizes: list[int] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            files = json.loads(request.content)["files"]
+            batch_sizes.append(len(files))
+            return httpx.Response(
+                202,
+                json={
+                    "written": len(files),
+                    "errorCount": 0,
+                    "errors": [],
+                    "correlationId": f"corr_{len(batch_sizes)}",
+                },
+            )
+
+        respx.post(f"{BASE}/v1/workspaces/ws_acme/fs/bulk").mock(
+            side_effect=handler
+        )
+        files = [
+            {"path": f"/docs/File{index + 1:04d}.md", "content": "small"}
+            for index in range(1001)
+        ]
+
+        async with AsyncRelayFileClient(BASE, "tok_test") as client:
+            result = await client.bulk_write("ws_acme", files)
+
+        assert result["written"] == len(files)
+        assert batch_sizes == [200, 200, 200, 200, 200, 1]
 
     @respx.mock
     @pytest.mark.asyncio

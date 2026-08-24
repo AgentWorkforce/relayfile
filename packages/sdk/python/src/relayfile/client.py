@@ -27,6 +27,7 @@ from .types import (
 
 AccessTokenProvider = Union[str, Callable[[], str]]
 AsyncAccessTokenProvider = Union[str, Callable[[], Any]]  # sync or async callable
+MAX_BULK_WRITE_FILES_PER_REQUEST = 200
 
 
 @dataclass
@@ -114,6 +115,33 @@ def _read_payload(response: httpx.Response) -> Any:
         except Exception:
             return {}
     return {"message": response.text}
+
+
+def _merge_bulk_write_response(
+    combined: dict[str, Any] | None, batch: Any
+) -> dict[str, Any]:
+    if combined is None:
+        return dict(batch) if isinstance(batch, dict) else {}
+    if not isinstance(batch, dict):
+        return combined
+
+    merged: dict[str, Any] = {
+        "written": int(combined.get("written", 0)) + int(batch.get("written", 0)),
+        "errorCount": int(combined.get("errorCount", 0))
+        + int(batch.get("errorCount", 0)),
+        "errors": [
+            *(combined.get("errors") or []),
+            *(batch.get("errors") or []),
+        ],
+        "correlationId": batch.get("correlationId")
+        or combined.get("correlationId", ""),
+    }
+    if combined.get("results") is not None or batch.get("results") is not None:
+        merged["results"] = [
+            *(combined.get("results") or []),
+            *(batch.get("results") or []),
+        ]
+    return merged
 
 
 def _parse_retry_after_ms(header: str | None) -> float | None:
@@ -487,12 +515,20 @@ class RelayFileClient:
         *,
         correlation_id: str | None = None,
     ) -> dict[str, Any]:
-        return self._request(
-            "POST",
-            f"/v1/workspaces/{_enc(workspace_id)}/fs/bulk",
-            json_body={"files": files},
-            correlation_id=correlation_id,
-        )
+        batches = [
+            files[start : start + MAX_BULK_WRITE_FILES_PER_REQUEST]
+            for start in range(0, len(files), MAX_BULK_WRITE_FILES_PER_REQUEST)
+        ] or [[]]
+        result: dict[str, Any] | None = None
+        for batch in batches:
+            batch_result = self._request(
+                "POST",
+                f"/v1/workspaces/{_enc(workspace_id)}/fs/bulk",
+                json_body={"files": batch},
+                correlation_id=correlation_id,
+            )
+            result = _merge_bulk_write_response(result, batch_result)
+        return result or {}
 
     def delete_file(self, input: DeleteFileInput) -> dict[str, Any]:
         query = _build_query({"path": input.path})
@@ -1187,12 +1223,20 @@ class AsyncRelayFileClient:
         *,
         correlation_id: str | None = None,
     ) -> dict[str, Any]:
-        return await self._request(
-            "POST",
-            f"/v1/workspaces/{_enc(workspace_id)}/fs/bulk",
-            json_body={"files": files},
-            correlation_id=correlation_id,
-        )
+        batches = [
+            files[start : start + MAX_BULK_WRITE_FILES_PER_REQUEST]
+            for start in range(0, len(files), MAX_BULK_WRITE_FILES_PER_REQUEST)
+        ] or [[]]
+        result: dict[str, Any] | None = None
+        for batch in batches:
+            batch_result = await self._request(
+                "POST",
+                f"/v1/workspaces/{_enc(workspace_id)}/fs/bulk",
+                json_body={"files": batch},
+                correlation_id=correlation_id,
+            )
+            result = _merge_bulk_write_response(result, batch_result)
+        return result or {}
 
     async def delete_file(self, input: DeleteFileInput) -> dict[str, Any]:
         query = _build_query({"path": input.path})

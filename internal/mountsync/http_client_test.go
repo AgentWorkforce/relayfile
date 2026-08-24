@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -458,5 +459,75 @@ func TestHTTPClientWriteFilesBulkRejectsEmptyBatch(t *testing.T) {
 	}
 	if atomic.LoadInt32(&calls) != 0 {
 		t.Fatalf("expected empty batch to fail before issuing a request, got %d calls", atomic.LoadInt32(&calls))
+	}
+}
+
+func TestHTTPClientWriteFilesBulkChunksLargeCallerSlice(t *testing.T) {
+	const fileCount = 1001
+
+	var calls atomic.Int32
+	var largestBatch atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/workspaces/ws_large_bulk/fs/bulk" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		var payload struct {
+			Files []BulkWriteFile `json:"files"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request body failed: %v", err)
+		}
+		batchSize := int32(len(payload.Files))
+		for previous := largestBatch.Load(); batchSize > previous; previous = largestBatch.Load() {
+			if largestBatch.CompareAndSwap(previous, batchSize) {
+				break
+			}
+		}
+		call := calls.Add(1)
+		if len(payload.Files) > 999 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"code":    "internal_error",
+				"message": "too many SQL variables at offset 412: SQLITE_ERROR",
+			})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(BulkWriteResponse{
+			Written: len(payload.Files),
+			Results: []BulkWriteResult{{
+				Path:     payload.Files[0].Path,
+				Revision: fmt.Sprintf("rev_%d", call),
+			}},
+			CorrelationID: fmt.Sprintf("corr_%d", call),
+		})
+	}))
+	defer server.Close()
+
+	files := make([]BulkWriteFile, 0, fileCount)
+	for idx := 0; idx < fileCount; idx++ {
+		files = append(files, BulkWriteFile{
+			Path:    fmt.Sprintf("/notion/Docs/File%04d.md", idx+1),
+			Content: "small",
+		})
+	}
+	client := NewHTTPClient(server.URL, "token", server.Client())
+	response, err := client.WriteFilesBulk(context.Background(), "ws_large_bulk", files)
+	if err != nil {
+		t.Fatalf("large bulk write failed: %v", err)
+	}
+	if response.Written != fileCount || response.ErrorCount != 0 {
+		t.Fatalf("unexpected aggregate response: %+v", response)
+	}
+	wantCalls := int32((fileCount + maxBulkWriteFilesPerRequest - 1) / maxBulkWriteFilesPerRequest)
+	if got := calls.Load(); got != wantCalls {
+		t.Fatalf("bulk request count = %d, want %d", got, wantCalls)
+	}
+	if got := len(response.Results); got != int(wantCalls) {
+		t.Fatalf("aggregate result count = %d, want %d", got, wantCalls)
+	}
+	if got := largestBatch.Load(); got > maxBulkWriteFilesPerRequest {
+		t.Fatalf("largest bulk request = %d, safe cap = %d", got, maxBulkWriteFilesPerRequest)
 	}
 }

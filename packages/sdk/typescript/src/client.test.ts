@@ -1414,6 +1414,36 @@ describe("RelayFileClient — existing methods", () => {
         ],
       });
     });
+
+    it("chunks caller slices that exceed SQLite's conservative variable limit", async () => {
+      const batchSizes: number[] = [];
+      const f = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        const files = (JSON.parse(init?.body as string) as { files: unknown[] }).files;
+        batchSizes.push(files.length);
+        if (files.length > 999) {
+          return new Response(JSON.stringify({
+            code: "internal_error",
+            message: "too many SQL variables at offset 412: SQLITE_ERROR",
+          }), { status: 500, headers: { "content-type": "application/json" } });
+        }
+        return new Response(JSON.stringify({
+          written: files.length,
+          errorCount: 0,
+          errors: [],
+          correlationId: `corr_${batchSizes.length}`,
+        }), { status: 202, headers: { "content-type": "application/json" } });
+      });
+      const client = makeClient(f as typeof fetch);
+      const files = Array.from({ length: 1001 }, (_, index) => ({
+        path: `/docs/File${String(index + 1).padStart(4, "0")}.md`,
+        content: "small",
+      }));
+
+      const result = await client.bulkWrite({ workspaceId: "ws_acme", files });
+
+      expect(result.written).toBe(files.length);
+      expect(batchSizes).toEqual([200, 200, 200, 200, 200, 1]);
+    });
   });
 
   describe("checkpoint seals", () => {

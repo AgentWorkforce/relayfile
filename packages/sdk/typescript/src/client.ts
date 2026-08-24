@@ -102,6 +102,8 @@ import {
   RevisionConflictError
 } from "./errors.js";
 
+const MAX_BULK_WRITE_FILES_PER_REQUEST = 200;
+
 /**
  * Bearer token or token factory used for Relayfile API requests.
  *
@@ -1645,23 +1647,44 @@ export class RelayFileClient {
 
   async bulkWrite(input: BulkWriteInput): Promise<BulkWriteResponse> {
     const query = buildQuery({ forkId: input.forkId });
-    const response = await this.performRequest({
-      method: "POST",
-      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/bulk${query}`,
-      correlationId: input.correlationId,
-      body: {
-        files: input.files
-      },
-      signal: input.signal
-    });
-    const result = await (this.readPayload(response) as Promise<BulkWriteResponse>);
+    const batches: BulkWriteInput["files"][] = [];
+    for (let start = 0; start < input.files.length; start += MAX_BULK_WRITE_FILES_PER_REQUEST) {
+      batches.push(input.files.slice(start, start + MAX_BULK_WRITE_FILES_PER_REQUEST));
+    }
+    // Preserve the server's validation behavior for an empty caller slice.
+    if (batches.length === 0) batches.push([]);
+
+    let result: BulkWriteResponse | undefined;
+    for (const files of batches) {
+      const response = await this.performRequest({
+        method: "POST",
+        path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/bulk${query}`,
+        correlationId: input.correlationId,
+        body: { files },
+        signal: input.signal
+      });
+      const batchResult = await (this.readPayload(response) as Promise<BulkWriteResponse>);
+      if (!result) {
+        result = batchResult;
+        continue;
+      }
+      result = {
+        written: result.written + batchResult.written,
+        errorCount: result.errorCount + batchResult.errorCount,
+        errors: [...result.errors, ...batchResult.errors],
+        ...(result.results || batchResult.results
+          ? { results: [...(result.results ?? []), ...(batchResult.results ?? [])] }
+          : {}),
+        correlationId: batchResult.correlationId || result.correlationId
+      };
+    }
     const cache = getFileReadCache(this);
     if (cache !== false) {
       for (const file of input.files) {
         cache.evict(input.workspaceId, file.path);
       }
     }
-    return result;
+    return result!;
   }
 
   async issueCheckpointSeal(input: IssueCheckpointSealInput): Promise<CheckpointSeal> {

@@ -5510,17 +5510,77 @@ func TestBulkWrite_ChunkAtThreshold(t *testing.T) {
 		t.Fatalf("chunked sync failed: %v", err)
 	}
 
-	if client.bulkWriteCalls != 2 {
-		t.Fatalf("expected two bulk write calls, got %d", client.bulkWriteCalls)
+	if client.bulkWriteCalls != 3 {
+		t.Fatalf("expected three bulk write calls, got %d", client.bulkWriteCalls)
 	}
-	if got := len(client.bulkWriteBatches); got != 2 {
-		t.Fatalf("expected two recorded bulk batches, got %d", got)
+	if got := len(client.bulkWriteBatches); got != 3 {
+		t.Fatalf("expected three recorded bulk batches, got %d", got)
 	}
-	if got := len(client.bulkWriteBatches[0]); got != 256 {
-		t.Fatalf("expected first batch size 256, got %d", got)
+	if got := len(client.bulkWriteBatches[0]); got != 200 {
+		t.Fatalf("expected first batch size 200, got %d", got)
 	}
-	if got := len(client.bulkWriteBatches[1]); got != 44 {
-		t.Fatalf("expected second batch size 44, got %d", got)
+	if got := len(client.bulkWriteBatches[1]); got != 56 {
+		t.Fatalf("expected second batch size 56, got %d", got)
+	}
+	if got := len(client.bulkWriteBatches[2]); got != 44 {
+		t.Fatalf("expected third batch size 44, got %d", got)
+	}
+}
+
+func TestBulkWrite_LargeWorkspaceStaysBelowSQLVariableLimit(t *testing.T) {
+	const (
+		fileCount        = 1001
+		sqlVariableLimit = 999
+	)
+
+	client := &fakeClient{
+		files: map[string]RemoteFile{},
+		bulkWriteResponseFunc: func(_ context.Context, _ string, files []BulkWriteFile) (BulkWriteResponse, error) {
+			if len(files) > sqlVariableLimit {
+				return BulkWriteResponse{}, &HTTPError{
+					StatusCode: http.StatusInternalServerError,
+					Code:       "internal_error",
+					Message:    "too many SQL variables at offset 412: SQLITE_ERROR",
+				}
+			}
+			return BulkWriteResponse{}, nil
+		},
+	}
+	localDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(localDir, "Docs"), 0o755); err != nil {
+		t.Fatalf("mkdir docs failed: %v", err)
+	}
+	for idx := 0; idx < fileCount; idx++ {
+		name := fmt.Sprintf("File%04d.md", idx+1)
+		path := filepath.Join(localDir, "Docs", name)
+		if err := os.WriteFile(path, []byte(name), 0o644); err != nil {
+			t.Fatalf("seed file %s failed: %v", name, err)
+		}
+	}
+
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_sql_variable_limit",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	// Reproduce the maintenance path that can collect every small due outbox
+	// record into one request instead of stopping at the normal foreground
+	// discovery threshold.
+	syncer.bulkFlushThreshold = fileCount
+
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("large-workspace sync failed: %v", err)
+	}
+	if got := len(client.files); got != fileCount {
+		t.Fatalf("remote file count = %d, want %d", got, fileCount)
+	}
+	for idx, batch := range client.bulkWriteBatches {
+		if len(batch) > maxBulkWriteFilesPerRequest {
+			t.Fatalf("batch %d contains %d files, over safe cap %d", idx, len(batch), maxBulkWriteFilesPerRequest)
+		}
 	}
 }
 

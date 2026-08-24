@@ -77,7 +77,15 @@ func (e *SchemaValidationError) Is(target error) bool {
 	return target == ErrSchemaValidation
 }
 
-const defaultBulkFlushThreshold = 256
+const (
+	defaultBulkFlushThreshold = 256
+	// maxBulkWriteFilesPerRequest keeps caller-sized /fs/bulk payloads well
+	// below SQLite's conservative 999-variable build limit. The cloud storage
+	// layer may bind one variable per file while committing a bulk mutation, so
+	// the byte-size cap alone is insufficient for large workspaces of small
+	// files.
+	maxBulkWriteFilesPerRequest = 200
+)
 
 // The WebSocket server may inline file payloads up to 1 MiB. nhooyr's client
 // default is only 32 KiB, which would disconnect real-time mounts whenever a
@@ -755,6 +763,25 @@ func (c *HTTPClient) WriteFilesBulk(ctx context.Context, workspaceID string, fil
 	if len(files) == 0 {
 		return BulkWriteResponse{}, ErrEmptyBulkWrite
 	}
+	var combined BulkWriteResponse
+	for start := 0; start < len(files); start += maxBulkWriteFilesPerRequest {
+		end := min(start+maxBulkWriteFilesPerRequest, len(files))
+		response, err := c.writeFilesBulkBatch(ctx, workspaceID, files[start:end])
+		if err != nil {
+			return combined, err
+		}
+		combined.Written += response.Written
+		combined.ErrorCount += response.ErrorCount
+		combined.Errors = append(combined.Errors, response.Errors...)
+		combined.Results = append(combined.Results, response.Results...)
+		if strings.TrimSpace(response.CorrelationID) != "" {
+			combined.CorrelationID = response.CorrelationID
+		}
+	}
+	return combined, nil
+}
+
+func (c *HTTPClient) writeFilesBulkBatch(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
 	body := struct {
 		Files []BulkWriteFile `json:"files"`
 	}{
@@ -3882,14 +3909,13 @@ func chunkOutboxRecords(records []outboxRecord, maxBytes int64) [][]outboxRecord
 	if len(records) == 0 {
 		return nil
 	}
-	if maxBytes <= 0 {
-		return [][]outboxRecord{records}
-	}
 	chunks := make([][]outboxRecord, 0, 1)
 	current := make([]outboxRecord, 0, len(records))
 	for _, record := range records {
 		candidate := append(append([]outboxRecord(nil), current...), record)
-		if len(current) > 0 && bulkWriteRequestSize(outboxRecordsAsBulkFiles(candidate)) > maxBytes {
+		exceedsFileLimit := len(current) >= maxBulkWriteFilesPerRequest
+		exceedsByteLimit := maxBytes > 0 && bulkWriteRequestSize(outboxRecordsAsBulkFiles(candidate)) > maxBytes
+		if len(current) > 0 && (exceedsFileLimit || exceedsByteLimit) {
 			chunks = append(chunks, append([]outboxRecord(nil), current...))
 			current = current[:0]
 		}
