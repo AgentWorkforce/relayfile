@@ -73,6 +73,7 @@ type mountConfig struct {
 	scopes                []string
 	scopedChild           bool
 	once                  bool
+	notifyFlush           bool
 	flushOutboxOnce       bool
 	pushLocalOnce         bool
 	checkpointAndSeal     bool
@@ -127,6 +128,7 @@ func main() {
 	fuse := flag.Bool("fuse", boolEnv("RELAYFILE_MOUNT_FUSE", false), "shortcut for --mode=fuse")
 	fuseContentTTL := flag.Duration("fuse-content-ttl", durationEnv("RELAYFILE_MOUNT_FUSE_CONTENT_TTL", 0), "FUSE in-memory file content cache TTL (default 30s; 0 = use default)")
 	once := flag.Bool("once", false, "run one sync cycle and exit")
+	notifyFlush := flag.Bool("notify-flush", false, "ask the already-running mount daemon for this local root to run one reconcile and exit; does not take the mount lease")
 	flushOutboxOnce := flag.Bool("flush-outbox-once", false, "flush durable writeback outbox once and exit without reconciling the local mirror")
 	pushLocalOnce := flag.Bool("push-local-once", false, "ingest pending local writeback drafts (one pushLocal pass) then flush the outbox once and exit; no pullRemote/digest/reconcile — the teardown drain for last-moment drafts")
 	checkpointAndSeal := flag.Bool("checkpoint-and-seal", false, "drain a managed mount, verify durable convergence, emit a one-use server checkpoint seal as JSON, and exit")
@@ -226,6 +228,7 @@ func main() {
 		logHTTPStatus:         *logHTTPStatus,
 		scopes:                parseTokenScopes(resolvedToken),
 		once:                  *once,
+		notifyFlush:           *notifyFlush,
 		flushOutboxOnce:       *flushOutboxOnce,
 		pushLocalOnce:         *pushLocalOnce,
 		checkpointAndSeal:     *checkpointAndSeal,
@@ -291,8 +294,8 @@ func executeMount(rootCtx context.Context, cfg mountConfig, runPoll pollRunner, 
 	if cfg.checkpointAndSeal && cfg.mode != mountModePoll {
 		return fmt.Errorf("--checkpoint-and-seal requires --mode=%s", mountModePoll)
 	}
-	if cfg.checkpointAndSeal && (cfg.once || cfg.flushOutboxOnce || cfg.pushLocalOnce) {
-		return errors.New("--checkpoint-and-seal cannot be combined with --once, --flush-outbox-once, or --push-local-once")
+	if cfg.checkpointAndSeal && (cfg.once || cfg.notifyFlush || cfg.flushOutboxOnce || cfg.pushLocalOnce) {
+		return errors.New("--checkpoint-and-seal cannot be combined with --once, --notify-flush, --flush-outbox-once, or --push-local-once")
 	}
 	if cfg.checkpointAndSeal && (cfg.checkpointSession == "" || cfg.checkpointGeneration == 0) {
 		return errors.New("--checkpoint-and-seal requires --checkpoint-session and a positive --checkpoint-generation")
@@ -302,6 +305,12 @@ func executeMount(rootCtx context.Context, cfg mountConfig, runPoll pollRunner, 
 	}
 	if cfg.mode == mountModeFuse && cfg.syncMode == syncModePullOnly {
 		return fmt.Errorf("--sync-mode=%s is not supported with --mode=%s; use --mode=%s", syncModePullOnly, mountModeFuse, mountModePoll)
+	}
+	if cfg.notifyFlush {
+		if cfg.once || cfg.flushOutboxOnce || cfg.pushLocalOnce {
+			return fmt.Errorf("--notify-flush cannot be combined with --once, --flush-outbox-once, or --push-local-once")
+		}
+		return notifyRunningMountFlush(rootCtx, cfg)
 	}
 	if strings.TrimSpace(cfg.baseURL) != "" && strings.TrimSpace(cfg.workspaceID) != "" {
 		lease, err := mountlease.Acquire(cfg.baseURL, cfg.workspaceID, cfg.localDir)
@@ -602,12 +611,22 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 	defer timer.Stop()
 	wsTicker := time.NewTicker(mountsync.DefaultWebSocketMaintenanceEvery)
 	defer wsTicker.Stop()
+	flushReq := listenFlushRequests(rootCtx)
 	cycle := 0
 	for {
 		select {
 		case <-rootCtx.Done():
 			log.Printf("mount sync stopping: %v", rootCtx.Err())
 			return nil
+		case <-flushReq:
+			if err := run(true); err != nil {
+				return err
+			}
+			if err := recordFlushAck(cfg); err != nil {
+				log.Printf("mount flush ack failed: %v", err)
+			} else {
+				log.Printf("mount flush requested via SIGUSR1; ack recorded")
+			}
 		case <-wsTicker.C:
 			if mountWebSocketEnabled(cfg) {
 				ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
