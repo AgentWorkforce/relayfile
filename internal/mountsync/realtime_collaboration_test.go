@@ -1125,7 +1125,7 @@ func TestSaveStateWithoutLocalScanKeepsTrackedPublicFiles(t *testing.T) {
 
 func TestWebSocketReconnectURLCarriesDurableCursor(t *testing.T) {
 	client := NewHTTPClient("https://relay.example", "secret", nil)
-	raw, err := client.websocketURL("ws_cursor", "evt_42")
+	raw, err := client.websocketURL("ws_cursor", "evt_42", "/")
 	if err != nil {
 		t.Fatalf("websocket url: %v", err)
 	}
@@ -1147,5 +1147,50 @@ func TestAdvanceEventCursorNeverRegressesRelayfileOrdinal(t *testing.T) {
 	}
 	if got := advanceEventCursor("evt_42", "evt_43"); got != "evt_43" {
 		t.Fatalf("cursor did not advance: %q", got)
+	}
+}
+
+// TestWebSocketURLScopesToMountRoot guards the path-scoped dial. A mount whose
+// token only covers a subtree used to dial /fs/ws with no ?path=, so the server
+// authorized it against a workspace-wide fs:read capability and returned 403 --
+// the daemon then logged "websocket unavailable; using polling sync" and every
+// scoped mount silently lost real-time propagation, falling back to the poll
+// interval.
+//
+// Both filters matter. The server authorizes against the first (the bare root,
+// which is what the token is scoped to) and ORs them when matching events; the
+// subtree glob is required because webSocketPathMatches compares segment counts
+// rather than prefixes, so "/a" alone would authorize and then match nothing.
+func TestWebSocketURLScopesToMountRoot(t *testing.T) {
+	client := &HTTPClient{baseURL: "https://dev.file.agentrelay.com", token: "tok"}
+
+	scoped, err := client.websocketURL("rw_1", "", "/workflows/runs/abc")
+	if err != nil {
+		t.Fatalf("scoped websocketURL: %v", err)
+	}
+	u, err := url.Parse(scoped)
+	if err != nil {
+		t.Fatalf("parse scoped: %v", err)
+	}
+	paths := u.Query()["path"]
+	if len(paths) != 2 || paths[0] != "/workflows/runs/abc" || paths[1] != "/workflows/runs/abc/**" {
+		t.Fatalf("scoped dial must send the root then its subtree glob; got %v (url %s)", paths, scoped)
+	}
+	if u.Scheme != "wss" {
+		t.Fatalf("https must map to wss, got %q", u.Scheme)
+	}
+
+	for _, root := range []string{"/", ""} {
+		rootURL, err := client.websocketURL("rw_1", "", root)
+		if err != nil {
+			t.Fatalf("root websocketURL(%q): %v", root, err)
+		}
+		ru, err := url.Parse(rootURL)
+		if err != nil {
+			t.Fatalf("parse root: %v", err)
+		}
+		if ru.Query().Has("path") {
+			t.Fatalf("root mount %q must keep the unscoped dial, got %s", root, rootURL)
+		}
 	}
 }
