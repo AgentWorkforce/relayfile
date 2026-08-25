@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -94,6 +95,36 @@ func agentRelayCloudAuthLockPath() (string, error) {
 		return "", err
 	}
 	return path + ".lock", nil
+}
+
+func agentRelayCloudIdentityPath() (string, error) {
+	path, err := agentRelayCloudAuthPath()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(path), "cloud-identity.json"), nil
+}
+
+// hasConfiguredAgentRelayCloudSession distinguishes an absent hosted session
+// (where self-hosted credentials.json is the correct fallback) from a present
+// but invalid hosted session (which must fail visibly instead of silently
+// changing auth modes). Explicit CLOUD_API_* auth counts as configured even
+// though Relayfile can never remove it from its parent process.
+func hasConfiguredAgentRelayCloudSession() (bool, error) {
+	if _, ok := agentRelayStoredAuthFromEnv(); ok {
+		return true, nil
+	}
+	path, err := agentRelayCloudAuthPath()
+	if err != nil {
+		return false, err
+	}
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func (a agentRelayStoredAuth) valid() bool {
@@ -208,6 +239,84 @@ func writeAgentRelayStoredAuthFile(auth agentRelayStoredAuth) error {
 	}
 	payload = append(payload, '\n')
 	return writeFileAtomically(path, payload, 0o600)
+}
+
+// revokeAndClearAgentRelayCloudSession ends the same canonical hosted session
+// created by setup/device login. Unlike the historical Relayfile logout, it
+// does not infer "already logged out" from the unrelated self-hosted store.
+// Revocation is verified before the only copy of the refresh token is removed;
+// on a network or server failure the file is kept so the user can retry.
+func revokeAndClearAgentRelayCloudSession(ctx context.Context) (bool, error) {
+	if _, ok := agentRelayStoredAuthFromEnv(); ok {
+		return false, errors.New("cannot log out an Agent Relay Cloud session supplied through CLOUD_API_* environment variables; unset them in the parent process")
+	}
+	path, err := agentRelayCloudAuthPath()
+	if err != nil {
+		return false, err
+	}
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect the Agent Relay cloud session at %s: %w", path, err)
+	}
+
+	release, err := acquireAgentRelayAuthLock(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+
+	auth, err := readAgentRelayStoredAuthFile()
+	if err != nil {
+		return false, fmt.Errorf("read the Agent Relay cloud session before logout: %w", err)
+	}
+	if strings.TrimSpace(auth.APIURL) == "" || strings.TrimSpace(auth.RefreshToken) == "" {
+		return false, fmt.Errorf("cannot verify logout for the Agent Relay cloud session at %s: apiUrl or refreshToken is missing", path)
+	}
+	revokeURL, err := buildCloudURL(auth.APIURL, "api/v1/auth/token/revoke")
+	if err != nil {
+		return false, fmt.Errorf("build Agent Relay cloud revoke URL: %w", err)
+	}
+	body, err := json.Marshal(map[string]string{"token": auth.RefreshToken})
+	if err != nil {
+		return false, err
+	}
+	revokeCtx, cancel := context.WithTimeout(ctx, agentRelayCloudRefreshTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(revokeCtx, http.MethodPost, revokeURL.String(), bytes.NewReader(body))
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "relayfile-cli/"+relayfileVersion)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("revoke the Agent Relay cloud session: %w; the local session was kept so logout can be retried", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return false, fmt.Errorf("revoke the Agent Relay cloud session: HTTP %d; the local session was kept so logout can be retried", resp.StatusCode)
+	}
+
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("remove the revoked Agent Relay cloud session at %s: %w", path, err)
+	}
+	identityPath, err := agentRelayCloudIdentityPath()
+	if err != nil {
+		return false, err
+	}
+	if err := os.Remove(identityPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("remove the Agent Relay cloud identity at %s: %w", identityPath, err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		if err == nil {
+			return false, fmt.Errorf("could not verify logout: the Agent Relay cloud session still exists at %s", path)
+		}
+		return false, fmt.Errorf("verify Agent Relay cloud logout at %s: %w", path, err)
+	}
+	return true, nil
 }
 
 func acquireAgentRelayAuthLock(ctx context.Context) (func(), error) {

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
@@ -66,6 +67,38 @@ func TestWorkspaceCreateStoresCatalogEntry(t *testing.T) {
 	}
 	if catalog.Workspaces[0].ID != "demo" {
 		t.Fatalf("expected workspace id demo, got %q", catalog.Workspaces[0].ID)
+	}
+}
+
+func TestWorkspaceCreateKeepsSelfHostedCredentialsStoreWorking(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	if err := saveCredentials(credentials{
+		Server: "https://self-hosted.relayfile.test",
+		Token:  "self_hosted_token",
+	}); err != nil {
+		t.Fatalf("saveCredentials failed: %v", err)
+	}
+	before, err := os.ReadFile(credentialsPath())
+	if err != nil {
+		t.Fatalf("read credentials before workspace create: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"workspace", "create", "self-hosted"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run workspace create failed: %v", err)
+	}
+
+	after, err := os.ReadFile(credentialsPath())
+	if err != nil {
+		t.Fatalf("read credentials after workspace create: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("self-hosted credentials were rewritten:\nbefore=%s\nafter=%s", before, after)
+	}
+	record, ok := workspaceRecordByName("self-hosted")
+	if !ok || record.ID != "self-hosted" {
+		t.Fatalf("self-hosted workspace was not preserved in the catalog: %#v, ok=%v", record, ok)
 	}
 }
 
@@ -1201,6 +1234,77 @@ func TestWorkspaceListFallsBackToAdminSync(t *testing.T) {
 	}
 }
 
+func TestWorkspaceListUsesCanonicalCloudSessionForFreshUser(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/workspaces" {
+			t.Fatalf("unexpected cloud workspace list request: %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer cld_fresh" {
+			t.Fatalf("cloud workspace list Authorization = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"workspaces":[{"id":"cloud-b","slug":"bravo","name":"Bravo"},{"id":"cloud-a","slug":"alpha","name":"Alpha"}]}`))
+	}))
+	defer server.Close()
+	writeAgentRelayCloudAuthForTest(t, server.URL, "cld_fresh")
+
+	var stdout bytes.Buffer
+	if err := run([]string{"workspace", "list", "--names-only"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run cloud workspace list failed: %v", err)
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "Alpha\nBravo" {
+		t.Fatalf("cloud workspace list output = %q", got)
+	}
+}
+
+func TestWorkspaceCreatePrefersCanonicalCloudSessionWithoutRewritingSelfHostedCredentials(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	if err := saveCredentials(credentials{Server: "https://self-hosted.relayfile.test", Token: "self_hosted"}); err != nil {
+		t.Fatalf("save self-hosted credentials: %v", err)
+	}
+	before, err := os.ReadFile(credentialsPath())
+	if err != nil {
+		t.Fatalf("read self-hosted credentials: %v", err)
+	}
+
+	cloudCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cloudCalls++
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "POST /api/v1/workspaces":
+			_, _ = w.Write([]byte(`{"workspaceId":"cloud-440","relayfileUrl":"https://relayfile.test","createdAt":"2026-08-23T00:00:00Z","name":"cloud-wins"}`))
+		case "GET /api/v1/workspaces/cloud-440/resolve":
+			_, _ = w.Write([]byte(`{"cloudWorkspaceId":"cloud-440","relayfileWorkspaceId":"rw_cloud440","provisioned":true}`))
+		case "POST /api/v1/workspaces/rw_cloud440/relayfile/delegated-token":
+			writeDelegatedBundleResponse(t, w, "https://relayfile.test", "rw_cloud440", "rf_cloud", "refresh_cloud")
+		default:
+			t.Fatalf("unexpected cloud workspace create request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	writeAgentRelayCloudAuthForTest(t, server.URL, "cld_fresh")
+
+	var stdout bytes.Buffer
+	if err := run([]string{"workspace", "create", "cloud-wins"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("cloud workspace create failed: %v", err)
+	}
+	after, err := os.ReadFile(credentialsPath())
+	if err != nil {
+		t.Fatalf("self-hosted credentials disappeared: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("self-hosted credentials changed:\nbefore=%s\nafter=%s", before, after)
+	}
+	if cloudCalls != 3 {
+		t.Fatalf("canonical cloud session was not preferred: got %d Cloud requests, want create, resolve, and mint", cloudCalls)
+	}
+}
+
 func TestTreeUsesEnvWorkspaceWhenWorkspaceArgOmitted(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
@@ -1518,6 +1622,9 @@ func TestSetupCreatesWorkspaceConnectsIntegrationAndSkipsMount(t *testing.T) {
 				t.Fatalf("expected workspace name demo, got %q", body.Name)
 			}
 			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","relayfileUrl":"https://relayfile.test","createdAt":"2026-05-01T00:00:00Z","name":"demo"}`))
+		case "/api/v1/workspaces/ws_123/resolve":
+			seen["resolve"] = true
+			_, _ = w.Write([]byte(`{"cloudWorkspaceId":"ws_123","relayfileWorkspaceId":"ws_123","provisioned":true}`))
 		case "/api/v1/workspaces/ws_123/relayfile/delegated-token":
 			seen["delegated"] = true
 			if r.Method != http.MethodPost {
@@ -1572,7 +1679,7 @@ func TestSetupCreatesWorkspaceConnectsIntegrationAndSkipsMount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run setup failed: %v\noutput:\n%s", err, stdout.String())
 	}
-	for _, key := range []string{"create", "delegated", "connect", "status"} {
+	for _, key := range []string{"create", "resolve", "delegated", "connect", "status"} {
 		if !seen[key] {
 			t.Fatalf("expected %s request", key)
 		}
@@ -1597,6 +1704,305 @@ func TestSetupCreatesWorkspaceConnectsIntegrationAndSkipsMount(t *testing.T) {
 	}
 }
 
+func TestFreshUserSetupCreatesAndResolvesWorkspaceBeforeMinting(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	localDir := t.TempDir()
+
+	const (
+		cloudWorkspaceID = "50587328-441d-4acb-b8f3-dbe1b3c5de99"
+		relayWorkspaceID = "rw_fresh440"
+	)
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "POST /api/v1/workspaces":
+			var body cloudWorkspaceCreateRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode create request: %v", err)
+			}
+			if body.Name != "fresh-user" {
+				t.Fatalf("workspace create name = %q, want fresh-user", body.Name)
+			}
+			_, _ = w.Write([]byte(`{"workspaceId":"` + cloudWorkspaceID + `","relayfileUrl":"https://relayfile.test","createdAt":"2026-08-23T00:00:00Z","name":"fresh-user"}`))
+		case "GET /api/v1/workspaces/" + cloudWorkspaceID + "/resolve":
+			_, _ = w.Write([]byte(`{"cloudWorkspaceId":"` + cloudWorkspaceID + `","relayfileWorkspaceId":"` + relayWorkspaceID + `","provisioned":true}`))
+		case "POST /api/v1/workspaces/" + relayWorkspaceID + "/relayfile/delegated-token":
+			writeDelegatedBundleResponse(t, w, "https://relayfile.test", relayWorkspaceID, "rf_fresh", "refresh_fresh")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"code":"workspace_not_found","message":"Workspace not found"}`))
+		}
+	}))
+	defer server.Close()
+	writeAgentRelayCloudAuthForTest(t, server.URL, "cld_fresh")
+
+	var stdout bytes.Buffer
+	err := run([]string{
+		"setup",
+		"--workspace", "fresh-user",
+		"--provider", "none",
+		"--local-dir", localDir,
+		"--no-open",
+		"--skip-mount",
+	}, strings.NewReader(""), &stdout, &stdout)
+	if err != nil {
+		t.Fatalf("fresh-user setup failed: %v\nrequests: %v\noutput:\n%s", err, requests, stdout.String())
+	}
+	wantRequests := []string{
+		"POST /api/v1/workspaces",
+		"GET /api/v1/workspaces/" + cloudWorkspaceID + "/resolve",
+		"POST /api/v1/workspaces/" + relayWorkspaceID + "/relayfile/delegated-token",
+	}
+	if !slices.Equal(requests, wantRequests) {
+		t.Fatalf("fresh setup request order = %v, want %v", requests, wantRequests)
+	}
+	record, ok := workspaceRecordByName("fresh-user")
+	if !ok || record.ID != cloudWorkspaceID || record.RelayWorkspaceID != relayWorkspaceID {
+		t.Fatalf("fresh setup workspace record = %#v, ok=%v", record, ok)
+	}
+}
+
+func TestHostedSetupIgnoresCollidingSelfHostedCatalogRow(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	localDir := t.TempDir()
+	if err := saveCredentials(credentials{
+		Server: "https://self-hosted.relayfile.test",
+		Token:  "self_hosted_token",
+	}); err != nil {
+		t.Fatalf("save self-hosted credentials: %v", err)
+	}
+	credentialsBefore, err := os.ReadFile(credentialsPath())
+	if err != nil {
+		t.Fatalf("read self-hosted credentials: %v", err)
+	}
+	selfHosted := workspaceRecord{
+		Name:       "demo",
+		ID:         "self-hosted-demo",
+		CreatedAt:  "2025-01-02T03:04:05Z",
+		LastUsedAt: "2025-01-02T03:04:05Z",
+		LocalDir:   "/legacy/self-hosted/demo",
+		Server:     "https://self-hosted.relayfile.test",
+	}
+	if err := saveWorkspaceCatalog(workspaceCatalog{
+		Default:    "demo",
+		Workspaces: []workspaceRecord{selfHosted},
+	}); err != nil {
+		t.Fatalf("save colliding self-hosted catalog: %v", err)
+	}
+
+	const (
+		cloudWorkspaceID = "cloud-demo-440"
+		relayWorkspaceID = "rw_cloud_demo_440"
+	)
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "POST /api/v1/workspaces":
+			var body cloudWorkspaceCreateRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode create request: %v", err)
+			}
+			if body.Name != "demo" {
+				t.Fatalf("workspace create name = %q, want demo", body.Name)
+			}
+			_, _ = w.Write([]byte(`{"workspaceId":"` + cloudWorkspaceID + `","relayfileUrl":"https://relayfile.test","createdAt":"2026-08-23T00:00:00Z","name":"demo"}`))
+		case "GET /api/v1/workspaces/" + cloudWorkspaceID + "/resolve":
+			_, _ = w.Write([]byte(`{"cloudWorkspaceId":"` + cloudWorkspaceID + `","relayfileWorkspaceId":"` + relayWorkspaceID + `","provisioned":true}`))
+		case "POST /api/v1/workspaces/" + relayWorkspaceID + "/relayfile/delegated-token":
+			writeDelegatedBundleResponse(t, w, "https://relayfile.test", relayWorkspaceID, "rf_cloud_demo", "refresh_cloud_demo")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"code":"workspace_not_found","message":"Workspace not found"}`))
+		}
+	}))
+	defer server.Close()
+	writeAgentRelayCloudAuthForTest(t, server.URL, "cld_fresh")
+
+	var stdout bytes.Buffer
+	runErr := run([]string{
+		"setup",
+		"--workspace", "demo",
+		"--provider", "none",
+		"--local-dir", localDir,
+		"--no-open",
+		"--skip-mount",
+	}, strings.NewReader(""), &stdout, &stdout)
+
+	credentialsAfter, err := os.ReadFile(credentialsPath())
+	if err != nil {
+		t.Fatalf("self-hosted credentials disappeared: %v", err)
+	}
+	if !bytes.Equal(credentialsAfter, credentialsBefore) {
+		t.Fatalf("self-hosted credentials changed:\nbefore=%s\nafter=%s", credentialsBefore, credentialsAfter)
+	}
+	if runErr != nil {
+		t.Fatalf("hosted setup with a colliding self-hosted row failed: %v\nrequests: %v\noutput:\n%s", runErr, requests, stdout.String())
+	}
+	wantRequests := []string{
+		"POST /api/v1/workspaces",
+		"GET /api/v1/workspaces/" + cloudWorkspaceID + "/resolve",
+		"POST /api/v1/workspaces/" + relayWorkspaceID + "/relayfile/delegated-token",
+	}
+	if !slices.Equal(requests, wantRequests) {
+		t.Fatalf("hosted setup request order = %v, want %v", requests, wantRequests)
+	}
+	catalog, err := loadWorkspaceCatalog()
+	if err != nil {
+		t.Fatalf("load workspace catalog: %v", err)
+	}
+	if len(catalog.Workspaces) != 2 {
+		t.Fatalf("catalog workspace count = %d, want preserved self-hosted row plus hosted row: %#v", len(catalog.Workspaces), catalog)
+	}
+	foundSelfHosted := false
+	foundCloud := false
+	for _, record := range catalog.Workspaces {
+		if record.ID == selfHosted.ID {
+			foundSelfHosted = true
+			if !reflect.DeepEqual(record, selfHosted) {
+				t.Fatalf("self-hosted catalog row changed:\nbefore=%#v\nafter=%#v", selfHosted, record)
+			}
+		}
+		if record.ID == cloudWorkspaceID && record.RelayWorkspaceID == relayWorkspaceID {
+			foundCloud = true
+		}
+	}
+	if !foundSelfHosted {
+		t.Fatalf("self-hosted workspace missing from catalog: %#v", catalog)
+	}
+	if !foundCloud {
+		t.Fatalf("hosted workspace missing from catalog: %#v", catalog)
+	}
+}
+
+func TestEnsureWorkspaceForSetupReusesOnlyCurrentCloudBinding(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	if err := saveWorkspaceCatalog(workspaceCatalog{Workspaces: []workspaceRecord{{
+		Name:             "demo",
+		ID:               "cloud-current",
+		RelayWorkspaceID: "rw_current",
+		CreatedAt:        "2026-08-23T00:00:00Z",
+	}}}); err != nil {
+		t.Fatalf("save hosted catalog: %v", err)
+	}
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /api/v1/workspaces":
+			_, _ = w.Write([]byte(`{"workspaces":[{"id":"cloud-current","name":"demo"}]}`))
+		case "GET /api/v1/workspaces/cloud-current/resolve":
+			_, _ = w.Write([]byte(`{"cloudWorkspaceId":"cloud-current","relayfileWorkspaceId":"rw_current","provisioned":true}`))
+		default:
+			t.Fatalf("unexpected current-Cloud binding request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	record, created, err := ensureWorkspaceForSetup(cloudCredentials{APIURL: server.URL, AccessToken: "cld_current"}, "demo", "")
+	if err != nil {
+		t.Fatalf("ensure current Cloud workspace: %v", err)
+	}
+	if created {
+		t.Fatal("current Cloud workspace was created instead of reused")
+	}
+	if record.ID != "cloud-current" || record.RelayWorkspaceID != "rw_current" {
+		t.Fatalf("reused workspace = %#v", record)
+	}
+	want := []string{"GET /api/v1/workspaces", "GET /api/v1/workspaces/cloud-current/resolve"}
+	if !slices.Equal(requests, want) {
+		t.Fatalf("current binding request order = %v, want %v", requests, want)
+	}
+}
+
+func TestEnsureWorkspaceForSetupCreatesWhenHostedBindingIsStale(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	stale := workspaceRecord{
+		Name:             "demo",
+		ID:               "cloud-stale",
+		RelayWorkspaceID: "rw_stale",
+		CreatedAt:        "2025-01-02T03:04:05Z",
+		CloudAPIURL:      "https://previous-session.test",
+	}
+	if err := saveWorkspaceCatalog(workspaceCatalog{Workspaces: []workspaceRecord{stale}}); err != nil {
+		t.Fatalf("save stale hosted catalog: %v", err)
+	}
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /api/v1/workspaces":
+			_, _ = w.Write([]byte(`{"workspaces":[{"id":"cloud-other","name":"other"}]}`))
+		case "POST /api/v1/workspaces":
+			_, _ = w.Write([]byte(`{"workspaceId":"cloud-new","relayfileUrl":"https://relayfile.test","createdAt":"2026-08-23T00:00:00Z","name":"demo"}`))
+		case "GET /api/v1/workspaces/cloud-new/resolve":
+			_, _ = w.Write([]byte(`{"cloudWorkspaceId":"cloud-new","relayfileWorkspaceId":"rw_new","provisioned":true}`))
+		default:
+			t.Fatalf("unexpected stale-binding request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	record, created, err := ensureWorkspaceForSetup(cloudCredentials{APIURL: server.URL, AccessToken: "cld_current"}, "demo", "")
+	if err != nil {
+		t.Fatalf("replace stale Cloud binding: %v", err)
+	}
+	if !created {
+		t.Fatal("stale Cloud binding was reused")
+	}
+	if record.ID != "cloud-new" || record.RelayWorkspaceID != "rw_new" {
+		t.Fatalf("created workspace = %#v", record)
+	}
+	want := []string{
+		"GET /api/v1/workspaces",
+		"POST /api/v1/workspaces",
+		"GET /api/v1/workspaces/cloud-new/resolve",
+	}
+	if !slices.Equal(requests, want) {
+		t.Fatalf("stale binding request order = %v, want %v", requests, want)
+	}
+}
+
+func TestSetupNamesMissingWorkspaceProvisioningStep(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/workspaces":
+			_, _ = w.Write([]byte(`{"workspaceId":"cloud-missing","relayfileUrl":"https://relayfile.test","createdAt":"2026-08-23T00:00:00Z","name":"missing"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"code":"workspace_not_found","message":"Workspace not found"}`))
+		}
+	}))
+	defer server.Close()
+	writeAgentRelayCloudAuthForTest(t, server.URL, "cld_fresh")
+
+	var stdout bytes.Buffer
+	err := run([]string{
+		"setup", "--workspace", "missing", "--provider", "none",
+		"--local-dir", t.TempDir(), "--no-open", "--skip-mount",
+	}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatal("expected setup to fail when Cloud did not provision the Relayfile workspace")
+	}
+	for _, want := range []string{"workspace", "create", "provision"} {
+		if !strings.Contains(strings.ToLower(err.Error()), want) {
+			t.Fatalf("setup error %q does not name missing %q step", err, want)
+		}
+	}
+}
+
 func TestSetupJiraRunsSitePickerAfterFreshConnect(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
@@ -1611,6 +2017,9 @@ func TestSetupJiraRunsSitePickerAfterFreshConnect(t *testing.T) {
 		case "/api/v1/workspaces":
 			seen["create"] = true
 			_, _ = w.Write([]byte(`{"workspaceId":"ws_123","relayfileUrl":"https://relayfile.test","createdAt":"2026-05-01T00:00:00Z","name":"demo"}`))
+		case "/api/v1/workspaces/ws_123/resolve":
+			seen["resolve"] = true
+			_, _ = w.Write([]byte(`{"cloudWorkspaceId":"ws_123","relayfileWorkspaceId":"ws_123","provisioned":true}`))
 		case "/api/v1/workspaces/ws_123/relayfile/delegated-token":
 			seen["delegated"] = true
 			writeDelegatedBundleResponse(t, w, "https://relayfile.test", "ws_123", "rf_join", "refresh_join")
@@ -2274,8 +2683,8 @@ func TestStatusIncludesLocalMirrorAndDaemonCounts(t *testing.T) {
 	if err := run([]string{"status", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
 		t.Fatalf("run status failed: %v", err)
 	}
-	if _, err := os.Stat(credentialsPath()); !os.IsNotExist(err) {
-		t.Fatalf("expected stale relayfile credentials removed, got err=%v", err)
+	if _, err := os.Stat(credentialsPath()); err != nil {
+		t.Fatalf("expected self-hosted relayfile credentials preserved, got err=%v", err)
 	}
 	got := stdout.String()
 	for _, fragment := range []string{
@@ -4737,11 +5146,14 @@ func TestLoginCanProvisionSeparateWorkspaceForMessagingOnlyRelaycastWorkspace(t 
 	defer relaycast.Close()
 	t.Setenv("RELAYCAST_BASE_URL", relaycast.URL)
 
-	var createCalls, mintCalls int
+	var createCalls, listCalls, mintCalls int
 	var cloud *httptest.Server
 	cloud = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/workspaces":
+			listCalls++
+			_, _ = w.Write([]byte(`{"workspaces":[{"id":"rw_relayfile","name":"chat-only (Relayfile)"}]}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/workspaces":
 			createCalls++
 			var body map[string]any
@@ -4752,6 +5164,8 @@ func TestLoginCanProvisionSeparateWorkspaceForMessagingOnlyRelaycastWorkspace(t 
 				t.Fatalf("Cloud create must contain only the messaging workspace name, got %#v", body)
 			}
 			_, _ = w.Write([]byte(`{"workspaceId":"rw_relayfile","relayfileUrl":"` + cloud.URL + `","createdAt":"2026-07-13T00:00:00Z"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/workspaces/rw_relayfile/resolve":
+			_, _ = w.Write([]byte(`{"cloudWorkspaceId":"rw_relayfile","relayfileWorkspaceId":"rw_relayfile","provisioned":true}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/workspaces/rw_relayfile/relayfile/delegated-token":
 			mintCalls++
 			if got := r.Header.Get("Authorization"); got != "Bearer cld_access" {
@@ -4808,8 +5222,8 @@ exit 2
 	if err := run([]string{"login", "--no-open", "--provision-messaging-only"}, strings.NewReader(""), &stdout, &stdout); err != nil {
 		t.Fatalf("repeat local provisioning failed: %v\noutput:\n%s", err, stdout.String())
 	}
-	if createCalls != 1 || mintCalls != 2 {
-		t.Fatalf("repeat local provisioning calls create=%d mint=%d, want create=1 mint=2", createCalls, mintCalls)
+	if createCalls != 1 || listCalls != 1 || mintCalls != 2 {
+		t.Fatalf("repeat local provisioning calls create=%d list=%d mint=%d, want create=1 list=1 mint=2", createCalls, listCalls, mintCalls)
 	}
 }
 
@@ -7276,6 +7690,13 @@ exit 2
 func TestLogoutClearsAuthCredentialsOnly(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
+	cloudServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/auth/token/revoke" {
+			t.Fatalf("unexpected cloud logout request: %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer cloudServer.Close()
 
 	if err := saveCredentials(credentials{Server: "https://relayfile.test", Token: "rf_legacy"}); err != nil {
 		t.Fatalf("saveCredentials failed: %v", err)
@@ -7306,13 +7727,7 @@ func TestLogoutClearsAuthCredentialsOnly(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save cached delegated credentials failed: %v", err)
 	}
-	agentRelayAuth := mustAgentRelayCloudAuthPath(t)
-	if err := os.MkdirAll(filepath.Dir(agentRelayAuth), 0o700); err != nil {
-		t.Fatalf("mkdir agent-relay auth dir failed: %v", err)
-	}
-	if err := os.WriteFile(agentRelayAuth, []byte(`{"accessToken":"cld_agent"}`), 0o600); err != nil {
-		t.Fatalf("write agent-relay cloud auth failed: %v", err)
-	}
+	agentRelayAuth := writeAgentRelayCloudAuthForTest(t, cloudServer.URL, "cld_agent")
 	catalog := workspaceCatalog{
 		Default: "demo",
 		Workspaces: []workspaceRecord{{
@@ -7332,21 +7747,16 @@ func TestLogoutClearsAuthCredentialsOnly(t *testing.T) {
 	if got := stdout.String(); !strings.Contains(got, "Logged out of Relayfile on this machine.") {
 		t.Fatalf("expected logout success message, got %q", got)
 	}
-	if got := stdout.String(); !strings.Contains(got, "Agent Relay cloud session left intact") {
-		t.Fatalf("expected shared-session note, got %q", got)
-	}
 	for _, path := range []string{
 		credentialsPath(),
 		cloudCredentialsPath(),
 		defaultDelegated,
 		filepath.Join(configDir(), "delegated"),
+		agentRelayAuth,
 	} {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("expected %s removed, got err=%v", path, err)
 		}
-	}
-	if _, err := os.Stat(agentRelayAuth); err != nil {
-		t.Fatalf("expected shared agent-relay cloud auth preserved, got err=%v", err)
 	}
 	loadedCatalog, err := loadWorkspaceCatalog()
 	if err != nil {
@@ -7354,6 +7764,105 @@ func TestLogoutClearsAuthCredentialsOnly(t *testing.T) {
 	}
 	if loadedCatalog.Default != "demo" || len(loadedCatalog.Workspaces) != 1 {
 		t.Fatalf("expected workspace catalog preserved, got %+v", loadedCatalog)
+	}
+}
+
+func TestLogoutAfterCloudLoginRevokesAndClearsCanonicalSession(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	var revoked string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/auth/token/revoke" {
+			t.Fatalf("unexpected logout request: %s %s", r.Method, r.URL.Path)
+		}
+		var body struct {
+			Token string `json:"token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode revoke body: %v", err)
+		}
+		revoked = body.Token
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	writeAgentRelayCloudAuthForTest(t, server.URL, "cld_logged_in")
+	identityPath, err := agentRelayCloudIdentityPath()
+	if err != nil {
+		t.Fatalf("resolve cloud identity path: %v", err)
+	}
+	if err := os.WriteFile(identityPath, []byte(`{"userId":"user-440"}`), 0o600); err != nil {
+		t.Fatalf("write cloud identity before logout: %v", err)
+	}
+	authBefore, err := readAgentRelayStoredAuthFile()
+	if err != nil {
+		t.Fatalf("read cloud session before logout: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"logout"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run logout failed: %v\noutput:\n%s", err, stdout.String())
+	}
+	if revoked != authBefore.RefreshToken {
+		t.Fatalf("revoked refresh token = %q, want stored session token", revoked)
+	}
+	if _, err := readAgentRelayStoredAuthFile(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cloud session still readable after logout: %v", err)
+	}
+	if _, err := os.Stat(identityPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cloud identity still exists after logout: %v", err)
+	}
+	if got := stdout.String(); !strings.Contains(got, "Logged out") || strings.Contains(got, "already logged out") {
+		t.Fatalf("logout result was not affirmative and accurate: %q", got)
+	}
+}
+
+func TestLogoutDoesNotClaimSuccessWhenCloudRevocationCannotBeVerified(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	writeAgentRelayCloudAuthForTest(t, server.URL, "cld_logged_in")
+
+	var stdout bytes.Buffer
+	err := run([]string{"logout"}, strings.NewReader(""), &stdout, &stdout)
+	if err == nil {
+		t.Fatal("expected logout to fail when Cloud revocation cannot be verified")
+	}
+	if !strings.Contains(err.Error(), "local session was kept") {
+		t.Fatalf("logout error does not describe retryable retained state: %v", err)
+	}
+	if strings.Contains(strings.ToLower(stdout.String()), "logged out") {
+		t.Fatalf("logout printed a false success result: %q", stdout.String())
+	}
+	if _, err := readAgentRelayStoredAuthFile(); err != nil {
+		t.Fatalf("cloud session was not retained for retry: %v", err)
+	}
+}
+
+func TestLogoutSelfHostedOnlyDoesNotClaimCloudRevocation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	if err := saveCredentials(credentials{Server: "https://self-hosted.test", Token: "self-hosted"}); err != nil {
+		t.Fatalf("save self-hosted credentials: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"logout"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("self-hosted logout failed: %v", err)
+	}
+	got := stdout.String()
+	if !strings.Contains(got, "Logged out of Relayfile on this machine.") {
+		t.Fatalf("self-hosted logout result = %q", got)
+	}
+	if strings.Contains(got, "Cloud session revoked") {
+		t.Fatalf("self-hosted logout claimed a Cloud revoke that did not happen: %q", got)
+	}
+	if _, err := os.Stat(credentialsPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("self-hosted credentials still exist after logout: %v", err)
 	}
 }
 
@@ -7367,9 +7876,6 @@ func TestLogoutIsIdempotentWhenNoCredentialsExist(t *testing.T) {
 	}
 	if got := stdout.String(); !strings.Contains(got, "Relayfile is already logged out.") {
 		t.Fatalf("expected already-logged-out message, got %q", got)
-	}
-	if got := stdout.String(); !strings.Contains(got, "Agent Relay cloud session left intact") {
-		t.Fatalf("expected shared-session note, got %q", got)
 	}
 }
 
@@ -7440,8 +7946,8 @@ func TestPrepareWorkspaceCommandClientBootstrapsDelegatedCredentialsDespiteStale
 	if !seenTree {
 		t.Fatalf("expected tree data-plane call")
 	}
-	if _, err := os.Stat(credentialsPath()); !os.IsNotExist(err) {
-		t.Fatalf("expected legacy relayfile credentials removed, got err=%v", err)
+	if _, err := os.Stat(credentialsPath()); err != nil {
+		t.Fatalf("expected self-hosted relayfile credentials preserved, got err=%v", err)
 	}
 	delegated, err := delegatedauth.Load(delegatedCredentialsPathForRequest("cloud-prod", defaultInspectScopes))
 	if err != nil {
@@ -8322,6 +8828,73 @@ func TestWorkspaceCurrentPrintsActiveWorkspace(t *testing.T) {
 	}
 	if got := strings.TrimSpace(stdout.String()); !strings.Contains(got, "source: default") {
 		t.Fatalf("expected verbose output to include source, got %q", got)
+	}
+}
+
+func TestWorkspaceCurrentUsesCanonicalCloudSessionForFreshUser(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/workspaces" {
+			t.Fatalf("unexpected cloud current request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"workspaces":[{"id":"cloud-only","slug":"only","name":"Only Workspace"}]}`))
+	}))
+	defer server.Close()
+	writeAgentRelayCloudAuthForTest(t, server.URL, "cld_fresh")
+
+	var stdout bytes.Buffer
+	if err := run([]string{"workspace", "current", "--verbose"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+		t.Fatalf("run cloud workspace current failed: %v", err)
+	}
+	got := strings.TrimSpace(stdout.String())
+	if !strings.HasPrefix(got, "Only Workspace") || !strings.Contains(got, "Agent Relay Cloud session") {
+		t.Fatalf("cloud workspace current output = %q", got)
+	}
+}
+
+func TestActiveCloudWorkspaceNameIgnoresSelfHostedNameCollision(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	if err := saveWorkspaceCatalog(workspaceCatalog{
+		Default: "demo",
+		Workspaces: []workspaceRecord{{
+			Name:      "demo",
+			ID:        "self-hosted-demo",
+			CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		}},
+	}); err != nil {
+		t.Fatalf("save self-hosted catalog: %v", err)
+	}
+	got := activeCloudWorkspaceName([]cloudWorkspaceSummary{
+		{ID: "cloud-demo", Name: "demo"},
+		{ID: "cloud-other", Name: "other"},
+	})
+	if got != "" {
+		t.Fatalf("self-hosted display-name collision selected Cloud workspace %q", got)
+	}
+}
+
+func TestActiveCloudWorkspaceNameUsesExactHostedRowAcrossNameCollision(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	if err := saveWorkspaceCatalog(workspaceCatalog{
+		Default: "demo",
+		Workspaces: []workspaceRecord{
+			{Name: "demo", ID: "self-hosted-demo", CreatedAt: time.Now().UTC().Format(time.RFC3339)},
+			{Name: "demo", ID: "cloud-demo", RelayWorkspaceID: "rw_cloud_demo", CreatedAt: time.Now().UTC().Format(time.RFC3339)},
+		},
+	}); err != nil {
+		t.Fatalf("save colliding catalog: %v", err)
+	}
+	got := activeCloudWorkspaceName([]cloudWorkspaceSummary{
+		{ID: "cloud-demo", Name: "demo"},
+		{ID: "cloud-other", Name: "other"},
+	})
+	if got != "demo" {
+		t.Fatalf("exact hosted catalog row selected Cloud workspace %q, want demo", got)
 	}
 }
 

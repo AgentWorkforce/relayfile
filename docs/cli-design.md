@@ -29,6 +29,13 @@ The `relayfile` CLI is the primary interface for humans and CI systems to intera
 | 3 | `~/.agentworkforce/relay/cloud-auth.json` (or `CLOUD_API_*`) | Cloud-hosted interactive use |
 | 4 | `~/.relayfile/credentials.json` | Self-hosted/API-key compatibility |
 
+These stores may coexist. Hosted commands do not migrate, rewrite, or delete
+the self-hosted file. Resolution is first-match-wins in the table above: an
+explicit flag or environment token overrides the hosted session, a configured
+hosted session overrides the self-hosted file, and the self-hosted file remains
+the fallback when no hosted session exists. A configured but malformed hosted
+session is an error rather than an implicit switch to another server.
+
 ### Auth flow: Cloud-hosted
 
 ```
@@ -211,9 +218,23 @@ relayfile workspace create <name>
 
 **Behavior:**
 
-1. `POST /v1/workspaces` with `{ "name": "<name>" }`.
-2. Store the workspace ID mapping in `~/.relayfile/workspaces.json`.
-3. Print the workspace ID.
+1. With the canonical hosted session, reuse a stored hosted binding only when
+   `GET /api/v1/workspaces` confirms its exact Cloud workspace ID for the
+   current session. Otherwise, `POST /api/v1/workspaces` with
+   `{ "name": "<name>" }`.
+2. Resolve the returned Cloud app workspace ID through
+   `GET /api/v1/workspaces/{id}/resolve`. Relayfile data-plane and delegated
+   credential routes use the returned `relayfileWorkspaceId`, never the Cloud
+   app UUID.
+3. Mint delegated Relayfile credentials for that resolved workspace and store
+   the Cloud-ID ↔ Relayfile-ID mapping in `~/.relayfile/workspaces.json`.
+4. With only `~/.relayfile/credentials.json`, preserve the existing
+   self-hosted/API-key compatibility behavior and leave that file unchanged.
+   The catalog is shared by both modes, so hosted setup never reuses a row by
+   display name alone. A stored hosted binding is reusable only when the
+   current Cloud session lists its exact Cloud workspace ID; otherwise the CLI
+   creates a new hosted workspace and leaves the self-hosted or stale row
+   untouched.
 
 **`~/.relayfile/workspaces.json`:**
 
@@ -244,9 +265,22 @@ relayfile workspace list [--json]
 
 **Behavior:**
 
-1. `GET /v1/workspaces` (paginated).
-2. Print table: `ID | Name | Files | Last Activity`.
-3. With `--json`, emit the raw API response.
+1. With the canonical hosted session, `GET /api/v1/workspaces` and print the
+   reachable Cloud workspaces.
+2. Otherwise use the explicit/environment/self-hosted token against the
+   Relayfile admin listing, retaining the local catalog fallback.
+
+---
+
+### `relayfile logout`
+
+Logout revokes the refresh token in the canonical hosted session before
+removing `cloud-auth.json` and `cloud-identity.json`, then clears Relayfile's
+local self-hosted and delegated credentials. If revocation cannot be verified,
+the hosted credential is kept for a retry and the command returns an error; it
+does not report that the user is already logged out. A session supplied through
+`CLOUD_API_*` must be unset in the parent process and cannot be cleared by a
+child CLI.
 
 ---
 
