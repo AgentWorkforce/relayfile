@@ -4728,7 +4728,7 @@ func (s *Syncer) connectWebSocket(ctx context.Context) error {
 		return nil
 	}
 
-	wsURL, err := httpClient.websocketURL(s.workspace, cursor)
+	wsURL, err := httpClient.websocketURL(s.workspace, cursor, s.remoteRoot)
 	if err != nil {
 		s.finishWebSocketConnectFailure(generation, 0)
 		return err
@@ -10674,7 +10674,11 @@ func correlationID() string {
 	return fmt.Sprintf("mount_%d", time.Now().UnixNano())
 }
 
-func (c *HTTPClient) websocketURL(workspaceID, cursor string) (string, error) {
+// websocketURL builds the /fs/ws dial URL. remoteRoot scopes the subscription
+// to the mount's own subtree: the server authorizes an unscoped dial (no
+// ?path=) against a workspace-WIDE fs:read capability, so a path-scoped mount
+// token is rejected with 403 and the daemon silently falls back to polling.
+func (c *HTTPClient) websocketURL(workspaceID, cursor, remoteRoot string) (string, error) {
 	base, err := url.Parse(c.baseURL)
 	if err != nil {
 		return "", err
@@ -10694,6 +10698,19 @@ func (c *HTTPClient) websocketURL(workspaceID, cursor string) (string, error) {
 	q.Set("token", c.Token())
 	if cursor = strings.TrimSpace(cursor); cursor != "" {
 		q.Set("cursor", cursor)
+	}
+	// Root mounts keep the historical unscoped dial: the server treats a
+	// missing/"/" path as the workspace-wide subscription those tokens carry.
+	//
+	// Scoped mounts send two filters. The server ORs them when matching events
+	// but authorizes against the FIRST, so the bare root leads (that is what
+	// the mount token is scoped to) and the subtree glob follows. The glob is
+	// required because the matcher compares segment counts, not prefixes:
+	// "/a" does not match "/a/b.md", so without it a scoped mount would
+	// authorize successfully and then receive nothing.
+	if root := normalizeRemotePath(remoteRoot); root != "" && root != "/" {
+		q.Add("path", root)
+		q.Add("path", strings.TrimSuffix(root, "/")+"/**")
 	}
 	base.RawQuery = q.Encode()
 	return base.String(), nil
