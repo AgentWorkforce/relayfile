@@ -50,14 +50,18 @@ import type {
 // ---------------------------------------------------------------------------
 
 function mockFetch(body: unknown, status = 200, headers: Record<string, string> = {}) {
+  return vi.fn().mockResolvedValue(jsonResponse(body, status, headers));
+}
+
+function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
   const headersObj = new Headers({ "content-type": "application/json", ...headers });
-  return vi.fn().mockResolvedValue({
+  return {
     ok: status >= 200 && status < 300,
     status,
     headers: headersObj,
     json: () => Promise.resolve(body),
     text: () => Promise.resolve(JSON.stringify(body)),
-  } as unknown as Response);
+  } as unknown as Response;
 }
 
 function makeWorkspaceToken(workspaceId = "ws_acme", agentName = "agent-test"): string {
@@ -1261,6 +1265,143 @@ describe("RelayFileClient — existing methods", () => {
       });
       const body = JSON.parse((f.mock.calls[0]![1] as RequestInit).body as string);
       expect(body.contentIdentity).toBeUndefined();
+    });
+  });
+
+  describe("file read cache invalidation after failed writes", () => {
+    const workspaceId = "ws_cache";
+    const path = "/indexes/pulls.json";
+    const staleFile: FileReadResponse = {
+      path,
+      revision: "rev_loser",
+      contentType: "application/json",
+      content: '{"pulls":["loser"]}',
+    };
+    const conflict = {
+      code: "revision_conflict",
+      message: "Conflict",
+      expectedRevision: "rev_loser",
+      currentRevision: "rev_winner",
+    };
+
+    it("makes a real read request after a conflicting write instead of serving the populated cache", async () => {
+      let readRequests = 0;
+      const f = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+        if (init.method === "GET") {
+          readRequests += 1;
+          return Promise.resolve(jsonResponse(staleFile));
+        }
+        return Promise.resolve(jsonResponse(conflict, 409));
+      });
+      const client = makeClient(f);
+
+      await client.readFile(workspaceId, path);
+      await client.readFile(workspaceId, path);
+      expect(readRequests).toBe(1);
+
+      await expect(client.writeFile({
+        workspaceId,
+        path,
+        baseRevision: "rev_loser",
+        content: '{"pulls":["mine"]}',
+        contentType: "application/json",
+      })).rejects.toThrow(RevisionConflictError);
+
+      await client.readFile(workspaceId, path);
+      expect(readRequests).toBe(2);
+    });
+
+    it("observes the winning revision on an immediate read after a conflicting write", async () => {
+      let readRequests = 0;
+      const winningFile: FileReadResponse = {
+        ...staleFile,
+        revision: "rev_winner",
+        content: '{"pulls":["winner"]}',
+      };
+      const f = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+        if (init.method === "GET") {
+          readRequests += 1;
+          return Promise.resolve(jsonResponse(readRequests === 1 ? staleFile : winningFile));
+        }
+        return Promise.resolve(jsonResponse(conflict, 409));
+      });
+      const client = makeClient(f);
+
+      const losingRead = await client.readFile(workspaceId, path);
+      expect(losingRead.revision).toBe("rev_loser");
+
+      await expect(client.writeFile({
+        workspaceId,
+        path,
+        baseRevision: losingRead.revision,
+        content: '{"pulls":["mine"]}',
+        contentType: "application/json",
+      })).rejects.toThrow(RevisionConflictError);
+
+      const retryRead = await client.readFile(workspaceId, path);
+      expect(retryRead).toMatchObject({
+        revision: "rev_winner",
+        content: '{"pulls":["winner"]}',
+      });
+      expect(f.mock.calls.map(([, init]) => (init as RequestInit).method)).toEqual([
+        "GET",
+        "PUT",
+        "GET",
+      ]);
+    });
+
+    it.each<{
+      name: string;
+      attempt: (client: RelayFileClient) => Promise<unknown>;
+    }>([
+      {
+        name: "mergeFile",
+        attempt: (client) => client.mergeFile({
+          workspaceId,
+          path,
+          strategy: "three-way-lines-v1",
+          content: '{"pulls":["mine"]}',
+          baseRevision: "rev_loser",
+          baseContent: staleFile.content,
+          contentType: "application/json",
+        }),
+      },
+      {
+        name: "bulkWrite",
+        attempt: (client) => client.bulkWrite({
+          workspaceId,
+          files: [{
+            path,
+            content: '{"pulls":["mine"]}',
+            contentType: "application/json",
+            ifMatch: "rev_loser",
+          }],
+        }),
+      },
+      {
+        name: "deleteFile",
+        attempt: (client) => client.deleteFile({
+          workspaceId,
+          path,
+          baseRevision: "rev_loser",
+        }),
+      },
+    ])("$name invalidates a populated cache when the request fails", async ({ attempt }) => {
+      let readRequests = 0;
+      const f = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+        if (init.method === "GET") {
+          readRequests += 1;
+          return Promise.resolve(jsonResponse(staleFile));
+        }
+        return Promise.resolve(jsonResponse(conflict, 409));
+      });
+      const client = makeClient(f);
+
+      await client.readFile(workspaceId, path);
+      await expect(attempt(client)).rejects.toThrow();
+      await client.readFile(workspaceId, path);
+
+      expect(readRequests).toBe(2);
     });
   });
 
