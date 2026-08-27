@@ -1398,6 +1398,9 @@ describe("RelayFileClient — existing methods", () => {
       const client = makeClient(f);
 
       await client.readFile(workspaceId, path);
+      await client.readFile(workspaceId, path);
+      expect(readRequests).toBe(1);
+
       await expect(attempt(client)).rejects.toThrow();
       await client.readFile(workspaceId, path);
 
