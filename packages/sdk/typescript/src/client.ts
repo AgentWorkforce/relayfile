@@ -318,6 +318,31 @@ function getFileReadCache(client: RelayFileClient): FileReadCache | false {
   return false;
 }
 
+async function withFileReadCacheInvalidated<T>(
+  client: RelayFileClient,
+  workspaceId: string,
+  paths: readonly string[],
+  attempt: () => Promise<T>
+): Promise<T> {
+  const cache = getFileReadCache(client);
+  if (cache === false) return attempt();
+
+  const evict = () => {
+    for (const path of paths) {
+      cache.evict(workspaceId, path);
+    }
+  };
+
+  // The attempt itself invalidates our knowledge, before its outcome is known.
+  evict();
+  try {
+    return await attempt();
+  } finally {
+    // A concurrent read can repopulate while the request is in flight.
+    evict();
+  }
+}
+
 function initFileReadCache(client: RelayFileClient, options: RelayFileClientOptions): void {
   if (options.readCache === false) {
     fileReadCaches.set(client, false);
@@ -1594,74 +1619,72 @@ export class RelayFileClient {
   async writeFile(input: WriteFileInput): Promise<WriteQueuedResponse> {
     const { workspaceId, path, correlationId, baseRevision, content, contentType, encoding, contentIdentity, signal } = input;
     const query = buildQuery({ path, forkId: input.forkId });
-    const result = await this.request<WriteQueuedResponse>({
-      method: "PUT",
-      path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/file${query}`,
-      correlationId,
-      headers: {
-        "If-Match": baseRevision
-      },
-      // Single-file PUT expects the target path in the query string, not the JSON body.
-      body: {
-        contentType: contentType ?? "text/markdown",
-        content,
-        encoding,
-        semantics: input.semantics,
-        ...(contentIdentity ? { contentIdentity } : {})
-      },
-      signal
-    });
-    const cache = getFileReadCache(this);
-    if (cache !== false) cache.evict(workspaceId, path);
-    return result;
+    return withFileReadCacheInvalidated(this, workspaceId, [path], () =>
+      this.request<WriteQueuedResponse>({
+        method: "PUT",
+        path: `/v1/workspaces/${encodeURIComponent(workspaceId)}/fs/file${query}`,
+        correlationId,
+        headers: {
+          "If-Match": baseRevision
+        },
+        // Single-file PUT expects the target path in the query string, not the JSON body.
+        body: {
+          contentType: contentType ?? "text/markdown",
+          content,
+          encoding,
+          semantics: input.semantics,
+          ...(contentIdentity ? { contentIdentity } : {})
+        },
+        signal
+      })
+    );
   }
 
   async mergeFile(input: MergeFileInput): Promise<MergeFileResponse> {
     const query = buildQuery({ path: input.path });
-    const result = await this.request<MergeFileResponse>({
-      method: "POST",
-      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/merge${query}`,
-      correlationId: input.correlationId,
-      body: {
-        strategy: input.strategy,
-        content: input.content,
-        baseRevision: input.baseRevision,
-        baseContent: input.baseContent,
-        // Default per-strategy: go-top-level-functions-v1 is Go-only, so
-        // existing callers that omit contentType must keep getting
-        // "text/x-go" (changing this would silently rewrite their file's
-        // stored content type and provider-writeback metadata on every
-        // merge). three-way-lines-v1 has no language restriction, so
-        // "text/plain" is the right neutral default there.
-        contentType: input.contentType ?? (input.strategy === "go-top-level-functions-v1" ? "text/x-go" : "text/plain"),
-        contentIdentity: input.contentIdentity
-      },
-      signal: input.signal
-    });
-    const cache = getFileReadCache(this);
-    if (cache !== false) cache.evict(input.workspaceId, input.path);
-    return result;
+    return withFileReadCacheInvalidated(this, input.workspaceId, [input.path], () =>
+      this.request<MergeFileResponse>({
+        method: "POST",
+        path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/merge${query}`,
+        correlationId: input.correlationId,
+        body: {
+          strategy: input.strategy,
+          content: input.content,
+          baseRevision: input.baseRevision,
+          baseContent: input.baseContent,
+          // Default per-strategy: go-top-level-functions-v1 is Go-only, so
+          // existing callers that omit contentType must keep getting
+          // "text/x-go" (changing this would silently rewrite their file's
+          // stored content type and provider-writeback metadata on every
+          // merge). three-way-lines-v1 has no language restriction, so
+          // "text/plain" is the right neutral default there.
+          contentType: input.contentType ?? (input.strategy === "go-top-level-functions-v1" ? "text/x-go" : "text/plain"),
+          contentIdentity: input.contentIdentity
+        },
+        signal: input.signal
+      })
+    );
   }
 
   async bulkWrite(input: BulkWriteInput): Promise<BulkWriteResponse> {
     const query = buildQuery({ forkId: input.forkId });
-    const response = await this.performRequest({
-      method: "POST",
-      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/bulk${query}`,
-      correlationId: input.correlationId,
-      body: {
-        files: input.files
-      },
-      signal: input.signal
-    });
-    const result = await (this.readPayload(response) as Promise<BulkWriteResponse>);
-    const cache = getFileReadCache(this);
-    if (cache !== false) {
-      for (const file of input.files) {
-        cache.evict(input.workspaceId, file.path);
+    return withFileReadCacheInvalidated(
+      this,
+      input.workspaceId,
+      input.files.map((file) => file.path),
+      async () => {
+        const response = await this.performRequest({
+          method: "POST",
+          path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/bulk${query}`,
+          correlationId: input.correlationId,
+          body: {
+            files: input.files
+          },
+          signal: input.signal
+        });
+        return await (this.readPayload(response) as Promise<BulkWriteResponse>);
       }
-    }
-    return result;
+    );
   }
 
   async issueCheckpointSeal(input: IssueCheckpointSealInput): Promise<CheckpointSeal> {
@@ -1773,18 +1796,17 @@ export class RelayFileClient {
 
   async deleteFile(input: DeleteFileInput): Promise<WriteQueuedResponse> {
     const query = buildQuery({ path: input.path, forkId: input.forkId });
-    const result = await this.request<WriteQueuedResponse>({
-      method: "DELETE",
-      path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/file${query}`,
-      correlationId: input.correlationId,
-      headers: {
-        "If-Match": input.baseRevision
-      },
-      signal: input.signal
-    });
-    const cache = getFileReadCache(this);
-    if (cache !== false) cache.evict(input.workspaceId, input.path);
-    return result;
+    return withFileReadCacheInvalidated(this, input.workspaceId, [input.path], () =>
+      this.request<WriteQueuedResponse>({
+        method: "DELETE",
+        path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/file${query}`,
+        correlationId: input.correlationId,
+        headers: {
+          "If-Match": input.baseRevision
+        },
+        signal: input.signal
+      })
+    );
   }
 
   async createFork(input: CreateForkInput): Promise<ForkHandle> {

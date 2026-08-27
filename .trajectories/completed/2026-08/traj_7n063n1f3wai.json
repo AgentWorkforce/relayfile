@@ -1,0 +1,53 @@
+{
+  "id": "traj_7n063n1f3wai",
+  "version": 1,
+  "task": {
+    "title": "Fix TypeScript SDK write-attempt read-cache invalidation"
+  },
+  "status": "completed",
+  "startedAt": "2026-08-27T20:19:59.085Z",
+  "completedAt": "2026-08-27T20:20:27.355Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-08-27T20:20:03.949Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_yfsbe9xwrrrt",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-08-27T20:20:03.949Z",
+      "endedAt": "2026-08-27T20:20:27.355Z",
+      "events": [
+        {
+          "ts": 1787862003950,
+          "type": "decision",
+          "content": "Bracket cache-aware file mutations with pre-request and finally eviction: Bracket cache-aware file mutations with pre-request and finally eviction",
+          "raw": {
+            "question": "Bracket cache-aware file mutations with pre-request and finally eviction",
+            "chosen": "Bracket cache-aware file mutations with pre-request and finally eviction",
+            "alternatives": [],
+            "reasoning": "A write attempt invalidates revision knowledge regardless of outcome. Pre-eviction prevents cached hits once the attempt starts; finally eviction removes entries or in-flight reads repopulated during the concurrent-reader window. This favors correctness over retaining a possibly valid entry after auth or network failures."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Bracketed SDK file mutations with pre-request and finally cache eviction; added populated-cache 409 and sibling mutation regressions; SDK build, typecheck, and 277 tests pass; success-only source ablation fails all 5 targeted regressions.",
+    "approach": "Standard approach",
+    "confidence": 0.95
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "a5ad0268d6e2c1b142f88e874e4300aa2469875b",
+    "endRef": "a5ad0268d6e2c1b142f88e874e4300aa2469875b"
+  }
+}
