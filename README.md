@@ -30,6 +30,7 @@ That's the entire interface. No new SDK to learn, no MCP schemas eating your con
 - **Hosted integrations:** `npx relayfile@latest` — sign in, connect GitHub, and mount the current project with no prior account or CLI setup.
 - **Local OSS:** run the Docker stack below, then mount `ws_demo` as a normal directory.
 - **Sandbox SDK:** use `RelayfileSetup.ensureMountedWorkspace()` when your runtime already has a cloud access token.
+- **Cross-machine proof:** run the [fail-closed Agent Relay sandbox demo](examples/live-workspace/README.md) to write uncommitted bytes in Daytona and verify their SHA-256 on your laptop through Relayfile.
 - **Programmatic agents:** use [`@relayfile/agents`](packages/agents/README.md) for Vercel AI SDK, OpenAI Agents SDK, and LangChain, or wrap `RelayFileClient.readFile()` / `writeFile()` directly in any custom harness.
 
 ```ts

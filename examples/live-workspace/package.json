@@ -1,0 +1,21 @@
+{
+  "name": "relayfile-cross-machine-proof",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A fail-closed proof that an agent's uncommitted file crossed from Daytona to this machine through Relayfile.",
+  "scripts": {
+    "setup": "relayfile login && agent-relay cloud connect claude",
+    "preflight": "node proof.mjs --preflight",
+    "proof": "node proof.mjs",
+    "dry-run": "node proof.mjs --dry-run",
+    "test": "node --test proof.test.mjs"
+  },
+  "devDependencies": {
+    "agent-relay": "11.8.7",
+    "relayfile": "0.10.51"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
