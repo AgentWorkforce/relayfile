@@ -99,6 +99,15 @@ export function parseWorkspaceLabel(output) {
   return current;
 }
 
+export function selectWorkspace(activeWorkspace, workspaceOverride) {
+  if (workspaceOverride && workspaceOverride.toLowerCase() !== activeWorkspace.toLowerCase()) {
+    throw new Error(
+      `--workspace ${workspaceOverride} does not match the active Agent Relay Cloud workspace ${activeWorkspace}`
+    );
+  }
+  return activeWorkspace;
+}
+
 export function parseCliVersion(output) {
   const match = output.match(/(?:^|\s)v?(\d+\.\d+\.\d+)(?:[-+\s]|$)/);
   if (!match) throw new Error(`could not parse CLI version from: ${output.trim()}`);
@@ -141,19 +150,45 @@ export function verifyProof({ body, sidecar, expectedNonce }) {
   return { digest, payload };
 }
 
-function run(command, args) {
+export function run(command, args, { timeoutMs } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    let killTimer;
+    const timeout = Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          child.kill("SIGTERM");
+          killTimer = setTimeout(() => child.kill("SIGKILL"), 1_000);
+          killTimer.unref();
+          const error = new Error(`${command} timed out after ${Math.ceil(timeoutMs)}ms`);
+          error.code = "COMMAND_TIMEOUT";
+          reject(error);
+        }, timeoutMs)
+      : undefined;
+    timeout?.unref();
     child.stdout.on("data", (chunk) => {
       stdout += chunk;
     });
     child.stderr.on("data", (chunk) => {
       stderr += chunk;
     });
-    child.on("error", reject);
-    child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      if (killTimer) clearTimeout(killTimer);
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      resolve({ code: code ?? 1, stdout, stderr });
+    });
   });
 }
 
@@ -186,22 +221,29 @@ async function preflight(workspaceOverride) {
     requireCommand("relayfile", MINIMUM_RELAYFILE_VERSION)
   ]);
   await requireCloudSession();
-  const workspace = workspaceOverride ?? await detectWorkspace();
+  const activeWorkspace = await detectWorkspace();
+  const workspace = selectWorkspace(activeWorkspace, workspaceOverride);
   return { agentRelayVersion, relayfileVersion, workspace };
 }
 
-async function readRemote(workspace, remotePath) {
-  const result = await run("relayfile", ["read", workspace, remotePath]);
-  return result.code === 0 ? result.stdout : undefined;
+async function readRemote(workspace, remotePath, timeoutMs) {
+  try {
+    const result = await run("relayfile", ["read", workspace, remotePath], { timeoutMs });
+    return result.code === 0 ? result.stdout : undefined;
+  } catch (error) {
+    if (error.code === "COMMAND_TIMEOUT") return undefined;
+    throw error;
+  }
 }
 
 async function waitForProof({ workspace, remotePath, expectedNonce, timeoutSeconds }) {
   const deadline = Date.now() + timeoutSeconds * 1000;
   let lastValidationError;
   while (Date.now() < deadline) {
+    const remainingMs = Math.max(1, deadline - Date.now());
     const [body, sidecar] = await Promise.all([
-      readRemote(workspace, remotePath),
-      readRemote(workspace, `${remotePath}.sha256`)
+      readRemote(workspace, remotePath, remainingMs),
+      readRemote(workspace, `${remotePath}.sha256`, remainingMs)
     ]);
     if (body !== undefined && sidecar !== undefined) {
       try {

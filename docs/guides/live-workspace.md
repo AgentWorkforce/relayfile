@@ -8,6 +8,7 @@ laptop that the agent's uncommitted file and SHA-256 sidecar arrived intact.
 ```bash
 cd examples/live-workspace
 npm install
+npm run setup  # first time only
 npm run preflight
 npm run proof
 ```

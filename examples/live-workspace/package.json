@@ -16,6 +16,6 @@
     "relayfile": "0.10.51"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   }
 }

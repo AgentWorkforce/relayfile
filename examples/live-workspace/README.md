@@ -59,7 +59,7 @@ Running a launch or recording a demo? Use the [launch playbook](./LAUNCH_PLAYBOO
 
 Prerequisites:
 
-- Node.js 18 or newer
+- Node.js 22 or newer
 - `agent-relay` 11.8.7 or newer (the example pins it)
 - `relayfile` 0.10.51 or newer (the example pins it)
 - `relayfile` authenticated to the same Agent Relay Cloud workspace
@@ -104,7 +104,7 @@ Any missing gate is `FAIL`, not a degraded preview.
 # Pick another supported agent CLI.
 npm run proof -- --provider codex
 
-# Override the auto-detected Relayfile workspace name.
+# Assert the active Relayfile workspace name before provisioning.
 npm run proof -- --workspace default
 
 # Keep waiting for five minutes after the agent launches.

@@ -11,6 +11,8 @@ import {
   parseCliVersion,
   parseWorkspaceLabel,
   portableAgentRelayCommand,
+  run,
+  selectWorkspace,
   verifyProof
 } from "./proof.mjs";
 
@@ -70,6 +72,19 @@ test("extractJsonObject accepts Agent Relay notes before JSON", () => {
 test("workspace labels from old and new Relayfile CLIs reduce to the workspace name", () => {
   assert.equal(parseWorkspaceLabel("Default (source: Agent Relay Cloud session)\n"), "Default");
   assert.equal(parseWorkspaceLabel("default (id: rw_123, source: agent-relay)\n"), "default");
+});
+
+test("workspace overrides can only assert the active Cloud workspace", () => {
+  assert.equal(selectWorkspace("Default", undefined), "Default");
+  assert.equal(selectWorkspace("Default", "default"), "Default");
+  assert.throws(() => selectWorkspace("Default", "Other"), /does not match the active/u);
+});
+
+test("commands that stall are terminated at their deadline", async () => {
+  await assert.rejects(
+    run(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { timeoutMs: 25 }),
+    (error) => error.code === "COMMAND_TIMEOUT"
+  );
 });
 
 test("verifyProof requires matching bytes, nonce, and origin", () => {
