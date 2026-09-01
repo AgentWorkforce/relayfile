@@ -225,6 +225,11 @@ interface StreamStartOptions {
 interface JwtClaimsShape {
   workspace_id?: unknown;
   agent_name?: unknown;
+  // Minted delegated tokens (relay_pa_*) emit the workspace under `wks` and the
+  // agent under `sub` ("agent_<name>") rather than the canonical claim names.
+  wks?: unknown;
+  workspace?: unknown;
+  sub?: unknown;
 }
 
 interface ChangeEventWireShape {
@@ -1108,7 +1113,14 @@ function getWorkspaceIdFromToken(token: string): string | undefined {
   }
   try {
     const parsed = JSON.parse(decodeBase64Url(parts[1] ?? "")) as JwtClaimsShape;
-    return typeof parsed.workspace_id === "string" && parsed.workspace_id.length > 0 ? parsed.workspace_id : undefined;
+    // Prefer the canonical `workspace_id` claim; fall back to the `wks` claim
+    // minted delegated tokens (relay_pa_*) actually carry, then `workspace`.
+    for (const candidate of [parsed.workspace_id, parsed.wks, parsed.workspace]) {
+      if (typeof candidate === "string" && candidate.length > 0) {
+        return candidate;
+      }
+    }
+    return undefined;
   } catch {
     return undefined;
   }
@@ -1121,7 +1133,15 @@ function getAgentIdFromToken(token: string): string | undefined {
   }
   try {
     const parsed = JSON.parse(decodeBase64Url(parts[1] ?? "")) as JwtClaimsShape;
-    return typeof parsed.agent_name === "string" && parsed.agent_name.length > 0 ? parsed.agent_name : undefined;
+    if (typeof parsed.agent_name === "string" && parsed.agent_name.length > 0) {
+      return parsed.agent_name;
+    }
+    // Minted delegated tokens omit `agent_name` and carry the agent as the JWT
+    // subject, e.g. sub: "agent_gil-ramp-bookkeeper".
+    if (typeof parsed.sub === "string" && parsed.sub.startsWith("agent_") && parsed.sub.length > "agent_".length) {
+      return parsed.sub.slice("agent_".length);
+    }
+    return undefined;
   } catch {
     return undefined;
   }
