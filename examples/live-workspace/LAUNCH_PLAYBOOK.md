@@ -22,20 +22,15 @@ same named workspace while hash evidence records exactly what was reviewed.
 Use two terminals. Terminal A runs the proof; Terminal B attaches to the live
 agents when their commands appear.
 
-First-time setup:
+Run this self-contained command in Terminal A:
 
 ```bash
 LIVE_REVIEW_REV=ce68bc90b3324e4b51c160152cc6aaa02513ae68
 LIVE_REVIEW_SHA256=47be2579cb28933ca5a6b0fa821095b86747be1b7a6845dd2846b29efaeeb873
 LIVE_REVIEW_SCRIPT="$(mktemp "${TMPDIR:-/tmp}/relayfile-live-review.XXXXXX")" &&
 curl -fsSL "https://gist.githubusercontent.com/khaliqgant/e9ee531e63a9048f612e12979f50d2ae/raw/$LIVE_REVIEW_REV/live-review.sh" -o "$LIVE_REVIEW_SCRIPT" &&
-printf '%s  %s\n' "$LIVE_REVIEW_SHA256" "$LIVE_REVIEW_SCRIPT" | shasum -a 256 -c - &&
-bash "$LIVE_REVIEW_SCRIPT" setup
-```
-
-Run the self-cleaning demo:
-
-```bash
+node -e 'const fs=require("fs"),c=require("crypto"),[p,w]=process.argv.slice(1),g=c.createHash("sha256").update(fs.readFileSync(p)).digest("hex");if(g!==w)throw Error("SHA-256 mismatch");console.log("SHA-256 verified")' "$LIVE_REVIEW_SCRIPT" "$LIVE_REVIEW_SHA256" &&
+bash "$LIVE_REVIEW_SCRIPT" setup &&
 bash "$LIVE_REVIEW_SCRIPT" validate
 ```
 
@@ -63,25 +58,22 @@ Suggested narration:
 6. “I can attach to either running agent while this happens.”
 
 `validate` releases both agents and deletes the exact successful sandbox after
-the proof. Use `run` only when you deliberately want the agents and sandbox to
-remain available after `PASS`:
-
-```bash
-bash "$LIVE_REVIEW_SCRIPT" run
-```
+the proof. To deliberately leave the agents and sandbox available after
+`PASS`, replace the final `validate` in the self-contained command with `run`.
 
 ## Public self-serve path
 
 Users do not need a repository checkout or globally installed Relayfile tools.
-They need Node.js 22+, npm, curl, and a Claude provider they can connect during
-setup. The script downloads pinned CLIs in an isolated npm execution:
+They need a Bash environment with `mktemp`, Node.js 22+, npm, curl, and a Claude
+provider they can connect during setup. The script downloads pinned CLIs in an
+isolated npm execution:
 
 ```bash
 LIVE_REVIEW_REV=ce68bc90b3324e4b51c160152cc6aaa02513ae68
 LIVE_REVIEW_SHA256=47be2579cb28933ca5a6b0fa821095b86747be1b7a6845dd2846b29efaeeb873
 LIVE_REVIEW_SCRIPT="$(mktemp "${TMPDIR:-/tmp}/relayfile-live-review.XXXXXX")" &&
 curl -fsSL "https://gist.githubusercontent.com/khaliqgant/e9ee531e63a9048f612e12979f50d2ae/raw/$LIVE_REVIEW_REV/live-review.sh" -o "$LIVE_REVIEW_SCRIPT" &&
-printf '%s  %s\n' "$LIVE_REVIEW_SHA256" "$LIVE_REVIEW_SCRIPT" | shasum -a 256 -c - &&
+node -e 'const fs=require("fs"),c=require("crypto"),[p,w]=process.argv.slice(1),g=c.createHash("sha256").update(fs.readFileSync(p)).digest("hex");if(g!==w)throw Error("SHA-256 mismatch");console.log("SHA-256 verified")' "$LIVE_REVIEW_SCRIPT" "$LIVE_REVIEW_SHA256" &&
 bash "$LIVE_REVIEW_SCRIPT" setup &&
 bash "$LIVE_REVIEW_SCRIPT" validate
 ```
