@@ -2739,6 +2739,62 @@ describe("RelayFileClient — retry", () => {
     expect(calls).toBe(2);
   });
 
+  it("retries a 429 workspace_busy and waits the server-advertised retryAfterSeconds", async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const f = vi.fn().mockImplementation(() => {
+        calls++;
+        if (calls < 2) {
+          return Promise.resolve({
+            ok: false,
+            status: 429,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: () =>
+              Promise.resolve({
+                code: "workspace_busy",
+                message: "workspace durable object is busy; retry after the advertised delay",
+                correlationId: "c_busy",
+                details: { retryAfterSeconds: 5, reason: "durable_object_overloaded" },
+              }),
+            text: () => Promise.resolve(""),
+          });
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: new Headers({ "content-type": "application/json" }),
+          json: () => Promise.resolve({ path: "/", entries: [], nextCursor: null }),
+          text: () => Promise.resolve("{}"),
+        });
+      }) as unknown as typeof fetch;
+
+      const client = new RelayFileClient({
+        baseUrl: "https://relay.test",
+        token: "tok",
+        fetchImpl: f,
+        // maxDelayMs is deliberately far below the advertised 5s. The old code
+        // truncated the delay to maxDelayMs and retried into the still-busy DO;
+        // the fix honors the advertised delay instead.
+        retry: { maxRetries: 3, baseDelayMs: 1, maxDelayMs: 5, jitterRatio: 0 },
+      });
+
+      const promise = client.listTree("ws_1");
+
+      // Advancing less than the advertised 5s must NOT trigger the retry.
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(f).toHaveBeenCalledTimes(1);
+
+      // Crossing 5s fires the retry, which succeeds.
+      await vi.advanceTimersByTimeAsync(3000);
+      const res = await promise;
+      expect(res.entries).toEqual([]);
+      expect(f).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not retry on abort", async () => {
     const controller = new AbortController();
     controller.abort();
