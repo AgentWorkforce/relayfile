@@ -631,6 +631,38 @@ describe("RelayFileClient — existing methods", () => {
       await connection.unsubscribe();
     });
 
+    it("delivers the WS error event to handlers without throwing when ErrorEvent is undefined (Node)", async () => {
+      // Regression: the browser-only `ErrorEvent` global is undefined under
+      // Node. If the WS "error" handler references it unguarded it throws
+      // `ReferenceError: ErrorEvent is not defined` — an uncaught exception that
+      // crashes the process and defeats the SDK's own auto-reconnect.
+      expect(typeof ErrorEvent).toBe("undefined");
+
+      const client = makeClient(mockFetch({}) as unknown as typeof fetch, {
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+      });
+
+      const connection = client.connectWebSocket("ws_acme", {
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+      });
+
+      const socket = await waitForWebSocket();
+
+      const received: Array<Event | Error> = [];
+      connection.on("error", (event) => {
+        received.push(event);
+      });
+
+      const wsError = { type: "error", message: "socket hang up" } as unknown as Event;
+      expect(() => socket.emit("error", wsError)).not.toThrow();
+
+      expect(received).toHaveLength(1);
+      // When ErrorEvent is undefined, the raw event is forwarded unchanged.
+      expect(received[0]).toBe(wsError);
+
+      connection.close();
+    });
+
     it("keeps acl token context for replayed change expansion", async () => {
       const scopedToken = makeWorkspaceToken("ws_scoped", "scoped-agent");
       const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
