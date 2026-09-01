@@ -2739,6 +2739,169 @@ describe("RelayFileClient — retry", () => {
     expect(calls).toBe(2);
   });
 
+  it("retries a 429 workspace_busy and waits the server-advertised retryAfterSeconds", async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const f = vi.fn().mockImplementation(() => {
+        calls++;
+        if (calls < 2) {
+          return Promise.resolve({
+            ok: false,
+            status: 429,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: () =>
+              Promise.resolve({
+                code: "workspace_busy",
+                message: "workspace durable object is busy; retry after the advertised delay",
+                correlationId: "c_busy",
+                details: { retryAfterSeconds: 5, reason: "durable_object_overloaded" },
+              }),
+            text: () => Promise.resolve(""),
+          });
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: new Headers({ "content-type": "application/json" }),
+          json: () => Promise.resolve({ path: "/", entries: [], nextCursor: null }),
+          text: () => Promise.resolve("{}"),
+        });
+      }) as unknown as typeof fetch;
+
+      const client = new RelayFileClient({
+        baseUrl: "https://relay.test",
+        token: "tok",
+        fetchImpl: f,
+        // maxDelayMs is deliberately far below the advertised 5s. The old code
+        // truncated the delay to maxDelayMs and retried into the still-busy DO;
+        // the fix honors the advertised delay instead.
+        retry: { maxRetries: 3, baseDelayMs: 1, maxDelayMs: 5, jitterRatio: 0 },
+      });
+
+      const promise = client.listTree("ws_1");
+
+      // Advancing less than the advertised 5s must NOT trigger the retry.
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(f).toHaveBeenCalledTimes(1);
+
+      // Crossing 5s fires the retry, which succeeds.
+      await vi.advanceTimersByTimeAsync(3000);
+      const res = await promise;
+      expect(res.entries).toEqual([]);
+      expect(f).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("prefers the Retry-After header over a body retryAfterSeconds when both are present", async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const f = vi.fn().mockImplementation(() => {
+        calls++;
+        if (calls < 2) {
+          return Promise.resolve({
+            ok: false,
+            status: 429,
+            headers: new Headers({
+              "content-type": "application/json",
+              // Explicit header says 1s; body says 5s. The header must win.
+              "retry-after": "1",
+            }),
+            json: () =>
+              Promise.resolve({
+                code: "workspace_busy",
+                message: "busy",
+                correlationId: "c_both",
+                details: { retryAfterSeconds: 5, reason: "durable_object_overloaded" },
+              }),
+            text: () => Promise.resolve(""),
+          });
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: new Headers({ "content-type": "application/json" }),
+          json: () => Promise.resolve({ path: "/", entries: [], nextCursor: null }),
+          text: () => Promise.resolve("{}"),
+        });
+      }) as unknown as typeof fetch;
+
+      const client = new RelayFileClient({
+        baseUrl: "https://relay.test",
+        token: "tok",
+        fetchImpl: f,
+        // maxDelayMs is high enough not to clamp the 1s header value.
+        retry: { maxRetries: 3, baseDelayMs: 1, maxDelayMs: 10_000, jitterRatio: 0 },
+      });
+
+      const promise = client.listTree("ws_1");
+
+      // The 1s header fires the retry; the 5s body value must NOT be honored.
+      await vi.advanceTimersByTimeAsync(1000);
+      const res = await promise;
+      expect(res.entries).toEqual([]);
+      expect(f).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ignores a body retryAfterSeconds on a 5xx and uses normal backoff", async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const f = vi.fn().mockImplementation(() => {
+        calls++;
+        if (calls < 2) {
+          return Promise.resolve({
+            ok: false,
+            status: 503,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: () =>
+              Promise.resolve({
+                code: "internal_error",
+                message: "unavailable",
+                correlationId: "c_5xx",
+                // A 5xx body must NOT be treated as an advertised backpressure
+                // delay; retryAfterSeconds is a 429-only signal.
+                details: { retryAfterSeconds: 5 },
+              }),
+            text: () => Promise.resolve(""),
+          });
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: new Headers({ "content-type": "application/json" }),
+          json: () => Promise.resolve({ path: "/", entries: [], nextCursor: null }),
+          text: () => Promise.resolve("{}"),
+        });
+      }) as unknown as typeof fetch;
+
+      const client = new RelayFileClient({
+        baseUrl: "https://relay.test",
+        token: "tok",
+        fetchImpl: f,
+        // maxDelayMs caps the backoff well below the 5s body value. If the body
+        // were (wrongly) honored, the retry would wait 5s instead of <=5ms.
+        retry: { maxRetries: 3, baseDelayMs: 1, maxDelayMs: 5, jitterRatio: 0 },
+      });
+
+      const promise = client.listTree("ws_1");
+
+      // Backoff is capped at maxDelayMs (5ms), so a tiny advance fires the retry.
+      await vi.advanceTimersByTimeAsync(5);
+      const res = await promise;
+      expect(res.entries).toEqual([]);
+      expect(f).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not retry on abort", async () => {
     const controller = new AbortController();
     controller.abort();

@@ -199,6 +199,16 @@ const DEFAULT_RETRY_OPTIONS: NormalizedRetryOptions = {
   jitterRatio: 0.2
 };
 
+/**
+ * Hard ceiling for a *server-advertised* retry delay (a 429 body's
+ * `details.retryAfterSeconds`). `maxDelayMs` bounds our OWN exponential
+ * backoff; an explicit server instruction ("retry after N seconds") is honored
+ * above that cap — truncating it just retries into the same overloaded resource
+ * and burns the retry budget — but is still bounded here so a pathological or
+ * hostile value cannot stall the client indefinitely.
+ */
+const RETRY_AFTER_MAX_MS = 30_000;
+
 const DEFAULT_CHANGE_COALESCE_MS = 200;
 const DEFAULT_CHANGE_LOG_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_CHANGE_LOG_MAX_ENTRIES = 10_000;
@@ -2707,7 +2717,17 @@ export class RelayFileClient {
       const payload = await this.readPayload(response);
       if (this.shouldRetryStatus(response.status, retries, params.signal)) {
         retries += 1;
-        await this.sleep(this.computeRetryDelayMs(retries, response.headers.get("retry-after")), params.signal);
+        await this.sleep(
+          this.computeRetryDelayMs(
+            retries,
+            response.headers.get("retry-after"),
+            // `details.retryAfterSeconds` is a 429-only backpressure signal
+            // (`workspace_busy` / `queue_full`). Only consult the body on a 429
+            // so a 5xx body can never bypass `maxDelayMs` via this path.
+            response.status === 429 ? payload : undefined,
+          ),
+          params.signal,
+        );
         continue;
       }
 
@@ -2735,16 +2755,57 @@ export class RelayFileClient {
     return retries < this.retryOptions.maxRetries;
   }
 
-  private computeRetryDelayMs(retryAttempt: number, retryAfterHeader: string | null): number {
+  private computeRetryDelayMs(
+    retryAttempt: number,
+    retryAfterHeader: string | null,
+    payload?: unknown,
+  ): number {
+    // A server-advertised `Retry-After` HEADER is the standard, explicit
+    // signal and takes precedence: parse it first and leave its handling
+    // unchanged (bounded by our own `maxDelayMs`). Only when the header is
+    // absent or unparseable do we consult the body below, so a body hint never
+    // silently overrides a shorter, explicit header the server already sent.
     const retryAfterMs = this.parseRetryAfterMs(retryAfterHeader);
     if (retryAfterMs !== null) {
       return Math.min(this.retryOptions.maxDelayMs, retryAfterMs);
+    }
+    // With no usable header, a 429 body can still advertise an explicit
+    // backpressure delay as `details.retryAfterSeconds` (e.g. `workspace_busy`
+    // when the workspace durable object is overloaded, or `queue_full`). Honor
+    // it as an instruction, bounded only by RETRY_AFTER_MAX_MS — NOT truncated
+    // to `maxDelayMs`, which governs our own exponential backoff. Truncating it
+    // (maxDelayMs defaults to 2s vs. a typical 5s advertised delay) retries
+    // into the still-busy resource and exhausts the retry budget.
+    const advertisedMs = this.parseRetryAfterSecondsFromBody(payload);
+    if (advertisedMs !== null) {
+      return Math.max(0, Math.min(RETRY_AFTER_MAX_MS, advertisedMs));
     }
     const backoff = this.retryOptions.baseDelayMs * Math.pow(2, Math.max(0, retryAttempt - 1));
     const capped = Math.min(this.retryOptions.maxDelayMs, backoff);
     const jitter = this.retryOptions.jitterRatio;
     const factor = 1 + (Math.random() * 2 - 1) * jitter;
     return Math.max(0, Math.round(capped * factor));
+  }
+
+  /**
+   * Extract a server-advertised retry delay from a parsed 429 error body.
+   * Relayfile advertises backpressure delays as `details.retryAfterSeconds`
+   * (in seconds) on `workspace_busy` / `queue_full` responses. Returns
+   * milliseconds, or null when absent/malformed.
+   */
+  private parseRetryAfterSecondsFromBody(payload: unknown): number | null {
+    if (!payload || typeof payload !== "object") {
+      return null;
+    }
+    const details = (payload as { details?: unknown }).details;
+    if (!details || typeof details !== "object") {
+      return null;
+    }
+    const seconds = (details as { retryAfterSeconds?: unknown }).retryAfterSeconds;
+    if (typeof seconds === "number" && Number.isFinite(seconds) && seconds >= 0) {
+      return seconds * 1000;
+    }
+    return null;
   }
 
   private parseRetryAfterMs(retryAfterHeader: string | null): number | null {
