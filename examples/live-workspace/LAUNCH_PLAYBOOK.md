@@ -64,9 +64,9 @@ the proof. To deliberately leave the agents and sandbox available after
 ## Public self-serve path
 
 Users do not need a repository checkout or globally installed Relayfile tools.
-They need a Bash environment with `mktemp`, Node.js 22+, npm, curl, and a Claude
-provider they can connect during setup. The script downloads pinned CLIs in an
-isolated npm execution:
+They need a Bash environment with `mktemp`, Node.js 22.22.0+, npm, curl, and a
+Claude provider they can connect during setup. The script downloads pinned CLIs
+in an isolated npm execution:
 
 ```bash
 LIVE_REVIEW_REV=ce68bc90b3324e4b51c160152cc6aaa02513ae68

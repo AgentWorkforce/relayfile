@@ -3,7 +3,7 @@
 The public launch demo is self-contained: one agent reviews live, uncommitted
 code in a fresh Daytona sandbox, a second agent fixes that same file after a
 hash-gated handoff, and the laptop independently verifies the final bytes.
-It requires a Bash environment with `mktemp`, Node.js 22+, npm, and curl.
+It requires a Bash environment with `mktemp`, Node.js 22.22.0+, npm, and curl.
 
 ```bash
 LIVE_REVIEW_REV=ce68bc90b3324e4b51c160152cc6aaa02513ae68

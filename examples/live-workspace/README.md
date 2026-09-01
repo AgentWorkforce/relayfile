@@ -4,7 +4,7 @@
 
 For the human-facing launch, use the self-contained live reviewer/builder demo.
 It needs no repository checkout and cleans up its exact Daytona sandbox in
-`validate` mode. It requires a Bash environment with `mktemp`, Node.js 22+,
+`validate` mode. It requires a Bash environment with `mktemp`, Node.js 22.22.0+,
 npm, and curl:
 
 ```bash
@@ -84,7 +84,7 @@ The lower-level example below proves the replication primitive with one agent.
 
 Prerequisites:
 
-- Node.js 22 or newer
+- Node.js 22.22.0 or newer
 - `agent-relay` 11.9.0 or newer (the example pins it)
 - `relayfile` 0.10.51 or newer (the example pins it)
 - `relayfile` authenticated to the same Agent Relay Cloud workspace
