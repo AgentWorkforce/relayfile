@@ -47,7 +47,7 @@ test("CLI versions are parsed and compared without dependencies", () => {
 test("attach commands work when the CLIs are installed only in the example", () => {
   assert.equal(
     portableAgentRelayCommand("agent-relay node agent attach proof --node sandbox --mode drive"),
-    "npx agent-relay@11.8.7 node agent attach proof --node sandbox --mode drive"
+    "npx agent-relay@11.9.0 node agent attach proof --node sandbox --mode drive"
   );
 });
 

@@ -2,97 +2,106 @@
 
 ## The claim
 
-> An agent writes an uncommitted file in a fresh cloud machine. The same bytes
-> appear on your laptop through Relayfile, without Git, curl, or a host path.
+> Two agents review and repair live, uncommitted code in a fresh cloud sandbox
+> while your laptop verifies the exact bytes they saw. No commit, branch, PR,
+> upload, or copy/paste handoff.
 
-The demo earns that claim with a run-specific nonce and two independent
-SHA-256 calculations. Do not lead with a dashboard. Lead with the machine
-boundary, the ordinary filesystem write, and the verified local read.
+The demo starts with an unsafe payment webhook. A reviewer in a fresh Daytona
+sandbox publishes `REQUEST_CHANGES` with the source SHA-256. The laptop verifies
+that hash before it authorizes a builder. The builder fixes the shared file, the
+reviewer approves the final SHA-256, and the laptop independently checks the
+same security properties against those exact final bytes.
 
-If someone asks “why not Git, rsync, S3, or an API?”, the answer is not that
-moving bytes was impossible before Relayfile. The difference is that those
-approaches make the agent or human operate the transfer. Relayfile makes the
-workspace itself available on both machines, so the product interaction remains
-“open and save a file.”
-
-Today that means live uncommitted work can move between laptops and sandboxes.
-It opens the door to durable agents, cross-machine handoff, shared human/agent
-review, and eventually reattach or teleport—but keep the Agent37 claims labeled
-as fast-follow until its acceptance flow is literally green.
+Without Relayfile, this requires a commit/push/checkout loop, a shared network
+filesystem, or a custom upload API plus change notifications. Relayfile turns
+the coordination layer into ordinary files: every surface works against the
+same named workspace while hash evidence records exactly what was reviewed.
 
 ## Founder demo
 
-Use two terminals. Record both if possible.
+Use two terminals. Terminal A runs the proof; Terminal B attaches to the live
+agents when their commands appear.
 
-One-time setup:
-
-```bash
-cd examples/live-workspace
-npm install
-npm run setup
-npm run preflight
-```
-
-Terminal A starts the proof:
+First-time setup:
 
 ```bash
-npm run proof
+curl -fsSL https://gist.githubusercontent.com/khaliqgant/e9ee531e63a9048f612e12979f50d2ae/raw/live-review.sh -o /tmp/live-review.sh
+bash /tmp/live-review.sh setup
 ```
 
-As soon as it prints `Attach:`, paste that command into Terminal B. Detach with
-`Ctrl+C`; the agent keeps running. Let Terminal A finish. Stop on the `PASS`
-receipt and show these lines:
-
-- remote hostname and mount path
-- the local `relayfile read` command
-- matching SHA-256
-- `Git commits: 0`
-- the measured write-to-read observation
-
-For repeat takes, reuse the node and mount path printed by the first run instead
-of provisioning another sandbox:
+Run the self-cleaning demo:
 
 ```bash
-npm run proof -- --node <node-name> --mount-path <absolute-mount-path>
+bash /tmp/live-review.sh validate
 ```
 
-If that node is not placement-ready, attach to the already-running proof agent
-or release stale agents before retrying. Do not create a sequence of fresh
-sandboxes just to get another recording take.
+As soon as Terminal A prints `Watch reviewer:`, paste that command into Terminal
+B. The reviewer attach is view mode. When `Drive builder:` appears, use that
+command to take over the builder interactively. `Ctrl+C` detaches without
+killing the agent.
+
+Stop the recording on `PASS` and show:
+
+- the Daytona node and Relayfile mount path
+- the review-time source SHA-256 and tamper gate
+- the builder's final source SHA-256
+- the reviewer's approval of the same final bytes
+- the run-specific review, build, and approval observations
+- cleanup of both agents and the exact sandbox ID
 
 Suggested narration:
 
-1. “This is a real Daytona machine, not localhost.”
-2. “The agent is writing with normal filesystem calls. No Git and no transfer API.”
-3. “Relayfile makes that workspace present on both machines.”
-4. “The laptop verifies the exact bytes against the sandbox's SHA-256.”
-5. “Now I can attach to the same running agent from another terminal.”
+1. “This is a fresh Daytona machine, not localhost.”
+2. “The reviewer is looking at live code that has never been committed.”
+3. “My laptop verifies the exact bytes the reviewer saw before another agent can touch them.”
+4. “The builder fixes the same file; there is no Git or upload handoff.”
+5. “The reviewer and my laptop independently approve the exact final bytes.”
+6. “I can attach to either running agent while this happens.”
+
+`validate` releases both agents and deletes the exact successful sandbox after
+the proof. Use `run` only when you deliberately want the agents and sandbox to
+remain available after `PASS`:
+
+```bash
+bash /tmp/live-review.sh run
+```
 
 ## Public self-serve path
 
-Once this example is merged to the public default branch, a user can run:
+Users do not need a repository checkout or globally installed Relayfile tools.
+They need Node.js 22+, npm, curl, and a Claude provider they can connect during
+setup. The script downloads pinned CLIs in an isolated npm execution:
 
 ```bash
-git clone https://github.com/AgentWorkforce/relayfile.git
-cd relayfile/examples/live-workspace
-npm install
-npm run setup
-npm run proof
+curl -fsSL https://gist.githubusercontent.com/khaliqgant/e9ee531e63a9048f612e12979f50d2ae/raw/live-review.sh -o /tmp/live-review.sh
+bash /tmp/live-review.sh setup
+bash /tmp/live-review.sh validate
 ```
 
-The proof fails closed. A user gets `PASS` only after a real mount, remote
-filesystem write, local read, nonce match, and SHA-256 match.
+`setup` performs one Agent Relay Cloud sign-in through `relayfile login`.
+`agent-relay cloud connect claude` configures the provider; it is not a second
+product-account login.
 
-## Cleanup and launch limits
+The proof fails closed unless all of these happen:
 
-The proof leaves the agent running so attach remains demonstrable. Release the
-agent with the exact command printed by the run.
+1. Cloud provisions one fresh Daytona sandbox with a confirmed Relayfile mount.
+2. The reviewer publishes `REQUEST_CHANGES` against the seeded source hash.
+3. The laptop re-reads the source and clears the three-way hash tamper gate.
+4. The builder changes the live file and reports its exact final hash.
+5. The reviewer approves that same final hash after re-reading the file.
+6. The laptop independently verifies syntax and all six webhook security gates.
+7. `validate` releases both agents and deletes the exact sandbox by ID.
 
-Agent Relay 11.8.7 does not yet expose successful Cloud sandbox deletion from
-the fleet CLI. Until that lands, ask users to delete the sandbox from Cloud
-fleet controls after the demo and position this as a controlled public beta,
-not an unlimited sandbox loop.
+## Claims and limits
 
-Do not claim a universal millisecond SLA from one run. It is accurate to say
-that Relayfile verified the exact bytes across machines and to quote the
-observation printed by that specific run.
+The script polls at 250 ms and prints remote-write-to-local-read observations
+when the machine clocks are sane. Quote the measurements from that run; do not
+turn one observation into a universal millisecond SLA.
+
+The reviewer is role-read-only today, not permission-enforced. Say that plainly.
+The public demo uses Daytona. E2B has separate reviewed integration proof, but
+is not enabled in this production path today.
+
+The repository's `npm run proof` example remains useful as a lower-level
+single-agent replication proof. For launch, lead with the live review because it
+shows why shared uncommitted context matters, not merely that bytes can move.
