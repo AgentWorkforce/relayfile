@@ -27,15 +27,16 @@ First-time setup:
 ```bash
 LIVE_REVIEW_REV=ce68bc90b3324e4b51c160152cc6aaa02513ae68
 LIVE_REVIEW_SHA256=47be2579cb28933ca5a6b0fa821095b86747be1b7a6845dd2846b29efaeeb873
-curl -fsSL "https://gist.githubusercontent.com/khaliqgant/e9ee531e63a9048f612e12979f50d2ae/raw/$LIVE_REVIEW_REV/live-review.sh" -o /tmp/live-review.sh
-echo "$LIVE_REVIEW_SHA256  /tmp/live-review.sh" | shasum -a 256 -c -
-bash /tmp/live-review.sh setup
+LIVE_REVIEW_SCRIPT="$(mktemp "${TMPDIR:-/tmp}/relayfile-live-review.XXXXXX")" &&
+curl -fsSL "https://gist.githubusercontent.com/khaliqgant/e9ee531e63a9048f612e12979f50d2ae/raw/$LIVE_REVIEW_REV/live-review.sh" -o "$LIVE_REVIEW_SCRIPT" &&
+printf '%s  %s\n' "$LIVE_REVIEW_SHA256" "$LIVE_REVIEW_SCRIPT" | shasum -a 256 -c - &&
+bash "$LIVE_REVIEW_SCRIPT" setup
 ```
 
 Run the self-cleaning demo:
 
 ```bash
-bash /tmp/live-review.sh validate
+bash "$LIVE_REVIEW_SCRIPT" validate
 ```
 
 As soon as Terminal A prints `Watch reviewer:`, paste that command into Terminal
@@ -66,7 +67,7 @@ the proof. Use `run` only when you deliberately want the agents and sandbox to
 remain available after `PASS`:
 
 ```bash
-bash /tmp/live-review.sh run
+bash "$LIVE_REVIEW_SCRIPT" run
 ```
 
 ## Public self-serve path
@@ -78,10 +79,11 @@ setup. The script downloads pinned CLIs in an isolated npm execution:
 ```bash
 LIVE_REVIEW_REV=ce68bc90b3324e4b51c160152cc6aaa02513ae68
 LIVE_REVIEW_SHA256=47be2579cb28933ca5a6b0fa821095b86747be1b7a6845dd2846b29efaeeb873
-curl -fsSL "https://gist.githubusercontent.com/khaliqgant/e9ee531e63a9048f612e12979f50d2ae/raw/$LIVE_REVIEW_REV/live-review.sh" -o /tmp/live-review.sh
-echo "$LIVE_REVIEW_SHA256  /tmp/live-review.sh" | shasum -a 256 -c -
-bash /tmp/live-review.sh setup
-bash /tmp/live-review.sh validate
+LIVE_REVIEW_SCRIPT="$(mktemp "${TMPDIR:-/tmp}/relayfile-live-review.XXXXXX")" &&
+curl -fsSL "https://gist.githubusercontent.com/khaliqgant/e9ee531e63a9048f612e12979f50d2ae/raw/$LIVE_REVIEW_REV/live-review.sh" -o "$LIVE_REVIEW_SCRIPT" &&
+printf '%s  %s\n' "$LIVE_REVIEW_SHA256" "$LIVE_REVIEW_SCRIPT" | shasum -a 256 -c - &&
+bash "$LIVE_REVIEW_SCRIPT" setup &&
+bash "$LIVE_REVIEW_SCRIPT" validate
 ```
 
 `setup` performs one Agent Relay Cloud sign-in through `relayfile login`.
