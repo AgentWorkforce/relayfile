@@ -2753,20 +2753,25 @@ export class RelayFileClient {
     retryAfterHeader: string | null,
     payload?: unknown,
   ): number {
-    // A 429 body can advertise an explicit backpressure delay as
-    // `details.retryAfterSeconds` (e.g. `workspace_busy` when the workspace
-    // durable object is overloaded, or `queue_full`). Honor it as an
-    // instruction, bounded only by RETRY_AFTER_MAX_MS — NOT truncated to
-    // `maxDelayMs`, which governs our own exponential backoff. Truncating it
+    // A server-advertised `Retry-After` HEADER is the standard, explicit
+    // signal and takes precedence: parse it first and leave its handling
+    // unchanged (bounded by our own `maxDelayMs`). Only when the header is
+    // absent or unparseable do we consult the body below, so a body hint never
+    // silently overrides a shorter, explicit header the server already sent.
+    const retryAfterMs = this.parseRetryAfterMs(retryAfterHeader);
+    if (retryAfterMs !== null) {
+      return Math.min(this.retryOptions.maxDelayMs, retryAfterMs);
+    }
+    // With no usable header, a 429 body can still advertise an explicit
+    // backpressure delay as `details.retryAfterSeconds` (e.g. `workspace_busy`
+    // when the workspace durable object is overloaded, or `queue_full`). Honor
+    // it as an instruction, bounded only by RETRY_AFTER_MAX_MS — NOT truncated
+    // to `maxDelayMs`, which governs our own exponential backoff. Truncating it
     // (maxDelayMs defaults to 2s vs. a typical 5s advertised delay) retries
     // into the still-busy resource and exhausts the retry budget.
     const advertisedMs = this.parseRetryAfterSecondsFromBody(payload);
     if (advertisedMs !== null) {
       return Math.max(0, Math.min(RETRY_AFTER_MAX_MS, advertisedMs));
-    }
-    const retryAfterMs = this.parseRetryAfterMs(retryAfterHeader);
-    if (retryAfterMs !== null) {
-      return Math.min(this.retryOptions.maxDelayMs, retryAfterMs);
     }
     const backoff = this.retryOptions.baseDelayMs * Math.pow(2, Math.max(0, retryAttempt - 1));
     const capped = Math.min(this.retryOptions.maxDelayMs, backoff);

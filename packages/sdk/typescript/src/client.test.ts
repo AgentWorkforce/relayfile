@@ -2795,6 +2795,60 @@ describe("RelayFileClient — retry", () => {
     }
   });
 
+  it("prefers the Retry-After header over a body retryAfterSeconds when both are present", async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const f = vi.fn().mockImplementation(() => {
+        calls++;
+        if (calls < 2) {
+          return Promise.resolve({
+            ok: false,
+            status: 429,
+            headers: new Headers({
+              "content-type": "application/json",
+              // Explicit header says 1s; body says 5s. The header must win.
+              "retry-after": "1",
+            }),
+            json: () =>
+              Promise.resolve({
+                code: "workspace_busy",
+                message: "busy",
+                correlationId: "c_both",
+                details: { retryAfterSeconds: 5, reason: "durable_object_overloaded" },
+              }),
+            text: () => Promise.resolve(""),
+          });
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: new Headers({ "content-type": "application/json" }),
+          json: () => Promise.resolve({ path: "/", entries: [], nextCursor: null }),
+          text: () => Promise.resolve("{}"),
+        });
+      }) as unknown as typeof fetch;
+
+      const client = new RelayFileClient({
+        baseUrl: "https://relay.test",
+        token: "tok",
+        fetchImpl: f,
+        // maxDelayMs is high enough not to clamp the 1s header value.
+        retry: { maxRetries: 3, baseDelayMs: 1, maxDelayMs: 10_000, jitterRatio: 0 },
+      });
+
+      const promise = client.listTree("ws_1");
+
+      // The 1s header fires the retry; the 5s body value must NOT be honored.
+      await vi.advanceTimersByTimeAsync(1000);
+      const res = await promise;
+      expect(res.entries).toEqual([]);
+      expect(f).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not retry on abort", async () => {
     const controller = new AbortController();
     controller.abort();
