@@ -2849,6 +2849,59 @@ describe("RelayFileClient — retry", () => {
     }
   });
 
+  it("ignores a body retryAfterSeconds on a 5xx and uses normal backoff", async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const f = vi.fn().mockImplementation(() => {
+        calls++;
+        if (calls < 2) {
+          return Promise.resolve({
+            ok: false,
+            status: 503,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: () =>
+              Promise.resolve({
+                code: "internal_error",
+                message: "unavailable",
+                correlationId: "c_5xx",
+                // A 5xx body must NOT be treated as an advertised backpressure
+                // delay; retryAfterSeconds is a 429-only signal.
+                details: { retryAfterSeconds: 5 },
+              }),
+            text: () => Promise.resolve(""),
+          });
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: new Headers({ "content-type": "application/json" }),
+          json: () => Promise.resolve({ path: "/", entries: [], nextCursor: null }),
+          text: () => Promise.resolve("{}"),
+        });
+      }) as unknown as typeof fetch;
+
+      const client = new RelayFileClient({
+        baseUrl: "https://relay.test",
+        token: "tok",
+        fetchImpl: f,
+        // maxDelayMs caps the backoff well below the 5s body value. If the body
+        // were (wrongly) honored, the retry would wait 5s instead of <=5ms.
+        retry: { maxRetries: 3, baseDelayMs: 1, maxDelayMs: 5, jitterRatio: 0 },
+      });
+
+      const promise = client.listTree("ws_1");
+
+      // Backoff is capped at maxDelayMs (5ms), so a tiny advance fires the retry.
+      await vi.advanceTimersByTimeAsync(5);
+      const res = await promise;
+      expect(res.entries).toEqual([]);
+      expect(f).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not retry on abort", async () => {
     const controller = new AbortController();
     controller.abort();

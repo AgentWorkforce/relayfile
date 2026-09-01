@@ -2718,7 +2718,14 @@ export class RelayFileClient {
       if (this.shouldRetryStatus(response.status, retries, params.signal)) {
         retries += 1;
         await this.sleep(
-          this.computeRetryDelayMs(retries, response.headers.get("retry-after"), payload),
+          this.computeRetryDelayMs(
+            retries,
+            response.headers.get("retry-after"),
+            // `details.retryAfterSeconds` is a 429-only backpressure signal
+            // (`workspace_busy` / `queue_full`). Only consult the body on a 429
+            // so a 5xx body can never bypass `maxDelayMs` via this path.
+            response.status === 429 ? payload : undefined,
+          ),
           params.signal,
         );
         continue;
