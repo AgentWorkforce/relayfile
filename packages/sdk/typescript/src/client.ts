@@ -531,7 +531,10 @@ class RelayFileWebSocketConnection implements WebSocketConnection {
     });
 
     socket.addEventListener("error", (event) => {
-      const errorEvent = event instanceof ErrorEvent && event.error instanceof Error ? event.error : event;
+      const errorEvent =
+        typeof ErrorEvent !== "undefined" && event instanceof ErrorEvent && event.error instanceof Error
+          ? event.error
+          : event;
       for (const handler of this.handlers.error) {
         handler(errorEvent);
       }
