@@ -73,6 +73,18 @@ function makeWorkspaceToken(workspaceId = "ws_acme", agentName = "agent-test"): 
   })}.sig`;
 }
 
+// Minted delegated tokens (relay_pa_*) carry the workspace under `wks` and the
+// agent under `sub` ("agent_<name>") — not `workspace_id` / `agent_name`.
+function makeMintedWorkspaceToken(workspaceId = "rw_7ccfea89", agentName = "gil-ramp-bookkeeper"): string {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `relay_pa_${encode({ alg: "HS256", typ: "JWT" })}.${encode({
+    sub: `agent_${agentName}`,
+    org: "org_agentworkforce",
+    wks: workspaceId,
+    scopes: ["relayfile:fs:read:/ramp", "relayfile:fs:read:/ramp/*"],
+  })}.sig`;
+}
+
 function flushMicrotasks(): Promise<void> {
   return Promise.resolve().then(() => undefined).then(() => undefined);
 }
@@ -412,6 +424,59 @@ describe("RelayFileClient — existing methods", () => {
         "RelayFile proactive-runtime APIs require a workspace-scoped JWT",
       );
       expect(fetchImpl).not.toHaveBeenCalled();
+    });
+
+    it("resolves the workspace id from the wks claim on minted delegated tokens", async () => {
+      const fetchImpl = vi.fn(async (url: string) => {
+        if (url.includes("/fs/file?path=%2Framp%2Finvoices%2FINV-1.json")) {
+          return jsonResponse({
+            path: "/ramp/invoices/INV-1.json",
+            contentType: "application/json",
+            content: JSON.stringify({
+              id: "INV-1",
+              provider: "ramp",
+              kind: "ramp.invoice",
+              title: "INV-1",
+              status: "Cleared",
+            }),
+          });
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      // No `workspace_id`/`agent_name` claims — only `wks` and `sub` as the cloud mints them.
+      const client = makeClient(fetchImpl as unknown as typeof fetch, {
+        token: makeMintedWorkspaceToken("rw_7ccfea89", "gil-ramp-bookkeeper"),
+      });
+      const handler = vi.fn();
+
+      const handle = client.subscribe(["/ramp/**"], handler, { coalesce: "none" });
+
+      await waitForExpectation(() => {
+        const lastSocket = ProactiveMockWebSocket.instances[ProactiveMockWebSocket.instances.length - 1];
+        expect(lastSocket?.url).toContain("/v1/workspaces/rw_7ccfea89/fs/ws?");
+      });
+      const socket = ProactiveMockWebSocket.instances[ProactiveMockWebSocket.instances.length - 1]!;
+      socket.emit("open", {});
+      socket.emit("message", {
+        data: JSON.stringify({
+          eventId: "evt_ramp_1",
+          type: "file.updated",
+          path: "/ramp/invoices/INV-1.json",
+          revision: "rev_2",
+          timestamp: "2026-05-11T00:00:00.000Z",
+        } satisfies FilesystemEvent),
+      });
+
+      await waitForExpectation(() => {
+        expect(handler).toHaveBeenCalledTimes(1);
+      });
+      expect(handler.mock.calls[0]?.[0]).toMatchObject({
+        id: "evt_ramp_1",
+        workspace: "rw_7ccfea89",
+        agentId: "gil-ramp-bookkeeper",
+      });
+
+      await handle.unsubscribe();
     });
 
     it("getResourceAtEvent reuses the retained cache before calling the API", async () => {
