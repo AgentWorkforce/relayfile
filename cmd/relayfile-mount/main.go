@@ -543,6 +543,11 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 	log.Printf("%s", mountStartupLogLine(cfg))
 	log.Printf("Mirror started at %s. Sync interval %s +/- %.0f%%. Public state: %s", cfg.localDir, cfg.interval.Round(time.Second), cfg.intervalJitter*100, filepath.Join(cfg.localDir, ".relay", "state.json"))
 
+	// lastCycleErr records the most recent cycle failure that `run` swallowed
+	// as nonfatal. The `--once` bootstrap resume loop reads it so it only
+	// continues a traversal that yielded on its file budget, never one that
+	// failed: a failing cycle keeps its historical single-attempt behavior.
+	var lastCycleErr error
 	run := func(reconcile bool) error {
 		ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
 		defer cancel()
@@ -552,6 +557,7 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 		} else {
 			err = syncer.SyncOnce(ctx)
 		}
+		lastCycleErr = err
 		if err != nil {
 			if mountsync.IsBootstrapTerminalError(err) {
 				// This is an operator-actionable hard stop, not a transient
@@ -577,7 +583,7 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 		return err
 	}
 	if cfg.once {
-		return nil
+		return finishInitialBootstrap(rootCtx, cfg, run, func() error { return lastCycleErr })
 	}
 
 	var watcher *mountsync.FileWatcher
@@ -809,6 +815,123 @@ func mountStartupLogLine(cfg mountConfig) string {
 		syncMode,
 		cfg.mode,
 		filepath.Join(cfg.localDir, ".relay", "state.json"),
+	)
+}
+
+// maxOnceBootstrapResumeCycles bounds the resumable `--once` bootstrap loop.
+// One cycle mirrors at most defaultBootstrapMaxFilesPerCycle (2000) files, so
+// this admits workspaces up to ~1M files while still refusing to spin forever
+// if the traversal reports progress that never terminates. The syncer's own
+// stall guard (RELAYFILE_BOOTSTRAP_STALL_CYCLES) normally fires long before
+// this, returning a terminal BootstrapStalledError.
+const maxOnceBootstrapResumeCycles = 500
+
+// onceBootstrapStableCycleLimit is how many consecutive successful cycles may
+// leave the resumable checkpoint untouched before `--once` gives up on it.
+const onceBootstrapStableCycleLimit = 3
+
+// finishInitialBootstrap keeps resuming the persisted traversal checkpoint
+// until the full-tree bootstrap completes, then returns.
+//
+// `--once` used to return immediately after a single reconcile. One reconcile
+// mirrors at most defaultBootstrapMaxFilesPerCycle files and then yields with
+// a persisted resume cursor, reporting cycle success — so on any workspace
+// larger than that budget `--once` exited 0 while .relay/state.json still
+// carried a non-null `bootstrap` block. AgentWorkforce/sandbox reads exactly
+// that field as the initial-sync readiness barrier and exits 75 (TEMPFAIL,
+// "relayfile initial sync paused before complete readiness"), which is why
+// every JIT sandbox provision failed rather than only large or slow ones.
+// See relayfile#455.
+//
+// The loop is bounded three ways: rootCtx cancellation (the caller's
+// `timeout`/idle watchdog), a terminal error from the cycle, and a
+// no-progress guard. Cancellation deliberately returns nil so the exit code
+// keeps its historical meaning; the readiness guard downstream still sees the
+// incomplete bootstrap and reports a resumable TEMPFAIL.
+func finishInitialBootstrap(rootCtx context.Context, cfg mountConfig, run func(reconcile bool) error, lastCycleErr func() error) error {
+	if err := lastCycleErr(); err != nil {
+		// The cycle failed rather than yielding on its budget. Retrying here
+		// would turn one transient cloud error into a stall escalation, so
+		// keep `--once`'s historical single-attempt behavior and let the
+		// readiness guard downstream report a resumable TEMPFAIL.
+		return nil
+	}
+	synced, total, inProgress := readBootstrapProgress(cfg.localDir)
+	if !inProgress {
+		return nil
+	}
+	log.Printf("initial sync: bootstrap incomplete after first cycle (%s); resuming from the persisted checkpoint", formatBootstrapProgress(synced, total))
+	lastCheckpoint := readBootstrapCheckpoint(cfg.localDir)
+	stableCycles := 0
+	for cycle := 0; cycle < maxOnceBootstrapResumeCycles; cycle++ {
+		if err := rootCtx.Err(); err != nil {
+			log.Printf("initial sync: stopping before bootstrap completed: %v", err)
+			return nil
+		}
+		if err := run(true); err != nil {
+			return err
+		}
+		if err := lastCycleErr(); err != nil {
+			log.Printf("initial sync: stopping after a failed resume cycle: %v", err)
+			return nil
+		}
+		synced, total, inProgress = readBootstrapProgress(cfg.localDir)
+		if !inProgress {
+			log.Printf("initial sync: bootstrap complete")
+			return nil
+		}
+		if checkpoint := readBootstrapCheckpoint(cfg.localDir); checkpoint != lastCheckpoint {
+			lastCheckpoint = checkpoint
+			stableCycles = 0
+			log.Printf("initial sync: bootstrapping %s", formatBootstrapProgress(synced, total))
+			continue
+		}
+		// A successful cycle that moved no part of the resumable checkpoint
+		// cannot be resumed into completion. The syncer's own stall guard
+		// escalates this to a terminal BootstrapStalledError over several
+		// cycles; allow it a couple of cycles to do so, then stop rather than
+		// spin.
+		stableCycles++
+		if stableCycles >= onceBootstrapStableCycleLimit {
+			log.Printf("initial sync: bootstrap checkpoint stopped advancing at %s; leaving it for the next run", formatBootstrapProgress(synced, total))
+			return nil
+		}
+	}
+	log.Printf("initial sync: bootstrap still incomplete after %d resume cycles; leaving the checkpoint for the next run", maxOnceBootstrapResumeCycles)
+	return nil
+}
+
+// readBootstrapCheckpoint fingerprints every resumable coordinate the public
+// bootstrap block exposes. Keying progress on filesSynced alone is not enough:
+// a cycle can advance the directory queue or the page offset while mirroring
+// no new files, and treating that as a stall would abandon a bootstrap that is
+// still moving. Returns "" when no bootstrap is in progress.
+func readBootstrapCheckpoint(localDir string) string {
+	if strings.TrimSpace(localDir) == "" {
+		return ""
+	}
+	payload, err := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
+	if err != nil {
+		return ""
+	}
+	var view struct {
+		Bootstrap *struct {
+			CurrentPath           string `json:"currentPath"`
+			FilesSynced           int    `json:"filesSynced"`
+			PageOffset            int    `json:"pageOffset"`
+			DirectoriesPending    int    `json:"directoriesPending"`
+			DirectoriesDiscovered int    `json:"directoriesDiscovered"`
+		} `json:"bootstrap"`
+	}
+	if err := json.Unmarshal(payload, &view); err != nil || view.Bootstrap == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s|%d|%d|%d|%d",
+		view.Bootstrap.CurrentPath,
+		view.Bootstrap.FilesSynced,
+		view.Bootstrap.PageOffset,
+		view.Bootstrap.DirectoriesPending,
+		view.Bootstrap.DirectoriesDiscovered,
 	)
 }
 
