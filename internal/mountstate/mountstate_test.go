@@ -181,6 +181,7 @@ func TestMergeRefusesToWriteOverAnUnreadableDocument(t *testing.T) {
 	if err == nil {
 		t.Fatal("merge over an unreadable document must fail rather than clobber it")
 	}
+	t.Cleanup(func() { delete(consecutiveReadFailures, path) })
 
 	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatalf("chmod back: %v", err)
@@ -220,5 +221,100 @@ func TestMergeSelfHealsAnUnparseableDocument(t *testing.T) {
 	}
 	if readBack(t, path)["status"] != "ready" {
 		t.Error("merge did not replace the corrupt document")
+	}
+}
+
+// TestUnreadableDocumentRefusalCannotBecomePermanent is the bound on the
+// refusal above. Chief raised this on PR #457 and it reproduced: a state file
+// left unreadable stalled every publish for the life of the mount, and the
+// sandbox readiness guard treats unreadable and missing identically -- so a
+// permanent refusal is a permanent exit 75, which is the relayfile#455 failure
+// the relayfile#412 fix must not reintroduce.
+//
+// Note the directory stays writable throughout, so the behaviour this replaced
+// (a plain overwrite) would have recovered on its own. The refusal is only
+// allowed to be safer than that for a bounded number of attempts.
+func TestUnreadableDocumentRefusalCannotBecomePermanent(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the permission bits this test relies on")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	t.Cleanup(func() { delete(consecutiveReadFailures, path) })
+
+	if err := Merge(path, []string{"providers"}, map[string]any{"providers": []string{"github"}}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+
+	// The refusal holds while the failure could still be transient.
+	for attempt := 1; attempt < unreadableQuarantineAfter; attempt++ {
+		if err := Merge(path, []string{"status"}, map[string]any{"status": "ready"}); err == nil {
+			t.Fatalf("attempt %d published over an unreadable document; the refusal is not protecting anything", attempt)
+		}
+	}
+
+	// ...and then gives way, so the mount is not stalled forever.
+	if err := Merge(path, []string{"status"}, map[string]any{"status": "ready"}); err != nil {
+		t.Fatalf("publishing never recovered from an unreadable state file: %v", err)
+	}
+	if readBack(t, path)["status"] != "ready" {
+		t.Error("recovered publish did not land")
+	}
+
+	quarantined, err := filepath.Glob(filepath.Join(dir, "state.json.unreadable-*"))
+	if err != nil || len(quarantined) != 1 {
+		t.Fatalf("expected exactly one quarantined copy for diagnosis, got %v (err %v)", quarantined, err)
+	}
+
+	// A later successful read clears the budget, so an intermittent reader
+	// cannot accumulate its way to a quarantine.
+	if err := Merge(path, []string{"status"}, map[string]any{"status": "still-ready"}); err != nil {
+		t.Fatalf("healthy publish after recovery: %v", err)
+	}
+	if got := consecutiveReadFailures[path]; got != 0 {
+		t.Errorf("failure budget = %d after a successful read, want 0", got)
+	}
+}
+
+// TestTransientUnreadableDocumentIsRefusedThenSucceeds pins the common case the
+// bound must not break: one bad read refuses and preserves the document, and
+// the next good read publishes with the other writer's keys intact.
+func TestTransientUnreadableDocumentIsRefusedThenSucceeds(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the permission bits this test relies on")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	t.Cleanup(func() { delete(consecutiveReadFailures, path) })
+
+	if err := Merge(path, []string{"providers"}, map[string]any{"providers": []string{"github"}}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	if err := Merge(path, []string{"status"}, map[string]any{"status": "ready"}); err == nil {
+		t.Fatal("a transient read failure must refuse the write")
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("chmod back: %v", err)
+	}
+
+	if err := Merge(path, []string{"status"}, map[string]any{"status": "ready"}); err != nil {
+		t.Fatalf("publish after the read recovered: %v", err)
+	}
+	document := readBack(t, path)
+	if _, ok := document["providers"]; !ok {
+		t.Error("the other writer's keys did not survive the transient failure")
+	}
+	if document["status"] != "ready" {
+		t.Error("recovered publish did not land")
+	}
+	if matches, _ := filepath.Glob(filepath.Join(dir, "state.json.unreadable-*")); len(matches) != 0 {
+		t.Errorf("a transient failure must not quarantine anything, got %v", matches)
 	}
 }

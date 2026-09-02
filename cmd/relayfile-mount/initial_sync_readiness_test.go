@@ -298,3 +298,25 @@ func TestFinishInitialBootstrapStopsWhenCheckpointStopsAdvancing(t *testing.T) {
 		t.Errorf("ran %d cycles on a stalled checkpoint, want %d", cycles, onceBootstrapStableCycleLimit)
 	}
 }
+
+// TestInitialSyncAtProductionBudget runs the readiness probe at the condition
+// that made relayfile#455 structural: a workspace larger than
+// defaultBootstrapMaxFilesPerCycle (2000) with no budget override, so one
+// --once cycle cannot mirror it.
+func TestInitialSyncAtProductionBudget(t *testing.T) {
+	server, _ := budgetedBootstrapRelay(t, 2500)
+	localDir := t.TempDir()
+
+	err := runSinglePollingMount(context.Background(), onceMountConfig(t, server.URL, localDir))
+	if err != nil {
+		t.Fatalf("mount --once returned an error: %v", err)
+	}
+	statePath := filepath.Join(localDir, ".relay", "state.json")
+	logPublicState(t, statePath)
+	ready, reason := sandboxInitialSyncGuard(statePath)
+	t.Logf("PRODUCTION-BUDGET RESULT: --once exit=0 guard_ready=%v reason=%q => sandbox exit code %d",
+		ready, reason, map[bool]int{true: 0, false: 75}[ready])
+	if !ready {
+		t.Fatalf("sandbox readiness guard failed (exit 75): %s", reason)
+	}
+}

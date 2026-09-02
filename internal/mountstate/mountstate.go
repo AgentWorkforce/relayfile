@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"time"
 )
 
 // stateMu serializes every read-modify-write of a mount state file in this
@@ -29,6 +30,30 @@ import (
 // writer's mutex appeared to synchronize against a writer that could not take
 // it — a lock that looks synchronized and is not.
 var stateMu sync.Mutex
+
+// unreadableQuarantineAfter bounds how many consecutive publishes may be
+// refused because the state file could not be read.
+//
+// Refusing to merge over a document we could not read is what stops a
+// transient EIO from deleting the other writer's keys. But the refusal must
+// not be able to last forever: a state file left unreadable (a stray chmod, an
+// ownership change across a container restart) would otherwise stall every
+// publish for the life of the mount, and the sandbox readiness guard treats an
+// unreadable state file exactly like a missing one — so a permanent refusal
+// and a permanent exit 75 are the same observable. That is the failure
+// relayfile#455 is about, which is not a thing the fix for relayfile#412 gets
+// to reintroduce.
+//
+// After this many consecutive failures the unreadable file is moved aside and
+// publishing resumes. Its keys are already unreachable to every consumer by
+// then, so a live document beats a preserved unreadable one, and the
+// quarantined copy is left on disk for diagnosis.
+const unreadableQuarantineAfter = 3
+
+// consecutiveReadFailures counts failed reads per state path. Guarded by
+// stateMu; entries are removed as soon as a read succeeds, so this holds at
+// most one entry per mount in the process.
+var consecutiveReadFailures = map[string]int{}
 
 // Document is a decoded state file. Values stay as raw JSON: the public state
 // carries a per-file map that runs to megabytes on a large workspace, and both
@@ -55,7 +80,7 @@ func MergeFunc(statePath string, ownedKeys []string, build func(previous Documen
 	stateMu.Lock()
 	defer stateMu.Unlock()
 
-	document, err := readDocumentLocked(statePath)
+	document, err := readForWriteLocked(statePath)
 	if err != nil {
 		return err
 	}
@@ -87,7 +112,7 @@ func Increment(statePath, key string, delta uint64) error {
 	stateMu.Lock()
 	defer stateMu.Unlock()
 
-	document, err := readDocumentLocked(statePath)
+	document, err := readForWriteLocked(statePath)
 	if err != nil {
 		return err
 	}
@@ -139,6 +164,32 @@ func (d Document) Uint64(key string) uint64 {
 		}
 	}
 	return 0
+}
+
+// readForWriteLocked is the read a writer performs before merging: it refuses
+// on an unreadable document so the merge cannot delete the other writer's
+// keys, but only until unreadableQuarantineAfter consecutive failures, at
+// which point it moves the file aside so publishing can resume.
+func readForWriteLocked(statePath string) (Document, error) {
+	document, err := readDocumentLocked(statePath)
+	if err == nil {
+		delete(consecutiveReadFailures, statePath)
+		return document, nil
+	}
+
+	consecutiveReadFailures[statePath]++
+	if consecutiveReadFailures[statePath] < unreadableQuarantineAfter {
+		return nil, err
+	}
+
+	quarantine := fmt.Sprintf("%s.unreadable-%d", statePath, time.Now().UnixNano())
+	if renameErr := os.Rename(statePath, quarantine); renameErr != nil {
+		// Nothing safe left to do: keep refusing rather than write over a
+		// document we can neither read nor move.
+		return nil, fmt.Errorf("%w (also could not quarantine it: %v)", err, renameErr)
+	}
+	delete(consecutiveReadFailures, statePath)
+	return Document{}, nil
 }
 
 // readDocumentLocked returns the current document, distinguishing "there is
