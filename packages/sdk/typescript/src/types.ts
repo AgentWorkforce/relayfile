@@ -500,7 +500,9 @@ export interface SubscribeOptions {
    * To scope to something more precise, pass an explicit glob: a trailing `**`
    * (`"/ramp/transactions/**"`) for a subtree, or per-segment `*` wildcards
    * (`"/github/repos/acme/api/pulls/*"`); these are honored verbatim. For an
-   * exact single path, use the `paths` argument with the specific pattern.
+   * exact single file, pass that exact path as a glob in the first `subscribe`
+   * argument (`subscribe(globs, ...)`, e.g. `["/linear/issues/ENG-1.json"]`) —
+   * the `globs` list is matched exactly unless it contains a `*`/`**` wildcard.
    */
   pathScope?: string[];
   from?: "now" | "legacy";

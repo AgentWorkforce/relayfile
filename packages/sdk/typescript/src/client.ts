@@ -1077,9 +1077,10 @@ function normalizeChangePattern(pattern: string): string[] {
 /**
  * A wildcard-free `pathScope` entry is DEFINED as a DIRECTORY SUBTREE scope: it
  * matches the path itself AND everything under it. To scope to an exact file,
- * use a glob (`/dir/file.json` is not treated as exact — pass an explicit
- * pattern via the `paths` argument, or a wildcard) — a bare path is never
- * exact-file. This is a deliberate API-design choice (Option A), not an
+ * pass that exact path as a glob in the first `subscribe(globs, ...)` argument
+ * (the `globs` list is matched exactly unless an entry has a `*`/`**` wildcard);
+ * a bare `pathScope` path is never exact-file. This is a deliberate API-design
+ * choice (Option A), not an
  * accident of the server matcher: it makes the common "watch this directory"
  * intent Just Work and avoids a silent zero-event foot-gun.
  *
