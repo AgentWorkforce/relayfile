@@ -856,12 +856,11 @@ func finishInitialBootstrap(rootCtx context.Context, cfg mountConfig, run func(r
 		// readiness guard downstream report a resumable TEMPFAIL.
 		return nil
 	}
-	synced, total, inProgress := readBootstrapProgress(cfg.localDir)
-	if !inProgress {
+	state := readBootstrapResumeState(cfg.localDir)
+	if !state.inProgress {
 		return nil
 	}
-	log.Printf("initial sync: bootstrap incomplete after first cycle (%s); resuming from the persisted checkpoint", formatBootstrapProgress(synced, total))
-	lastCheckpoint := readBootstrapCheckpoint(cfg.localDir)
+	log.Printf("initial sync: bootstrap incomplete after first cycle (%s); resuming from the persisted checkpoint", formatBootstrapProgress(state.synced, state.total))
 	stableCycles := 0
 	for cycle := 0; cycle < maxOnceBootstrapResumeCycles; cycle++ {
 		if err := rootCtx.Err(); err != nil {
@@ -875,15 +874,15 @@ func finishInitialBootstrap(rootCtx context.Context, cfg mountConfig, run func(r
 			log.Printf("initial sync: stopping after a failed resume cycle: %v", err)
 			return nil
 		}
-		synced, total, inProgress = readBootstrapProgress(cfg.localDir)
-		if !inProgress {
+		next := readBootstrapResumeState(cfg.localDir)
+		if !next.inProgress {
 			log.Printf("initial sync: bootstrap complete")
 			return nil
 		}
-		if checkpoint := readBootstrapCheckpoint(cfg.localDir); checkpoint != lastCheckpoint {
-			lastCheckpoint = checkpoint
+		if next.checkpoint != state.checkpoint {
+			state = next
 			stableCycles = 0
-			log.Printf("initial sync: bootstrapping %s", formatBootstrapProgress(synced, total))
+			log.Printf("initial sync: bootstrapping %s", formatBootstrapProgress(state.synced, state.total))
 			continue
 		}
 		// A successful cycle that moved no part of the resumable checkpoint
@@ -891,9 +890,10 @@ func finishInitialBootstrap(rootCtx context.Context, cfg mountConfig, run func(r
 		// escalates this to a terminal BootstrapStalledError over several
 		// cycles; allow it a couple of cycles to do so, then stop rather than
 		// spin.
+		state = next
 		stableCycles++
 		if stableCycles >= onceBootstrapStableCycleLimit {
-			log.Printf("initial sync: bootstrap checkpoint stopped advancing at %s; leaving it for the next run", formatBootstrapProgress(synced, total))
+			log.Printf("initial sync: bootstrap checkpoint stopped advancing at %s; leaving it for the next run", formatBootstrapProgress(state.synced, state.total))
 			return nil
 		}
 	}
@@ -901,38 +901,55 @@ func finishInitialBootstrap(rootCtx context.Context, cfg mountConfig, run func(r
 	return nil
 }
 
-// readBootstrapCheckpoint fingerprints every resumable coordinate the public
-// bootstrap block exposes. Keying progress on filesSynced alone is not enough:
-// a cycle can advance the directory queue or the page offset while mirroring
-// no new files, and treating that as a stall would abandon a bootstrap that is
-// still moving. Returns "" when no bootstrap is in progress.
-func readBootstrapCheckpoint(localDir string) string {
+// bootstrapResumeState is one read of the public bootstrap block: how far the
+// traversal has got, and a fingerprint of every resumable coordinate it
+// exposes. Keying progress on filesSynced alone is not enough — a cycle can
+// advance the directory queue or the page offset while mirroring no new files,
+// and treating that as a stall would abandon a bootstrap that is still moving.
+//
+// The state file carries mountsync's per-file map and runs to megabytes on a
+// large workspace, so the resume loop parses it once per cycle rather than
+// once per field it needs.
+type bootstrapResumeState struct {
+	inProgress bool
+	synced     int
+	total      int
+	checkpoint string
+}
+
+func readBootstrapResumeState(localDir string) bootstrapResumeState {
 	if strings.TrimSpace(localDir) == "" {
-		return ""
+		return bootstrapResumeState{}
 	}
 	payload, err := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
 	if err != nil {
-		return ""
+		return bootstrapResumeState{}
 	}
 	var view struct {
 		Bootstrap *struct {
 			CurrentPath           string `json:"currentPath"`
 			FilesSynced           int    `json:"filesSynced"`
+			FilesTotal            int    `json:"filesTotal"`
 			PageOffset            int    `json:"pageOffset"`
 			DirectoriesPending    int    `json:"directoriesPending"`
 			DirectoriesDiscovered int    `json:"directoriesDiscovered"`
 		} `json:"bootstrap"`
 	}
 	if err := json.Unmarshal(payload, &view); err != nil || view.Bootstrap == nil {
-		return ""
+		return bootstrapResumeState{}
 	}
-	return fmt.Sprintf("%s|%d|%d|%d|%d",
-		view.Bootstrap.CurrentPath,
-		view.Bootstrap.FilesSynced,
-		view.Bootstrap.PageOffset,
-		view.Bootstrap.DirectoriesPending,
-		view.Bootstrap.DirectoriesDiscovered,
-	)
+	return bootstrapResumeState{
+		inProgress: true,
+		synced:     view.Bootstrap.FilesSynced,
+		total:      view.Bootstrap.FilesTotal,
+		checkpoint: fmt.Sprintf("%s|%d|%d|%d|%d",
+			view.Bootstrap.CurrentPath,
+			view.Bootstrap.FilesSynced,
+			view.Bootstrap.PageOffset,
+			view.Bootstrap.DirectoriesPending,
+			view.Bootstrap.DirectoriesDiscovered,
+		),
+	}
 }
 
 // readBootstrapProgress reads the in-progress bootstrap block from the

@@ -1,0 +1,192 @@
+// Package mountstate owns the merge discipline for a mount's public
+// `.relay/state.json`.
+//
+// Two writers in the mount process publish to that one path: the syncer's
+// public state and (in the CLI) the provider/daemon mirror snapshot. Their
+// schemas are disjoint, so a writer that serializes its own struct over the
+// whole file deletes the other's keys — and a consumer's guard keyed on a
+// deleted key silently fails open rather than reporting ill health.
+//
+// Every writer therefore goes through this package, declaring the keys it
+// owns. The merge replaces exactly those keys and preserves the rest, under
+// one process-wide lock so the two writers cannot interleave a
+// read-modify-write.
+//
+// See relayfile#412.
+package mountstate
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"sync"
+)
+
+// stateMu serializes every read-modify-write of a mount state file in this
+// process. It replaces the arrangement relayfile#412 documented, where one
+// writer's mutex appeared to synchronize against a writer that could not take
+// it — a lock that looks synchronized and is not.
+var stateMu sync.Mutex
+
+// Document is a decoded state file. Values stay as raw JSON: the public state
+// carries a per-file map that runs to megabytes on a large workspace, and both
+// writers publish on every reconcile and every local-change batch, so a merge
+// must not pay to materialize a structure it only intends to copy or drop.
+type Document map[string]json.RawMessage
+
+// Merge writes snapshot into statePath, replacing exactly ownedKeys and
+// leaving every other key untouched — including keys this build does not know
+// about.
+//
+// ownedKeys is cleared before the overlay so a field the caller has cleared
+// (a drained stall reason, a resolved error) is not resurrected from the
+// previous document.
+func Merge(statePath string, ownedKeys []string, snapshot any) error {
+	return MergeFunc(statePath, ownedKeys, func(Document) (any, error) { return snapshot, nil })
+}
+
+// MergeFunc is Merge for a writer whose snapshot depends on what is already
+// published — a counter it must not regress, say. build runs under the state
+// lock with the previous document, so the value it reads cannot be overwritten
+// between the read and this write.
+func MergeFunc(statePath string, ownedKeys []string, build func(previous Document) (any, error)) error {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+
+	document := readDocumentLocked(statePath)
+	snapshot, err := build(document)
+	if err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	var owned Document
+	if err := json.Unmarshal(encoded, &owned); err != nil {
+		return err
+	}
+	for _, key := range ownedKeys {
+		delete(document, key)
+	}
+	for key, value := range owned {
+		document[key] = value
+	}
+	return writeDocumentLocked(statePath, document)
+}
+
+// Increment adds delta to a numeric key, creating it when absent. The read and
+// the write happen under one lock hold, so an increment cannot be lost to a
+// snapshot that read the counter before it landed.
+func Increment(statePath, key string, delta uint64) error {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+
+	document := readDocumentLocked(statePath)
+	next := document.Uint64(key) + delta
+	encoded, err := json.Marshal(next)
+	if err != nil {
+		return err
+	}
+	document[key] = encoded
+	return writeDocumentLocked(statePath, document)
+}
+
+// Read returns the published document, empty when the file is missing or
+// unparseable. It takes the same lock, so a reader never observes a
+// half-applied merge.
+func Read(statePath string) Document {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	return readDocumentLocked(statePath)
+}
+
+// Uint64 decodes key as an unsigned integer, returning 0 when it is absent or
+// is not a number. JSON numbers arrive as floats often enough that a plain
+// decode into uint64 is not sufficient on its own.
+func (d Document) Uint64(key string) uint64 {
+	raw, ok := d[key]
+	if !ok || len(raw) == 0 {
+		return 0
+	}
+	var asUint uint64
+	if err := json.Unmarshal(raw, &asUint); err == nil {
+		return asUint
+	}
+	var asFloat float64
+	if err := json.Unmarshal(raw, &asFloat); err == nil && asFloat > 0 {
+		return uint64(asFloat)
+	}
+	var asString string
+	if err := json.Unmarshal(raw, &asString); err == nil {
+		if parsed, err := strconv.ParseUint(asString, 10, 64); err == nil {
+			return parsed
+		}
+	}
+	return 0
+}
+
+func readDocumentLocked(statePath string) Document {
+	document := Document{}
+	payload, err := os.ReadFile(statePath)
+	if err != nil {
+		return document
+	}
+	// A corrupt file presents as empty rather than as an error: this is a
+	// published view, and refusing to rewrite a corrupt one would strand the
+	// mount with it forever.
+	if err := json.Unmarshal(payload, &document); err != nil || document == nil {
+		return Document{}
+	}
+	return document
+}
+
+func writeDocumentLocked(statePath string, document Document) error {
+	payload, err := json.Marshal(document)
+	if err != nil {
+		return err
+	}
+	payload = append(payload, '\n')
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		return err
+	}
+	return writeFileAtomic(statePath, payload, 0o644)
+}
+
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmpFile, err := os.CreateTemp(dir, ".state.json.tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmpFile.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if err := tmpFile.Chmod(mode); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+	// Data-loss guard, matching the mountsync writer this replaces: never
+	// rename a file over an existing directory.
+	if info, err := os.Lstat(path); err == nil && info.IsDir() {
+		return fmt.Errorf("refusing to replace directory %s with a file: %w", path, os.ErrExist)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}

@@ -38,6 +38,7 @@ import (
 	"github.com/agentworkforce/relayfile/internal/delegatedauth"
 	"github.com/agentworkforce/relayfile/internal/mountlease"
 	"github.com/agentworkforce/relayfile/internal/mountscope"
+	"github.com/agentworkforce/relayfile/internal/mountstate"
 	"github.com/agentworkforce/relayfile/internal/mountsync"
 	"github.com/agentworkforce/relayfile/internal/relayfile"
 	"github.com/agentworkforce/relayfile/internal/writeback"
@@ -560,8 +561,6 @@ type processCommandSnapshot struct {
 	PID     int
 	Command string
 }
-
-var failedWritebacksStateMu sync.Mutex
 
 var listProcessCommands = defaultListProcessCommands
 
@@ -12266,119 +12265,42 @@ func writeMirrorStateFile(localDir string, snapshot syncStateFile) error {
 	if err := ensureMountRuntimeLayout(localDir); err != nil {
 		return err
 	}
-	failedWritebacksStateMu.Lock()
-	defer failedWritebacksStateMu.Unlock()
-	if persisted := readPersistedFailedWritebacksUnlocked(localDir); persisted > snapshot.FailedWritebacks {
-		snapshot.FailedWritebacks = persisted
-	}
 	// Only stamp a reconcile time when the mount has not reported one. The
 	// unconditional stamp this replaces made the document fresh by
 	// construction, so no consumer could ever observe a stale mount.
 	if strings.TrimSpace(snapshot.LastReconcileAt) == "" {
 		snapshot.LastReconcileAt = time.Now().UTC().Format(time.RFC3339)
 	}
-	statePath := filepath.Join(localDir, ".relay", "state.json")
-	document := map[string]any{}
-	if existing, err := os.ReadFile(statePath); err == nil {
-		if err := json.Unmarshal(existing, &document); err != nil || document == nil {
-			document = map[string]any{}
+	return mountstate.MergeFunc(mountStatePath(localDir), mirrorStateOwnedKeys, func(previous mountstate.Document) (any, error) {
+		// Read the persisted failure counter under the same lock the write
+		// takes, so a concurrent increment cannot be lost to this snapshot.
+		if persisted := previous.Uint64("failedWritebacks"); persisted > snapshot.FailedWritebacks {
+			snapshot.FailedWritebacks = persisted
 		}
-	}
-	// Clear the keys this writer owns so a cleared field (a drained
-	// stallReason, a resolved lastError) is not resurrected by the merge,
-	// then overlay the snapshot.
-	for _, key := range mirrorStateOwnedKeys {
-		delete(document, key)
-	}
-	encoded, err := json.Marshal(snapshot)
-	if err != nil {
-		return err
-	}
-	var owned map[string]any
-	if err := json.Unmarshal(encoded, &owned); err != nil {
-		return err
-	}
-	for key, value := range owned {
-		document[key] = value
-	}
-	// Compact, matching the mountsync writer. The merged document carries
-	// mountsync's per-file map (megabytes on a large workspace) and this
-	// write fires on every local-change batch, so indenting it would inflate
-	// both the file and the write volume for no consumer's benefit.
-	payload, err := json.Marshal(document)
-	if err != nil {
-		return err
-	}
-	payload = append(payload, '\n')
-	return writeFileAtomically(statePath, payload, 0o644)
+		return snapshot, nil
+	})
+}
+
+func mountStatePath(localDir string) string {
+	return filepath.Join(localDir, ".relay", "state.json")
 }
 
 func readPersistedFailedWritebacks(localDir string) uint64 {
 	if localDir == "" {
 		return 0
 	}
-	failedWritebacksStateMu.Lock()
-	defer failedWritebacksStateMu.Unlock()
-	return readPersistedFailedWritebacksUnlocked(localDir)
-}
-
-func readPersistedFailedWritebacksUnlocked(localDir string) uint64 {
-	payload, err := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
-	if err != nil {
-		return 0
-	}
-	var snapshot syncStateFile
-	if err := json.Unmarshal(payload, &snapshot); err != nil {
-		return 0
-	}
-	return snapshot.FailedWritebacks
+	return mountstate.Read(mountStatePath(localDir)).Uint64("failedWritebacks")
 }
 
 func incrementFailedWritebacksInState(localDir string) error {
 	if strings.TrimSpace(localDir) == "" {
 		return nil
 	}
-	failedWritebacksStateMu.Lock()
-	defer failedWritebacksStateMu.Unlock()
-
-	statePath := filepath.Join(localDir, ".relay", "state.json")
-	document := map[string]any{}
-	if payload, err := os.ReadFile(statePath); err == nil {
-		_ = json.Unmarshal(payload, &document)
-	}
-	if document == nil {
-		document = map[string]any{}
-	}
-	document["failedWritebacks"] = uint64FromJSONValue(document["failedWritebacks"]) + 1
-	payload, err := json.MarshalIndent(document, "", "  ")
-	if err != nil {
-		return err
-	}
-	payload = append(payload, '\n')
-	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
-		return err
-	}
-	return writeFileAtomically(statePath, payload, 0o644)
-}
-
-func uint64FromJSONValue(value any) uint64 {
-	switch v := value.(type) {
-	case float64:
-		if v > 0 {
-			return uint64(v)
-		}
-	case int:
-		if v > 0 {
-			return uint64(v)
-		}
-	case uint64:
-		return v
-	case json.Number:
-		if n, err := strconv.ParseUint(string(v), 10, 64); err == nil {
-			return n
-		}
-	}
-	return 0
+	// Both state writers read-modify-write this counter. Incrementing under
+	// the lock they publish under means an increment can no longer be
+	// overwritten by a snapshot that read the counter before it landed.
+	// relayfile#412.
+	return mountstate.Increment(mountStatePath(localDir), "failedWritebacks", 1)
 }
 
 func countDirtyTrackedFiles(localDir string) int {

@@ -34,6 +34,7 @@ import (
 
 	"github.com/agentworkforce/relayfile/internal/digest"
 	"github.com/agentworkforce/relayfile/internal/mountscope"
+	"github.com/agentworkforce/relayfile/internal/mountstate"
 	"github.com/agentworkforce/relayfile/internal/relayfile"
 	"github.com/fsnotify/fsnotify"
 	"nhooyr.io/websocket"
@@ -9479,7 +9480,9 @@ func (s *Syncer) savePublicStateWithLocalScan(scanLocal bool) error {
 	if err != nil {
 		return err
 	}
-	failedWritebacks := s.readPublicFailedWritebacks()
+	// failedWritebacks is carried forward inside the merge below, under the
+	// state lock, so an increment landing between a read here and the write
+	// could not be lost. relayfile#412.
 	deniedPaths := 0
 	pendingWriteback := 0
 	var files map[string]publicFileState
@@ -9643,7 +9646,7 @@ func (s *Syncer) savePublicStateWithLocalScan(scanLocal bool) error {
 		PendingWriteback:          pendingWriteback,
 		PendingConflicts:          pendingConflicts,
 		DeniedPaths:               deniedPaths,
-		FailedWritebacks:          failedWritebacks,
+		FailedWritebacks:          0, // replaced under the state lock below
 		LastError:                 s.state.LastError,
 		Files:                     files,
 		LowMemory:                 s.lowMemory,
@@ -9674,28 +9677,51 @@ func (s *Syncer) savePublicStateWithLocalScan(scanLocal bool) error {
 			public.CredExpiresInSecs = int64(time.Until(exp).Seconds())
 		}
 	}
-	if err := os.MkdirAll(filepath.Dir(s.publicStatePath), 0o755); err != nil {
-		return err
-	}
-	publicBytes, err := json.Marshal(public)
-	if err != nil {
-		return err
-	}
-	return writeFileAtomic(s.publicStatePath, publicBytes, 0o644)
+	// Merge rather than replace: the CLI mirrors provider, daemon and guard
+	// state into this same file, and serializing publicState over the whole
+	// document would delete those keys on every cycle — including on the
+	// realtime-refresh path, which publishes state without a following CLI
+	// snapshot. relayfile#412.
+	return mountstate.MergeFunc(s.publicStatePath, publicStateOwnedKeys, func(previous mountstate.Document) (any, error) {
+		// Never regress the published failure counter: the CLI increments it
+		// in the same file, and reading it here means the read and the write
+		// share one lock hold.
+		public.FailedWritebacks = previous.Uint64("failedWritebacks")
+		return public, nil
+	})
 }
 
-func (s *Syncer) readPublicFailedWritebacks() uint64 {
-	payload, err := os.ReadFile(s.publicStatePath)
-	if err != nil {
-		return 0
-	}
-	var current struct {
-		FailedWritebacks uint64 `json:"failedWritebacks"`
-	}
-	if err := json.Unmarshal(payload, &current); err != nil {
-		return 0
-	}
-	return current.FailedWritebacks
+// publicStateOwnedKeys are the state.json keys this writer owns. Pinned to the
+// publicState JSON surface by TestPublicStateOwnedKeysMatchStruct so a new
+// field cannot silently stop being republished.
+var publicStateOwnedKeys = []string{
+	"workspaceId",
+	"remoteRoot",
+	"localRoot",
+	"mode",
+	"syncMode",
+	"intervalMs",
+	"lastReconcileAt",
+	"lastSuccessfulReconcileAt",
+	"lastEventAt",
+	"staleAfter",
+	"status",
+	"states",
+	"pendingWriteback",
+	"pendingConflicts",
+	"deniedPaths",
+	"failedWritebacks",
+	"lastError",
+	"files",
+	"lowMemory",
+	"counters",
+	"circuit",
+	"outbox",
+	"lastAppliedRevision",
+	"bootstrap",
+	"reconcileAgeSecs",
+	"credExpiresInSecs",
+	"eventListener",
 }
 
 func (s *Syncer) listConflictArtifacts() (map[string]int, int, error) {
