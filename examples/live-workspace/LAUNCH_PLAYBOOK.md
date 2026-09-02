@@ -68,6 +68,10 @@ They need a Bash environment with `mktemp`, Node.js 22.22.0+, npm, curl, and a
 Claude provider they can connect during setup. The script downloads pinned CLIs
 in an isolated npm execution:
 
+That immutable script pins agent-relay 11.10.0 and Relayfile/SDK 0.10.51, the
+exact combination validated by the revision. The separate checked-in
+lower-level proof tracks Relayfile 0.10.52.
+
 ```bash
 LIVE_REVIEW_REV=ed2a9ae1e96fbe474861c33b95cd7bcae1ab640c
 LIVE_REVIEW_SHA256=398214e8c0208b968018f6ddf85f8f1fb8d1582c35e05ba24140cfeaad14d42e
