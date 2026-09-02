@@ -1,0 +1,4 @@
+# sha256 of the raw .relay/state.json as read INSIDE the sandbox
+# (armX-state.json.gz decompresses to exactly these bytes)
+3d59ae71dff2fe943f226d398056290f65d13fa080f4063d47fd226e37dc1d43  armA2-state.json  (324833 bytes)
+39329c7c14f5234564811bc2278ebd73f6d228da9b833a224fc1d5dc14dad359  armB2-state.json  (1028186 bytes)

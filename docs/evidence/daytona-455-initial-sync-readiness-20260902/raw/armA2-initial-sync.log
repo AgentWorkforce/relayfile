@@ -1,0 +1,11 @@
+2026/09/02 12:16:02 mount layout=exact remote=/github/repos/AgentWorkforce/relay local=/home/daytona/ws-A2/github/repos/AgentWorkforce/relay sync=mirror mode=poll state=/home/daytona/ws-A2/github/repos/AgentWorkforce/relay/.relay/state.json
+2026/09/02 12:16:02 Mirror started at /home/daytona/ws-A2/github/repos/AgentWorkforce/relay. Sync interval 30s +/- 20%. Public state: /home/daytona/ws-A2/github/repos/AgentWorkforce/relay/.relay/state.json
+2026/09/02 12:16:03 websocket unavailable; using polling sync: failed to WebSocket dial: expected handshake response status code 101 but got 429
+2026/09/02 12:17:22 bootstrap page checkpoint persisted at entry 256 after 589 files this cycle; continuing current server page
+2026/09/02 12:17:33 bootstrap page checkpoint persisted at entry 512 after 845 files this cycle; continuing current server page
+2026/09/02 12:17:37 bootstrap page checkpoint persisted at entry 768 after 1101 files this cycle; continuing current server page
+2026/09/02 12:17:54 bootstrap page checkpoint persisted at entry 256 after 1589 files this cycle; continuing current server page
+2026/09/02 12:18:22 bootstrap file budget reached (2000 files this cycle, max 2000); yielding at entry 170 of the current server page
+2026/09/02 12:18:22 mount full-tree traversal summary remote_root="/github/repos/AgentWorkforce/relay" list_calls=6 entries_seen=3986 files_seen=2000 directories_seen=1986 bytes_seen=26734874 runtime_entries_seen=0 runtime_subtrees_pruned=0 traversal_complete=false traversal_failed=false duration_ms=103291
+2026/09/02 12:18:24 mount sync cycle completed
+relayfile initial sync paused before complete readiness
