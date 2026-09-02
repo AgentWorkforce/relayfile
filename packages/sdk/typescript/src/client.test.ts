@@ -412,18 +412,23 @@ describe("RelayFileClient — existing methods", () => {
       await handle.unsubscribe();
     });
 
-    it("subscribe keeps an exact-file pathScope correct while adding its (empty) subtree filter", async () => {
+    it("subscribe treats a wildcard-free file-looking pathScope as a DIRECTORY scope (matches descendants)", async () => {
+      // Option A (deliberate API design): a wildcard-free pathScope entry is a
+      // directory subtree scope, even when it looks like a file. Relayfile
+      // creates descendants under file-looking paths (e.g.
+      // /linear/issues/ENG-1.json/replies/draft.json), so a bare path is never
+      // treated as exact-file — it matches the node AND its whole subtree.
       const fetchImpl = vi.fn(async (url: string) => {
-        if (url.includes("/fs/file?path=%2Framp%2Ftransactions%2Ftxn_9.json")) {
+        if (url.includes("/fs/file?path=%2Flinear%2Fissues%2FENG-1.json%2Freplies%2Fdraft.json")) {
           return {
             ok: true,
             status: 200,
             headers: new Headers({ "content-type": "application/json" }),
             json: async () => ({
-              path: "/ramp/transactions/txn_9.json",
+              path: "/linear/issues/ENG-1.json/replies/draft.json",
               revision: "rev_1",
               contentType: "application/json",
-              content: JSON.stringify({ id: "txn_9", provider: "ramp", kind: "ramp.transaction" }),
+              content: JSON.stringify({ id: "draft", provider: "linear", kind: "linear.reply" }),
             }),
             text: async () => "",
           } as unknown as Response;
@@ -435,34 +440,38 @@ describe("RelayFileClient — existing methods", () => {
       });
       const handler = vi.fn();
       const handle = client.subscribe(
-        ["/ramp/transactions/txn_9.json"],
+        ["/linear/issues/**"],
         handler,
-        { coalesce: "none", pathScope: ["/ramp/transactions/txn_9.json"] },
+        { coalesce: "none", pathScope: ["/linear/issues/ENG-1.json"] },
       );
 
       await waitForExpectation(() => {
         const socket = ProactiveMockWebSocket.instances[ProactiveMockWebSocket.instances.length - 1];
         expect(socket).toBeDefined();
-        // The exact-file filter still matches the file; the appended /** filter
-        // only ever matches (non-existent) children, so exact scopes stay correct.
-        expect(socket!.url).toContain("path=%2Framp%2Ftransactions%2Ftxn_9.json&");
-        expect(socket!.url).toContain("path=%2Framp%2Ftransactions%2Ftxn_9.json%2F**");
+        // The bare path is expanded to {exact, exact + "/**"} so its subtree is covered.
+        expect(socket!.url).toContain("path=%2Flinear%2Fissues%2FENG-1.json&");
+        expect(socket!.url).toContain("path=%2Flinear%2Fissues%2FENG-1.json%2F**");
       });
 
       const socket = ProactiveMockWebSocket.instances[ProactiveMockWebSocket.instances.length - 1]!;
       socket.emit("open", {});
       socket.emit("message", {
         data: JSON.stringify({
-          eventId: "evt_ramp_9",
+          eventId: "evt_linear_reply_1",
           type: "file.updated",
-          path: "/ramp/transactions/txn_9.json",
+          path: "/linear/issues/ENG-1.json/replies/draft.json",
           revision: "rev_1",
           timestamp: "2026-05-11T00:00:00.000Z",
         } satisfies FilesystemEvent),
       });
 
+      // A descendant under the file-looking scope IS delivered (directory semantics).
       await waitForExpectation(() => {
         expect(handler).toHaveBeenCalledTimes(1);
+      });
+      expect(handler.mock.calls[0]?.[0]).toMatchObject({
+        id: "evt_linear_reply_1",
+        resource: { path: "/linear/issues/ENG-1.json/replies/draft.json" },
       });
 
       await handle.unsubscribe();

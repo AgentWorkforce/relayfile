@@ -488,6 +488,20 @@ export interface LayoutManifest {
 export interface SubscribeOptions {
   coalesce?: "none" | "fire-once";
   coalesceMs?: number;
+  /**
+   * Narrow the server-side event stream to one or more path scopes.
+   *
+   * A **wildcard-free** entry is a DIRECTORY SUBTREE scope: `"/ramp/transactions"`
+   * matches that path AND everything under it. A bare path is NOT treated as an
+   * exact-file match — Relayfile creates descendants under file-looking paths
+   * (e.g. `/linear/issues/ENG-1.json/replies/draft.json`), so a wildcard-free
+   * scope always means "this directory and its subtree".
+   *
+   * To scope to something more precise, pass an explicit glob: a trailing `**`
+   * (`"/ramp/transactions/**"`) for a subtree, or per-segment `*` wildcards
+   * (`"/github/repos/acme/api/pulls/*"`); these are honored verbatim. For an
+   * exact single path, use the `paths` argument with the specific pattern.
+   */
   pathScope?: string[];
   from?: "now" | "legacy";
   cursor?: string;

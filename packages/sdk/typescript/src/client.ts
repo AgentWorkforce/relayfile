@@ -691,9 +691,10 @@ class RelayFileChangeSubscription {
     private readonly options?: SubscribeOptions
   ) {
     this.globPatterns = globs.map((pattern) => normalizeChangePattern(pattern));
-    // A bare directory-style pathScope (e.g. "/ramp/transactions") matches zero
-    // children on the server, so expand each wildcard-free entry into the exact
-    // path plus its "/**" subtree filter. See expandDirectoryScope for the rule.
+    // A wildcard-free pathScope entry (e.g. "/ramp/transactions") is a DIRECTORY
+    // SUBTREE scope: expand it into the exact path plus its "/**" subtree filter
+    // so it matches the directory and everything under it. A bare path is never
+    // exact-file; use a glob for that. See expandDirectoryScope for the rule.
     this.pathScopes = options?.pathScope?.length
       ? options.pathScope.flatMap((pattern) => expandDirectoryScope(normalizeChangePattern(pattern)))
       : null;
@@ -1074,29 +1075,36 @@ function normalizeChangePattern(pattern: string): string[] {
 }
 
 /**
- * Expand a normalized `pathScope` pattern so a *directory-style* scope actually
- * matches its subtree on the server.
+ * A wildcard-free `pathScope` entry is DEFINED as a DIRECTORY SUBTREE scope: it
+ * matches the path itself AND everything under it. To scope to an exact file,
+ * use a glob (`/dir/file.json` is not treated as exact — pass an explicit
+ * pattern via the `paths` argument, or a wildcard) — a bare path is never
+ * exact-file. This is a deliberate API-design choice (Option A), not an
+ * accident of the server matcher: it makes the common "watch this directory"
+ * intent Just Work and avoids a silent zero-event foot-gun.
+ *
+ * Why it MUST be subtree, and why "exact-file" is not a safe alternative:
+ * Relayfile creates descendants under file-looking paths (e.g.
+ * `/linear/issues/ENG-1.json/replies/draft.json`), so a bare path can never be
+ * assumed to name a leaf. Treating a wildcard-free entry as directory-scope is
+ * the only consistent rule.
  *
  * The data plane (see `webSocketPathMatches` in internal/httpapi/websocket.go)
  * matches a `path=` filter against an event path with these semantics:
- *   - exact match: `/ramp/transactions/txn_1.json` == the event path, OR
+ *   - exact match: `path` == the event path, OR
  *   - trailing `**`: `/ramp/transactions/**` matches any STRICT descendant, OR
  *   - per-segment `*` wildcards, requiring equal segment counts otherwise.
- * A bare directory prefix like `/ramp/transactions` (no wildcard) therefore
- * matches ONLY an event whose path is exactly `/ramp/transactions` — it matches
- * ZERO children. A caller who scopes a subscription to `["/ramp/transactions"]`
- * expecting to hear about files under it opens a WS that silently receives no
- * events (proven: `path=/ramp/transactions` -> 0 events; `/**` -> 6). The same
- * count-must-match rule in `matchChangeSegments` makes the client-side filter
- * agree, so the miss is doubly silent.
+ * A bare directory prefix like `/ramp/transactions` (no wildcard) would
+ * therefore match ONLY an event whose path is exactly `/ramp/transactions` —
+ * ZERO children — so a caller scoping to `["/ramp/transactions"]` opens a WS
+ * that silently receives no events (proven: `path=/ramp/transactions` -> 0
+ * events; `/**` -> 6). The same count-must-match rule in `matchChangeSegments`
+ * makes the client-side filter agree, so the miss would be doubly silent.
  *
- * Fix: for a wildcard-free entry, emit BOTH the exact path AND the `.../**`
- * subtree filter. The union keeps an exact-FILE scope correct (the exact filter
- * still matches the file; the `/**` filter matches its — non-existent — children
- * and adds nothing) while making a DIRECTORY scope match everything beneath it,
- * without having to guess whether the final segment names a file or a folder.
- * Entries that already contain a `*`/`**` wildcard are honored verbatim — we
- * never broaden an intentionally precise glob.
+ * Implementation: for a wildcard-free entry, emit BOTH the exact path AND the
+ * `.../**` subtree filter — the union matches the directory node itself plus its
+ * entire subtree. Entries that already contain a `*`/`**` wildcard are honored
+ * verbatim — an intentionally precise glob is never broadened.
  */
 function expandDirectoryScope(segments: string[]): string[][] {
   if (segments.some((segment) => segment === "*" || segment === "**")) {
