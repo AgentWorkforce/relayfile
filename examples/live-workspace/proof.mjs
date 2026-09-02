@@ -6,8 +6,8 @@ import { pathToFileURL } from "node:url";
 
 const DEFAULT_TIMEOUT_SECONDS = 180;
 const POLL_INTERVAL_MS = 200;
-const MINIMUM_AGENT_RELAY_VERSION = "11.9.0";
-const MINIMUM_RELAYFILE_VERSION = "0.10.51";
+const MINIMUM_AGENT_RELAY_VERSION = "11.10.0";
+const MINIMUM_RELAYFILE_VERSION = "0.10.52";
 
 export function parseArgs(argv) {
   const options = {

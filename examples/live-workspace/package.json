@@ -12,8 +12,8 @@
     "test": "node --test proof.test.mjs"
   },
   "devDependencies": {
-    "agent-relay": "11.9.0",
-    "relayfile": "0.10.51"
+    "agent-relay": "11.10.0",
+    "relayfile": "0.10.52"
   },
   "engines": {
     "node": ">=22.22.0"

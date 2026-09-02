@@ -3,11 +3,12 @@
 The public launch demo is self-contained: one agent reviews live, uncommitted
 code in a fresh Daytona sandbox, a second agent fixes that same file after a
 hash-gated handoff, and the laptop independently verifies the final bytes.
-It requires a Bash environment with `mktemp`, Node.js 22.22.0+, npm, and curl.
+It requires a Bash environment with `mktemp`, Node.js 22.22.0+, npm, curl, and
+access to a Claude provider that can be connected during setup.
 
 ```bash
-LIVE_REVIEW_REV=ce68bc90b3324e4b51c160152cc6aaa02513ae68
-LIVE_REVIEW_SHA256=47be2579cb28933ca5a6b0fa821095b86747be1b7a6845dd2846b29efaeeb873
+LIVE_REVIEW_REV=ed2a9ae1e96fbe474861c33b95cd7bcae1ab640c
+LIVE_REVIEW_SHA256=398214e8c0208b968018f6ddf85f8f1fb8d1582c35e05ba24140cfeaad14d42e
 LIVE_REVIEW_SCRIPT="$(mktemp "${TMPDIR:-/tmp}/relayfile-live-review.XXXXXX")" &&
 curl -fsSL "https://gist.githubusercontent.com/khaliqgant/e9ee531e63a9048f612e12979f50d2ae/raw/$LIVE_REVIEW_REV/live-review.sh" -o "$LIVE_REVIEW_SCRIPT" &&
 node -e 'const fs=require("fs"),c=require("crypto"),[p,w]=process.argv.slice(1),g=c.createHash("sha256").update(fs.readFileSync(p)).digest("hex");if(g!==w)throw Error("SHA-256 mismatch");console.log("SHA-256 verified")' "$LIVE_REVIEW_SCRIPT" "$LIVE_REVIEW_SHA256" &&
