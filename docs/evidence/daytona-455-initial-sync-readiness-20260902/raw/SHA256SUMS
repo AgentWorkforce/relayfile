@@ -1,0 +1,13 @@
+# Verifiable with: sha256sum -c SHA256SUMS   (run from this directory)
+#
+# These lines check the COMMITTED files. The raw uncompressed .relay/state.json
+# bytes, as read inside the sandbox, hash to:
+#   armA2-state.json  3d59ae71dff2fe943f226d398056290f65d13fa080f4063d47fd226e37dc1d43  (324833 bytes)
+#   armB2-state.json  39329c7c14f5234564811bc2278ebd73f6d228da9b833a224fc1d5dc14dad359  (1028186 bytes)
+# Verify those with:
+#   gzip -dc armA2-state.json.gz | sha256sum
+#   gzip -dc armB2-state.json.gz | sha256sum
+ef14a992e939630a1b297dbbd75d0656d2966b5bda14ec8b795cc38b95b9a55f  armA2-state.json.gz
+7fa2f3bfc6fe80ec09e790b5b796b1f403086c2178d20dc94035c42c8ae3dcc1  armB2-state.json.gz
+f9fd76adf8b7dad540f7c5892d2898cd9ea398c113f23772a4d87b566f63ce8b  armA2-initial-sync.log
+db3bf43184cdc61b6af7bfb1616625a55c86ba32a4cc4c23464a6c8957c15196  armB2-initial-sync.log

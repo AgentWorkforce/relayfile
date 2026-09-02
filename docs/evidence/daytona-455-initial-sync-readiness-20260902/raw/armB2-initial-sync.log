@@ -1,0 +1,26 @@
+2026/09/02 12:16:02 mount layout=exact remote=/github/repos/AgentWorkforce/relay local=/home/daytona/ws-B2/github/repos/AgentWorkforce/relay sync=mirror mode=poll state=/home/daytona/ws-B2/github/repos/AgentWorkforce/relay/.relay/state.json
+2026/09/02 12:16:02 Mirror started at /home/daytona/ws-B2/github/repos/AgentWorkforce/relay. Sync interval 30s +/- 20%. Public state: /home/daytona/ws-B2/github/repos/AgentWorkforce/relay/.relay/state.json
+2026/09/02 12:16:03 websocket unavailable; using polling sync: failed to WebSocket dial: expected handshake response status code 101 but got 429
+2026/09/02 12:17:28 bootstrap page checkpoint persisted at entry 256 after 589 files this cycle; continuing current server page
+2026/09/02 12:17:35 bootstrap page checkpoint persisted at entry 512 after 845 files this cycle; continuing current server page
+2026/09/02 12:17:39 bootstrap page checkpoint persisted at entry 768 after 1101 files this cycle; continuing current server page
+2026/09/02 12:17:58 bootstrap page checkpoint persisted at entry 256 after 1589 files this cycle; continuing current server page
+2026/09/02 12:18:25 bootstrap file budget reached (2000 files this cycle, max 2000); yielding at entry 170 of the current server page
+2026/09/02 12:18:25 mount full-tree traversal summary remote_root="/github/repos/AgentWorkforce/relay" list_calls=6 entries_seen=3986 files_seen=2000 directories_seen=1986 bytes_seen=26734874 runtime_entries_seen=0 runtime_subtrees_pruned=0 traversal_complete=false traversal_failed=false duration_ms=107674
+2026/09/02 12:18:27 mount sync cycle completed
+2026/09/02 12:18:27 initial sync: bootstrap incomplete after first cycle (2000 files synced (authoritative total unavailable)); resuming from the persisted checkpoint
+2026/09/02 12:18:28 detected non-empty state without completed bootstrap; will resume from persisted cursor (2000 files already synced)
+2026/09/02 12:18:55 websocket read failed; falling back to polling: failed to read JSON message: failed to get reader: failed to read frame header: EOF
+2026/09/02 12:19:13 export snapshot did not complete within 45s; falling back to resumable tree pull
+2026/09/02 12:19:13 resuming bootstrap bounded-tree pull at /github/repos/AgentWorkforce/relay from persisted cursor and page offset 170 (887 directories pending, 2000 files already synced)
+2026/09/02 12:32:30 bootstrap file budget reached (2000 files this cycle, max 2000); yielding at entry 1 of the current server page
+2026/09/02 12:32:30 mount full-tree traversal summary remote_root="/github/repos/AgentWorkforce/relay" list_calls=425 entries_seen=2497 files_seen=2000 directories_seen=497 bytes_seen=23134950 runtime_entries_seen=0 runtime_subtrees_pruned=0 traversal_complete=false traversal_failed=false duration_ms=797284
+2026/09/02 12:32:32 mount sync cycle completed
+2026/09/02 12:32:32 initial sync: bootstrapping 4000 files synced (authoritative total unavailable)
+2026/09/02 12:32:36 detected non-empty state without completed bootstrap; forcing full reconcile (4000 tracked files)
+2026/09/02 12:33:12 resuming bootstrap bounded-tree pull at /github/repos/AgentWorkforce/relay/deployments/5277255814/statuses from persisted cursor and page offset 1 (474 directories pending, 4000 files already synced)
+2026/09/02 12:33:36 websocket read failed; falling back to polling: failed to read JSON message: failed to get reader: failed to read frame header: EOF
+2026/09/02 12:47:47 skipping snapshot delete pass: bootstrap resumed from a persisted cursor so the fresh listing is partial; deferring deletes to the next full cycle
+2026/09/02 12:47:47 mount full-tree traversal summary remote_root="/github/repos/AgentWorkforce/relay" list_calls=476 entries_seen=1695 files_seen=1685 directories_seen=10 bytes_seen=7379201 runtime_entries_seen=0 runtime_subtrees_pruned=0 traversal_complete=true traversal_failed=false duration_ms=875135
+2026/09/02 12:47:49 mount sync cycle completed
+2026/09/02 12:47:49 initial sync: bootstrap complete
