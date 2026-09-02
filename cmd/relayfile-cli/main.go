@@ -7882,8 +7882,12 @@ func runMount(args []string) error {
 			Transport: newWritebackFailureTransport(scope.LocalDir, log.Default(), mountsync.NewSyncTransport()),
 		})
 		syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
-			WorkspaceID:               workspaceID,
-			RemoteRoot:                scope.RemotePath,
+			WorkspaceID: workspaceID,
+			RemoteRoot:  scope.RemotePath,
+			// Without this the syncer's interval is the zero value, so its
+			// public state advertises intervalMs: 0 and every consumer's
+			// staleness check early-returns "fresh" forever. relayfile#412.
+			Interval:                  *interval,
 			EventProvider:             strings.TrimSpace(*eventProvider),
 			ScopedChild:               resolvedLocalLayout == mountscope.LayoutScoped,
 			LocalRoot:                 scope.LocalDir,
@@ -12220,6 +12224,41 @@ func readGuardCounters(localDir string) *syncStateGuards {
 	return g
 }
 
+// mirrorStateOwnedKeys are the .relay/state.json keys the CLI mirror writer
+// owns. Everything else in the document belongs to the in-process mountsync
+// public-state writer (files, states, counters, circuit, outbox, localRoot,
+// syncMode, staleAfter, lastAppliedRevision, reconcileAgeSecs,
+// credExpiresInSecs, lowMemory) and must survive a mirror write.
+//
+// Both writers target the identical path from the same process, roughly once
+// per second. Before relayfile#412 the mirror writer serialized its own struct
+// over the whole file, so whichever writer ran last decided which half of the
+// schema existed. That is why consumers saw a document with no `providers`
+// (mountsync won) or no `files`/`counters` (the CLI won), and why guards keyed
+// on the missing half silently failed open.
+var mirrorStateOwnedKeys = []string{
+	"workspaceId",
+	"remoteRoot",
+	"mode",
+	"status",
+	"lastReconcileAt",
+	"lastSuccessfulReconcileAt",
+	"lastEventAt",
+	"intervalMs",
+	"providers",
+	"pendingWriteback",
+	"pendingConflicts",
+	"deniedPaths",
+	"failedWritebacks",
+	"stallReason",
+	"lastError",
+	"incrementalReadNotReadySince",
+	"daemon",
+	"guards",
+	"bootstrap",
+	"eventListener",
+}
+
 func writeMirrorStateFile(localDir string, snapshot syncStateFile) error {
 	if localDir == "" {
 		return nil
@@ -12232,13 +12271,46 @@ func writeMirrorStateFile(localDir string, snapshot syncStateFile) error {
 	if persisted := readPersistedFailedWritebacksUnlocked(localDir); persisted > snapshot.FailedWritebacks {
 		snapshot.FailedWritebacks = persisted
 	}
-	snapshot.LastReconcileAt = time.Now().UTC().Format(time.RFC3339)
-	payload, err := json.MarshalIndent(snapshot, "", "  ")
+	// Only stamp a reconcile time when the mount has not reported one. The
+	// unconditional stamp this replaces made the document fresh by
+	// construction, so no consumer could ever observe a stale mount.
+	if strings.TrimSpace(snapshot.LastReconcileAt) == "" {
+		snapshot.LastReconcileAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	statePath := filepath.Join(localDir, ".relay", "state.json")
+	document := map[string]any{}
+	if existing, err := os.ReadFile(statePath); err == nil {
+		if err := json.Unmarshal(existing, &document); err != nil || document == nil {
+			document = map[string]any{}
+		}
+	}
+	// Clear the keys this writer owns so a cleared field (a drained
+	// stallReason, a resolved lastError) is not resurrected by the merge,
+	// then overlay the snapshot.
+	for _, key := range mirrorStateOwnedKeys {
+		delete(document, key)
+	}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	var owned map[string]any
+	if err := json.Unmarshal(encoded, &owned); err != nil {
+		return err
+	}
+	for key, value := range owned {
+		document[key] = value
+	}
+	// Compact, matching the mountsync writer. The merged document carries
+	// mountsync's per-file map (megabytes on a large workspace) and this
+	// write fires on every local-change batch, so indenting it would inflate
+	// both the file and the write volume for no consumer's benefit.
+	payload, err := json.Marshal(document)
 	if err != nil {
 		return err
 	}
 	payload = append(payload, '\n')
-	return writeFileAtomically(filepath.Join(localDir, ".relay", "state.json"), payload, 0o644)
+	return writeFileAtomically(statePath, payload, 0o644)
 }
 
 func readPersistedFailedWritebacks(localDir string) uint64 {
