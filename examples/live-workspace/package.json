@@ -12,10 +12,10 @@
     "test": "node --test proof.test.mjs"
   },
   "devDependencies": {
-    "agent-relay": "11.8.7",
-    "relayfile": "0.10.51"
+    "agent-relay": "11.10.1",
+    "relayfile": "0.10.52"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.22.0"
   }
 }

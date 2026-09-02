@@ -1,5 +1,34 @@
 # Relayfile cross-machine proof
 
+## Launch demo: live review before the PR
+
+For the human-facing launch, use the self-contained live reviewer/builder demo.
+It needs no repository checkout and cleans up its exact Daytona sandbox in
+`validate` mode. It requires a Bash environment with `mktemp`, Node.js 22.22.0+,
+npm, curl, and access to a Claude provider that can be connected during setup:
+
+The immutable launch script pins agent-relay 11.10.1 and Relayfile/SDK 0.10.52,
+the exact combination validated by that revision. The checked-in lower-level
+proof below uses the same versions.
+
+```bash
+LIVE_REVIEW_REV=53dfd49f532d362bbced37b12b1c41725cee4b5a
+LIVE_REVIEW_SHA256=69272a35ed3ec3d3294fe9f9bdc14ab0dc9b5f642e379098591d0b378e0c9863
+LIVE_REVIEW_SCRIPT="$(mktemp "${TMPDIR:-/tmp}/relayfile-live-review.XXXXXX")" &&
+curl -fsSL "https://gist.githubusercontent.com/khaliqgant/e9ee531e63a9048f612e12979f50d2ae/raw/$LIVE_REVIEW_REV/live-review.sh" -o "$LIVE_REVIEW_SCRIPT" &&
+node -e 'const fs=require("fs"),c=require("crypto"),[p,w]=process.argv.slice(1),g=c.createHash("sha256").update(fs.readFileSync(p)).digest("hex");if(g!==w)throw Error("SHA-256 mismatch");console.log("SHA-256 verified")' "$LIVE_REVIEW_SCRIPT" "$LIVE_REVIEW_SHA256" &&
+bash "$LIVE_REVIEW_SCRIPT" setup &&
+bash "$LIVE_REVIEW_SCRIPT" validate
+```
+
+One agent reviews an unsafe, uncommitted payment webhook. The laptop verifies
+the review-time source hash, then authorizes a second agent to fix the same live
+file. The reviewer and laptop independently approve the exact final bytes. The
+script prints commands to attach to both agents while the proof runs.
+
+See the [launch playbook](./LAUNCH_PLAYBOOK.md) for the two-terminal recording
+flow, narration, claims, and caveats.
+
 ## The human version
 
 A cloud agent saves a file in its normal folder. That same file appears on your
@@ -45,23 +74,23 @@ The current demo proves cross-machine byte replication. Long-running Agent37
 reattach and live teleport are a separate fast-follow and should not be claimed
 until their full dev acceptance flow passes.
 
-This is the launch demo: after one-time setup, one command provisions a fresh Daytona sandbox,
-mounts the current Relayfile workspace, starts an agent inside that mount, and
-waits for the agent's uncommitted proof file to arrive on this machine.
+This lower-level proof provisions a fresh Daytona sandbox, mounts the current
+Relayfile workspace, starts one agent inside that mount, and waits for the
+agent's uncommitted proof file to arrive on this machine.
 
 There is no localhost app and no simulated event stream. The command prints
 `PASS` only after this machine independently verifies the remote file against a
 SHA-256 sidecar produced in the sandbox.
 
-Running a launch or recording a demo? Use the [launch playbook](./LAUNCH_PLAYBOOK.md).
+The lower-level example below proves the replication primitive with one agent.
 
 ## Run it
 
 Prerequisites:
 
-- Node.js 22 or newer
-- `agent-relay` 11.8.7 or newer (the example pins it)
-- `relayfile` 0.10.51 or newer (the example pins it)
+- Node.js 22.22.0 or newer
+- `agent-relay` 11.10.1 or newer (the example pins it)
+- `relayfile` 0.10.52 or newer (the example pins it)
 - `relayfile` authenticated to the same Agent Relay Cloud workspace
 - a connected Claude provider in Agent Relay Cloud
 
@@ -73,13 +102,14 @@ npm run proof
 ```
 
 `npm run setup` signs in to Relayfile's shared Agent Relay Cloud session and
-connects Claude. `npm run preflight` is read-only and fails before sandbox provisioning if
-the CLI versions, Cloud session, or active Relayfile workspace are missing.
+connects Claude. `npm run preflight` is read-only and fails before sandbox
+provisioning if the CLI versions, Cloud session, or active Relayfile workspace
+are missing.
 
 The command prints an attach command as soon as the agent launches:
 
 ```bash
-npx agent-relay@11.8.7 node agent attach <agent> --node <sandbox> --mode drive
+npx agent-relay@11.10.1 node agent attach <agent> --node <sandbox> --mode drive
 ```
 
 Use `--mode view` for a read-only session. `Ctrl+C` detaches without killing the
@@ -133,15 +163,13 @@ The proof intentionally leaves the agent running so you can attach to it. When
 finished, release it with the exact command printed by the demo:
 
 ```bash
-npx agent-relay@11.8.7 fleet release <agent-name>
+npx agent-relay@11.10.1 fleet release <agent-name>
 ```
 
-As of Agent Relay 11.8.7, `fleet spawn --sandbox` does not expose a CLI command
-for deleting a successfully provisioned Cloud-owned Daytona sandbox. Do not
-loop the fresh-sandbox demo. Reuse the named node for additional takes and
-remove it from Cloud fleet controls when finished. Failed provisioning and
-failed spawn attempts are cleaned up automatically when Cloud returns a
-complete sandbox identity.
+The lower-level proof deliberately keeps its successful sandbox alive for
+attach. Reuse the named node for additional takes and remove it from Cloud fleet
+controls when finished. For a fresh sandbox on every run with deterministic
+agent and sandbox cleanup, use the launch demo's `validate` mode above.
 
 ## What the result proves
 
