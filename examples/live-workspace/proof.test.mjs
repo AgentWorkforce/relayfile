@@ -38,8 +38,8 @@ test("parseArgs supports a read-only preflight", () => {
 
 test("CLI versions are parsed and compared without dependencies", () => {
   assert.equal(parseCliVersion("relayfile v0.10.52\n"), "0.10.52");
-  assert.equal(parseCliVersion("11.10.0\n"), "11.10.0");
-  assert.ok(compareVersions("11.10.0", "11.9.1") > 0);
+  assert.equal(parseCliVersion("11.10.1\n"), "11.10.1");
+  assert.ok(compareVersions("11.10.1", "11.10.0") > 0);
   assert.equal(compareVersions("0.10.52", "0.10.52"), 0);
   assert.ok(compareVersions("0.10.51", "0.10.52") < 0);
 });
@@ -47,7 +47,7 @@ test("CLI versions are parsed and compared without dependencies", () => {
 test("attach commands work when the CLIs are installed only in the example", () => {
   assert.equal(
     portableAgentRelayCommand("agent-relay node agent attach proof --node sandbox --mode drive"),
-    "npx agent-relay@11.10.0 node agent attach proof --node sandbox --mode drive"
+    "npx agent-relay@11.10.1 node agent attach proof --node sandbox --mode drive"
   );
 });
 

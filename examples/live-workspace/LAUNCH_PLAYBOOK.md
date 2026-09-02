@@ -25,8 +25,8 @@ agents when their commands appear.
 Run this self-contained command in Terminal A:
 
 ```bash
-LIVE_REVIEW_REV=ed2a9ae1e96fbe474861c33b95cd7bcae1ab640c
-LIVE_REVIEW_SHA256=398214e8c0208b968018f6ddf85f8f1fb8d1582c35e05ba24140cfeaad14d42e
+LIVE_REVIEW_REV=53dfd49f532d362bbced37b12b1c41725cee4b5a
+LIVE_REVIEW_SHA256=69272a35ed3ec3d3294fe9f9bdc14ab0dc9b5f642e379098591d0b378e0c9863
 LIVE_REVIEW_SCRIPT="$(mktemp "${TMPDIR:-/tmp}/relayfile-live-review.XXXXXX")" &&
 curl -fsSL "https://gist.githubusercontent.com/khaliqgant/e9ee531e63a9048f612e12979f50d2ae/raw/$LIVE_REVIEW_REV/live-review.sh" -o "$LIVE_REVIEW_SCRIPT" &&
 node -e 'const fs=require("fs"),c=require("crypto"),[p,w]=process.argv.slice(1),g=c.createHash("sha256").update(fs.readFileSync(p)).digest("hex");if(g!==w)throw Error("SHA-256 mismatch");console.log("SHA-256 verified")' "$LIVE_REVIEW_SCRIPT" "$LIVE_REVIEW_SHA256" &&
@@ -68,13 +68,13 @@ They need a Bash environment with `mktemp`, Node.js 22.22.0+, npm, curl, and a
 Claude provider they can connect during setup. The script downloads pinned CLIs
 in an isolated npm execution:
 
-That immutable script pins agent-relay 11.10.0 and Relayfile/SDK 0.10.51, the
-exact combination validated by the revision. The separate checked-in
-lower-level proof tracks Relayfile 0.10.52.
+That immutable script pins agent-relay 11.10.1 and Relayfile/SDK 0.10.52, the
+exact combination validated by the revision. The checked-in lower-level proof
+uses the same versions.
 
 ```bash
-LIVE_REVIEW_REV=ed2a9ae1e96fbe474861c33b95cd7bcae1ab640c
-LIVE_REVIEW_SHA256=398214e8c0208b968018f6ddf85f8f1fb8d1582c35e05ba24140cfeaad14d42e
+LIVE_REVIEW_REV=53dfd49f532d362bbced37b12b1c41725cee4b5a
+LIVE_REVIEW_SHA256=69272a35ed3ec3d3294fe9f9bdc14ab0dc9b5f642e379098591d0b378e0c9863
 LIVE_REVIEW_SCRIPT="$(mktemp "${TMPDIR:-/tmp}/relayfile-live-review.XXXXXX")" &&
 curl -fsSL "https://gist.githubusercontent.com/khaliqgant/e9ee531e63a9048f612e12979f50d2ae/raw/$LIVE_REVIEW_REV/live-review.sh" -o "$LIVE_REVIEW_SCRIPT" &&
 node -e 'const fs=require("fs"),c=require("crypto"),[p,w]=process.argv.slice(1),g=c.createHash("sha256").update(fs.readFileSync(p)).digest("hex");if(g!==w)throw Error("SHA-256 mismatch");console.log("SHA-256 verified")' "$LIVE_REVIEW_SCRIPT" "$LIVE_REVIEW_SHA256" &&

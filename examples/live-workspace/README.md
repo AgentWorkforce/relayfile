@@ -7,13 +7,13 @@ It needs no repository checkout and cleans up its exact Daytona sandbox in
 `validate` mode. It requires a Bash environment with `mktemp`, Node.js 22.22.0+,
 npm, curl, and access to a Claude provider that can be connected during setup:
 
-The immutable launch script pins agent-relay 11.10.0 and Relayfile/SDK 0.10.51,
-the exact combination validated by that revision. The separate checked-in
-lower-level proof below tracks Relayfile 0.10.52.
+The immutable launch script pins agent-relay 11.10.1 and Relayfile/SDK 0.10.52,
+the exact combination validated by that revision. The checked-in lower-level
+proof below uses the same versions.
 
 ```bash
-LIVE_REVIEW_REV=ed2a9ae1e96fbe474861c33b95cd7bcae1ab640c
-LIVE_REVIEW_SHA256=398214e8c0208b968018f6ddf85f8f1fb8d1582c35e05ba24140cfeaad14d42e
+LIVE_REVIEW_REV=53dfd49f532d362bbced37b12b1c41725cee4b5a
+LIVE_REVIEW_SHA256=69272a35ed3ec3d3294fe9f9bdc14ab0dc9b5f642e379098591d0b378e0c9863
 LIVE_REVIEW_SCRIPT="$(mktemp "${TMPDIR:-/tmp}/relayfile-live-review.XXXXXX")" &&
 curl -fsSL "https://gist.githubusercontent.com/khaliqgant/e9ee531e63a9048f612e12979f50d2ae/raw/$LIVE_REVIEW_REV/live-review.sh" -o "$LIVE_REVIEW_SCRIPT" &&
 node -e 'const fs=require("fs"),c=require("crypto"),[p,w]=process.argv.slice(1),g=c.createHash("sha256").update(fs.readFileSync(p)).digest("hex");if(g!==w)throw Error("SHA-256 mismatch");console.log("SHA-256 verified")' "$LIVE_REVIEW_SCRIPT" "$LIVE_REVIEW_SHA256" &&
@@ -89,7 +89,7 @@ The lower-level example below proves the replication primitive with one agent.
 Prerequisites:
 
 - Node.js 22.22.0 or newer
-- `agent-relay` 11.10.0 or newer (the example pins it)
+- `agent-relay` 11.10.1 or newer (the example pins it)
 - `relayfile` 0.10.52 or newer (the example pins it)
 - `relayfile` authenticated to the same Agent Relay Cloud workspace
 - a connected Claude provider in Agent Relay Cloud
@@ -109,7 +109,7 @@ are missing.
 The command prints an attach command as soon as the agent launches:
 
 ```bash
-npx agent-relay@11.10.0 node agent attach <agent> --node <sandbox> --mode drive
+npx agent-relay@11.10.1 node agent attach <agent> --node <sandbox> --mode drive
 ```
 
 Use `--mode view` for a read-only session. `Ctrl+C` detaches without killing the
@@ -163,7 +163,7 @@ The proof intentionally leaves the agent running so you can attach to it. When
 finished, release it with the exact command printed by the demo:
 
 ```bash
-npx agent-relay@11.10.0 fleet release <agent-name>
+npx agent-relay@11.10.1 fleet release <agent-name>
 ```
 
 The lower-level proof deliberately keeps its successful sandbox alive for
