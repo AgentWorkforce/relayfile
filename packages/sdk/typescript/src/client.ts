@@ -691,7 +691,12 @@ class RelayFileChangeSubscription {
     private readonly options?: SubscribeOptions
   ) {
     this.globPatterns = globs.map((pattern) => normalizeChangePattern(pattern));
-    this.pathScopes = options?.pathScope?.length ? options.pathScope.map((pattern) => normalizeChangePattern(pattern)) : null;
+    // A bare directory-style pathScope (e.g. "/ramp/transactions") matches zero
+    // children on the server, so expand each wildcard-free entry into the exact
+    // path plus its "/**" subtree filter. See expandDirectoryScope for the rule.
+    this.pathScopes = options?.pathScope?.length
+      ? options.pathScope.flatMap((pattern) => expandDirectoryScope(normalizeChangePattern(pattern)))
+      : null;
     this.shouldCoalesce = (options?.coalesce ?? "fire-once") !== "none";
     this.coalesceMs = Math.max(0, Math.floor(options?.coalesceMs ?? DEFAULT_CHANGE_COALESCE_MS));
   }
@@ -1066,6 +1071,38 @@ function normalizeChangePattern(pattern: string): string[] {
     throw new Error("subscribe globs only support '**' as the trailing segment.");
   }
   return segments;
+}
+
+/**
+ * Expand a normalized `pathScope` pattern so a *directory-style* scope actually
+ * matches its subtree on the server.
+ *
+ * The data plane (see `webSocketPathMatches` in internal/httpapi/websocket.go)
+ * matches a `path=` filter against an event path with these semantics:
+ *   - exact match: `/ramp/transactions/txn_1.json` == the event path, OR
+ *   - trailing `**`: `/ramp/transactions/**` matches any STRICT descendant, OR
+ *   - per-segment `*` wildcards, requiring equal segment counts otherwise.
+ * A bare directory prefix like `/ramp/transactions` (no wildcard) therefore
+ * matches ONLY an event whose path is exactly `/ramp/transactions` — it matches
+ * ZERO children. A caller who scopes a subscription to `["/ramp/transactions"]`
+ * expecting to hear about files under it opens a WS that silently receives no
+ * events (proven: `path=/ramp/transactions` -> 0 events; `/**` -> 6). The same
+ * count-must-match rule in `matchChangeSegments` makes the client-side filter
+ * agree, so the miss is doubly silent.
+ *
+ * Fix: for a wildcard-free entry, emit BOTH the exact path AND the `.../**`
+ * subtree filter. The union keeps an exact-FILE scope correct (the exact filter
+ * still matches the file; the `/**` filter matches its — non-existent — children
+ * and adds nothing) while making a DIRECTORY scope match everything beneath it,
+ * without having to guess whether the final segment names a file or a folder.
+ * Entries that already contain a `*`/`**` wildcard are honored verbatim — we
+ * never broaden an intentionally precise glob.
+ */
+function expandDirectoryScope(segments: string[]): string[][] {
+  if (segments.some((segment) => segment === "*" || segment === "**")) {
+    return [segments];
+  }
+  return [segments, [...segments, "**"]];
 }
 
 function normalizeChangePath(path: string): string[] {
