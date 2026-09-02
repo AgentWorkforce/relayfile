@@ -320,6 +320,178 @@ describe("RelayFileClient — existing methods", () => {
       await broadHandle.unsubscribe();
     });
 
+    it("subscribe expands a bare directory pathScope into the exact path plus its subtree filter and delivers child events", async () => {
+      // The server treats `path=/ramp/transactions` as an EXACT match (0 child
+      // events); only `path=/ramp/transactions/**` matches the subtree. A bare
+      // directory pathScope must therefore yield BOTH filters so children arrive.
+      const fetchImpl = vi.fn(async (url: string) => {
+        if (url.includes("/fs/file?path=%2Framp%2Ftransactions%2Ftxn_1.json")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              path: "/ramp/transactions/txn_1.json",
+              revision: "rev_2",
+              contentType: "application/json",
+              content: JSON.stringify({
+                id: "txn_1",
+                provider: "ramp",
+                kind: "ramp.transaction",
+                title: "txn_1",
+                status: "cleared",
+              }),
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      const client = makeClient(fetchImpl as unknown as typeof fetch, {
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+      });
+      const handler = vi.fn();
+
+      const handle = client.subscribe(
+        ["/ramp/transactions/**"],
+        handler,
+        { coalesce: "none", pathScope: ["/ramp/transactions"] },
+      );
+
+      await waitForExpectation(() => {
+        const socket = ProactiveMockWebSocket.instances[ProactiveMockWebSocket.instances.length - 1];
+        expect(socket).toBeDefined();
+        // Both the exact-path filter AND the subtree filter are sent.
+        expect(socket!.url).toContain("path=%2Framp%2Ftransactions&");
+        expect(socket!.url).toContain("path=%2Framp%2Ftransactions%2F**");
+      });
+
+      const socket = ProactiveMockWebSocket.instances[ProactiveMockWebSocket.instances.length - 1]!;
+      socket.emit("open", {});
+      socket.emit("message", {
+        data: JSON.stringify({
+          eventId: "evt_ramp_1",
+          type: "file.updated",
+          path: "/ramp/transactions/txn_1.json",
+          revision: "rev_2",
+          timestamp: "2026-05-11T00:00:00.000Z",
+        } satisfies FilesystemEvent),
+      });
+
+      // The child event is delivered — the pre-fix bug silently dropped it both
+      // server-side (0-match filter) and client-side (exact-length pathScope).
+      await waitForExpectation(() => {
+        expect(handler).toHaveBeenCalledTimes(1);
+      });
+      expect(handler.mock.calls[0]?.[0]).toMatchObject({
+        id: "evt_ramp_1",
+        resource: { path: "/ramp/transactions/txn_1.json", provider: "ramp" },
+      });
+
+      await handle.unsubscribe();
+    });
+
+    it("subscribe leaves a wildcarded pathScope untouched (no directory broadening)", async () => {
+      const client = makeClient(mockFetch({}) as unknown as typeof fetch, {
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+      });
+      const handle = client.subscribe(
+        ["/ramp/transactions/**"],
+        vi.fn(),
+        { coalesce: "none", pathScope: ["/ramp/transactions/**"] },
+      );
+
+      await waitForExpectation(() => {
+        const socket = ProactiveMockWebSocket.instances[ProactiveMockWebSocket.instances.length - 1];
+        expect(socket).toBeDefined();
+        expect(socket!.url).toContain("path=%2Framp%2Ftransactions%2F**");
+        // No bare exact-path filter is added for an already-wildcarded scope.
+        expect(socket!.url).not.toContain("path=%2Framp%2Ftransactions&");
+      });
+
+      await handle.unsubscribe();
+    });
+
+    it("subscribe treats a wildcard-free file-looking pathScope as a DIRECTORY scope (matches descendants)", async () => {
+      // Option A (deliberate API design): a wildcard-free pathScope entry is a
+      // directory subtree scope, even when it looks like a file. Relayfile
+      // creates descendants under file-looking paths (e.g.
+      // /linear/issues/ENG-1.json/replies/draft.json), so a bare path is never
+      // treated as exact-file — it matches the node AND its whole subtree.
+      const fetchImpl = vi.fn(async (url: string) => {
+        if (url.includes("/fs/file?path=%2Flinear%2Fissues%2FENG-1.json%2Freplies%2Fdraft.json")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: async () => ({
+              path: "/linear/issues/ENG-1.json/replies/draft.json",
+              revision: "rev_1",
+              contentType: "application/json",
+              content: JSON.stringify({ id: "draft", provider: "linear", kind: "linear.reply" }),
+            }),
+            text: async () => "",
+          } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      });
+      const client = makeClient(fetchImpl as unknown as typeof fetch, {
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+      });
+      const handler = vi.fn();
+      const handle = client.subscribe(
+        ["/linear/issues/**"],
+        handler,
+        { coalesce: "none", pathScope: ["/linear/issues/ENG-1.json"] },
+      );
+
+      await waitForExpectation(() => {
+        const socket = ProactiveMockWebSocket.instances[ProactiveMockWebSocket.instances.length - 1];
+        expect(socket).toBeDefined();
+        // The bare path is expanded to {exact, exact + "/**"} so its subtree is covered.
+        expect(socket!.url).toContain("path=%2Flinear%2Fissues%2FENG-1.json&");
+        expect(socket!.url).toContain("path=%2Flinear%2Fissues%2FENG-1.json%2F**");
+      });
+
+      const socket = ProactiveMockWebSocket.instances[ProactiveMockWebSocket.instances.length - 1]!;
+      socket.emit("open", {});
+      socket.emit("message", {
+        data: JSON.stringify({
+          eventId: "evt_linear_reply_1",
+          type: "file.updated",
+          path: "/linear/issues/ENG-1.json/replies/draft.json",
+          revision: "rev_1",
+          timestamp: "2026-05-11T00:00:00.000Z",
+        } satisfies FilesystemEvent),
+      });
+
+      // A descendant under the file-looking scope IS delivered (directory semantics).
+      await waitForExpectation(() => {
+        expect(handler).toHaveBeenCalledTimes(1);
+      });
+      expect(handler.mock.calls[0]?.[0]).toMatchObject({
+        id: "evt_linear_reply_1",
+        resource: { path: "/linear/issues/ENG-1.json/replies/draft.json" },
+      });
+
+      await handle.unsubscribe();
+    });
+
+    it("subscribe defaults from=now for a fresh subscription (matching connectWebSocket)", async () => {
+      const client = makeClient(mockFetch({}) as unknown as typeof fetch, {
+        token: makeWorkspaceToken("ws_acme", "support-agent"),
+      });
+      const handle = client.subscribe(["/ramp/**"], vi.fn(), { coalesce: "none" });
+
+      await waitForExpectation(() => {
+        const socket = ProactiveMockWebSocket.instances[ProactiveMockWebSocket.instances.length - 1];
+        expect(socket).toBeDefined();
+        expect(socket!.url).toContain("from=now");
+      });
+
+      await handle.unsubscribe();
+    });
+
     it("subscribe uses the acl token transport and coalesces rapid writes to one event", async () => {
       vi.useFakeTimers();
       try {

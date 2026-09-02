@@ -691,7 +691,13 @@ class RelayFileChangeSubscription {
     private readonly options?: SubscribeOptions
   ) {
     this.globPatterns = globs.map((pattern) => normalizeChangePattern(pattern));
-    this.pathScopes = options?.pathScope?.length ? options.pathScope.map((pattern) => normalizeChangePattern(pattern)) : null;
+    // A wildcard-free pathScope entry (e.g. "/ramp/transactions") is a DIRECTORY
+    // SUBTREE scope: expand it into the exact path plus its "/**" subtree filter
+    // so it matches the directory and everything under it. A bare path is never
+    // exact-file; use a glob for that. See expandDirectoryScope for the rule.
+    this.pathScopes = options?.pathScope?.length
+      ? options.pathScope.flatMap((pattern) => expandDirectoryScope(normalizeChangePattern(pattern)))
+      : null;
     this.shouldCoalesce = (options?.coalesce ?? "fire-once") !== "none";
     this.coalesceMs = Math.max(0, Math.floor(options?.coalesceMs ?? DEFAULT_CHANGE_COALESCE_MS));
   }
@@ -1066,6 +1072,46 @@ function normalizeChangePattern(pattern: string): string[] {
     throw new Error("subscribe globs only support '**' as the trailing segment.");
   }
   return segments;
+}
+
+/**
+ * A wildcard-free `pathScope` entry is DEFINED as a DIRECTORY SUBTREE scope: it
+ * matches the path itself AND everything under it. To scope to an exact file,
+ * pass that exact path as a glob in the first `subscribe(globs, ...)` argument
+ * (the `globs` list is matched exactly unless an entry has a `*`/`**` wildcard);
+ * a bare `pathScope` path is never exact-file. This is a deliberate API-design
+ * choice (Option A), not an
+ * accident of the server matcher: it makes the common "watch this directory"
+ * intent Just Work and avoids a silent zero-event foot-gun.
+ *
+ * Why it MUST be subtree, and why "exact-file" is not a safe alternative:
+ * Relayfile creates descendants under file-looking paths (e.g.
+ * `/linear/issues/ENG-1.json/replies/draft.json`), so a bare path can never be
+ * assumed to name a leaf. Treating a wildcard-free entry as directory-scope is
+ * the only consistent rule.
+ *
+ * The data plane (see `webSocketPathMatches` in internal/httpapi/websocket.go)
+ * matches a `path=` filter against an event path with these semantics:
+ *   - exact match: `path` == the event path, OR
+ *   - trailing `**`: `/ramp/transactions/**` matches any STRICT descendant, OR
+ *   - per-segment `*` wildcards, requiring equal segment counts otherwise.
+ * A bare directory prefix like `/ramp/transactions` (no wildcard) would
+ * therefore match ONLY an event whose path is exactly `/ramp/transactions` —
+ * ZERO children — so a caller scoping to `["/ramp/transactions"]` opens a WS
+ * that silently receives no events (proven: `path=/ramp/transactions` -> 0
+ * events; `/**` -> 6). The same count-must-match rule in `matchChangeSegments`
+ * makes the client-side filter agree, so the miss would be doubly silent.
+ *
+ * Implementation: for a wildcard-free entry, emit BOTH the exact path AND the
+ * `.../**` subtree filter — the union matches the directory node itself plus its
+ * entire subtree. Entries that already contain a `*`/`**` wildcard are honored
+ * verbatim — an intentionally precise glob is never broadened.
+ */
+function expandDirectoryScope(segments: string[]): string[][] {
+  if (segments.some((segment) => segment === "*" || segment === "**")) {
+    return [segments];
+  }
+  return [segments, [...segments, "**"]];
 }
 
 function normalizeChangePath(path: string): string[] {
