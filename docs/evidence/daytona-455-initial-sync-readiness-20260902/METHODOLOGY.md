@@ -61,9 +61,19 @@ string, or the file cannot be read/parsed. Incomplete ⇒ `process.exit(75)`
 
 ## The two arms
 
-Both arms run the **identical generated command** against the **identical
-remote subtree**. They differ in exactly one thing: which `relayfile-mount`
-binary is first on `PATH`.
+Both arms run against the **identical remote subtree** with the **identical
+mount flags, layout, budget and readiness guard**. The only difference that can
+affect the outcome is which `relayfile-mount` binary resolves first on `PATH`.
+
+To be precise about what is *not* identical: the two arms necessarily use
+per-arm `localDir` (`ws-A` vs `ws-B`), `stateDir`, `credsFilePath`, `runId` and
+launcher filename, because each arm needs its own mirror, its own private state
+and its own exit sentinel — two arms cannot share one workspace. Those values
+are embedded in the emitted shell, so the generated command strings are **not**
+byte-identical, and an earlier draft of this document wrongly claimed they were.
+What makes the comparison a control is that every input governing the mechanism
+under test is the same, and the observable first-cycle behaviour was numerically
+identical across the arms (see RESULTS.md).
 
 | Arm | Binary | sha256 | Expected |
 |---|---|---|---|
@@ -71,8 +81,8 @@ binary is first on `PATH`.
 | B | built from `4e3c1105`, `CGO_ENABLED=0 GOOS=linux GOARCH=amd64` | `d3fe2cb55b4bcf262355bdbd4a3ef546e964265d1b75c0d3590bebd4df7ced78` | exit **0**, `bootstrap: null` |
 
 Arm B's binary is placed in `/home/daytona/binB` and reached with
-`PATH=/home/daytona/binB:$PATH`, so the shell string itself is byte-identical
-between arms.
+`PATH=/home/daytona/binB:$PATH`, so nothing about how the mount is invoked
+changes — only which executable answers to the name `relayfile-mount`.
 
 Two scopes were run:
 
@@ -129,6 +139,27 @@ Recording these because each would have produced a confident wrong answer.
 ## Reproducing
 
 `scripts/test-sandbox-initial-sync-readiness-e2e.mjs` runs both arms and
-asserts A fails 75 / B passes 0. It exits 2 (UNKNOWN) — not 0 — when it cannot
-provision, when an arm times out, or when arm A *passes*, since a must-fail
-control that does not fail means the fixture never reached the mechanism.
+asserts A fails 75 / B passes 0.
+
+Because this harness gates future merges, it is built to fail like the thing it
+tests. It exits 2 (UNKNOWN) — never 0, and never 1 — when it cannot provision,
+cannot resolve its modules, an arm times out, or an arm hits a 401/403. Exit 1
+(REFUTED) is reserved for a candidate that genuinely ran and did not converge,
+so an infrastructure glitch can never masquerade as "the fix does not work".
+
+Critically, **arm A exiting 75 is not accepted as a valid control on its own**.
+The guard returns 75 for any incomplete-or-unreadable state, so the harness
+additionally requires arm A's parsed state to carry a non-null `bootstrap`
+block at `filesSynced >= 2000` and its log to report both
+`bootstrap file budget reached` and `traversal_complete=false`. The false
+signal recorded above (75 with `filesSynced: 0` from a scope error) is
+rejected as INCONCLUSIVE by that gate — verified against the recorded data in
+`scripts/test-sandbox-initial-sync-readiness-e2e.verdict.test.mjs`.
+
+The state file each arm is scored on is derived from the package's own
+`resolveRelayfileMountExactLayout`, the same computation the guard uses to
+choose the file it reads, so the harness cannot drift from the guard.
+
+Module resolution: the three external packages are not dependencies of this
+repo, and ESM ignores `NODE_PATH`. Set `RELAYFILE_PROOF_MODULE_BASE` to a
+checkout whose `node_modules` provides them (the `cloud` checkout).

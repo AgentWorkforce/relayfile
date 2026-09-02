@@ -55,7 +55,15 @@ worth a separate look.
 ## Repo-side
 
 The two mirrors (`/home/daytona/ws-A2`, `/home/daytona/ws-B2`) and the uploaded
-candidate binary live only inside the sandbox and disappear with it. Nothing
-was written to the `rw_7ccfea89` workspace: both arms are mirror-mode bootstrap
+candidate binary live only inside the sandbox and disappear with it. To be
+explicit, since it has been asked: `/home/daytona` is the **sandbox
+container's** own home directory — `daytona` is the fixed unprivileged user
+baked into the Daytona snapshot, and the path already appears verbatim in the
+public `@agent-relay/sandbox` source (`DEFAULT_FLEET_MOUNT_CREDS_FILE =
+"/home/daytona/.relayfile-mount-creds.json"`). It is not the operator's machine
+and not the operator's username; the driver host's paths appear nowhere in this
+evidence.
+
+Nothing was written to the `rw_7ccfea89` workspace: both arms are mirror-mode bootstrap
 pulls, `pendingWriteback: 0` and `outbox.pending: 0` in both arms' final
 state.json.
