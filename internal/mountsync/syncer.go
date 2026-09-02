@@ -1916,6 +1916,15 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		return nil, err
 	}
 	stateFile := statePath.StateFile
+	if !statePath.Override {
+		if removed, cleanupErr := cleanupStaleMountStateTemps(stateFile, time.Now()); cleanupErr != nil {
+			if opts.Logger != nil {
+				opts.Logger.Printf("warning: failed to clean stale private mount state temp files: %v", cleanupErr)
+			}
+		} else if removed > 0 && opts.Logger != nil {
+			opts.Logger.Printf("removed %d stale private mount state temp file(s)", removed)
+		}
+	}
 	publicStatePath := filepath.Join(localRoot, ".relay", "state.json")
 	conflictsDir := filepath.Join(localRoot, ".relay", "conflicts")
 	resolvedConflictsDir := filepath.Join(conflictsDir, "resolved")
