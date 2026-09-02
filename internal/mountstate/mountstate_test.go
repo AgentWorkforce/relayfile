@@ -157,3 +157,68 @@ func TestDocumentUint64(t *testing.T) {
 		}
 	}
 }
+
+// TestMergeRefusesToWriteOverAnUnreadableDocument is the failure mode cubic
+// flagged on PR #457: a merge writes back everything it read, so treating an
+// unreadable file as empty would delete the other writer's keys on a transient
+// I/O or permissions error -- the exact clobber this package exists to prevent.
+func TestMergeRefusesToWriteOverAnUnreadableDocument(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the permission bits this test relies on")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+
+	if err := Merge(path, []string{"providers"}, map[string]any{"providers": []string{"github"}}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+
+	err := Merge(path, []string{"status"}, map[string]any{"status": "ready"})
+	if err == nil {
+		t.Fatal("merge over an unreadable document must fail rather than clobber it")
+	}
+
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("chmod back: %v", err)
+	}
+	document := readBack(t, path)
+	if _, ok := document["providers"]; !ok {
+		t.Errorf("the refused merge still destroyed the other writer's keys: %v", document)
+	}
+	if _, ok := document["status"]; ok {
+		t.Errorf("the refused merge wrote anyway: %v", document)
+	}
+}
+
+// TestMergeStartsFreshWhenTheFileIsMissing pins the other side: a missing file
+// is not an error, because the first write has to start somewhere.
+func TestMergeStartsFreshWhenTheFileIsMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "state.json")
+	if err := Merge(path, []string{"status"}, map[string]any{"status": "ready"}); err != nil {
+		t.Fatalf("merge onto a missing file must succeed, got %v", err)
+	}
+	if readBack(t, path)["status"] != "ready" {
+		t.Error("first merge did not publish")
+	}
+}
+
+// TestMergeSelfHealsAnUnparseableDocument pins the deliberate exception: a file
+// that reads fine but does not parse is overwritten rather than failing
+// forever, since atomic renames mean a torn document should be unreachable and
+// refusing to rewrite one would strand the mount.
+func TestMergeSelfHealsAnUnparseableDocument(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Merge(path, []string{"status"}, map[string]any{"status": "ready"}); err != nil {
+		t.Fatalf("merge over a corrupt document must self-heal, got %v", err)
+	}
+	if readBack(t, path)["status"] != "ready" {
+		t.Error("merge did not replace the corrupt document")
+	}
+}

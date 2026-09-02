@@ -55,7 +55,10 @@ func MergeFunc(statePath string, ownedKeys []string, build func(previous Documen
 	stateMu.Lock()
 	defer stateMu.Unlock()
 
-	document := readDocumentLocked(statePath)
+	document, err := readDocumentLocked(statePath)
+	if err != nil {
+		return err
+	}
 	snapshot, err := build(document)
 	if err != nil {
 		return err
@@ -84,7 +87,10 @@ func Increment(statePath, key string, delta uint64) error {
 	stateMu.Lock()
 	defer stateMu.Unlock()
 
-	document := readDocumentLocked(statePath)
+	document, err := readDocumentLocked(statePath)
+	if err != nil {
+		return err
+	}
 	next := document.Uint64(key) + delta
 	encoded, err := json.Marshal(next)
 	if err != nil {
@@ -94,13 +100,20 @@ func Increment(statePath, key string, delta uint64) error {
 	return writeDocumentLocked(statePath, document)
 }
 
-// Read returns the published document, empty when the file is missing or
-// unparseable. It takes the same lock, so a reader never observes a
-// half-applied merge.
+// Read returns the published document, empty when the file is missing,
+// unreadable or unparseable. It takes the same lock, so a reader never
+// observes a half-applied merge.
+//
+// Unlike the writers, a reader has nothing to destroy by treating an
+// unreadable file as empty, so this deliberately does not surface the error.
 func Read(statePath string) Document {
 	stateMu.Lock()
 	defer stateMu.Unlock()
-	return readDocumentLocked(statePath)
+	document, err := readDocumentLocked(statePath)
+	if err != nil {
+		return Document{}
+	}
+	return document
 }
 
 // Uint64 decodes key as an unsigned integer, returning 0 when it is absent or
@@ -128,19 +141,32 @@ func (d Document) Uint64(key string) uint64 {
 	return 0
 }
 
-func readDocumentLocked(statePath string) Document {
-	document := Document{}
+// readDocumentLocked returns the current document, distinguishing "there is
+// nothing here yet" from "I could not read what is here".
+//
+// The distinction is the whole point of the package. A merge writes back
+// everything it read, so treating an unreadable file as empty would delete the
+// other writer's keys — the exact clobber this package exists to prevent — on
+// a transient EIO or a permissions change. A missing file is different: there
+// is nothing to lose, and the first write has to start somewhere.
+//
+// A file that reads fine but does not parse is treated as empty on purpose.
+// Writes go through an atomic rename, so a torn document should not be
+// reachable, and refusing to rewrite a corrupt one would strand the mount with
+// it forever with no way back.
+func readDocumentLocked(statePath string) (Document, error) {
 	payload, err := os.ReadFile(statePath)
 	if err != nil {
-		return document
+		if os.IsNotExist(err) {
+			return Document{}, nil
+		}
+		return nil, fmt.Errorf("read mount state %s: %w", statePath, err)
 	}
-	// A corrupt file presents as empty rather than as an error: this is a
-	// published view, and refusing to rewrite a corrupt one would strand the
-	// mount with it forever.
+	document := Document{}
 	if err := json.Unmarshal(payload, &document); err != nil || document == nil {
-		return Document{}
+		return Document{}, nil
 	}
-	return document
+	return document, nil
 }
 
 func writeDocumentLocked(statePath string, document Document) error {

@@ -201,15 +201,7 @@ func TestInitialSyncOnceStopsWhenRootContextEnds(t *testing.T) {
 // deterministically, without depending on where a timeout happens to land: an
 // already-cancelled context must stop the loop before it runs another cycle.
 func TestFinishInitialBootstrapReturnsOnCancelledContext(t *testing.T) {
-	localDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(localDir, ".relay"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// An in-progress bootstrap, so the loop is entered rather than short-circuited.
-	if err := os.WriteFile(filepath.Join(localDir, ".relay", "state.json"),
-		[]byte(`{"bootstrap":{"phase":"bootstrapping","filesSynced":5,"filesTotal":100,"pageOffset":5}}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	localDir := bootstrapInProgressDir(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -227,18 +219,12 @@ func TestFinishInitialBootstrapReturnsOnCancelledContext(t *testing.T) {
 	}
 }
 
-// TestFinishInitialBootstrapDoesNotRetryAFailedCycle pins the other bound: a
-// cycle that failed keeps --once's historical single-attempt behavior, so one
-// transient cloud error cannot be escalated into a bootstrap stall.
-func TestFinishInitialBootstrapDoesNotRetryAFailedCycle(t *testing.T) {
-	localDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(localDir, ".relay"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(localDir, ".relay", "state.json"),
-		[]byte(`{"bootstrap":{"phase":"bootstrapping","filesSynced":5,"filesTotal":100,"pageOffset":5}}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+// TestFinishInitialBootstrapDoesNotRetryAFailedFirstCycle pins the pre-loop
+// gate: when the cycle that ran before this function failed, --once keeps its
+// historical single-attempt behavior so one transient cloud error cannot be
+// escalated into a bootstrap stall.
+func TestFinishInitialBootstrapDoesNotRetryAFailedFirstCycle(t *testing.T) {
+	localDir := bootstrapInProgressDir(t)
 
 	cycles := 0
 	err := finishInitialBootstrap(context.Background(), mountConfig{localDir: localDir},
@@ -249,14 +235,40 @@ func TestFinishInitialBootstrapDoesNotRetryAFailedCycle(t *testing.T) {
 		t.Fatalf("a failed first cycle must not become an error, got %v", err)
 	}
 	if cycles != 0 {
-		t.Errorf("ran %d resume cycles after a failed cycle, want 0", cycles)
+		t.Errorf("ran %d resume cycles after a failed first cycle, want 0", cycles)
 	}
 }
 
-// TestFinishInitialBootstrapStopsWhenCheckpointStopsAdvancing pins the
-// no-progress bound: a cycle that keeps succeeding without moving any
-// resumable coordinate must not spin to the cycle ceiling.
-func TestFinishInitialBootstrapStopsWhenCheckpointStopsAdvancing(t *testing.T) {
+// TestFinishInitialBootstrapStopsAfterAFailedResumeCycle covers the in-loop
+// branch, which the pre-loop test above cannot reach: the loop is entered
+// because the first cycle succeeded, and a resume cycle then fails. It must
+// stop there rather than keep retrying a failing cycle.
+func TestFinishInitialBootstrapStopsAfterAFailedResumeCycle(t *testing.T) {
+	localDir := bootstrapInProgressDir(t)
+
+	cycles := 0
+	err := finishInitialBootstrap(context.Background(), mountConfig{localDir: localDir},
+		func(bool) error { cycles++; return nil },
+		// nil for the pre-loop check, then an error once a resume cycle has run.
+		func() error {
+			if cycles == 0 {
+				return nil
+			}
+			return errors.New("transient cloud error")
+		},
+	)
+	if err != nil {
+		t.Fatalf("a failed resume cycle must not become an error, got %v", err)
+	}
+	if cycles != 1 {
+		t.Errorf("ran %d resume cycles, want exactly 1 before the failure stopped the loop", cycles)
+	}
+}
+
+// bootstrapInProgressDir writes a public state with a non-null bootstrap block
+// so finishInitialBootstrap enters its resume loop instead of returning early.
+func bootstrapInProgressDir(t *testing.T) string {
+	t.Helper()
 	localDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(localDir, ".relay"), 0o755); err != nil {
 		t.Fatal(err)
@@ -265,6 +277,14 @@ func TestFinishInitialBootstrapStopsWhenCheckpointStopsAdvancing(t *testing.T) {
 		[]byte(`{"bootstrap":{"phase":"bootstrapping","filesSynced":5,"filesTotal":100,"pageOffset":5}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	return localDir
+}
+
+// TestFinishInitialBootstrapStopsWhenCheckpointStopsAdvancing pins the
+// no-progress bound: a cycle that keeps succeeding without moving any
+// resumable coordinate must not spin to the cycle ceiling.
+func TestFinishInitialBootstrapStopsWhenCheckpointStopsAdvancing(t *testing.T) {
+	localDir := bootstrapInProgressDir(t)
 
 	cycles := 0
 	err := finishInitialBootstrap(context.Background(), mountConfig{localDir: localDir},
