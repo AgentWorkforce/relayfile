@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -73,6 +74,10 @@ func logPublicState(t *testing.T, statePath string) {
 // shape: the traversal exhausts its per-cycle file budget, persists a resume
 // cursor and yields with traversal_complete=false.
 func budgetedBootstrapRelay(t *testing.T, fileCount int) (*httptest.Server, *atomic.Int32) {
+	return budgetedBootstrapRelayWithDelay(t, fileCount, 0)
+}
+
+func budgetedBootstrapRelayWithDelay(t *testing.T, fileCount int, readDelay time.Duration) (*httptest.Server, *atomic.Int32) {
 	t.Helper()
 	entries := make([]mountsync.TreeEntry, 0, fileCount)
 	for i := 0; i < fileCount; i++ {
@@ -86,6 +91,13 @@ func budgetedBootstrapRelay(t *testing.T, fileCount int) (*httptest.Server, *ato
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(mountsync.TreeResponse{Entries: entries})
 		case strings.Contains(r.URL.Path, "/fs/file"):
+			if readDelay > 0 {
+				select {
+				case <-time.After(readDelay):
+				case <-r.Context().Done():
+					return
+				}
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(mountsync.RemoteFile{
 				Path:        r.URL.Query().Get("path"),
@@ -152,9 +164,15 @@ func TestInitialSyncOnceSatisfiesSandboxReadinessGuard(t *testing.T) {
 // TestInitialSyncOnceStopsWhenRootContextEnds pins the cancellation bound on
 // the resume loop: a cancelled root context must return without error rather
 // than spin, leaving the persisted checkpoint for the next run.
+//
+// The workspace is deliberately sized so the bootstrap cannot finish inside the
+// window — 400 files at 2 per cycle, each read delayed — and the test asserts
+// that cancellation actually fired and that the bootstrap is still incomplete.
+// Without those assertions the test would pass by finishing normally and could
+// not catch a regression in the bound at all.
 func TestInitialSyncOnceStopsWhenRootContextEnds(t *testing.T) {
 	t.Setenv("RELAYFILE_BOOTSTRAP_MAX_FILES_PER_CYCLE", "2")
-	server, _ := budgetedBootstrapRelay(t, 200)
+	server, _ := budgetedBootstrapRelayWithDelay(t, 400, 20*time.Millisecond)
 	localDir := t.TempDir()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -170,5 +188,93 @@ func TestInitialSyncOnceStopsWhenRootContextEnds(t *testing.T) {
 		}
 	case <-time.After(60 * time.Second):
 		t.Fatal("--once did not stop after its root context was cancelled")
+	}
+	if ctx.Err() == nil {
+		t.Fatal("--once returned before its root context was cancelled; this run did not exercise the cancellation bound")
+	}
+	if state := readBootstrapResumeState(localDir); !state.inProgress {
+		t.Fatal("bootstrap completed inside the cancellation window; this run did not exercise the cancellation bound")
+	}
+}
+
+// TestFinishInitialBootstrapReturnsOnCancelledContext pins the rootCtx branch
+// deterministically, without depending on where a timeout happens to land: an
+// already-cancelled context must stop the loop before it runs another cycle.
+func TestFinishInitialBootstrapReturnsOnCancelledContext(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(localDir, ".relay"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// An in-progress bootstrap, so the loop is entered rather than short-circuited.
+	if err := os.WriteFile(filepath.Join(localDir, ".relay", "state.json"),
+		[]byte(`{"bootstrap":{"phase":"bootstrapping","filesSynced":5,"filesTotal":100,"pageOffset":5}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	cycles := 0
+	err := finishInitialBootstrap(ctx, mountConfig{localDir: localDir},
+		func(bool) error { cycles++; return nil },
+		func() error { return nil },
+	)
+	if err != nil {
+		t.Fatalf("cancellation must not change the exit code, got %v", err)
+	}
+	if cycles != 0 {
+		t.Errorf("ran %d cycles on an already-cancelled context, want 0", cycles)
+	}
+}
+
+// TestFinishInitialBootstrapDoesNotRetryAFailedCycle pins the other bound: a
+// cycle that failed keeps --once's historical single-attempt behavior, so one
+// transient cloud error cannot be escalated into a bootstrap stall.
+func TestFinishInitialBootstrapDoesNotRetryAFailedCycle(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(localDir, ".relay"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, ".relay", "state.json"),
+		[]byte(`{"bootstrap":{"phase":"bootstrapping","filesSynced":5,"filesTotal":100,"pageOffset":5}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cycles := 0
+	err := finishInitialBootstrap(context.Background(), mountConfig{localDir: localDir},
+		func(bool) error { cycles++; return nil },
+		func() error { return errors.New("transient cloud error") },
+	)
+	if err != nil {
+		t.Fatalf("a failed first cycle must not become an error, got %v", err)
+	}
+	if cycles != 0 {
+		t.Errorf("ran %d resume cycles after a failed cycle, want 0", cycles)
+	}
+}
+
+// TestFinishInitialBootstrapStopsWhenCheckpointStopsAdvancing pins the
+// no-progress bound: a cycle that keeps succeeding without moving any
+// resumable coordinate must not spin to the cycle ceiling.
+func TestFinishInitialBootstrapStopsWhenCheckpointStopsAdvancing(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(localDir, ".relay"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, ".relay", "state.json"),
+		[]byte(`{"bootstrap":{"phase":"bootstrapping","filesSynced":5,"filesTotal":100,"pageOffset":5}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cycles := 0
+	err := finishInitialBootstrap(context.Background(), mountConfig{localDir: localDir},
+		func(bool) error { cycles++; return nil }, // never advances the checkpoint
+		func() error { return nil },
+	)
+	if err != nil {
+		t.Fatalf("a stalled checkpoint must not change the exit code, got %v", err)
+	}
+	if cycles != onceBootstrapStableCycleLimit {
+		t.Errorf("ran %d cycles on a stalled checkpoint, want %d", cycles, onceBootstrapStableCycleLimit)
 	}
 }
