@@ -1,0 +1,60 @@
+{
+  "id": "compact_hi2bd5rx3hgw",
+  "version": 1,
+  "type": "compacted",
+  "compactedAt": "2026-09-02T09:55:19.548Z",
+  "sourceTrajectories": [
+    "traj_po33pni6sqsr"
+  ],
+  "dateRange": {
+    "start": "2026-09-02T09:54:37.596Z",
+    "end": "2026-09-02T09:55:11.681Z"
+  },
+  "summary": {
+    "totalDecisions": 4,
+    "totalEvents": 4,
+    "uniqueAgents": [
+      "default"
+    ]
+  },
+  "decisionGroups": [
+    {
+      "category": "security",
+      "decisions": [
+        {
+          "question": "Freeze only the script bytes that passed the real launch flow",
+          "chosen": "Freeze only the script bytes that passed the real launch flow",
+          "reasoning": "The self-contained script at Gist revision 53dfd49f532d362bbced37b12b1c41725cee4b5a hashes to 69272a35ed3ec3d3294fe9f9bdc14ab0dc9b5f642e379098591d0b378e0c9863, pins Agent Relay 11.10.1 and Relayfile/SDK 0.10.52, and those exact bytes completed a fresh Daytona validate run: reject seeded hash, laptop tamper gate, builder repair, reviewer approval of final bytes, six security gates, both agent releases, and exact sandbox deletion.",
+          "fromTrajectory": "traj_po33pni6sqsr"
+        },
+        {
+          "question": "Publish agent briefs through Relayfile and inject only short task pointers",
+          "chosen": "Publish agent briefs through Relayfile and inject only short task pointers",
+          "reasoning": "The first real Claude run left the large inline reviewer task parked in the composer. Moving reviewer-task.md and builder-task.md into the mounted shared workspace removed that PTY paste boundary and made instructions, code, review, authorization, fix, and approval all observable Relayfile artifacts.",
+          "fromTrajectory": "traj_po33pni6sqsr"
+        }
+      ]
+    },
+    {
+      "category": "testing",
+      "decisions": [
+        {
+          "question": "Align every public and checked-in version surface",
+          "chosen": "Align every public and checked-in version surface",
+          "reasoning": "The guide, README, playbook, example manifest and lockfile, runtime floor, tests, attach commands, and release commands now use Agent Relay 11.10.1 with Relayfile 0.10.52; 10 tests, dry-run, authenticated preflight, immutable hash verification, JSON parsing, diff hygiene, and secret scan passed.",
+          "fromTrajectory": "traj_po33pni6sqsr"
+        },
+        {
+          "question": "Rerun the unrelated Go TempDir cleanup race instead of changing launch code",
+          "chosen": "Rerun the unrelated Go TempDir cleanup race instead of changing launch code",
+          "reasoning": "The initial exact-head CI failure occurred after TestProductizedCloudMountE2EProof completed, when TempDir cleanup briefly found the mount directory nonempty. The test passed five consecutive local runs, the prior branch head, recent main, and the exact same commit on rerun; the rerun then unlocked green Go build and E2E.",
+          "fromTrajectory": "traj_po33pni6sqsr"
+        }
+      ]
+    }
+  ],
+  "keyLearnings": [],
+  "keyFindings": [],
+  "filesAffected": [],
+  "commits": []
+}

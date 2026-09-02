@@ -31,11 +31,7 @@
     }
   ],
   "keyLearnings": [],
-  "keyFindings": [
-    "Superseding launch state: the public script is frozen at Gist revision 53dfd49f532d362bbced37b12b1c41725cee4b5a with SHA-256 69272a35ed3ec3d3294fe9f9bdc14ab0dc9b5f642e379098591d0b378e0c9863 and pins agent-relay 11.10.1 plus Relayfile/SDK 0.10.52.",
-    "A full two-agent validate run passed in a fresh Daytona sandbox: the reviewer rejected the seeded source hash, the builder fixed the shared file only after the laptop's hash gate, the reviewer approved the exact final bytes, all six security gates passed, and exact agent/sandbox cleanup completed.",
-    "The first real run exposed long inline task text parked in the Claude composer. Publishing reviewer-task.md and builder-task.md through Relayfile and spawning agents with short pointers removed that PTY injection boundary and made the real validate run pass."
-  ],
+  "keyFindings": [],
   "filesAffected": [
     "docs/guides/live-workspace.md",
     "examples/live-workspace/LAUNCH_PLAYBOOK.md",
@@ -124,5 +120,7 @@
       "recommendation": "Always publish the full revision segment and content hash together; never replace either with a mutable raw URL."
     }
   ],
-  "openQuestions": []
+  "openQuestions": [
+    "The refreshed Gist pin (agent-relay 11.10.0, Relayfile/SDK 0.10.51) passed its immutable checksum and `validate --dry-run`; if a full two-agent non-dry-run has not already been captured, that remains the final operator rehearsal before launch."
+  ]
 }
