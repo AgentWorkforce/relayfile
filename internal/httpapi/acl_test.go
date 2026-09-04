@@ -73,6 +73,8 @@ func TestFilePermissionAllows(t *testing.T) {
 		permissions []string
 		workspaceID string
 		claims      tokenClaims
+		action      string
+		path        string
 		want        bool
 	}{
 		{
@@ -131,6 +133,70 @@ func TestFilePermissionAllows(t *testing.T) {
 			want: true,
 		},
 		{
+			name:        "bare allow matches four segment RelayAuth grant",
+			permissions: []string{"allow:scope:fs:read"},
+			workspaceID: "ws_123",
+			claims: tokenClaims{
+				Scopes: map[string]struct{}{"relayfile:fs:read:*": {}},
+			},
+			want: true,
+		},
+		{
+			name: "readonly deny matches broader RelayAuth write grant",
+			permissions: []string{
+				"allow:scope:fs:write",
+				"deny:scope:relayfile:fs:write:/protected/*",
+			},
+			workspaceID: "ws_123",
+			claims: tokenClaims{
+				Scopes: map[string]struct{}{"relayfile:fs:write:*": {}},
+			},
+			action: "write",
+			path:   "/protected/document.md",
+			want:   false,
+		},
+		{
+			name: "readonly write deny does not block reads",
+			permissions: []string{
+				"allow:scope:fs:read",
+				"deny:scope:relayfile:fs:write:/protected/*",
+			},
+			workspaceID: "ws_123",
+			claims: tokenClaims{
+				Scopes: map[string]struct{}{
+					"relayfile:fs:read:*":  {},
+					"relayfile:fs:write:*": {},
+				},
+			},
+			path: "/protected/document.md",
+			want: true,
+		},
+		{
+			name: "ignored read deny matches broader RelayAuth read grant",
+			permissions: []string{
+				"allow:scope:fs:read",
+				"deny:scope:relayfile:fs:read:/ignored/*",
+			},
+			workspaceID: "ws_123",
+			claims: tokenClaims{
+				Scopes: map[string]struct{}{"relayfile:fs:read:*": {}},
+			},
+			path: "/ignored/document.md",
+			want: false,
+		},
+		{
+			name: "legacy workspace allow matches RelayAuth path grant semantically",
+			permissions: []string{
+				"allow:scope:workspace:relayfile-local:read:/protected/*",
+			},
+			workspaceID: "ws_123",
+			claims: tokenClaims{
+				Scopes: map[string]struct{}{"relayfile:fs:read:*": {}},
+			},
+			path: "/protected/document.md",
+			want: true,
+		},
+		{
 			name:        "deny overrides allow",
 			permissions: []string{"allow:agent:code-agent", "deny:agent:code-agent"},
 			workspaceID: "ws_123",
@@ -153,7 +219,15 @@ func TestFilePermissionAllows(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := filePermissionAllows(tt.permissions, tt.workspaceID, &tt.claims)
+			action := tt.action
+			if action == "" {
+				action = "read"
+			}
+			path := tt.path
+			if path == "" {
+				path = "/document.md"
+			}
+			got := filePermissionAllows(tt.permissions, tt.workspaceID, &tt.claims, action, path)
 			if got != tt.want {
 				t.Fatalf("expected %v, got %v", tt.want, got)
 			}
@@ -303,6 +377,11 @@ func TestIsValidACLRuleValue(t *testing.T) {
 		{"valid scope", "scope", "fs:read", true},
 		{"valid scope simple", "scope", "admin", true},
 		{"scope with numbers", "scope", "fs2:read", true},
+		{"valid RelayAuth path scope", "scope", "relayfile:fs:write:/protected/*", true},
+		{"valid legacy workspace path scope", "scope", "workspace:relayfile-local:read:/protected/*", true},
+		{"scope with path traversal", "scope", "relayfile:fs:read:/protected/../private/*", false},
+		{"scope with internal glob", "scope", "relayfile:fs:read:/protected/*/private", false},
+		{"scope with unsupported plane", "scope", "other:fs:read:/protected/*", false},
 		{"scope empty segment", "scope", "fs:", false},
 		{"valid workspace", "workspace", "ws_123", true},
 		{"workspace with uuid", "workspace", "abc-def-123", true},
@@ -349,6 +428,11 @@ func TestParsePermissionRuleValidation(t *testing.T) {
 			name: "valid scope rule",
 			raw:  "allow:scope:fs:read",
 			want: &ParsedPermissionRule{Effect: "allow", Kind: "scope", Value: "fs:read"},
+		},
+		{
+			name: "valid path scope rule",
+			raw:  "deny:scope:relayfile:fs:write:/protected/*",
+			want: &ParsedPermissionRule{Effect: "deny", Kind: "scope", Value: "relayfile:fs:write:/protected/*"},
 		},
 		{
 			name: "scope with invalid chars rejected",
