@@ -286,3 +286,77 @@ func TestDivergentWriteConflictStillFailsTheOutboxRecord(t *testing.T) {
 		t.Fatalf("outbox/acked holds %d record(s), want 0 for a genuine divergence", len(acked))
 	}
 }
+
+/**
+ * An idempotent write is an ADMITTED write, so it must claim up-path ownership exactly
+ * as the accepted-write branch does. Without it, a full pull still in flight is free to
+ * replay the path with older bytes or infer it absent — silently undoing a delivery that
+ * succeeded.
+ */
+func TestIdempotentWriteClaimsUpPathOwnership(t *testing.T) {
+	localRoot := t.TempDir()
+	remotePath := normalizeRemotePath("/messages/message.json")
+	localPath := filepath.Join(localRoot, "messages", "message.json")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("create local parent: %v", err)
+	}
+	delivered := []byte(`{"text":"already landed"}`)
+	if err := os.WriteFile(localPath, delivered, 0o644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+
+	client := &fakeClient{files: map[string]RemoteFile{
+		remotePath: {
+			Path:        remotePath,
+			Revision:    "rev_delivered",
+			ContentType: "application/json",
+			Content:     string(delivered),
+		},
+	}}
+	client.bulkWriteResponseFunc = func(_ context.Context, _ string, files []BulkWriteFile) (BulkWriteResponse, error) {
+		return BulkWriteResponse{ErrorCount: len(files), Errors: []BulkWriteError{{
+			Path: files[0].Path, Code: "conflict", Message: "revision conflict",
+		}}}, nil
+	}
+
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_idempotent_uppath",
+		RemoteRoot:  "/",
+		LocalRoot:   localRoot,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	if err := syncer.loadState(); err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	snapshot, err := readLocalSnapshot(localPath, true)
+	if err != nil {
+		t.Fatalf("read local snapshot: %v", err)
+	}
+	pending, err := syncer.preparePendingBulkWrite(
+		context.Background(), remotePath, localPath, snapshot, trackedFile{}, false,
+	)
+	if err != nil || pending == nil {
+		t.Fatalf("prepare pending write: pending=%v err=%v", pending, err)
+	}
+	if _, err := syncer.ensureOutboxRecord(*pending); err != nil {
+		t.Fatalf("persist outbox record: %v", err)
+	}
+
+	// The race cubic described: a full pull is in flight while the write is
+	// acknowledged. Both the mark and its reader are no-ops otherwise, so without
+	// this the assertion below could never hold and the test would prove nothing.
+	syncer.fullPullActive = true
+	if syncer.fullPullUpPaths == nil {
+		syncer.fullPullUpPaths = map[string]struct{}{}
+	}
+
+	if err := syncer.FlushOutboxOnce(context.Background()); err != nil {
+		t.Fatalf("flush outbox: %v", err)
+	}
+
+	if !syncer.fullPullPathTouchedByUpPath(remotePath) {
+		t.Fatal("idempotent write did not claim up-path ownership; an in-flight full pull could replay it with older bytes")
+	}
+}

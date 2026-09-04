@@ -3632,6 +3632,12 @@ func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRec
 				// SUCCESSFUL delivery, and the warm-start audit refuses to boot a
 				// sandbox that has one (relayfile_mount_intent_warm_audit_unresolved_outbox).
 				// That is the whole bug this path exists to fix.
+				//
+				// Claim up-path ownership for the same reason the accepted-write
+				// branch below does: this IS an admitted write, so a full pull still
+				// in flight must not replay the path with older bytes or infer it
+				// absent. Marked before the ack, so the window cannot be lost.
+				s.markFullPullUpPath(pendingWrite.remotePath)
 				record.Revision = s.state.Files[pendingWrite.remotePath].Revision
 				if ackErr := s.ackOutboxRecord(
 					record,
