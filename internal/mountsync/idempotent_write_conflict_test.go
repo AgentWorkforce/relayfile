@@ -360,3 +360,80 @@ func TestIdempotentWriteClaimsUpPathOwnership(t *testing.T) {
 		t.Fatal("idempotent write did not claim up-path ownership; an in-flight full pull could replay it with older bytes")
 	}
 }
+
+/**
+ * A matching hash is not enough — the revision must be usable.
+ *
+ * Adopting an empty revision clears the tracked one, and the next local edit then falls
+ * back to `ExpectedRevision: "0"`, which `Store.BulkWrite` rejects against an existing
+ * file. The path would never sync again. So an empty revision must fall through to the
+ * ordinary conflict handling, which keeps the record retryable, rather than be
+ * acknowledged as delivered.
+ */
+func TestIdempotentWriteIsNotAckedWithoutAUsableRevision(t *testing.T) {
+	localRoot := t.TempDir()
+	remotePath := normalizeRemotePath("/messages/message.json")
+	localPath := filepath.Join(localRoot, "messages", "message.json")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("create local parent: %v", err)
+	}
+	delivered := []byte(`{"text":"already landed"}`)
+	if err := os.WriteFile(localPath, delivered, 0o644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+
+	// Content matches, revision does not come back.
+	client := &fakeClient{files: map[string]RemoteFile{
+		remotePath: {
+			Path:        remotePath,
+			Revision:    "",
+			ContentType: "application/json",
+			Content:     string(delivered),
+		},
+	}}
+	client.bulkWriteResponseFunc = func(_ context.Context, _ string, files []BulkWriteFile) (BulkWriteResponse, error) {
+		return BulkWriteResponse{ErrorCount: len(files), Errors: []BulkWriteError{{
+			Path: files[0].Path, Code: "conflict", Message: "revision conflict",
+		}}}, nil
+	}
+
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_no_revision",
+		RemoteRoot:  "/",
+		LocalRoot:   localRoot,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	if err := syncer.loadState(); err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	snapshot, err := readLocalSnapshot(localPath, true)
+	if err != nil {
+		t.Fatalf("read local snapshot: %v", err)
+	}
+	pending, err := syncer.preparePendingBulkWrite(
+		context.Background(), remotePath, localPath, snapshot, trackedFile{}, false,
+	)
+	if err != nil || pending == nil {
+		t.Fatalf("prepare pending write: pending=%v err=%v", pending, err)
+	}
+	if _, err := syncer.ensureOutboxRecord(*pending); err != nil {
+		t.Fatalf("persist outbox record: %v", err)
+	}
+
+	if err := syncer.FlushOutboxOnce(context.Background()); err != nil {
+		t.Fatalf("flush outbox: %v", err)
+	}
+
+	acked := readOutboxRecordsInDirForTest(t, filepath.Join(localRoot, ".relay", "outbox", "acked"))
+	if len(acked) != 0 {
+		t.Fatalf("outbox/acked holds %d record(s); a write must not be acked on an unusable revision — the path would never sync again", len(acked))
+	}
+	// Deliberately NOT asserting on tracked state here. With an unusable revision this
+	// falls through to the ordinary conflict handling, and what that leaves behind is
+	// pre-existing behaviour this change neither introduces nor owns. The property that
+	// belongs to this change is the one above: the write is not acknowledged as
+	// delivered, so it stays retryable instead of being silently accepted on a revision
+	// that would make the path unsyncable.
+}

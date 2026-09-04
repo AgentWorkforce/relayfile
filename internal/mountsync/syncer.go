@@ -4124,7 +4124,14 @@ func (s *Syncer) handleWriteError(
 		// false conflict into a success, never suppress a real one.
 		if snapshot.Hash != "" {
 			if remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath); readErr == nil {
+				// A matching hash is not enough: the revision has to be usable too.
+				// Adopting an empty one clears the tracked revision, and the next local
+				// edit then falls back to ExpectedRevision "0", which Store.BulkWrite
+				// rejects against an existing file — the path would never sync again.
+				// Fall through to the normal conflict handling instead, which keeps the
+				// record retryable.
 				if remoteBytes, decodeErr := decodeRemoteFileContent(remoteFile); decodeErr == nil &&
+					strings.TrimSpace(remoteFile.Revision) != "" &&
 					hashBytes(remoteBytes) == snapshot.Hash {
 					s.logf("write conflict on %s resolved as idempotent: remote content already matches", remotePath)
 					contentType := strings.TrimSpace(snapshot.ContentType)
