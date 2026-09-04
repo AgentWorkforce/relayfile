@@ -66,15 +66,43 @@ jobs:
           # interpolated into the shell script body.
           CUSTOM_VERSION: ${{ github.event.inputs.custom_version }}
           VERSION_TYPE: ${{ github.event.inputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           PYPROJECT="pyproject.toml"
 
-          CURRENT_VERSION=$(awk -F '"' '/^version = / { print $2; exit }' "$PYPROJECT")
-          if [ -z "$CURRENT_VERSION" ]; then
-            echo "Unable to read current version from $PYPROJECT"
+          MANIFEST_VERSION=$(awk -F '"' '/^version = / { print $2; exit }' "$PYPROJECT")
+          LATEST_TAG=""
+          while IFS= read -r CANDIDATE_TAG; do
+            RELEASE_ERROR=$(mktemp)
+            if gh api \
+              "repos/${GITHUB_REPOSITORY}/releases/tags/${CANDIDATE_TAG}" \
+              --silent 2>"$RELEASE_ERROR"; then
+              LATEST_TAG="$CANDIDATE_TAG"
+              rm -f "$RELEASE_ERROR"
+              break
+            fi
+            if grep -q 'HTTP 404' "$RELEASE_ERROR"; then
+              rm -f "$RELEASE_ERROR"
+              continue
+            fi
+            cat "$RELEASE_ERROR" >&2
+            rm -f "$RELEASE_ERROR"
+            echo "ERROR: could not verify completed release ${CANDIDATE_TAG}" >&2
+            exit 1
+          done < <(git -c versionsort.suffix=- for-each-ref \
+            --sort=-version:refname \
+            --format='%(refname:short)' \
+            'refs/tags/sdk-python-v[0-9]*')
+
+          if [ -z "$LATEST_TAG" ]; then
+            echo "ERROR: no completed Python SDK GitHub release exists" >&2
             exit 1
           fi
-          echo "Current version: $CURRENT_VERSION"
+
+          CURRENT_VERSION="${LATEST_TAG#sdk-python-v}"
+          echo "Manifest version: $MANIFEST_VERSION"
+          echo "Release baseline: $CURRENT_VERSION ($LATEST_TAG)"
 
           bump_semver() {
             local current="$1"
@@ -136,6 +164,18 @@ jobs:
             echo "Bumped version: $VERSION_TYPE -> $NEW_VERSION"
           fi
 
+          if git show-ref --verify --quiet "refs/tags/sdk-python-v${NEW_VERSION}"; then
+            TAG_COMMIT=$(git rev-list -n 1 "refs/tags/sdk-python-v${NEW_VERSION}")
+            if [ "$TAG_COMMIT" != "$GITHUB_SHA" ]; then
+              echo "ERROR: sdk-python-v${NEW_VERSION} exists at ${TAG_COMMIT}, not ${GITHUB_SHA}" >&2
+              exit 1
+            fi
+            echo "is_recovery=true" >> "$GITHUB_OUTPUT"
+            echo "Recovering Python SDK release reserved by this source commit"
+          else
+            echo "is_recovery=false" >> "$GITHUB_OUTPUT"
+          fi
+
           # Update pyproject.toml [project] version (first match only).
           awk -v v="$NEW_VERSION" '
             !done && /^version = / { print "version = \"" v "\""; done=1; next }
@@ -160,33 +200,62 @@ jobs:
       - name: Check distribution metadata
         run: uvx twine check dist/*
 
-      - name: Publish to PyPI
+      - name: Check PyPI version state
+        id: pypi-state
+        env:
+          NEW_VERSION: ${{ steps.bump.outputs.new_version }}
+          RELEASE_RECOVERY: ${{ steps.bump.outputs.is_recovery }}
+        run: |
+          set -euo pipefail
+          STATUS=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            "https://pypi.org/pypi/relayfile-sdk/${NEW_VERSION}/json")
+          case "$STATUS" in
+            200)
+              if [ "$RELEASE_RECOVERY" != "true" ]; then
+                echo "ERROR: relayfile-sdk ${NEW_VERSION} exists without a same-commit tag reservation" >&2
+                exit 1
+              fi
+              echo "published=true" >> "$GITHUB_OUTPUT"
+              ;;
+            404)
+              echo "published=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "ERROR: PyPI version lookup returned HTTP ${STATUS}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Reserve Python SDK version tag
         if: github.ref == 'refs/heads/main' && github.event.inputs.dry_run != 'true'
+        working-directory: ${{ github.workspace }}
+        env:
+          NEW_VERSION: ${{ steps.bump.outputs.new_version }}
+        run: |
+          set -euo pipefail
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          if git show-ref --verify --quiet "refs/tags/sdk-python-v${NEW_VERSION}"; then
+            TAG_COMMIT=$(git rev-list -n 1 "refs/tags/sdk-python-v${NEW_VERSION}")
+            if [ "$TAG_COMMIT" != "$GITHUB_SHA" ]; then
+              echo "ERROR: sdk-python-v${NEW_VERSION} belongs to ${TAG_COMMIT}, not ${GITHUB_SHA}" >&2
+              exit 1
+            fi
+            echo "Python SDK tag is already reserved by this source commit"
+            exit 0
+          fi
+          git tag -a "sdk-python-v${NEW_VERSION}" -m "sdk-python v${NEW_VERSION}"
+          git push origin "refs/tags/sdk-python-v${NEW_VERSION}:refs/tags/sdk-python-v${NEW_VERSION}"
+
+      - name: Publish to PyPI
+        if: github.ref == 'refs/heads/main' && github.event.inputs.dry_run != 'true' && steps.pypi-state.outputs.published != 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: packages/sdk/python/dist
 
-      - name: Commit and tag
-        if: github.ref == 'refs/heads/main' && github.event.inputs.dry_run != 'true'
-        working-directory: ${{ github.workspace }}
-        run: |
-          NEW_VERSION="${{ steps.bump.outputs.new_version }}"
-
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-
-          git add packages/sdk/python/pyproject.toml packages/sdk/python/uv.lock
-          if ! git diff --staged --quiet; then
-            git commit -m "chore(sdk-python): v${NEW_VERSION}"
-            git push origin HEAD:main
-          fi
-
-          git tag -a "sdk-python-v${NEW_VERSION}" -m "sdk-python v${NEW_VERSION}"
-          git push origin "sdk-python-v${NEW_VERSION}"
-
       - name: Create GitHub Release
         if: github.ref == 'refs/heads/main' && github.event.inputs.dry_run != 'true'
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: sdk-python-v${{ steps.bump.outputs.new_version }}
           name: sdk-python-v${{ steps.bump.outputs.new_version }}
@@ -204,15 +273,17 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          echo "## Python SDK Publish Summary" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Version**: \`${{ steps.bump.outputs.new_version }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Dry Run**: \`${{ github.event.inputs.dry_run }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-            echo "Dry run completed. Built and checked dist, but did not publish or tag." >> "$GITHUB_STEP_SUMMARY"
-          elif [ "${{ github.ref }}" != "refs/heads/main" ]; then
-            echo "Build and checks completed on a non-main ref; publish, tag, and release were skipped." >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "Published to PyPI and created tag \`sdk-python-v${{ steps.bump.outputs.new_version }}\`." >> "$GITHUB_STEP_SUMMARY"
-          fi
+          {
+            echo "## Python SDK Publish Summary"
+            echo ""
+            echo "**Version**: \`${{ steps.bump.outputs.new_version }}\`"
+            echo "**Dry Run**: \`${{ github.event.inputs.dry_run }}\`"
+            echo ""
+            if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+              echo "Dry run completed. Built and checked dist, but did not publish or tag."
+            elif [ "${{ github.ref }}" != "refs/heads/main" ]; then
+              echo "Build and checks completed on a non-main ref; publish, tag, and release were skipped."
+            else
+              echo "Published to PyPI and created tag \`sdk-python-v${{ steps.bump.outputs.new_version }}\`."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
