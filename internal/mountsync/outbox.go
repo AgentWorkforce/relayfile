@@ -67,6 +67,10 @@ type outboxSummary struct {
 	NeedsAttention int `json:"needsAttention"`
 	Failed         int `json:"failed"`
 	Acked          int `json:"acked"`
+	// DeadLettered counts legacy transport dead-letters. They predate the
+	// durable outbox but remain actionable and must participate in mount health
+	// so an operator does not need to discover them by walking the VFS.
+	DeadLettered int `json:"deadLettered,omitempty"`
 }
 
 type outboxCapabilities struct {
@@ -565,6 +569,15 @@ func (s *Syncer) summarizeOutbox() outboxSummary {
 			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
 				summary.Acked++
 			}
+		}
+	}
+	if entries, err := os.ReadDir(s.deadLetterDir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") || strings.HasSuffix(entry.Name(), ".error.json") {
+				continue
+			}
+			summary.DeadLettered++
+			summary.NeedsAttention++
 		}
 	}
 	return summary

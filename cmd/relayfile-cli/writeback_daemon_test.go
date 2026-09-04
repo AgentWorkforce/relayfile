@@ -219,3 +219,72 @@ func TestWritebackDaemonDeadLettersHTTP400(t *testing.T) {
 		t.Fatalf("mount loop did not stop after cancel")
 	}
 }
+
+func TestWritebackFailureTransportDoesNotDeadLetterWorkspaceBusy(t *testing.T) {
+	localDir := t.TempDir()
+	const (
+		opID     = "op_workspace_busy"
+		attempts = 6 // mirrors the mountsync backpressure policy
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"opId":"op_workspace_busy","code":"workspace_busy","message":"retry after the advertised delay"}`))
+	}))
+	defer server.Close()
+
+	base := server.Client().Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	transport := newWritebackFailureTransport(localDir, log.New(io.Discard, "", 0), base)
+	for attempt := 1; attempt <= attempts; attempt++ {
+		req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/workspaces/ws_busy/fs/bulk", bytes.NewBufferString(`{"files":[{"path":"/slack/channels/C123/messages/draft.json","content":"hello"}]}`))
+		if err != nil {
+			t.Fatalf("attempt %d request: %v", attempt, err)
+		}
+		resp, err := transport.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("attempt %d round trip: %v", attempt, err)
+		}
+		_ = resp.Body.Close()
+	}
+
+	deadLetterPath := filepath.Join(localDir, ".relay", "dead-letter", opID+".json")
+	if _, err := os.Stat(deadLetterPath); !os.IsNotExist(err) {
+		t.Fatalf("Relayfile backpressure must remain durable/retryable, not dead-lettered: stat err=%v", err)
+	}
+}
+
+func TestWritebackFailureTransportStillDeadLettersOrdinary429(t *testing.T) {
+	localDir := t.TempDir()
+	const opID = "op_provider_rate_limited"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"opId":"op_provider_rate_limited","code":"rate_limited","message":"provider quota"}`))
+	}))
+	defer server.Close()
+
+	base := server.Client().Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	transport := newWritebackFailureTransport(localDir, log.New(io.Discard, "", 0), base)
+	for attempt := 1; attempt <= writebackMaxHTTPAttempts; attempt++ {
+		req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/workspaces/ws_rate/fs/bulk", bytes.NewBufferString(`{"files":[{"path":"/slack/channels/C123/messages/draft.json","content":"hello"}]}`))
+		if err != nil {
+			t.Fatalf("attempt %d request: %v", attempt, err)
+		}
+		resp, err := transport.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("attempt %d round trip: %v", attempt, err)
+		}
+		_ = resp.Body.Close()
+	}
+
+	deadLetterPath := filepath.Join(localDir, ".relay", "dead-letter", opID+".json")
+	if _, err := os.Stat(deadLetterPath); err != nil {
+		t.Fatalf("ordinary exhausted 429 must still fire the terminal control: %v", err)
+	}
+}
