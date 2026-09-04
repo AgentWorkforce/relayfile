@@ -59,6 +59,7 @@ const (
 	defaultMountInterval                      = 30 * time.Second
 	defaultEventSilenceThreshold              = 24 * time.Hour
 	setupIntentPrintedEnv                     = "RELAYFILE_NPM_SETUP_INTENT_PRINTED"
+	defaultSetupLocalDir                      = "./relayfile-mount"
 	minMountPollInterval                      = 5 * time.Second
 	defaultMountTimeout                       = 15 * time.Second
 )
@@ -723,7 +724,7 @@ func quickStartSetupArgsForDir(workingDir string, now time.Time) []string {
 	return []string{
 		"--provider", "github",
 		"--workspace", workspaceName,
-		"--local-dir", "./relayfile-mount",
+		"--local-dir", defaultSetupLocalDir,
 	}
 }
 
@@ -1119,13 +1120,23 @@ func runSetupWithOptions(args []string, stdin io.Reader, stdout io.Writer, optio
 
 	localDir := strings.TrimSpace(*localDirFlag)
 	if localDir == "" {
-		prompted, err := promptLine(stdin, stdout, "Local mount directory [./relayfile-mount]: ")
-		if err != nil {
-			return err
-		}
-		localDir = strings.TrimSpace(prompted)
-		if localDir == "" {
-			localDir = "./relayfile-mount"
+		// --skip-mount is the headless contract: setup finishes without ever
+		// starting the mount process, so a run under --no-open has no terminal
+		// to answer a prompt and blocked on this read forever. The directory
+		// still matters (the mirror layout is created there and the printed
+		// `relayfile mount` hint names it), so take the same value the prompt's
+		// default would have produced instead of asking.
+		if *skipMount {
+			localDir = defaultSetupLocalDir
+		} else {
+			prompted, err := promptLine(stdin, stdout, fmt.Sprintf("Local mount directory [%s]: ", defaultSetupLocalDir))
+			if err != nil {
+				return err
+			}
+			localDir = strings.TrimSpace(prompted)
+			if localDir == "" {
+				localDir = defaultSetupLocalDir
+			}
 		}
 	}
 	name, localDir = resolveSetupTarget(name, localDir, options.preserveExistingLocalDir)
@@ -2494,8 +2505,20 @@ func resolveCloudWorkspaceForRelayfile(cloud cloudCredentials, workspaceID strin
 	}
 	resolved.CloudWorkspaceID = strings.TrimSpace(resolved.CloudWorkspaceID)
 	resolved.RelayfileWorkspaceID = strings.TrimSpace(resolved.RelayfileWorkspaceID)
-	if resolved.CloudWorkspaceID == "" || resolved.RelayfileWorkspaceID == "" {
-		return cloudWorkspaceResolveResponse{}, errors.New("resolve the workspace after the create step: Cloud did not return cloudWorkspaceId and relayfileWorkspaceId; workspace provisioning did not complete")
+	if resolved.RelayfileWorkspaceID == "" {
+		return cloudWorkspaceResolveResponse{}, errors.New("resolve the workspace after the create step: Cloud did not return relayfileWorkspaceId; workspace provisioning did not complete")
+	}
+	if resolved.CloudWorkspaceID == "" {
+		// The Relayfile workspace exists — provisioning DID complete — but
+		// Cloud reports no Cloud workspace bound to it. Every id the rest of
+		// setup needs (delegated-token, integrations, mount) is authorized
+		// through that binding, so continuing here only trades this error for
+		// an opaque `404 workspace_not_found` on the delegated-token call.
+		// Fail at the step that can actually name the cause.
+		return cloudWorkspaceResolveResponse{}, fmt.Errorf(
+			"resolve the workspace after the create step: Cloud resolved Relayfile workspace %s but returned cloudWorkspaceId: null, so the new workspace is not bound to a Cloud workspace and cannot mint delegated credentials; this binding has to be established by Cloud at create time (relayfile cannot create it), so run setup against a Cloud workspace that is already bound",
+			resolved.RelayfileWorkspaceID,
+		)
 	}
 	return resolved, nil
 }
