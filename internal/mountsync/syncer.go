@@ -4072,6 +4072,56 @@ func (s *Syncer) handleWriteError(
 	err error,
 ) error {
 	if errors.Is(err, ErrConflict) {
+		// Idempotent write success: our own write already landed.
+		//
+		// The transport retries 429/5xx internally, so a write whose response
+		// was lost is re-sent carrying the same expectedRevision the first
+		// attempt used. The server — now holding the revision that first
+		// attempt created — answers 409. Nothing diverged: the remote holds
+		// exactly the bytes we were trying to write.
+		//
+		// Treating that as a conflict is not merely noisy. It materializes a
+		// conflict artifact and leaves the outbox entry unresolved, and the
+		// warm-start audit then refuses to boot the sandbox at all
+		// (relayfile_mount_intent_warm_audit_unresolved_outbox) — so a
+		// delivery that SUCCEEDED wedges every later run of the agent, and
+		// only destroying the sandbox clears it. Observed 2026-09-04 on
+		// repo-intel: two Slack messages byte-identical to the remote, filed
+		// as failed, blocking every subsequent run.
+		//
+		// This mirrors the idempotent-delete case in the delete path below,
+		// which already treats "the remote is already in the state I asked
+		// for" as success rather than as a conflict.
+		//
+		// The comparison is on content, never on revision: an equal hash is
+		// positive evidence the remote is what we wanted. A read error, a
+		// decode error, an empty local hash, or any mismatch falls straight
+		// through to the conflict handling below — this may only ever turn a
+		// false conflict into a success, never suppress a real one.
+		if snapshot.Hash != "" {
+			if remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath); readErr == nil {
+				if remoteBytes, decodeErr := decodeRemoteFileContent(remoteFile); decodeErr == nil &&
+					hashBytes(remoteBytes) == snapshot.Hash {
+					s.logf("write conflict on %s resolved as idempotent: remote content already matches", remotePath)
+					contentType := strings.TrimSpace(snapshot.ContentType)
+					if contentType == "" {
+						contentType = strings.TrimSpace(remoteFile.ContentType)
+					}
+					s.state.Files[remotePath] = trackedFile{
+						Revision:          strings.TrimSpace(remoteFile.Revision),
+						ContentType:       contentType,
+						Encoding:          normalizeEncoding(snapshot.Encoding),
+						Hash:              snapshot.Hash,
+						Dirty:             false,
+						LocalRelativePath: tracked.LocalRelativePath,
+						ReadOnly:          false,
+					}
+					s.resolveConflictArtifacts(remotePath)
+					return nil
+				}
+			}
+		}
+
 		// Mount rollout: for a merge-eligible path with a verified base in
 		// the shadow cache, try a three-way line merge before treating this
 		// as a conflict at all. Any miss or failure here — cache miss,
