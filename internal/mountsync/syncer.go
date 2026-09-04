@@ -3607,7 +3607,7 @@ func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRec
 			continue
 		}
 		if writeErr, ok := errorsByPath[record.RemotePath]; ok {
-			err := s.handleWriteError(
+			idempotent, err := s.handleWriteError(
 				ctx,
 				pendingWrite.remotePath,
 				pendingWrite.localPath,
@@ -3620,12 +3620,30 @@ func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRec
 			if err != nil && firstErr == nil {
 				firstErr = err
 			}
-			if err == nil {
+			switch {
+			case err != nil:
+				if incErr := s.incrementOutboxAttempt(record, err); incErr != nil && firstErr == nil {
+					firstErr = incErr
+				}
+			case idempotent:
+				// The write already landed — the remote holds our exact bytes.
+				// Acknowledge it like any other delivered write. Filing it under
+				// outbox/failed instead would leave an unresolved entry for a
+				// SUCCESSFUL delivery, and the warm-start audit refuses to boot a
+				// sandbox that has one (relayfile_mount_intent_warm_audit_unresolved_outbox).
+				// That is the whole bug this path exists to fix.
+				record.Revision = s.state.Files[pendingWrite.remotePath].Revision
+				if ackErr := s.ackOutboxRecord(
+					record,
+					record.Revision,
+					response.CorrelationID,
+				); ackErr != nil && firstErr == nil {
+					firstErr = ackErr
+				}
+			default:
 				if failErr := s.failOutboxRecord(record, writeErr.Message); failErr != nil && firstErr == nil {
 					firstErr = failErr
 				}
-			} else if incErr := s.incrementOutboxAttempt(record, err); incErr != nil && firstErr == nil {
-				firstErr = incErr
 			}
 			continue
 		}
@@ -4070,7 +4088,7 @@ func (s *Syncer) handleWriteError(
 	exists bool,
 	conflicted map[string]struct{},
 	err error,
-) error {
+) (idempotent bool, handledErr error) {
 	if errors.Is(err, ErrConflict) {
 		// Idempotent write success: our own write already landed.
 		//
@@ -4107,17 +4125,29 @@ func (s *Syncer) handleWriteError(
 					if contentType == "" {
 						contentType = strings.TrimSpace(remoteFile.ContentType)
 					}
-					s.state.Files[remotePath] = trackedFile{
-						Revision:          strings.TrimSpace(remoteFile.Revision),
-						ContentType:       contentType,
-						Encoding:          normalizeEncoding(snapshot.Encoding),
-						Hash:              snapshot.Hash,
-						Dirty:             false,
-						LocalRelativePath: tracked.LocalRelativePath,
-						ReadOnly:          false,
+					remoteRevision := strings.TrimSpace(remoteFile.Revision)
+					// Never let this older acknowledgement rewind tracked state.
+					// The realtime watcher releases s.mu while the bulk POST is in
+					// flight, so a WebSocket revision can already have advanced the
+					// tracked file past the revision we just read back. Mirrors the
+					// guard in reconcileBulkWrite, for the same race. The write still
+					// landed, so this is still an idempotent success — we simply do
+					// not overwrite newer state to say so.
+					if current, ok := s.state.Files[remotePath]; !ok ||
+						current.Revision == "" || current.Revision == remoteRevision ||
+						current.Revision == tracked.Revision {
+						s.state.Files[remotePath] = trackedFile{
+							Revision:          remoteRevision,
+							ContentType:       contentType,
+							Encoding:          normalizeEncoding(snapshot.Encoding),
+							Hash:              snapshot.Hash,
+							Dirty:             false,
+							LocalRelativePath: tracked.LocalRelativePath,
+							ReadOnly:          false,
+						}
 					}
 					s.resolveConflictArtifacts(remotePath)
-					return nil
+					return true, nil
 				}
 			}
 		}
@@ -4130,12 +4160,12 @@ func (s *Syncer) handleWriteError(
 		// to today's conflict-artifact behavior below; a failed merge
 		// attempt must never be worse than not having attempted one.
 		if s.attemptMountRolloutMerge(ctx, remotePath, localPath, snapshot, tracked) {
-			return nil
+			return false, nil
 		}
 		if conflicted != nil {
 			conflicted[remotePath] = struct{}{}
 		}
-		return s.materializeConflict(ctx, remotePath, localPath, snapshot, tracked)
+		return false, s.materializeConflict(ctx, remotePath, localPath, snapshot, tracked)
 	}
 
 	var schemaErr *SchemaValidationError
@@ -4144,7 +4174,7 @@ func (s *Syncer) handleWriteError(
 		// per-file degradation: quarantine the local body, restore the
 		// last known remote, and let the user fix the offending file
 		// without aborting the cycle.
-		return s.materializeSchemaInvalid(ctx, remotePath, localPath, snapshot, tracked, schemaErr.Message)
+		return false, s.materializeSchemaInvalid(ctx, remotePath, localPath, snapshot, tracked, schemaErr.Message)
 	}
 
 	var httpErr *HTTPError
@@ -4167,12 +4197,12 @@ func (s *Syncer) handleWriteError(
 				WriteDenied:       true,
 				DeniedHash:        snapshot.Hash,
 			}
-			return nil
+			return false, nil
 		}
-		return s.revertReadonlyFile(ctx, remotePath, localPath, tracked, snapshot.ContentType)
+		return false, s.revertReadonlyFile(ctx, remotePath, localPath, tracked, snapshot.ContentType)
 	}
 
-	return err
+	return false, err
 }
 
 func (s *Syncer) materializeConflict(ctx context.Context, remotePath, localPath string, snapshot localSnapshot, tracked trackedFile) error {

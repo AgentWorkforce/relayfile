@@ -131,3 +131,158 @@ func TestWriteConflictWithDifferentRemoteContentStillConflicts(t *testing.T) {
 	assertLocalFileContent(t, artifactPath, local)
 	assertLocalFileContent(t, localPath, remote)
 }
+
+/**
+ * The property that actually matters, and the one the first version of this fix missed.
+ *
+ * Removing the conflict artifact is not enough. `flushOutboxRecordChunk` treats ANY
+ * handled per-file error (handleWriteError returning a nil error) as a failure and calls
+ * `failOutboxRecord`, which archives the command under `.relay/outbox/failed`. It is that
+ * unresolved outbox entry — not the artifact — that the warm-start audit refuses to boot a
+ * sandbox with (`relayfile_mount_intent_warm_audit_unresolved_outbox`).
+ *
+ * So a fix that only suppressed the artifact would leave the agent exactly as wedged,
+ * while every artifact-level assertion passed. This test asserts on the outbox.
+ */
+func TestIdempotentWriteAcksTheOutboxRecordInsteadOfFailingIt(t *testing.T) {
+	localRoot := t.TempDir()
+	remotePath := normalizeRemotePath("/messages/message.json")
+	localPath := filepath.Join(localRoot, "messages", "message.json")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("create local parent: %v", err)
+	}
+	delivered := []byte(`{"text":"the digest that already landed"}`)
+	if err := os.WriteFile(localPath, delivered, 0o644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+
+	// The lost-ack shape: the remote already holds our exact bytes under a revision we
+	// never observed, so our IfMatch is stale and the server answers 409 for a write
+	// that already succeeded.
+	client := &fakeClient{files: map[string]RemoteFile{
+		remotePath: {
+			Path:        remotePath,
+			Revision:    "rev_delivered",
+			ContentType: "application/json",
+			Content:     string(delivered),
+		},
+	}}
+	client.bulkWriteResponseFunc = func(_ context.Context, _ string, files []BulkWriteFile) (BulkWriteResponse, error) {
+		return BulkWriteResponse{ErrorCount: len(files), Errors: []BulkWriteError{{
+			Path: files[0].Path, Code: "conflict", Message: "revision conflict",
+		}}}, nil
+	}
+
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_idempotent_outbox",
+		RemoteRoot:  "/",
+		LocalRoot:   localRoot,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	if err := syncer.loadState(); err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	snapshot, err := readLocalSnapshot(localPath, true)
+	if err != nil {
+		t.Fatalf("read local snapshot: %v", err)
+	}
+	pending, err := syncer.preparePendingBulkWrite(
+		context.Background(), remotePath, localPath, snapshot, trackedFile{}, false,
+	)
+	if err != nil || pending == nil {
+		t.Fatalf("prepare pending write: pending=%v err=%v", pending, err)
+	}
+	if _, err := syncer.ensureOutboxRecord(*pending); err != nil {
+		t.Fatalf("persist outbox record: %v", err)
+	}
+
+	if err := syncer.FlushOutboxOnce(context.Background()); err != nil {
+		t.Fatalf("flush outbox: %v", err)
+	}
+
+	failed := readOutboxRecordsInDirForTest(t, filepath.Join(localRoot, ".relay", "outbox", "failed"))
+	if len(failed) != 0 {
+		t.Fatalf("outbox/failed holds %d record(s); a delivery that SUCCEEDED must not be filed as failed — this is what wedges warm start", len(failed))
+	}
+
+	acked := readOutboxRecordsInDirForTest(t, filepath.Join(localRoot, ".relay", "outbox", "acked"))
+	if len(acked) != 1 {
+		t.Fatalf("outbox/acked holds %d record(s), want 1", len(acked))
+	}
+
+	// And nothing is left pending, or the next flush would retry a write that landed.
+	if pendingLeft := readPendingOutboxRecordsForTest(t, localRoot); len(pendingLeft) != 0 {
+		t.Fatalf("outbox/pending holds %d record(s), want 0", len(pendingLeft))
+	}
+}
+
+/**
+ * The negative control for the outbox path: a genuine divergence must STILL be filed as
+ * failed. Otherwise the fix above would silently swallow real write failures, which is a
+ * far worse bug than the one it set out to fix.
+ */
+func TestDivergentWriteConflictStillFailsTheOutboxRecord(t *testing.T) {
+	localRoot := t.TempDir()
+	remotePath := normalizeRemotePath("/messages/message.json")
+	localPath := filepath.Join(localRoot, "messages", "message.json")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("create local parent: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte(`{"text":"my edit"}`), 0o644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+
+	client := &fakeClient{files: map[string]RemoteFile{
+		remotePath: {
+			Path:        remotePath,
+			Revision:    "rev_remote",
+			ContentType: "application/json",
+			Content:     `{"text":"someone else's edit"}`,
+		},
+	}}
+	client.bulkWriteResponseFunc = func(_ context.Context, _ string, files []BulkWriteFile) (BulkWriteResponse, error) {
+		return BulkWriteResponse{ErrorCount: len(files), Errors: []BulkWriteError{{
+			Path: files[0].Path, Code: "conflict", Message: "revision conflict",
+		}}}, nil
+	}
+
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_divergent_outbox",
+		RemoteRoot:  "/",
+		LocalRoot:   localRoot,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	if err := syncer.loadState(); err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	snapshot, err := readLocalSnapshot(localPath, true)
+	if err != nil {
+		t.Fatalf("read local snapshot: %v", err)
+	}
+	pending, err := syncer.preparePendingBulkWrite(
+		context.Background(), remotePath, localPath, snapshot, trackedFile{}, false,
+	)
+	if err != nil || pending == nil {
+		t.Fatalf("prepare pending write: pending=%v err=%v", pending, err)
+	}
+	if _, err := syncer.ensureOutboxRecord(*pending); err != nil {
+		t.Fatalf("persist outbox record: %v", err)
+	}
+
+	if err := syncer.FlushOutboxOnce(context.Background()); err != nil {
+		t.Fatalf("flush outbox: %v", err)
+	}
+
+	failed := readOutboxRecordsInDirForTest(t, filepath.Join(localRoot, ".relay", "outbox", "failed"))
+	if len(failed) != 1 {
+		t.Fatalf("outbox/failed holds %d record(s), want 1 — a real conflict must still be reported", len(failed))
+	}
+	acked := readOutboxRecordsInDirForTest(t, filepath.Join(localRoot, ".relay", "outbox", "acked"))
+	if len(acked) != 0 {
+		t.Fatalf("outbox/acked holds %d record(s), want 0 for a genuine divergence", len(acked))
+	}
+}
