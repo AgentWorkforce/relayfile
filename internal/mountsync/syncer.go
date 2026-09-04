@@ -3607,7 +3607,7 @@ func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRec
 			continue
 		}
 		if writeErr, ok := errorsByPath[record.RemotePath]; ok {
-			err := s.handleWriteError(
+			idempotent, err := s.handleWriteError(
 				ctx,
 				pendingWrite.remotePath,
 				pendingWrite.localPath,
@@ -3620,12 +3620,36 @@ func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRec
 			if err != nil && firstErr == nil {
 				firstErr = err
 			}
-			if err == nil {
+			switch {
+			case err != nil:
+				if incErr := s.incrementOutboxAttempt(record, err); incErr != nil && firstErr == nil {
+					firstErr = incErr
+				}
+			case idempotent:
+				// The write already landed — the remote holds our exact bytes.
+				// Acknowledge it like any other delivered write. Filing it under
+				// outbox/failed instead would leave an unresolved entry for a
+				// SUCCESSFUL delivery, and the warm-start audit refuses to boot a
+				// sandbox that has one (relayfile_mount_intent_warm_audit_unresolved_outbox).
+				// That is the whole bug this path exists to fix.
+				//
+				// Claim up-path ownership for the same reason the accepted-write
+				// branch below does: this IS an admitted write, so a full pull still
+				// in flight must not replay the path with older bytes or infer it
+				// absent. Marked before the ack, so the window cannot be lost.
+				s.markFullPullUpPath(pendingWrite.remotePath)
+				record.Revision = s.state.Files[pendingWrite.remotePath].Revision
+				if ackErr := s.ackOutboxRecord(
+					record,
+					record.Revision,
+					response.CorrelationID,
+				); ackErr != nil && firstErr == nil {
+					firstErr = ackErr
+				}
+			default:
 				if failErr := s.failOutboxRecord(record, writeErr.Message); failErr != nil && firstErr == nil {
 					firstErr = failErr
 				}
-			} else if incErr := s.incrementOutboxAttempt(record, err); incErr != nil && firstErr == nil {
-				firstErr = incErr
 			}
 			continue
 		}
@@ -4070,8 +4094,77 @@ func (s *Syncer) handleWriteError(
 	exists bool,
 	conflicted map[string]struct{},
 	err error,
-) error {
+) (idempotent bool, handledErr error) {
 	if errors.Is(err, ErrConflict) {
+		// Idempotent write success: our own write already landed.
+		//
+		// The transport retries 429/5xx internally, so a write whose response
+		// was lost is re-sent carrying the same expectedRevision the first
+		// attempt used. The server — now holding the revision that first
+		// attempt created — answers 409. Nothing diverged: the remote holds
+		// exactly the bytes we were trying to write.
+		//
+		// Treating that as a conflict is not merely noisy. It materializes a
+		// conflict artifact and leaves the outbox entry unresolved, and the
+		// warm-start audit then refuses to boot the sandbox at all
+		// (relayfile_mount_intent_warm_audit_unresolved_outbox) — so a
+		// delivery that SUCCEEDED wedges every later run of the agent, and
+		// only destroying the sandbox clears it. Observed 2026-09-04 on
+		// repo-intel: two Slack messages byte-identical to the remote, filed
+		// as failed, blocking every subsequent run.
+		//
+		// This mirrors the idempotent-delete case in the delete path below,
+		// which already treats "the remote is already in the state I asked
+		// for" as success rather than as a conflict.
+		//
+		// The comparison is on content, never on revision: an equal hash is
+		// positive evidence the remote is what we wanted. A read error, a
+		// decode error, an empty local hash, or any mismatch falls straight
+		// through to the conflict handling below — this may only ever turn a
+		// false conflict into a success, never suppress a real one.
+		if snapshot.Hash != "" {
+			if remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath); readErr == nil {
+				// A matching hash is not enough: the revision has to be usable too.
+				// Adopting an empty one clears the tracked revision, and the next local
+				// edit then falls back to ExpectedRevision "0", which Store.BulkWrite
+				// rejects against an existing file — the path would never sync again.
+				// Fall through to the normal conflict handling instead, which keeps the
+				// record retryable.
+				if remoteBytes, decodeErr := decodeRemoteFileContent(remoteFile); decodeErr == nil &&
+					strings.TrimSpace(remoteFile.Revision) != "" &&
+					hashBytes(remoteBytes) == snapshot.Hash {
+					s.logf("write conflict on %s resolved as idempotent: remote content already matches", remotePath)
+					contentType := strings.TrimSpace(snapshot.ContentType)
+					if contentType == "" {
+						contentType = strings.TrimSpace(remoteFile.ContentType)
+					}
+					remoteRevision := strings.TrimSpace(remoteFile.Revision)
+					// Never let this older acknowledgement rewind tracked state.
+					// The realtime watcher releases s.mu while the bulk POST is in
+					// flight, so a WebSocket revision can already have advanced the
+					// tracked file past the revision we just read back. Mirrors the
+					// guard in reconcileBulkWrite, for the same race. The write still
+					// landed, so this is still an idempotent success — we simply do
+					// not overwrite newer state to say so.
+					if current, ok := s.state.Files[remotePath]; !ok ||
+						current.Revision == "" || current.Revision == remoteRevision ||
+						current.Revision == tracked.Revision {
+						s.state.Files[remotePath] = trackedFile{
+							Revision:          remoteRevision,
+							ContentType:       contentType,
+							Encoding:          normalizeEncoding(snapshot.Encoding),
+							Hash:              snapshot.Hash,
+							Dirty:             false,
+							LocalRelativePath: tracked.LocalRelativePath,
+							ReadOnly:          false,
+						}
+					}
+					s.resolveConflictArtifacts(remotePath)
+					return true, nil
+				}
+			}
+		}
+
 		// Mount rollout: for a merge-eligible path with a verified base in
 		// the shadow cache, try a three-way line merge before treating this
 		// as a conflict at all. Any miss or failure here — cache miss,
@@ -4080,12 +4173,12 @@ func (s *Syncer) handleWriteError(
 		// to today's conflict-artifact behavior below; a failed merge
 		// attempt must never be worse than not having attempted one.
 		if s.attemptMountRolloutMerge(ctx, remotePath, localPath, snapshot, tracked) {
-			return nil
+			return false, nil
 		}
 		if conflicted != nil {
 			conflicted[remotePath] = struct{}{}
 		}
-		return s.materializeConflict(ctx, remotePath, localPath, snapshot, tracked)
+		return false, s.materializeConflict(ctx, remotePath, localPath, snapshot, tracked)
 	}
 
 	var schemaErr *SchemaValidationError
@@ -4094,7 +4187,7 @@ func (s *Syncer) handleWriteError(
 		// per-file degradation: quarantine the local body, restore the
 		// last known remote, and let the user fix the offending file
 		// without aborting the cycle.
-		return s.materializeSchemaInvalid(ctx, remotePath, localPath, snapshot, tracked, schemaErr.Message)
+		return false, s.materializeSchemaInvalid(ctx, remotePath, localPath, snapshot, tracked, schemaErr.Message)
 	}
 
 	var httpErr *HTTPError
@@ -4117,12 +4210,12 @@ func (s *Syncer) handleWriteError(
 				WriteDenied:       true,
 				DeniedHash:        snapshot.Hash,
 			}
-			return nil
+			return false, nil
 		}
-		return s.revertReadonlyFile(ctx, remotePath, localPath, tracked, snapshot.ContentType)
+		return false, s.revertReadonlyFile(ctx, remotePath, localPath, tracked, snapshot.ContentType)
 	}
 
-	return err
+	return false, err
 }
 
 func (s *Syncer) materializeConflict(ctx context.Context, remotePath, localPath string, snapshot localSnapshot, tracked trackedFile) error {
