@@ -127,6 +127,24 @@ func TestBootstrapBulkReadFallbackRequiresExplicitUnsupported(t *testing.T) {
 	})
 }
 
+func TestBootstrapBulkReadUnsupportedDoesNotRereadOversizedPointJobs(t *testing.T) {
+	client := &bulkReadTestClient{
+		files: map[string]RemoteFile{
+			"/large": {Path: "/large", Revision: "rev_large", ContentType: "application/octet-stream", Content: "large"},
+			"/small": {Path: "/small", Revision: "rev_small", ContentType: "text/plain", Content: "small"},
+		},
+		bulkErr: &HTTPError{StatusCode: http.StatusNotImplemented, Code: "bulk_read_unsupported", Message: "unsupported"},
+	}
+	syncer := &Syncer{workspace: "ws", client: client}
+	results := syncer.readBootstrapFiles(context.Background(), []bootstrapReadJob{
+		{Index: 0, RemotePath: "/large", Size: defaultBulkReadMaxBytes + 1},
+		{Index: 1, RemotePath: "/small", Size: 1},
+	}, bootstrapProgress{})
+	if len(results) != 2 || client.pointReadCalls != 2 {
+		t.Fatalf("results=%d point reads=%d, want 2 and 2", len(results), client.pointReadCalls)
+	}
+}
+
 func TestBootstrapBulkReadPointReadsDeclaredOversizedFiles(t *testing.T) {
 	path := "/large.bin"
 	client := &bulkReadTestClient{files: map[string]RemoteFile{

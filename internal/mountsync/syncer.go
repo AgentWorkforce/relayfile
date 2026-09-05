@@ -7336,7 +7336,7 @@ func (s *Syncer) readBootstrapFilesBulk(ctx context.Context, client bulkReadClie
 	}
 	batches := chunkBootstrapReadJobs(bulkJobs)
 	ctx = withResponseProgress(ctx, prog.touch)
-	for _, batch := range batches {
+	for batchIndex, batch := range batches {
 		paths := make([]string, len(batch))
 		for index, job := range batch {
 			paths[index] = job.RemotePath
@@ -7345,7 +7345,17 @@ func (s *Syncer) readBootstrapFilesBulk(ctx context.Context, client bulkReadClie
 		if err != nil {
 			if isBulkReadUnsupported(err) {
 				s.bulkReadUnsupported.Store(true)
-				return s.readBootstrapFilesIndividually(ctx, jobs, prog)
+				// Preserve point reads and successful bulk batches already
+				// completed. Only replay the current and unprocessed bulk jobs;
+				// rereading oversized point jobs can double large-file traffic.
+				remaining := make([]bootstrapReadJob, 0, len(bulkJobs))
+				remaining = append(remaining, batch...)
+				for _, later := range batches[batchIndex+1:] {
+					remaining = append(remaining, later...)
+				}
+				results = append(results, s.readBootstrapFilesIndividually(ctx, remaining, prog)...)
+				sort.Slice(results, func(i, j int) bool { return results[i].Index < results[j].Index })
+				return results
 			}
 			for _, job := range batch {
 				results = append(results, bootstrapReadResult{Index: job.Index, RemotePath: job.RemotePath, Err: err})
