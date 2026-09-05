@@ -13,15 +13,16 @@ import (
 type bulkReadTestClient struct {
 	RemoteClient
 
-	mu               sync.Mutex
-	files            map[string]RemoteFile
-	bulkCalls        [][]string
-	bulkErr          error
-	pointErrs        map[string]error
-	pointReadCalls   int
-	activePointReads int
-	maxPointReads    int
-	pointReadDelay   time.Duration
+	mu                sync.Mutex
+	files             map[string]RemoteFile
+	bulkCalls         [][]string
+	bulkErr           error
+	pointErrs         map[string]error
+	pointReadCalls    int
+	activePointReads  int
+	maxPointReads     int
+	pointProgressSeen bool
+	pointReadDelay    time.Duration
 }
 
 func (c *bulkReadTestClient) ReadFilesBulk(_ context.Context, _ string, paths []string) (BulkReadResponse, error) {
@@ -49,10 +50,13 @@ func (c *bulkReadTestClient) ReadFilesBulk(_ context.Context, _ string, paths []
 	return response, nil
 }
 
-func (c *bulkReadTestClient) ReadFile(_ context.Context, _ string, path string) (RemoteFile, error) {
+func (c *bulkReadTestClient) ReadFile(ctx context.Context, _ string, path string) (RemoteFile, error) {
 	c.mu.Lock()
 	c.pointReadCalls++
 	c.activePointReads++
+	if responseProgress(ctx) != nil {
+		c.pointProgressSeen = true
+	}
 	if c.activePointReads > c.maxPointReads {
 		c.maxPointReads = c.activePointReads
 	}
@@ -236,6 +240,24 @@ func TestBootstrapBulkReadPreservesMixedJobIndexOrder(t *testing.T) {
 	}
 	if len(client.bulkCalls) != 1 || len(client.bulkCalls[0]) != 1 || client.bulkCalls[0][0] != "/small" {
 		t.Fatalf("bulk calls = %#v, want one call for /small before point read", client.bulkCalls)
+	}
+}
+
+func TestBootstrapIndividualReadsCarryResponseProgress(t *testing.T) {
+	client := &bulkReadTestClient{files: map[string]RemoteFile{
+		"/a": {Path: "/a", Revision: "rev_a", ContentType: "text/plain", Content: "a"},
+	}}
+	syncer := &Syncer{workspace: "ws", client: client}
+	syncer.bulkReadUnsupported.Store(true)
+	results := syncer.readBootstrapFiles(context.Background(), []bootstrapReadJob{{Index: 0, RemotePath: "/a", Size: 1}}, bootstrapProgress{})
+	if len(results) != 1 || results[0].Err != nil {
+		t.Fatalf("individual read results = %#v", results)
+	}
+	client.mu.Lock()
+	progressSeen := client.pointProgressSeen
+	client.mu.Unlock()
+	if !progressSeen {
+		t.Fatal("individual read did not receive response progress hook")
 	}
 }
 

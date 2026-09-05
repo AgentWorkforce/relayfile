@@ -7355,6 +7355,10 @@ func (s *Syncer) readBootstrapFilesEach(ctx context.Context, jobs []bootstrapRea
 	if len(jobs) == 0 {
 		return nil
 	}
+	// Keep the watchdog progress hook on both bulk and compatibility paths.
+	// Once a server has returned 501, future cycles dispatch directly to the
+	// individual reader and must still refresh liveness while a body streams.
+	ctx = withResponseProgress(ctx, prog.touch)
 	if client, ok := s.client.(bulkReadClient); ok && !s.bulkReadUnsupported.Load() {
 		return s.readBootstrapFilesBulkEach(ctx, client, jobs, prog, handle)
 	}
