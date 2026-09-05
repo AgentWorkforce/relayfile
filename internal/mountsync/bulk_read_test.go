@@ -221,6 +221,7 @@ func TestBootstrapBulkReadOversizedPointReadsAreAppliedIncrementally(t *testing.
 		pointReadDelay: 5 * time.Millisecond,
 	}
 	var applied []string
+	var pointReadsAtCallback []int
 	err := (&Syncer{workspace: "ws", client: client}).readBootstrapFilesEach(context.Background(), []bootstrapReadJob{
 		{Index: 0, RemotePath: "/large-a", Size: defaultBulkReadMaxBytes + 1},
 		{Index: 1, RemotePath: "/large-b", Size: defaultBulkReadMaxBytes + 1},
@@ -229,13 +230,16 @@ func TestBootstrapBulkReadOversizedPointReadsAreAppliedIncrementally(t *testing.
 			return result.Err
 		}
 		applied = append(applied, result.RemotePath)
+		client.mu.Lock()
+		pointReadsAtCallback = append(pointReadsAtCallback, client.pointReadCalls)
+		client.mu.Unlock()
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("incremental read = %v", err)
 	}
-	if len(applied) != 2 || client.maxPointReads != 1 {
-		t.Fatalf("applied=%v max concurrent point reads=%d, want 2 and 1", applied, client.maxPointReads)
+	if len(applied) != 2 || len(pointReadsAtCallback) != 2 || pointReadsAtCallback[0] != 1 || client.maxPointReads != 1 {
+		t.Fatalf("applied=%v point reads at callback=%v max concurrent point reads=%d, want 2, [1 2], and 1", applied, pointReadsAtCallback, client.maxPointReads)
 	}
 }
 
