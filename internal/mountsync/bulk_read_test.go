@@ -17,6 +17,7 @@ type bulkReadTestClient struct {
 	files            map[string]RemoteFile
 	bulkCalls        [][]string
 	bulkErr          error
+	pointErrs        map[string]error
 	pointReadCalls   int
 	activePointReads int
 	maxPointReads    int
@@ -66,6 +67,9 @@ func (c *bulkReadTestClient) ReadFile(_ context.Context, _ string, path string) 
 	c.mu.Unlock()
 	if !ok {
 		return RemoteFile{}, &HTTPError{StatusCode: http.StatusNotFound, Code: "not_found", Message: "not found"}
+	}
+	if err := c.pointErrs[path]; err != nil {
+		return RemoteFile{}, err
 	}
 	return file, nil
 }
@@ -202,6 +206,35 @@ func TestBootstrapBulkReadOversizedPointReadsAreAppliedIncrementally(t *testing.
 	}
 	if len(applied) != 2 || client.maxPointReads != 1 {
 		t.Fatalf("applied=%v max concurrent point reads=%d, want 2 and 1", applied, client.maxPointReads)
+	}
+}
+
+func TestBootstrapBulkReadPreservesMixedJobIndexOrder(t *testing.T) {
+	client := &bulkReadTestClient{
+		files: map[string]RemoteFile{
+			"/small": {Path: "/small", Revision: "rev_small", ContentType: "text/plain", Content: "small"},
+			"/large": {Path: "/large", Revision: "rev_large", ContentType: "application/octet-stream", Content: "large"},
+		},
+		pointErrs: map[string]error{
+			"/large": &HTTPError{StatusCode: http.StatusServiceUnavailable, Code: "unavailable", Message: "retry"},
+		},
+	}
+	var seen []string
+	err := (&Syncer{workspace: "ws", client: client}).readBootstrapFilesEach(context.Background(), []bootstrapReadJob{
+		{Index: 0, RemotePath: "/small", Size: 1},
+		{Index: 1, RemotePath: "/large", Size: defaultBulkReadMaxBytes + 1},
+	}, bootstrapProgress{}, func(result bootstrapReadResult) error {
+		seen = append(seen, result.RemotePath)
+		return result.Err
+	})
+	if err == nil {
+		t.Fatal("expected transient point-read error")
+	}
+	if got, want := fmt.Sprint(seen), "[/small /large]"; got != want {
+		t.Fatalf("callback order = %s, want %s", got, want)
+	}
+	if len(client.bulkCalls) != 1 || len(client.bulkCalls[0]) != 1 || client.bulkCalls[0][0] != "/small" {
+		t.Fatalf("bulk calls = %#v, want one call for /small before point read", client.bulkCalls)
 	}
 }
 

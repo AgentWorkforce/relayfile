@@ -7345,9 +7345,12 @@ func (s *Syncer) readBootstrapFiles(ctx context.Context, jobs []bootstrapReadJob
 	return results
 }
 
-// readBootstrapFilesEach applies each result as soon as its response is
-// available. Keeping the callback on the critical path prevents a page full
-// of oversized point-read bodies from accumulating in a single result slice.
+// readBootstrapFilesEach dispatches bulk reads and oversized point reads in
+// index order. Oversized point reads are each passed as a singleton, so their
+// response body is released before the next oversized read begins. The
+// compatibility/individual path retains its bounded read set until all reads
+// complete; callers that need incremental oversized reads stay on the bulk
+// path above.
 func (s *Syncer) readBootstrapFilesEach(ctx context.Context, jobs []bootstrapReadJob, prog bootstrapProgress, handle func(bootstrapReadResult) error) error {
 	if len(jobs) == 0 {
 		return nil
@@ -7370,89 +7373,92 @@ func (s *Syncer) readBootstrapFilesBulk(ctx context.Context, client bulkReadClie
 
 func (s *Syncer) readBootstrapFilesBulkEach(ctx context.Context, client bulkReadClient, jobs []bootstrapReadJob, prog bootstrapProgress, handle func(bootstrapReadResult) error) error {
 	ctx = withResponseProgress(ctx, prog.touch)
-	bulkJobs := make([]bootstrapReadJob, 0, len(jobs))
-	pointJobs := make([]bootstrapReadJob, 0)
-	for _, job := range jobs {
-		if job.Size > defaultBulkReadMaxBytes {
-			pointJobs = append(pointJobs, job)
-		} else {
-			bulkJobs = append(bulkJobs, job)
-		}
-	}
-	// Oversized responses are deliberately read one at a time. The caller can
-	// apply and release each body before the next one is fetched, keeping
-	// retained memory bounded even when a page contains many large files.
-	for _, pointJob := range pointJobs {
-		if err := s.readBootstrapFilesIndividuallyEach(ctx, []bootstrapReadJob{pointJob}, prog, handle); err != nil {
-			return err
-		}
-	}
-	batches := chunkBootstrapReadJobs(bulkJobs)
-	for batchIndex, batch := range batches {
-		paths := make([]string, len(batch))
-		for index, job := range batch {
-			paths[index] = job.RemotePath
-		}
-		response, err := client.ReadFilesBulk(ctx, s.workspace, paths)
-		if err != nil {
-			if isBulkReadUnsupported(err) {
-				s.bulkReadUnsupported.Store(true)
-				// Preserve point reads and successful bulk batches already
-				// completed. Only replay the current and unprocessed bulk jobs;
-				// rereading oversized point jobs can double large-file traffic.
-				remaining := make([]bootstrapReadJob, 0, len(bulkJobs))
-				remaining = append(remaining, batch...)
-				for _, later := range batches[batchIndex+1:] {
-					remaining = append(remaining, later...)
-				}
-				return s.readBootstrapFilesIndividuallyEach(ctx, remaining, prog, handle)
+	orderedJobs := append([]bootstrapReadJob(nil), jobs...)
+	sort.SliceStable(orderedJobs, func(i, j int) bool { return orderedJobs[i].Index < orderedJobs[j].Index })
+	for jobIndex := 0; jobIndex < len(orderedJobs); {
+		if orderedJobs[jobIndex].Size > defaultBulkReadMaxBytes {
+			// Read oversized responses one at a time. The caller can apply and
+			// release each body before the next one is fetched, keeping retained
+			// memory bounded even when a page contains many large files.
+			if err := s.readBootstrapFilesIndividuallyEach(ctx, orderedJobs[jobIndex:jobIndex+1], prog, handle); err != nil {
+				return err
 			}
-			for _, job := range batch {
-				if callbackErr := handle(bootstrapReadResult{Index: job.Index, RemotePath: job.RemotePath, Err: err}); callbackErr != nil {
-					return callbackErr
-				}
-			}
+			jobIndex++
 			continue
 		}
-		if len(response.Files) != len(batch) {
-			err := fmt.Errorf("bulk read returned %d files for %d paths", len(response.Files), len(batch))
-			for _, job := range batch {
-				if callbackErr := handle(bootstrapReadResult{Index: job.Index, RemotePath: job.RemotePath, Err: err}); callbackErr != nil {
-					return callbackErr
-				}
-			}
-			continue
+
+		// Keep normal files in an original-order contiguous segment. This lets
+		// mixed pages apply ordinary files before a later oversized point read,
+		// while still allowing the normal files to use bounded bulk batches.
+		segmentStart := jobIndex
+		for jobIndex < len(orderedJobs) && orderedJobs[jobIndex].Size <= defaultBulkReadMaxBytes {
+			jobIndex++
 		}
-		for index, result := range response.Files {
-			job := batch[index]
-			if result.Error != nil {
+		batches := chunkBootstrapReadJobs(orderedJobs[segmentStart:jobIndex])
+		batchOffset := 0
+		for _, batch := range batches {
+			currentOffset := batchOffset
+			batchOffset += len(batch)
+			paths := make([]string, len(batch))
+			for index, job := range batch {
+				paths[index] = job.RemotePath
+			}
+			response, err := client.ReadFilesBulk(ctx, s.workspace, paths)
+			if err != nil {
+				if isBulkReadUnsupported(err) {
+					s.bulkReadUnsupported.Store(true)
+					// Preserve successful reads already completed. Replay only the
+					// current and unprocessed jobs in original order; this avoids
+					// rereading oversized point jobs and preserves callback order.
+					return s.readBootstrapFilesIndividuallyEach(ctx, orderedJobs[segmentStart+currentOffset:], prog, handle)
+				}
+				for _, job := range batch {
+					if callbackErr := handle(bootstrapReadResult{Index: job.Index, RemotePath: job.RemotePath, Err: err}); callbackErr != nil {
+						return callbackErr
+					}
+				}
+				continue
+			}
+			if len(response.Files) != len(batch) {
+				err := fmt.Errorf("bulk read returned %d files for %d paths", len(response.Files), len(batch))
+				for _, job := range batch {
+					if callbackErr := handle(bootstrapReadResult{Index: job.Index, RemotePath: job.RemotePath, Err: err}); callbackErr != nil {
+						return callbackErr
+					}
+				}
+				continue
+			}
+			for index, result := range response.Files {
+				job := batch[index]
+				if result.Error != nil {
+					if callbackErr := handle(bootstrapReadResult{
+						Index:      job.Index,
+						RemotePath: job.RemotePath,
+						Err: &HTTPError{
+							StatusCode: result.Error.Status,
+							Code:       result.Error.Code,
+							Message:    result.Error.Message,
+						},
+					}); callbackErr != nil {
+						return callbackErr
+					}
+					continue
+				}
+				prog.touch()
 				if callbackErr := handle(bootstrapReadResult{
 					Index:      job.Index,
 					RemotePath: job.RemotePath,
-					Err: &HTTPError{
-						StatusCode: result.Error.Status,
-						Code:       result.Error.Code,
-						Message:    result.Error.Message,
+					File: RemoteFile{
+						Path:        result.Path,
+						Revision:    result.Revision,
+						ContentType: result.ContentType,
+						Content:     result.Content,
+						Encoding:    result.Encoding,
+						ContentHash: result.ContentHash,
 					},
 				}); callbackErr != nil {
 					return callbackErr
 				}
-				continue
-			}
-			prog.touch()
-			if callbackErr := handle(bootstrapReadResult{
-				Index:      job.Index,
-				RemotePath: job.RemotePath,
-				File: RemoteFile{
-					Path:        result.Path,
-					Revision:    result.Revision,
-					ContentType: result.ContentType,
-					Content:     result.Content,
-					Encoding:    result.Encoding,
-					ContentHash: result.ContentHash,
-				},
-			}); callbackErr != nil {
-				return callbackErr
 			}
 		}
 	}
@@ -7517,6 +7523,30 @@ func (s *Syncer) readBootstrapFilesIndividually(ctx context.Context, jobs []boot
 }
 
 func (s *Syncer) readBootstrapFilesIndividuallyEach(ctx context.Context, jobs []bootstrapReadJob, prog bootstrapProgress, handle func(bootstrapReadResult) error) error {
+	orderedJobs := append([]bootstrapReadJob(nil), jobs...)
+	sort.SliceStable(orderedJobs, func(i, j int) bool { return orderedJobs[i].Index < orderedJobs[j].Index })
+	for jobIndex := 0; jobIndex < len(orderedJobs); {
+		if orderedJobs[jobIndex].Size > defaultBulkReadMaxBytes {
+			if err := s.readBootstrapFilesIndividuallyBatchEach(ctx, orderedJobs[jobIndex:jobIndex+1], prog, handle); err != nil {
+				return err
+			}
+			jobIndex++
+			continue
+		}
+		segmentStart := jobIndex
+		for jobIndex < len(orderedJobs) && orderedJobs[jobIndex].Size <= defaultBulkReadMaxBytes {
+			jobIndex++
+		}
+		for _, batch := range chunkBootstrapReadJobs(orderedJobs[segmentStart:jobIndex]) {
+			if err := s.readBootstrapFilesIndividuallyBatchEach(ctx, batch, prog, handle); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Syncer) readBootstrapFilesIndividuallyBatchEach(ctx context.Context, jobs []bootstrapReadJob, prog bootstrapProgress, handle func(bootstrapReadResult) error) error {
 	workers := bootstrapReadWorkers()
 	if workers > len(jobs) {
 		workers = len(jobs)
@@ -7554,12 +7584,15 @@ func (s *Syncer) readBootstrapFilesIndividuallyEach(ctx context.Context, jobs []
 	close(resultCh)
 
 	var handleErr error
+	results := make([]bootstrapReadResult, 0, len(jobs))
 	for result := range resultCh {
-		if handleErr == nil {
-			handleErr = handle(result)
-			if handleErr != nil {
-				cancel()
-			}
+		results = append(results, result)
+	}
+	sort.SliceStable(results, func(i, j int) bool { return results[i].Index < results[j].Index })
+	for _, result := range results {
+		if handleErr = handle(result); handleErr != nil {
+			cancel()
+			break
 		}
 	}
 	return handleErr
