@@ -1388,6 +1388,28 @@ func aclTargetExists(r *http.Request) bool {
 // aclGetFile returns a function that reads ACL permissions for a given path.
 // Both Semantics and Content are read from a single ReadFile snapshot to avoid
 // TOCTOU races between the two sources.
+func permissionsFromFile(file relayfile.File) ([]byte, error) {
+	// Prefer structured semantics (authoritative source).
+	if len(file.Semantics.Permissions) > 0 {
+		return json.Marshal(file.Semantics.Permissions)
+	}
+
+	// Fall back to parsing permissions from file content
+	// (ACL markers seeded via bulk write store permissions in content as JSON).
+	if file.Content != "" {
+		var contentObj struct {
+			Semantics struct {
+				Permissions []string `json:"permissions"`
+			} `json:"semantics"`
+		}
+		if err := json.Unmarshal([]byte(file.Content), &contentObj); err == nil && len(contentObj.Semantics.Permissions) > 0 {
+			return json.Marshal(contentObj.Semantics.Permissions)
+		}
+	}
+
+	return nil, nil
+}
+
 func (s *Server) aclGetFile(workspaceID string) func(path string) ([]byte, error) {
 	return func(path string) ([]byte, error) {
 		file, err := s.store.ReadFile(workspaceID, path)
@@ -1395,25 +1417,7 @@ func (s *Server) aclGetFile(workspaceID string) func(path string) ([]byte, error
 			return nil, err
 		}
 
-		// Prefer structured semantics (authoritative source).
-		if len(file.Semantics.Permissions) > 0 {
-			return json.Marshal(file.Semantics.Permissions)
-		}
-
-		// Fall back to parsing permissions from file content
-		// (ACL markers seeded via bulk write store permissions in content as JSON)
-		if file.Content != "" {
-			var contentObj struct {
-				Semantics struct {
-					Permissions []string `json:"permissions"`
-				} `json:"semantics"`
-			}
-			if err := json.Unmarshal([]byte(file.Content), &contentObj); err == nil && len(contentObj.Semantics.Permissions) > 0 {
-				return json.Marshal(contentObj.Semantics.Permissions)
-			}
-		}
-
-		return nil, nil
+		return permissionsFromFile(file)
 	}
 }
 
@@ -1424,22 +1428,7 @@ func (s *Server) aclGetForkFile(workspaceID, forkID string) func(path string) ([
 			return nil, err
 		}
 
-		if len(file.Semantics.Permissions) > 0 {
-			return json.Marshal(file.Semantics.Permissions)
-		}
-
-		if file.Content != "" {
-			var contentObj struct {
-				Semantics struct {
-					Permissions []string `json:"permissions"`
-				} `json:"semantics"`
-			}
-			if err := json.Unmarshal([]byte(file.Content), &contentObj); err == nil && len(contentObj.Semantics.Permissions) > 0 {
-				return json.Marshal(contentObj.Semantics.Permissions)
-			}
-		}
-
-		return nil, nil
+		return permissionsFromFile(file)
 	}
 }
 
@@ -1911,20 +1900,7 @@ func resolveBulkReadPermissionsForReturnedFile(
 		if normalizeACLPath(candidate) != targetPath {
 			return aclReader(candidate)
 		}
-		if len(file.Semantics.Permissions) > 0 {
-			return json.Marshal(file.Semantics.Permissions)
-		}
-		if file.Content != "" {
-			var contentObj struct {
-				Semantics struct {
-					Permissions []string `json:"permissions"`
-				} `json:"semantics"`
-			}
-			if err := json.Unmarshal([]byte(file.Content), &contentObj); err == nil && len(contentObj.Semantics.Permissions) > 0 {
-				return json.Marshal(contentObj.Semantics.Permissions)
-			}
-		}
-		return nil, nil
+		return permissionsFromFile(file)
 	}
 	return resolveFilePermissionsWithTarget(targetReader, path, true)
 }
