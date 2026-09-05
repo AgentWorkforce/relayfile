@@ -359,6 +359,29 @@ describe('RelayfileControlPlaneClient lifecycle', () => {
     });
   });
 
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+    'defaults non-finite stale-owner discovery timeout %s safely',
+    async (timeoutMs) => {
+      const client = new RelayfileControlPlaneClient({
+        socketPath: '/nope.sock',
+        autoStart: true,
+        staleDaemonDiscoveryTimeoutMs: timeoutMs,
+      });
+      vi.spyOn(lifecycleInternals(client), 'linuxSocketOwnerPids').mockReturnValue([]);
+      const runCommand = vi.spyOn(lifecycleInternals(client), 'runCommand').mockResolvedValue({
+        stdout: '',
+        stderr: '',
+        code: null,
+        timedOut: true,
+      });
+
+      await expect(lifecycleInternals(client).socketOwnerPids()).rejects.toMatchObject({
+        code: 'STALE_DAEMON_DISCOVERY_FAILED',
+      });
+      expect(runCommand).toHaveBeenCalledWith('lsof', ['-t', '--', '/nope.sock'], 5000);
+    }
+  );
+
   it('waits for both the stale socket and owner PID to be released', async () => {
     const root = mkdtempSync(join(tmpdir(), 'relayfile-stop-stale-'));
     const socketPath = join(root, 'relayfile.sock');

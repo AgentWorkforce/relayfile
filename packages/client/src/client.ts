@@ -210,13 +210,18 @@ export class RelayfileControlPlaneClient {
     this.autoStart = options.autoStart ?? process.env.RELAYFILE_REQUIRE_DAEMON !== '1';
     this.startTimeoutMs = options.startTimeoutMs ?? 5000;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 10000;
-    this.staleDaemonDiscoveryTimeoutMs = Math.min(
-      MAX_STALE_DAEMON_DISCOVERY_TIMEOUT_MS,
-      Math.max(
-        DEFAULT_STALE_DAEMON_DISCOVERY_TIMEOUT_MS,
-        options.staleDaemonDiscoveryTimeoutMs ?? DEFAULT_STALE_DAEMON_DISCOVERY_TIMEOUT_MS
-      )
-    );
+    const requestedStaleDaemonDiscoveryTimeoutMs = options.staleDaemonDiscoveryTimeoutMs;
+    this.staleDaemonDiscoveryTimeoutMs = Number.isFinite(
+      requestedStaleDaemonDiscoveryTimeoutMs
+    )
+      ? Math.min(
+          MAX_STALE_DAEMON_DISCOVERY_TIMEOUT_MS,
+          Math.max(
+            DEFAULT_STALE_DAEMON_DISCOVERY_TIMEOUT_MS,
+            requestedStaleDaemonDiscoveryTimeoutMs!
+          )
+        )
+      : DEFAULT_STALE_DAEMON_DISCOVERY_TIMEOUT_MS;
   }
 
   private createHTTPRequest(
