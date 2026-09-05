@@ -7321,6 +7321,7 @@ func (s *Syncer) readBootstrapFiles(ctx context.Context, jobs []bootstrapReadJob
 }
 
 func (s *Syncer) readBootstrapFilesBulk(ctx context.Context, client bulkReadClient, jobs []bootstrapReadJob, prog bootstrapProgress) []bootstrapReadResult {
+	ctx = withResponseProgress(ctx, prog.touch)
 	bulkJobs := make([]bootstrapReadJob, 0, len(jobs))
 	pointJobs := make([]bootstrapReadJob, 0)
 	for _, job := range jobs {
@@ -7335,7 +7336,6 @@ func (s *Syncer) readBootstrapFilesBulk(ctx context.Context, client bulkReadClie
 		results = append(results, s.readBootstrapFilesIndividually(ctx, pointJobs, prog)...)
 	}
 	batches := chunkBootstrapReadJobs(bulkJobs)
-	ctx = withResponseProgress(ctx, prog.touch)
 	for batchIndex, batch := range batches {
 		paths := make([]string, len(batch))
 		for index, job := range batch {
