@@ -1765,6 +1765,29 @@ func TestBulkReadInheritedACLDoesNotProbeDeniedPaths(t *testing.T) {
 	}
 }
 
+func TestBulkReadRevalidatesTargetACLFromReturnedRevision(t *testing.T) {
+	returned := relayfile.File{
+		Path:     "/private/file.txt",
+		Revision: "rev-before-tightening",
+		Semantics: relayfile.FileSemantics{
+			Permissions: []string{"public"},
+		},
+	}
+	// Simulate the ACL store changing after the file snapshot was read. The
+	// target reader must use permissions from that returned revision, while the
+	// ancestor reader remains fresh.
+	freshACLReader := func(path string) ([]byte, error) {
+		if normalizeRoutePath(path) == returned.Path {
+			return json.Marshal([]string{"scope:finance"})
+		}
+		return nil, nil
+	}
+	permissions := resolveBulkReadPermissionsForReturnedFile(freshACLReader, returned.Path, returned)
+	if len(permissions) != 1 || permissions[0] != "public" {
+		t.Fatalf("target permissions = %#v, want returned-revision public grant", permissions)
+	}
+}
+
 func TestBulkWriteEndpoint(t *testing.T) {
 	server := NewServer(relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true}))
 	token := mustTestJWT(t, "dev-secret", "ws_bulk_endpoint", "Worker1", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))

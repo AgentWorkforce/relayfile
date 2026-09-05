@@ -1865,7 +1865,7 @@ func (s *Server) handleBulkRead(w http.ResponseWriter, r *http.Request, workspac
 		// lookup are separate store operations. Revalidate against a fresh ACL
 		// snapshot before returning content so a concurrent target permission
 		// tightening cannot authorize the old snapshot and expose the new file.
-		freshPermissions := resolveFilePermissionsWithTarget(aclReader, path, true)
+		freshPermissions := resolveBulkReadPermissionsForReturnedFile(aclReader, path, file)
 		if !filePermissionAllows(freshPermissions, workspaceID, &claims) {
 			results = append(results, bulkReadError(path, http.StatusForbidden, "forbidden", "file access denied by permission policy"))
 			continue
@@ -1895,6 +1895,38 @@ func (s *Server) handleBulkRead(w http.ResponseWriter, r *http.Request, workspac
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(payload)
+}
+
+// resolveBulkReadPermissionsForReturnedFile uses the exact file snapshot that
+// ReadFile returned for target-level permissions, while resolving ancestors
+// from a fresh store read. This prevents a target ACL update from being mixed
+// with content from a different file revision during a bulk read.
+func resolveBulkReadPermissionsForReturnedFile(
+	aclReader func(path string) ([]byte, error),
+	path string,
+	file relayfile.File,
+) []string {
+	targetPath := normalizeRoutePath(path)
+	targetReader := func(candidate string) ([]byte, error) {
+		if normalizeRoutePath(candidate) != targetPath {
+			return aclReader(candidate)
+		}
+		if len(file.Semantics.Permissions) > 0 {
+			return json.Marshal(file.Semantics.Permissions)
+		}
+		if file.Content != "" {
+			var contentObj struct {
+				Semantics struct {
+					Permissions []string `json:"permissions"`
+				} `json:"semantics"`
+			}
+			if err := json.Unmarshal([]byte(file.Content), &contentObj); err == nil && len(contentObj.Semantics.Permissions) > 0 {
+				return json.Marshal(contentObj.Semantics.Permissions)
+			}
+		}
+		return nil, nil
+	}
+	return resolveFilePermissionsWithTarget(targetReader, path, true)
 }
 
 func (s *Server) handleBulkWrite(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
