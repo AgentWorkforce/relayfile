@@ -302,6 +302,23 @@ func TestBootstrapBulkReadRejectsCustomClientResultCountMismatch(t *testing.T) {
 	}
 }
 
+func TestBootstrapBulkReadRejectsCustomClientMalformedResult(t *testing.T) {
+	client := &bulkReadMalformedClient{}
+	syncer := &Syncer{workspace: "ws", client: client}
+	results := syncer.readBootstrapFiles(context.Background(), []bootstrapReadJob{{Index: 0, RemotePath: "/a", Size: 1}}, bootstrapProgress{})
+	if len(results) != 1 || results[0].Err == nil {
+		t.Fatalf("malformed results = %#v, want one error", results)
+	}
+}
+
+type bulkReadMalformedClient struct{ bulkReadTestClient }
+
+func (c *bulkReadMalformedClient) ReadFilesBulk(context.Context, string, []string) (BulkReadResponse, error) {
+	return BulkReadResponse{Files: []BulkReadFileResult{{
+		Path: "/wrong", Revision: "rev", ContentType: "text/plain", Content: "a",
+	}}}, nil
+}
+
 type bulkReadCountMismatchClient struct {
 	*bulkReadTestClient
 	count int
