@@ -79,6 +79,50 @@ func TestHTTPClientBulkReadUsesBoundedEndpointAndPreservesOrder(t *testing.T) {
 	}
 }
 
+func TestHTTPClientBulkReadRejectsEscapedRequestOver64KiB(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("request should be rejected before transport")
+	}))
+	defer server.Close()
+	paths := make([]string, 32)
+	for i := range paths {
+		paths[i] = "/" + strings.Repeat("<", 500) + strings.Repeat("a", 499) + fmt.Sprintf("%d", i)
+	}
+	client := NewHTTPClient(server.URL, "token", server.Client())
+	if _, err := client.ReadFilesBulk(context.Background(), "ws_mount", paths); err == nil {
+		t.Fatal("expected marshaled request size rejection")
+	}
+}
+
+func TestHTTPClientBulkReadRejectsMissingRequiredFields(t *testing.T) {
+	for _, body := range []string{
+		`{"files":[{"path":"/a","revision":"rev_1","contentType":"text/plain"}]}`,
+		`{"files":[{"path":"/a","revision":"rev_1","content":"a"}]}`,
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(body))
+		}))
+		client := NewHTTPClient(server.URL, "token", server.Client())
+		if _, err := client.ReadFilesBulk(context.Background(), "ws_mount", []string{"/a"}); err == nil {
+			t.Fatalf("expected missing field rejection for %s", body)
+		}
+		server.Close()
+	}
+}
+
+func TestHTTPClientBulkReadAcceptsExplicitEmptyContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"files":[{"path":"/a","revision":"rev_1","contentType":"","content":""}]}`))
+	}))
+	defer server.Close()
+	client := NewHTTPClient(server.URL, "token", server.Client())
+	if _, err := client.ReadFilesBulk(context.Background(), "ws_mount", []string{"/a"}); err != nil {
+		t.Fatalf("explicit empty fields should be valid: %v", err)
+	}
+}
+
 func TestHTTPClientBulkReadRejectsMoreThan32PathsLocally(t *testing.T) {
 	paths := make([]string, defaultBulkReadMaxFiles+1)
 	for index := range paths {

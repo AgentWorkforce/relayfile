@@ -230,6 +230,8 @@ paths:
       description: |
         Reads between 1 and 32 unique file paths in request order. Each path is
         independently permission-checked and may return a typed per-file error.
+        Each path is limited to 4096 UTF-8 bytes and the aggregate path set to
+        32 KiB. The marshaled JSON request body is limited to 64 KiB.
         The server rejects requests whose decoded successful content exceeds
         32 MiB or whose encoded JSON response exceeds 64 MiB. Clients may fall
         back to point reads only when a server explicitly returns
@@ -243,6 +245,7 @@ paths:
         - $ref: '#/components/parameters/ForkId'
       requestBody:
         required: true
+        description: The marshaled JSON request body must not exceed 64 KiB.
         content:
           application/json:
             schema:
@@ -2893,6 +2896,7 @@ components:
       properties:
         paths:
           type: array
+          description: Unique file paths. Each path is at most 4096 UTF-8 bytes and the aggregate UTF-8 path bytes are at most 32 KiB.
           minItems: 1
           maxItems: 32
           uniqueItems: true

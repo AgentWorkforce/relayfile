@@ -183,6 +183,7 @@ const (
 	defaultBulkReadMaxWireBytes     int64 = 64 << 20
 	defaultBulkReadMaxPathBytes           = 4096
 	defaultBulkReadMaxPathsBytes          = 32 << 10
+	defaultBulkReadMaxRequestBytes  int64 = 64 << 10
 	defaultIncrementalReadWorkers         = 16
 	defaultReceiptSettlementWorkers       = 16
 	// fullTreeTraversalDepth bounds each tree request so the client can see and
@@ -436,13 +437,33 @@ type BulkReadFileError struct {
 }
 
 type BulkReadFileResult struct {
-	Path        string             `json:"path"`
-	Revision    string             `json:"revision,omitempty"`
-	ContentType string             `json:"contentType,omitempty"`
-	Content     string             `json:"content,omitempty"`
-	Encoding    string             `json:"encoding,omitempty"`
-	ContentHash string             `json:"contentHash,omitempty"`
-	Error       *BulkReadFileError `json:"error,omitempty"`
+	Path               string             `json:"path"`
+	Revision           string             `json:"revision,omitempty"`
+	ContentType        string             `json:"contentType,omitempty"`
+	Content            string             `json:"content,omitempty"`
+	Encoding           string             `json:"encoding,omitempty"`
+	ContentHash        string             `json:"contentHash,omitempty"`
+	Error              *BulkReadFileError `json:"error,omitempty"`
+	contentPresent     bool
+	contentTypePresent bool
+}
+
+// UnmarshalJSON tracks presence separately from value so an explicitly empty
+// content/contentType is valid while an omitted field is rejected.
+func (r *BulkReadFileResult) UnmarshalJSON(data []byte) error {
+	type wireResult BulkReadFileResult
+	var decoded wireResult
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	*r = BulkReadFileResult(decoded)
+	_, r.contentPresent = fields["content"]
+	_, r.contentTypePresent = fields["contentType"]
+	return nil
 }
 
 type BulkReadResponse struct {
@@ -796,8 +817,15 @@ func (c *HTTPClient) ReadFilesBulk(ctx context.Context, workspaceID string, path
 	body := struct {
 		Paths []string `json:"paths"`
 	}{Paths: normalized}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return BulkReadResponse{}, err
+	}
+	if int64(len(bodyBytes)) > defaultBulkReadMaxRequestBytes {
+		return BulkReadResponse{}, fmt.Errorf("bulk read request exceeds %d bytes", defaultBulkReadMaxRequestBytes)
+	}
 	var out BulkReadResponse
-	err := c.doJSONWithLimit(
+	err = c.doJSONWithLimit(
 		ctx,
 		http.MethodPost,
 		fmt.Sprintf("/v1/workspaces/%s/fs/bulk-read", url.PathEscape(workspaceID)),
@@ -838,6 +866,12 @@ func validateBulkReadResponse(paths []string, response BulkReadResponse) error {
 		encoding := strings.ToLower(strings.TrimSpace(result.Encoding))
 		if encoding != "" && encoding != "utf-8" && encoding != "base64" {
 			return fmt.Errorf("bulk read result for %s has unsupported encoding %q", expected, result.Encoding)
+		}
+		if !result.contentPresent && result.Content == "" {
+			return fmt.Errorf("bulk read result for %s is missing content", expected)
+		}
+		if !result.contentTypePresent && result.ContentType == "" {
+			return fmt.Errorf("bulk read result for %s is missing contentType", expected)
 		}
 		size, err := decodedRemoteContentSize(result.Content, result.Encoding)
 		if err != nil {
@@ -1100,6 +1134,46 @@ func (c *HTTPClient) doJSON(
 	return c.doJSONWithLimit(ctx, method, requestPath, headers, body, out, 64<<20, false)
 }
 
+type responseProgressKey struct{}
+
+func withResponseProgress(ctx context.Context, touch func()) context.Context {
+	if touch == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, responseProgressKey{}, touch)
+}
+
+func responseProgress(ctx context.Context) func() {
+	touch, _ := ctx.Value(responseProgressKey{}).(func())
+	return touch
+}
+
+func readResponseBody(body io.Reader, limit int64, touch func()) ([]byte, error) {
+	if limit <= 0 {
+		limit = 64 << 20
+	}
+	result := bytes.NewBuffer(nil)
+	buffer := make([]byte, 32*1024)
+	for {
+		count, err := body.Read(buffer)
+		if count > 0 {
+			_, _ = result.Write(buffer[:count])
+			if touch != nil {
+				touch()
+			}
+			if int64(result.Len()) >= limit {
+				return result.Bytes(), nil
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
+				return result.Bytes(), nil
+			}
+			return result.Bytes(), err
+		}
+	}
+}
+
 func (c *HTTPClient) doJSONWithLimit(
 	ctx context.Context,
 	method, requestPath string,
@@ -1150,7 +1224,7 @@ func (c *HTTPClient) doJSONWithLimit(
 		if maxResponseSize <= 0 {
 			maxResponseSize = 64 << 20
 		}
-		payloadBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize+1))
+		payloadBytes, readErr := readResponseBody(resp.Body, maxResponseSize+1, responseProgress(ctx))
 		_ = resp.Body.Close()
 		if readErr != nil {
 			// Read-only bulk requests may be replayed after a peer or intermediary
@@ -7247,8 +7321,21 @@ func (s *Syncer) readBootstrapFiles(ctx context.Context, jobs []bootstrapReadJob
 }
 
 func (s *Syncer) readBootstrapFilesBulk(ctx context.Context, client bulkReadClient, jobs []bootstrapReadJob, prog bootstrapProgress) []bootstrapReadResult {
-	batches := chunkBootstrapReadJobs(jobs)
+	bulkJobs := make([]bootstrapReadJob, 0, len(jobs))
+	pointJobs := make([]bootstrapReadJob, 0)
+	for _, job := range jobs {
+		if job.Size > defaultBulkReadMaxBytes {
+			pointJobs = append(pointJobs, job)
+		} else {
+			bulkJobs = append(bulkJobs, job)
+		}
+	}
 	results := make([]bootstrapReadResult, 0, len(jobs))
+	if len(pointJobs) > 0 {
+		results = append(results, s.readBootstrapFilesIndividually(ctx, pointJobs, prog)...)
+	}
+	batches := chunkBootstrapReadJobs(bulkJobs)
+	ctx = withResponseProgress(ctx, prog.touch)
 	for _, batch := range batches {
 		paths := make([]string, len(batch))
 		for index, job := range batch {
@@ -7260,6 +7347,13 @@ func (s *Syncer) readBootstrapFilesBulk(ctx context.Context, client bulkReadClie
 				s.bulkReadUnsupported.Store(true)
 				return s.readBootstrapFilesIndividually(ctx, jobs, prog)
 			}
+			for _, job := range batch {
+				results = append(results, bootstrapReadResult{Index: job.Index, RemotePath: job.RemotePath, Err: err})
+			}
+			continue
+		}
+		if len(response.Files) != len(batch) {
+			err := fmt.Errorf("bulk read returned %d files for %d paths", len(response.Files), len(batch))
 			for _, job := range batch {
 				results = append(results, bootstrapReadResult{Index: job.Index, RemotePath: job.RemotePath, Err: err})
 			}
@@ -7307,7 +7401,8 @@ func chunkBootstrapReadJobs(jobs []bootstrapReadJob) [][]bootstrapReadJob {
 		if size < 0 {
 			size = 0
 		}
-		if len(current) > 0 && (len(current) >= defaultBulkReadMaxFiles || size > defaultBulkReadMaxBytes-declaredBytes) {
+		requestSize := bulkReadRequestSize(current, job.RemotePath)
+		if len(current) > 0 && (len(current) >= defaultBulkReadMaxFiles || size > defaultBulkReadMaxBytes-declaredBytes || requestSize > defaultBulkReadMaxRequestBytes) {
 			batches = append(batches, current)
 			current = make([]bootstrapReadJob, 0, defaultBulkReadMaxFiles)
 			declaredBytes = 0
@@ -7319,6 +7414,22 @@ func chunkBootstrapReadJobs(jobs []bootstrapReadJob) [][]bootstrapReadJob {
 		batches = append(batches, current)
 	}
 	return batches
+}
+
+func bulkReadRequestSize(paths []bootstrapReadJob, nextPath string) int64 {
+	allPaths := make([]string, 0, len(paths)+1)
+	for _, job := range paths {
+		allPaths = append(allPaths, normalizeRemotePath(job.RemotePath))
+	}
+	allPaths = append(allPaths, normalizeRemotePath(nextPath))
+	body := struct {
+		Paths []string `json:"paths"`
+	}{Paths: allPaths}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return defaultBulkReadMaxRequestBytes + 1
+	}
+	return int64(len(data))
 }
 
 func isBulkReadUnsupported(err error) bool {

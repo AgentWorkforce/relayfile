@@ -127,6 +127,52 @@ func TestBootstrapBulkReadFallbackRequiresExplicitUnsupported(t *testing.T) {
 	})
 }
 
+func TestBootstrapBulkReadPointReadsDeclaredOversizedFiles(t *testing.T) {
+	path := "/large.bin"
+	client := &bulkReadTestClient{files: map[string]RemoteFile{
+		path: {Path: path, Revision: "rev_large", ContentType: "application/octet-stream", Content: "x"},
+	}}
+	syncer := &Syncer{workspace: "ws", client: client}
+	results := syncer.readBootstrapFiles(context.Background(), []bootstrapReadJob{{
+		Index: 0, RemotePath: path, Size: defaultBulkReadMaxBytes + 1,
+	}}, bootstrapProgress{})
+	if len(results) != 1 || results[0].Err != nil || results[0].File.Content != "x" {
+		t.Fatalf("oversized point-read results = %#v", results)
+	}
+	if len(client.bulkCalls) != 0 || client.pointReadCalls != 1 {
+		t.Fatalf("bulk calls = %d, point reads = %d; want 0, 1", len(client.bulkCalls), client.pointReadCalls)
+	}
+}
+
+func TestBootstrapBulkReadRejectsCustomClientResultCountMismatch(t *testing.T) {
+	for _, count := range []int{0, 2} {
+		t.Run(fmt.Sprintf("count_%d", count), func(t *testing.T) {
+			client := &bulkReadTestClient{files: map[string]RemoteFile{}}
+			client.bulkErr = nil
+			// Override through a wrapper that returns the requested mismatch.
+			mismatch := &bulkReadCountMismatchClient{bulkReadTestClient: client, count: count}
+			syncer := &Syncer{workspace: "ws", client: mismatch}
+			results := syncer.readBootstrapFiles(context.Background(), []bootstrapReadJob{{Index: 0, RemotePath: "/a", Size: 1}}, bootstrapProgress{})
+			if len(results) != 1 || results[0].Err == nil {
+				t.Fatalf("mismatch results = %#v, want one error", results)
+			}
+		})
+	}
+}
+
+type bulkReadCountMismatchClient struct {
+	*bulkReadTestClient
+	count int
+}
+
+func (c *bulkReadCountMismatchClient) ReadFilesBulk(context.Context, string, []string) (BulkReadResponse, error) {
+	files := make([]BulkReadFileResult, c.count)
+	for i := range files {
+		files[i] = BulkReadFileResult{Path: "/a", Revision: "rev", ContentType: "text/plain", Content: "a"}
+	}
+	return BulkReadResponse{Files: files}, nil
+}
+
 func TestValidateBulkReadResponseRejectsAggregateDecodedOverflow(t *testing.T) {
 	content := make([]byte, defaultBulkReadMaxBytes+1)
 	err := validateBulkReadResponse([]string{"/large"}, BulkReadResponse{Files: []BulkReadFileResult{{

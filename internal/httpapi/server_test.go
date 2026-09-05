@@ -1734,6 +1734,37 @@ func TestBulkReadEndpointRejectsMoreThan32Paths(t *testing.T) {
 	}
 }
 
+func TestBulkReadInheritedACLDoesNotProbeDeniedPaths(t *testing.T) {
+	server := NewServer(relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true}))
+	owner := mustTestJWT(t, "dev-secret", "ws_bulk_acl", "Owner", []string{"fs:read", "fs:write", "finance"}, time.Now().Add(time.Hour))
+	limited := mustTestJWT(t, "dev-secret", "ws_bulk_acl", "Limited", []string{"fs:read"}, time.Now().Add(time.Hour))
+	for _, item := range []struct {
+		path string
+		body map[string]any
+	}{
+		{path: "/private/.relayfile.acl", body: map[string]any{"contentType": "text/plain", "content": "acl", "semantics": map[string]any{"permissions": []string{"scope:finance"}}}},
+		{path: "/private/exists.txt", body: map[string]any{"contentType": "text/plain", "content": "secret"}},
+	} {
+		resp := doRequest(t, server, request{method: http.MethodPut, path: "/v1/workspaces/ws_bulk_acl/fs/file?path=" + url.QueryEscape(item.path), headers: map[string]string{"Authorization": "Bearer " + owner, "X-Correlation-Id": "corr_bulk_acl_seed", "If-Match": "0"}, body: item.body})
+		if resp.Code != http.StatusAccepted {
+			t.Fatalf("seed %s status = %d (%s)", item.path, resp.Code, resp.Body.String())
+		}
+	}
+	resp := doRequest(t, server, request{method: http.MethodPost, path: "/v1/workspaces/ws_bulk_acl/fs/bulk-read", headers: map[string]string{"Authorization": "Bearer " + limited, "X-Correlation-Id": "corr_bulk_acl_read"}, body: map[string]any{"paths": []string{"/private/exists.txt", "/private/missing.txt"}}})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("bulk-read status = %d (%s)", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Files []bulkReadFileResult `json:"files"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode bulk-read response: %v", err)
+	}
+	if len(payload.Files) != 2 || payload.Files[0].Error == nil || payload.Files[1].Error == nil || payload.Files[0].Error.Status != http.StatusForbidden || payload.Files[1].Error.Status != http.StatusForbidden {
+		t.Fatalf("denied existing/missing results = %#v", payload.Files)
+	}
+}
+
 func TestBulkWriteEndpoint(t *testing.T) {
 	server := NewServer(relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true}))
 	token := mustTestJWT(t, "dev-secret", "ws_bulk_endpoint", "Worker1", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
