@@ -173,8 +173,18 @@ const (
 	defaultCursorResolutionAttempts   = 3
 	defaultCursorRetryBaseDelay       = 250 * time.Millisecond
 	defaultBootstrapReadWorkers       = 16
-	defaultIncrementalReadWorkers     = 16
-	defaultReceiptSettlementWorkers   = 16
+	// Bulk bootstrap reads deliberately match the tree checkpoint size. One
+	// request therefore replaces at most 32 point reads without creating a new
+	// unbounded response surface. The decoded aggregate stays below 32 MiB and
+	// the JSON envelope is capped separately because base64 and JSON escaping
+	// can make the wire body larger than the decoded files.
+	defaultBulkReadMaxFiles               = 32
+	defaultBulkReadMaxBytes         int64 = 32 << 20
+	defaultBulkReadMaxWireBytes     int64 = 64 << 20
+	defaultBulkReadMaxPathBytes           = 4096
+	defaultBulkReadMaxPathsBytes          = 32 << 10
+	defaultIncrementalReadWorkers         = 16
+	defaultReceiptSettlementWorkers       = 16
 	// fullTreeTraversalDepth bounds each tree request so the client can see and
 	// prune a reserved .relay directory before the server reaches deep
 	// outbox/acked/mountcmd_* leaves. Depth 3 also covers the common Slack
@@ -419,6 +429,26 @@ type RemoteFile struct {
 	ContentHash string `json:"contentHash,omitempty"`
 }
 
+type BulkReadFileError struct {
+	Status  int    `json:"status"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type BulkReadFileResult struct {
+	Path        string             `json:"path"`
+	Revision    string             `json:"revision,omitempty"`
+	ContentType string             `json:"contentType,omitempty"`
+	Content     string             `json:"content,omitempty"`
+	Encoding    string             `json:"encoding,omitempty"`
+	ContentHash string             `json:"contentHash,omitempty"`
+	Error       *BulkReadFileError `json:"error,omitempty"`
+}
+
+type BulkReadResponse struct {
+	Files []BulkReadFileResult `json:"files"`
+}
+
 type WriteResult struct {
 	OpID           string `json:"opId,omitempty"`
 	Status         string `json:"status,omitempty"`
@@ -453,6 +483,15 @@ type RemoteClient interface {
 	// ("merge_conflict", "merge_ineligible", "merge_base_unavailable") for
 	// logging only — it never changes the fallback decision.
 	MergeFile(ctx context.Context, workspaceID, path, strategy, baseRevision, baseContent, content, contentType string) (MergeResult, error)
+}
+
+// bulkReadClient is optional so custom RemoteClient implementations and old
+// servers remain source-compatible. The mount only falls back to ReadFile when
+// the server explicitly answers 501 bulk_read_unsupported; ordinary 404s,
+// overloads, resets, and malformed responses stay failures and are retried by
+// the existing resumable bootstrap machinery.
+type bulkReadClient interface {
+	ReadFilesBulk(ctx context.Context, workspaceID string, paths []string) (BulkReadResponse, error)
 }
 
 type checkpointSealClient interface {
@@ -726,6 +765,106 @@ func (c *HTTPClient) ReadFile(ctx context.Context, workspaceID, path string) (Re
 	return out, err
 }
 
+func (c *HTTPClient) ReadFilesBulk(ctx context.Context, workspaceID string, paths []string) (BulkReadResponse, error) {
+	if len(paths) == 0 {
+		return BulkReadResponse{}, errors.New("bulk read requires at least one path")
+	}
+	if len(paths) > defaultBulkReadMaxFiles {
+		return BulkReadResponse{}, fmt.Errorf("bulk read has %d paths, limit is %d", len(paths), defaultBulkReadMaxFiles)
+	}
+	normalized := make([]string, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	aggregatePathBytes := 0
+	for _, filePath := range paths {
+		filePath = normalizeRemotePath(filePath)
+		if filePath == "/" {
+			return BulkReadResponse{}, errors.New("bulk read path must identify a file")
+		}
+		if len(filePath) > defaultBulkReadMaxPathBytes {
+			return BulkReadResponse{}, fmt.Errorf("bulk read path exceeds %d bytes", defaultBulkReadMaxPathBytes)
+		}
+		aggregatePathBytes += len(filePath)
+		if aggregatePathBytes > defaultBulkReadMaxPathsBytes {
+			return BulkReadResponse{}, fmt.Errorf("bulk read paths exceed %d aggregate bytes", defaultBulkReadMaxPathsBytes)
+		}
+		if _, duplicate := seen[filePath]; duplicate {
+			return BulkReadResponse{}, fmt.Errorf("bulk read path is duplicated: %s", filePath)
+		}
+		seen[filePath] = struct{}{}
+		normalized = append(normalized, filePath)
+	}
+	body := struct {
+		Paths []string `json:"paths"`
+	}{Paths: normalized}
+	var out BulkReadResponse
+	err := c.doJSONWithLimit(
+		ctx,
+		http.MethodPost,
+		fmt.Sprintf("/v1/workspaces/%s/fs/bulk-read", url.PathEscape(workspaceID)),
+		nil,
+		body,
+		&out,
+		defaultBulkReadMaxWireBytes,
+		true,
+	)
+	if err != nil {
+		return BulkReadResponse{}, err
+	}
+	if err := validateBulkReadResponse(normalized, out); err != nil {
+		return BulkReadResponse{}, err
+	}
+	return out, nil
+}
+
+func validateBulkReadResponse(paths []string, response BulkReadResponse) error {
+	if len(response.Files) != len(paths) {
+		return fmt.Errorf("bulk read returned %d files for %d paths", len(response.Files), len(paths))
+	}
+	var decodedBytes int64
+	for index, result := range response.Files {
+		expected := normalizeRemotePath(paths[index])
+		if normalizeRemotePath(result.Path) != expected {
+			return fmt.Errorf("bulk read result %d path %q does not match request path %q", index, result.Path, expected)
+		}
+		if result.Error != nil {
+			if result.Error.Status < 400 || result.Error.Status > 599 || strings.TrimSpace(result.Error.Code) == "" {
+				return fmt.Errorf("bulk read result for %s has an invalid per-file error", expected)
+			}
+			continue
+		}
+		if strings.TrimSpace(result.Revision) == "" {
+			return fmt.Errorf("bulk read result for %s is missing revision", expected)
+		}
+		encoding := strings.ToLower(strings.TrimSpace(result.Encoding))
+		if encoding != "" && encoding != "utf-8" && encoding != "base64" {
+			return fmt.Errorf("bulk read result for %s has unsupported encoding %q", expected, result.Encoding)
+		}
+		size, err := decodedRemoteContentSize(result.Content, result.Encoding)
+		if err != nil {
+			return fmt.Errorf("bulk read result for %s: %w", expected, err)
+		}
+		if size > defaultBulkReadMaxBytes-decodedBytes {
+			return fmt.Errorf("bulk read decoded content exceeds %d bytes", defaultBulkReadMaxBytes)
+		}
+		decodedBytes += size
+	}
+	return nil
+}
+
+func decodedRemoteContentSize(content, encoding string) (int64, error) {
+	if normalizeEncoding(encoding) != "base64" {
+		return int64(len(content)), nil
+	}
+	decoded, err := base64.StdEncoding.DecodeString(content)
+	if err != nil {
+		decoded, err = base64.RawStdEncoding.DecodeString(content)
+	}
+	if err != nil {
+		return 0, errors.New("invalid base64 content")
+	}
+	return int64(len(decoded)), nil
+}
+
 func (c *HTTPClient) WriteFile(ctx context.Context, workspaceID, path, baseRevision, contentType, content string) (WriteResult, error) {
 	return c.writeFile(ctx, workspaceID, path, baseRevision, contentType, content, "")
 }
@@ -958,6 +1097,18 @@ func (c *HTTPClient) doJSON(
 	body any,
 	out any,
 ) error {
+	return c.doJSONWithLimit(ctx, method, requestPath, headers, body, out, 64<<20, false)
+}
+
+func (c *HTTPClient) doJSONWithLimit(
+	ctx context.Context,
+	method, requestPath string,
+	headers map[string]string,
+	body any,
+	out any,
+	maxResponseSize int64,
+	retryBodyReadErrors bool,
+) error {
 	var bodyBytes []byte
 	if body != nil {
 		var err error
@@ -996,14 +1147,33 @@ func (c *HTTPClient) doJSON(
 			}
 			return err
 		}
-		// Limit response body to 64MB to prevent unbounded memory usage.
-		const maxResponseSize = 64 << 20
-		payloadBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
+		if maxResponseSize <= 0 {
+			maxResponseSize = 64 << 20
+		}
+		payloadBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize+1))
 		_ = resp.Body.Close()
 		if readErr != nil {
+			// Read-only bulk requests may be replayed after a peer or intermediary
+			// resets the connection after response headers arrive. Mutating calls
+			// intentionally do not opt in: their side effect may have committed.
+			// The existing retry budget and caller context keep recovery bounded.
+			if retryBodyReadErrors && attempt < c.maxRetries {
+				if waitErr := waitWithContext(ctx, c.retryDelay(attempt+1, "")); waitErr != nil {
+					return waitErr
+				}
+				continue
+			}
 			return readErr
 		}
+		if int64(len(payloadBytes)) > maxResponseSize {
+			return fmt.Errorf("relayfile response exceeds %d bytes", maxResponseSize)
+		}
 		c.logHTTPStatus(method, requestPath, resp.StatusCode, resp.Header.Get("Retry-After"), attempt)
+		var errPayload struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		}
+		_ = json.Unmarshal(payloadBytes, &errPayload)
 
 		if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
 			if out == nil || len(payloadBytes) == 0 {
@@ -1018,6 +1188,13 @@ func (c *HTTPClient) doJSON(
 				continue
 			}
 		}
+		if resp.StatusCode == http.StatusNotImplemented && errPayload.Code == "bulk_read_unsupported" {
+			return &HTTPError{
+				StatusCode: resp.StatusCode,
+				Code:       errPayload.Code,
+				Message:    errPayload.Message,
+			}
+		}
 
 		if (resp.StatusCode == http.StatusTooManyRequests || (resp.StatusCode >= 500 && resp.StatusCode <= 599)) && attempt < c.maxRetries {
 			if waitErr := waitWithContext(ctx, c.retryDelay(attempt+1, resp.Header.Get("Retry-After"))); waitErr != nil {
@@ -1026,11 +1203,6 @@ func (c *HTTPClient) doJSON(
 			continue
 		}
 
-		var errPayload struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		}
-		_ = json.Unmarshal(payloadBytes, &errPayload)
 		// Only a plain revision conflict (the shape WriteFile/WriteFilesBulk/
 		// DeleteFile return) collapses to the untyped ErrConflict sentinel.
 		// A differently-coded 409 (e.g. merge_conflict, merge_base_unavailable
@@ -1316,6 +1488,10 @@ type Syncer struct {
 	state                mountState
 	loaded               bool
 	bootstrapped         bool
+	// bulkReadUnsupported remembers the server's explicit compatibility
+	// response for this Syncer. Without this latch, every 32-file bootstrap
+	// checkpoint would probe the unsupported endpoint again before falling back.
+	bulkReadUnsupported atomic.Bool
 	// recoverStartupDrift is true only for this process instance's first
 	// complete pushLocal pass. Before that pass, the watcher could not have
 	// observed edits made while the daemon was stopped. In watcher mode,
@@ -6827,6 +7003,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			readJobs = append(readJobs, bootstrapReadJob{
 				Index:      len(readJobs),
 				RemotePath: remotePath,
+				Size:       entry.Size,
 			})
 		}
 		var readResults []bootstrapReadResult
@@ -7000,6 +7177,7 @@ type fullTreeTraversalMetrics struct {
 type bootstrapReadJob struct {
 	Index      int
 	RemotePath string
+	Size       int64
 }
 
 type bootstrapReadResult struct {
@@ -7062,6 +7240,95 @@ func (s *Syncer) readBootstrapFiles(ctx context.Context, jobs []bootstrapReadJob
 	if len(jobs) == 0 {
 		return nil
 	}
+	if client, ok := s.client.(bulkReadClient); ok && !s.bulkReadUnsupported.Load() {
+		return s.readBootstrapFilesBulk(ctx, client, jobs, prog)
+	}
+	return s.readBootstrapFilesIndividually(ctx, jobs, prog)
+}
+
+func (s *Syncer) readBootstrapFilesBulk(ctx context.Context, client bulkReadClient, jobs []bootstrapReadJob, prog bootstrapProgress) []bootstrapReadResult {
+	batches := chunkBootstrapReadJobs(jobs)
+	results := make([]bootstrapReadResult, 0, len(jobs))
+	for _, batch := range batches {
+		paths := make([]string, len(batch))
+		for index, job := range batch {
+			paths[index] = job.RemotePath
+		}
+		response, err := client.ReadFilesBulk(ctx, s.workspace, paths)
+		if err != nil {
+			if isBulkReadUnsupported(err) {
+				s.bulkReadUnsupported.Store(true)
+				return s.readBootstrapFilesIndividually(ctx, jobs, prog)
+			}
+			for _, job := range batch {
+				results = append(results, bootstrapReadResult{Index: job.Index, RemotePath: job.RemotePath, Err: err})
+			}
+			continue
+		}
+		for index, result := range response.Files {
+			job := batch[index]
+			if result.Error != nil {
+				results = append(results, bootstrapReadResult{
+					Index:      job.Index,
+					RemotePath: job.RemotePath,
+					Err: &HTTPError{
+						StatusCode: result.Error.Status,
+						Code:       result.Error.Code,
+						Message:    result.Error.Message,
+					},
+				})
+				continue
+			}
+			prog.touch()
+			results = append(results, bootstrapReadResult{
+				Index:      job.Index,
+				RemotePath: job.RemotePath,
+				File: RemoteFile{
+					Path:        result.Path,
+					Revision:    result.Revision,
+					ContentType: result.ContentType,
+					Content:     result.Content,
+					Encoding:    result.Encoding,
+					ContentHash: result.ContentHash,
+				},
+			})
+		}
+	}
+	sort.Slice(results, func(i, j int) bool { return results[i].Index < results[j].Index })
+	return results
+}
+
+func chunkBootstrapReadJobs(jobs []bootstrapReadJob) [][]bootstrapReadJob {
+	var batches [][]bootstrapReadJob
+	current := make([]bootstrapReadJob, 0, defaultBulkReadMaxFiles)
+	var declaredBytes int64
+	for _, job := range jobs {
+		size := job.Size
+		if size < 0 {
+			size = 0
+		}
+		if len(current) > 0 && (len(current) >= defaultBulkReadMaxFiles || size > defaultBulkReadMaxBytes-declaredBytes) {
+			batches = append(batches, current)
+			current = make([]bootstrapReadJob, 0, defaultBulkReadMaxFiles)
+			declaredBytes = 0
+		}
+		current = append(current, job)
+		declaredBytes += size
+	}
+	if len(current) > 0 {
+		batches = append(batches, current)
+	}
+	return batches
+}
+
+func isBulkReadUnsupported(err error) bool {
+	var httpErr *HTTPError
+	return errors.As(err, &httpErr) &&
+		httpErr.StatusCode == http.StatusNotImplemented &&
+		httpErr.Code == "bulk_read_unsupported"
+}
+
+func (s *Syncer) readBootstrapFilesIndividually(ctx context.Context, jobs []bootstrapReadJob, prog bootstrapProgress) []bootstrapReadResult {
 	workers := bootstrapReadWorkers()
 	if workers > len(jobs) {
 		workers = len(jobs)

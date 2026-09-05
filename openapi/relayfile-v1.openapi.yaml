@@ -222,6 +222,57 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /v1/workspaces/{workspaceId}/fs/bulk-read:
+    post:
+      tags: [Filesystem]
+      operationId: bulkReadFiles
+      summary: Read a bounded batch of files
+      description: |
+        Reads between 1 and 32 unique file paths in request order. Each path is
+        independently permission-checked and may return a typed per-file error.
+        The server rejects requests whose decoded successful content exceeds
+        32 MiB or whose encoded JSON response exceeds 64 MiB. Clients may fall
+        back to point reads only when a server explicitly returns
+        `501 bulk_read_unsupported`; overloads, transport failures, and ordinary
+        not-found responses are not compatibility signals.
+      security:
+        - BearerAuth: [fs:read]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - $ref: '#/components/parameters/ForkId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkReadRequest'
+      responses:
+        '200':
+          description: Ordered file results and per-path errors
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkReadResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '501':
+          description: Explicit compatibility signal from a server without bulk reads
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /v1/workspaces/{workspaceId}/fs/merge:
     post:
       tags: [Filesystem]
@@ -2834,6 +2885,60 @@ components:
           format: date-time
         semantics:
           $ref: '#/components/schemas/FileSemantics'
+
+    BulkReadRequest:
+      type: object
+      additionalProperties: false
+      required: [paths]
+      properties:
+        paths:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 4096
+            pattern: '^/.*'
+
+    BulkReadFileError:
+      type: object
+      additionalProperties: false
+      required: [status, code, message]
+      properties:
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        code:
+          type: string
+        message:
+          type: string
+
+    BulkReadFileResult:
+      oneOf:
+        - $ref: '#/components/schemas/FileReadResponse'
+        - type: object
+          additionalProperties: false
+          required: [path, error]
+          properties:
+            path:
+              type: string
+            error:
+              $ref: '#/components/schemas/BulkReadFileError'
+
+    BulkReadResponse:
+      type: object
+      additionalProperties: false
+      required: [files]
+      properties:
+        files:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items:
+            $ref: '#/components/schemas/BulkReadFileResult'
 
     FileWriteRequest:
       type: object
