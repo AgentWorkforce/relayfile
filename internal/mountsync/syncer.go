@@ -437,13 +437,18 @@ type BulkReadFileError struct {
 }
 
 type BulkReadFileResult struct {
-	Path               string             `json:"path"`
-	Revision           string             `json:"revision,omitempty"`
-	ContentType        string             `json:"contentType,omitempty"`
-	Content            string             `json:"content,omitempty"`
-	Encoding           string             `json:"encoding,omitempty"`
-	ContentHash        string             `json:"contentHash,omitempty"`
-	Error              *BulkReadFileError `json:"error,omitempty"`
+	Path        string             `json:"path"`
+	Revision    string             `json:"revision,omitempty"`
+	ContentType string             `json:"contentType,omitempty"`
+	Content     string             `json:"content,omitempty"`
+	Encoding    string             `json:"encoding,omitempty"`
+	ContentHash string             `json:"contentHash,omitempty"`
+	Error       *BulkReadFileError `json:"error,omitempty"`
+	// ContentPresent and ContentTypePresent let in-process bulk-read clients
+	// distinguish an explicitly empty field from an omitted field. JSON wire
+	// responses populate these automatically in UnmarshalJSON.
+	ContentPresent     bool `json:"-"`
+	ContentTypePresent bool `json:"-"`
 	contentPresent     bool
 	contentTypePresent bool
 }
@@ -466,12 +471,14 @@ func (r *BulkReadFileResult) UnmarshalJSON(data []byte) error {
 			return errors.New("bulk read content must not be null")
 		}
 		r.contentPresent = true
+		r.ContentPresent = true
 	}
 	if raw, ok := fields["contentType"]; ok {
 		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 			return errors.New("bulk read contentType must not be null")
 		}
 		r.contentTypePresent = true
+		r.ContentTypePresent = true
 	}
 	return nil
 }
@@ -877,10 +884,10 @@ func validateBulkReadResponse(paths []string, response BulkReadResponse) error {
 		if encoding != "" && encoding != "utf-8" && encoding != "base64" {
 			return fmt.Errorf("bulk read result for %s has unsupported encoding %q", expected, result.Encoding)
 		}
-		if !result.contentPresent && result.Content == "" {
+		if !result.contentPresent && !result.ContentPresent && result.Content == "" {
 			return fmt.Errorf("bulk read result for %s is missing content", expected)
 		}
-		if !result.contentTypePresent && result.ContentType == "" {
+		if !result.contentTypePresent && !result.ContentTypePresent && result.ContentType == "" {
 			return fmt.Errorf("bulk read result for %s is missing contentType", expected)
 		}
 		size, err := decodedRemoteContentSize(result.Content, result.Encoding)

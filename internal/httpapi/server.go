@@ -1861,6 +1861,15 @@ func (s *Server) handleBulkRead(w http.ResponseWriter, r *http.Request, workspac
 			}
 			continue
 		}
+		// The pre-read ACL check protects existence, but the file read and ACL
+		// lookup are separate store operations. Revalidate against a fresh ACL
+		// snapshot before returning content so a concurrent target permission
+		// tightening cannot authorize the old snapshot and expose the new file.
+		freshPermissions := resolveFilePermissionsWithTarget(aclReader, path, true)
+		if !filePermissionAllows(freshPermissions, workspaceID, &claims) {
+			results = append(results, bulkReadError(path, http.StatusForbidden, "forbidden", "file access denied by permission policy"))
+			continue
+		}
 		decoded, err := decodeExportContent(file)
 		if err != nil {
 			results = append(results, bulkReadError(path, http.StatusInternalServerError, "internal_error", "file content is invalid"))

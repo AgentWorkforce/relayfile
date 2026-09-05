@@ -311,6 +311,24 @@ func TestBootstrapBulkReadRejectsCustomClientMalformedResult(t *testing.T) {
 	}
 }
 
+func TestBootstrapBulkReadAcceptsCustomClientEmptyResult(t *testing.T) {
+	client := &bulkReadEmptyClient{}
+	syncer := &Syncer{workspace: "ws", client: client}
+	results := syncer.readBootstrapFiles(context.Background(), []bootstrapReadJob{{Index: 0, RemotePath: "/empty", Size: 0}}, bootstrapProgress{})
+	if len(results) != 1 || results[0].Err != nil || results[0].File.Content != "" {
+		t.Fatalf("empty results = %#v, want one empty file", results)
+	}
+}
+
+type bulkReadEmptyClient struct{ bulkReadTestClient }
+
+func (c *bulkReadEmptyClient) ReadFilesBulk(context.Context, string, []string) (BulkReadResponse, error) {
+	return BulkReadResponse{Files: []BulkReadFileResult{{
+		Path: "/empty", Revision: "rev", ContentType: "text/plain",
+		ContentPresent: true, ContentTypePresent: true,
+	}}}, nil
+}
+
 type bulkReadMalformedClient struct{ bulkReadTestClient }
 
 func (c *bulkReadMalformedClient) ReadFilesBulk(context.Context, string, []string) (BulkReadResponse, error) {
