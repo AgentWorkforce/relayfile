@@ -1906,9 +1906,9 @@ func resolveBulkReadPermissionsForReturnedFile(
 	path string,
 	file relayfile.File,
 ) []string {
-	targetPath := normalizeRoutePath(path)
+	targetPath := normalizeACLPath(path)
 	targetReader := func(candidate string) ([]byte, error) {
-		if normalizeRoutePath(candidate) != targetPath {
+		if normalizeACLPath(candidate) != targetPath {
 			return aclReader(candidate)
 		}
 		if len(file.Semantics.Permissions) > 0 {

@@ -1777,12 +1777,12 @@ func TestBulkReadRevalidatesTargetACLFromReturnedRevision(t *testing.T) {
 	// target reader must use permissions from that returned revision, while the
 	// ancestor reader remains fresh.
 	freshACLReader := func(path string) ([]byte, error) {
-		if normalizeRoutePath(path) == returned.Path {
+		if normalizeACLPath(path) == returned.Path {
 			return json.Marshal([]string{"scope:finance"})
 		}
 		return nil, nil
 	}
-	permissions := resolveBulkReadPermissionsForReturnedFile(freshACLReader, returned.Path, returned)
+	permissions := resolveBulkReadPermissionsForReturnedFile(freshACLReader, "/private//./file.txt", returned)
 	if len(permissions) != 1 || permissions[0] != "public" {
 		t.Fatalf("target permissions = %#v, want returned-revision public grant", permissions)
 	}
