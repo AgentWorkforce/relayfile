@@ -1841,6 +1841,14 @@ func (s *Server) handleBulkRead(w http.ResponseWriter, r *http.Request, workspac
 	results := make([]bulkReadFileResult, 0, len(paths))
 	var contentBytes int64
 	for _, path := range paths {
+		// Resolve inherited permissions before probing the requested path. This
+		// prevents an ACL-denied caller from distinguishing an existing file
+		// from a missing one through the per-file status.
+		permissions := resolveFilePermissionsWithTarget(cachedACLReader, path, true)
+		if !filePermissionAllows(permissions, workspaceID, &claims) {
+			results = append(results, bulkReadError(path, http.StatusForbidden, "forbidden", "file access denied by permission policy"))
+			continue
+		}
 		file, err := s.readFile(workspaceID, forkID, path)
 		if err != nil {
 			switch err {
@@ -1851,11 +1859,6 @@ func (s *Server) handleBulkRead(w http.ResponseWriter, r *http.Request, workspac
 			default:
 				results = append(results, bulkReadError(path, http.StatusInternalServerError, "internal_error", "file read failed"))
 			}
-			continue
-		}
-		permissions := resolveFilePermissionsWithTarget(cachedACLReader, path, true)
-		if !filePermissionAllows(permissions, workspaceID, &claims) {
-			results = append(results, bulkReadError(path, http.StatusForbidden, "forbidden", "file access denied by permission policy"))
 			continue
 		}
 		decoded, err := decodeExportContent(file)

@@ -2,20 +2,28 @@ package mountsync
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type bulkReadTestClient struct {
 	RemoteClient
 
-	mu             sync.Mutex
-	files          map[string]RemoteFile
-	bulkCalls      [][]string
-	bulkErr        error
-	pointReadCalls int
+	mu                sync.Mutex
+	files             map[string]RemoteFile
+	bulkCalls         [][]string
+	bulkErr           error
+	pointErrs         map[string]error
+	pointReadCalls    int
+	activePointReads  int
+	maxPointReads     int
+	pointProgressSeen bool
+	pointReadDelay    time.Duration
 }
 
 func (c *bulkReadTestClient) ReadFilesBulk(_ context.Context, _ string, paths []string) (BulkReadResponse, error) {
@@ -43,13 +51,31 @@ func (c *bulkReadTestClient) ReadFilesBulk(_ context.Context, _ string, paths []
 	return response, nil
 }
 
-func (c *bulkReadTestClient) ReadFile(_ context.Context, _ string, path string) (RemoteFile, error) {
+func (c *bulkReadTestClient) ReadFile(ctx context.Context, _ string, path string) (RemoteFile, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.pointReadCalls++
+	c.activePointReads++
+	if responseProgress(ctx) != nil {
+		c.pointProgressSeen = true
+	}
+	if c.activePointReads > c.maxPointReads {
+		c.maxPointReads = c.activePointReads
+	}
 	file, ok := c.files[path]
+	pointErr := c.pointErrs[path]
+	delay := c.pointReadDelay
+	c.mu.Unlock()
+	if delay > 0 {
+		time.Sleep(delay)
+	}
+	c.mu.Lock()
+	c.activePointReads--
+	c.mu.Unlock()
 	if !ok {
 		return RemoteFile{}, &HTTPError{StatusCode: http.StatusNotFound, Code: "not_found", Message: "not found"}
+	}
+	if pointErr != nil {
+		return RemoteFile{}, pointErr
 	}
 	return file, nil
 }
@@ -78,6 +104,30 @@ func TestBootstrapBulkReadBatchesAt32AndDeclaredByteLimit(t *testing.T) {
 	}
 	if client.pointReadCalls != 0 {
 		t.Fatalf("point reads = %d, want 0", client.pointReadCalls)
+	}
+}
+
+func TestChunkBootstrapReadJobsBoundsAggregatePathBytes(t *testing.T) {
+	jobs := make([]bootstrapReadJob, 0, defaultBulkReadMaxFiles)
+	for i := 0; i < defaultBulkReadMaxFiles; i++ {
+		jobs = append(jobs, bootstrapReadJob{
+			Index:      i,
+			RemotePath: fmt.Sprintf("/%s/%02d", strings.Repeat("p", 1022), i),
+			Size:       1,
+		})
+	}
+	batches := chunkBootstrapReadJobs(jobs)
+	if len(batches) < 2 {
+		t.Fatalf("got %d batch, want path-byte split", len(batches))
+	}
+	for i, batch := range batches {
+		var got int
+		for _, job := range batch {
+			got += len(normalizeRemotePath(job.RemotePath))
+		}
+		if got > defaultBulkReadMaxPathsBytes {
+			t.Fatalf("batch %d path bytes = %d, want <= %d", i, got, defaultBulkReadMaxPathsBytes)
+		}
 	}
 }
 
@@ -127,6 +177,144 @@ func TestBootstrapBulkReadFallbackRequiresExplicitUnsupported(t *testing.T) {
 	})
 }
 
+func TestBootstrapBulkReadUnsupportedDoesNotRereadOversizedPointJobs(t *testing.T) {
+	client := &bulkReadTestClient{
+		files: map[string]RemoteFile{
+			"/large": {Path: "/large", Revision: "rev_large", ContentType: "application/octet-stream", Content: "large"},
+			"/small": {Path: "/small", Revision: "rev_small", ContentType: "text/plain", Content: "small"},
+		},
+		bulkErr: &HTTPError{StatusCode: http.StatusNotImplemented, Code: "bulk_read_unsupported", Message: "unsupported"},
+	}
+	syncer := &Syncer{workspace: "ws", client: client}
+	results := syncer.readBootstrapFiles(context.Background(), []bootstrapReadJob{
+		{Index: 0, RemotePath: "/large", Size: defaultBulkReadMaxBytes + 1},
+		{Index: 1, RemotePath: "/small", Size: 1},
+	}, bootstrapProgress{})
+	if len(results) != 2 || client.pointReadCalls != 2 {
+		t.Fatalf("results=%d point reads=%d, want 2 and 2", len(results), client.pointReadCalls)
+	}
+}
+
+func TestBootstrapBulkReadPointReadsDeclaredOversizedFiles(t *testing.T) {
+	path := "/large.bin"
+	client := &bulkReadTestClient{files: map[string]RemoteFile{
+		path: {Path: path, Revision: "rev_large", ContentType: "application/octet-stream", Content: "x"},
+	}}
+	syncer := &Syncer{workspace: "ws", client: client}
+	results := syncer.readBootstrapFiles(context.Background(), []bootstrapReadJob{{
+		Index: 0, RemotePath: path, Size: defaultBulkReadMaxBytes + 1,
+	}}, bootstrapProgress{})
+	if len(results) != 1 || results[0].Err != nil || results[0].File.Content != "x" {
+		t.Fatalf("oversized point-read results = %#v", results)
+	}
+	if len(client.bulkCalls) != 0 || client.pointReadCalls != 1 {
+		t.Fatalf("bulk calls = %d, point reads = %d; want 0, 1", len(client.bulkCalls), client.pointReadCalls)
+	}
+}
+
+func TestBootstrapBulkReadOversizedPointReadsAreAppliedIncrementally(t *testing.T) {
+	client := &bulkReadTestClient{
+		files: map[string]RemoteFile{
+			"/large-a": {Path: "/large-a", Revision: "rev_a", ContentType: "application/octet-stream", Content: "a"},
+			"/large-b": {Path: "/large-b", Revision: "rev_b", ContentType: "application/octet-stream", Content: "b"},
+		},
+		pointReadDelay: 5 * time.Millisecond,
+	}
+	var applied []string
+	err := (&Syncer{workspace: "ws", client: client}).readBootstrapFilesEach(context.Background(), []bootstrapReadJob{
+		{Index: 0, RemotePath: "/large-a", Size: defaultBulkReadMaxBytes + 1},
+		{Index: 1, RemotePath: "/large-b", Size: defaultBulkReadMaxBytes + 1},
+	}, bootstrapProgress{}, func(result bootstrapReadResult) error {
+		if result.Err != nil {
+			return result.Err
+		}
+		applied = append(applied, result.RemotePath)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("incremental read = %v", err)
+	}
+	if len(applied) != 2 || client.maxPointReads != 1 {
+		t.Fatalf("applied=%v max concurrent point reads=%d, want 2 and 1", applied, client.maxPointReads)
+	}
+}
+
+func TestBootstrapBulkReadPreservesMixedJobIndexOrder(t *testing.T) {
+	client := &bulkReadTestClient{
+		files: map[string]RemoteFile{
+			"/small": {Path: "/small", Revision: "rev_small", ContentType: "text/plain", Content: "small"},
+			"/large": {Path: "/large", Revision: "rev_large", ContentType: "application/octet-stream", Content: "large"},
+		},
+		pointErrs: map[string]error{
+			"/large": &HTTPError{StatusCode: http.StatusServiceUnavailable, Code: "unavailable", Message: "retry"},
+		},
+	}
+	var seen []string
+	err := (&Syncer{workspace: "ws", client: client}).readBootstrapFilesEach(context.Background(), []bootstrapReadJob{
+		{Index: 0, RemotePath: "/small", Size: 1},
+		{Index: 1, RemotePath: "/large", Size: defaultBulkReadMaxBytes + 1},
+	}, bootstrapProgress{}, func(result bootstrapReadResult) error {
+		seen = append(seen, result.RemotePath)
+		return result.Err
+	})
+	if err == nil {
+		t.Fatal("expected transient point-read error")
+	}
+	if got, want := fmt.Sprint(seen), "[/small /large]"; got != want {
+		t.Fatalf("callback order = %s, want %s", got, want)
+	}
+	if len(client.bulkCalls) != 1 || len(client.bulkCalls[0]) != 1 || client.bulkCalls[0][0] != "/small" {
+		t.Fatalf("bulk calls = %#v, want one call for /small before point read", client.bulkCalls)
+	}
+}
+
+func TestBootstrapIndividualReadsCarryResponseProgress(t *testing.T) {
+	client := &bulkReadTestClient{files: map[string]RemoteFile{
+		"/a": {Path: "/a", Revision: "rev_a", ContentType: "text/plain", Content: "a"},
+	}}
+	syncer := &Syncer{workspace: "ws", client: client}
+	syncer.bulkReadUnsupported.Store(true)
+	results := syncer.readBootstrapFiles(context.Background(), []bootstrapReadJob{{Index: 0, RemotePath: "/a", Size: 1}}, bootstrapProgress{})
+	if len(results) != 1 || results[0].Err != nil {
+		t.Fatalf("individual read results = %#v", results)
+	}
+	client.mu.Lock()
+	progressSeen := client.pointProgressSeen
+	client.mu.Unlock()
+	if !progressSeen {
+		t.Fatal("individual read did not receive response progress hook")
+	}
+}
+
+func TestBootstrapBulkReadRejectsCustomClientResultCountMismatch(t *testing.T) {
+	for _, count := range []int{0, 2} {
+		t.Run(fmt.Sprintf("count_%d", count), func(t *testing.T) {
+			client := &bulkReadTestClient{files: map[string]RemoteFile{}}
+			client.bulkErr = nil
+			// Override through a wrapper that returns the requested mismatch.
+			mismatch := &bulkReadCountMismatchClient{bulkReadTestClient: client, count: count}
+			syncer := &Syncer{workspace: "ws", client: mismatch}
+			results := syncer.readBootstrapFiles(context.Background(), []bootstrapReadJob{{Index: 0, RemotePath: "/a", Size: 1}}, bootstrapProgress{})
+			if len(results) != 1 || results[0].Err == nil {
+				t.Fatalf("mismatch results = %#v, want one error", results)
+			}
+		})
+	}
+}
+
+type bulkReadCountMismatchClient struct {
+	*bulkReadTestClient
+	count int
+}
+
+func (c *bulkReadCountMismatchClient) ReadFilesBulk(context.Context, string, []string) (BulkReadResponse, error) {
+	files := make([]BulkReadFileResult, c.count)
+	for i := range files {
+		files[i] = BulkReadFileResult{Path: "/a", Revision: "rev", ContentType: "text/plain", Content: "a"}
+	}
+	return BulkReadResponse{Files: files}, nil
+}
+
 func TestValidateBulkReadResponseRejectsAggregateDecodedOverflow(t *testing.T) {
 	content := make([]byte, defaultBulkReadMaxBytes+1)
 	err := validateBulkReadResponse([]string{"/large"}, BulkReadResponse{Files: []BulkReadFileResult{{
@@ -157,5 +345,17 @@ func TestValidateBulkReadResponseRejectsMalformedResultVariants(t *testing.T) {
 				t.Fatal("expected malformed result rejection")
 			}
 		})
+	}
+}
+
+func TestBulkReadFileResultRejectsNullContentFields(t *testing.T) {
+	for _, payload := range []string{
+		`{"path":"/a","revision":"rev_1","content":null,"contentType":"text/plain"}`,
+		`{"path":"/a","revision":"rev_1","content":"a","contentType":null}`,
+	} {
+		var result BulkReadFileResult
+		if err := json.Unmarshal([]byte(payload), &result); err == nil {
+			t.Fatalf("payload %s was accepted", payload)
+		}
 	}
 }
