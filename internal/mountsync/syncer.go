@@ -7385,7 +7385,8 @@ func (s *Syncer) readBootstrapFilesBulk(ctx context.Context, client bulkReadClie
 func (s *Syncer) readBootstrapFilesBulkEach(ctx context.Context, client bulkReadClient, jobs []bootstrapReadJob, prog bootstrapProgress, handle func(bootstrapReadResult) error) error {
 	ctx = withResponseProgress(ctx, prog.touch)
 	var unsupported *bulkReadUnsupportedError
-	err := s.readBootstrapFilesSegmentedEach(ctx, jobs, func(batch, remaining []bootstrapReadJob) error {
+	var executeBatch func(batch, remaining []bootstrapReadJob) error
+	executeBatch = func(batch, remaining []bootstrapReadJob) error {
 		if len(batch) == 1 && batch[0].Size > defaultBulkReadMaxBytes {
 			// Bulk requests deliberately exclude oversized bodies; keep the
 			// singleton point-read path so its response can be released before
@@ -7401,6 +7402,19 @@ func (s *Syncer) readBootstrapFilesBulkEach(ctx context.Context, client bulkRead
 			if isBulkReadUnsupported(err) {
 				unsupported = &bulkReadUnsupportedError{remaining: append([]bootstrapReadJob(nil), remaining...)}
 				return unsupported
+			}
+			if isBulkReadResponseTooLarge(err) {
+				if len(batch) == 1 {
+					// A singleton can still exceed the bulk response wire budget
+					// because JSON escaping expands its body. Use the bounded point
+					// read path as the final fallback.
+					return s.readBootstrapFilesIndividuallyEach(ctx, batch, prog, handle)
+				}
+				midpoint := len(batch) / 2
+				if splitErr := executeBatch(batch[:midpoint], remaining); splitErr != nil {
+					return splitErr
+				}
+				return executeBatch(batch[midpoint:], remaining[midpoint:])
 			}
 			for _, job := range batch {
 				if callbackErr := handle(bootstrapReadResult{Index: job.Index, RemotePath: job.RemotePath, Err: err}); callbackErr != nil {
@@ -7450,7 +7464,8 @@ func (s *Syncer) readBootstrapFilesBulkEach(ctx context.Context, client bulkRead
 			}
 		}
 		return nil
-	})
+	}
+	err := s.readBootstrapFilesSegmentedEach(ctx, jobs, executeBatch)
 	if unsupported != nil && errors.Is(err, unsupported) {
 		s.bulkReadUnsupported.Store(true)
 		return s.readBootstrapFilesIndividuallyEach(ctx, unsupported.remaining, prog, handle)
@@ -7548,6 +7563,13 @@ func isBulkReadUnsupported(err error) bool {
 	return errors.As(err, &httpErr) &&
 		httpErr.StatusCode == http.StatusNotImplemented &&
 		httpErr.Code == "bulk_read_unsupported"
+}
+
+func isBulkReadResponseTooLarge(err error) bool {
+	var httpErr *HTTPError
+	return errors.As(err, &httpErr) &&
+		httpErr.StatusCode == http.StatusRequestEntityTooLarge &&
+		httpErr.Code == "bulk_read_response_too_large"
 }
 
 func (s *Syncer) readBootstrapFilesIndividually(ctx context.Context, jobs []bootstrapReadJob, prog bootstrapProgress) []bootstrapReadResult {

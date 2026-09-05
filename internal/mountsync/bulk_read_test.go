@@ -324,6 +324,33 @@ func TestBootstrapBulkReadAcceptsCustomClientEmptyResult(t *testing.T) {
 	}
 }
 
+func TestBootstrapBulkReadSplitsWireTooLargeBatches(t *testing.T) {
+	client := &bulkReadWireTooLargeClient{bulkReadTestClient: &bulkReadTestClient{files: map[string]RemoteFile{
+		"/a": {Path: "/a", Revision: "rev_a", ContentType: "text/plain", Content: "a"},
+		"/b": {Path: "/b", Revision: "rev_b", ContentType: "text/plain", Content: "b"},
+	}}}
+	syncer := &Syncer{workspace: "ws", client: client}
+	results := syncer.readBootstrapFiles(context.Background(), []bootstrapReadJob{
+		{Index: 0, RemotePath: "/a", Size: 1},
+		{Index: 1, RemotePath: "/b", Size: 1},
+	}, bootstrapProgress{})
+	if len(results) != 2 || results[0].Err != nil || results[1].Err != nil {
+		t.Fatalf("split results = %#v, want two successful files", results)
+	}
+	if client.pointReadCalls != 0 || len(client.bulkCalls) != 2 {
+		t.Fatalf("point reads = %d, bulk calls = %d; want 0, 2", client.pointReadCalls, len(client.bulkCalls))
+	}
+}
+
+type bulkReadWireTooLargeClient struct{ *bulkReadTestClient }
+
+func (c *bulkReadWireTooLargeClient) ReadFilesBulk(ctx context.Context, workspace string, paths []string) (BulkReadResponse, error) {
+	if len(paths) > 1 {
+		return BulkReadResponse{}, &HTTPError{StatusCode: http.StatusRequestEntityTooLarge, Code: "bulk_read_response_too_large", Message: "response too large"}
+	}
+	return c.bulkReadTestClient.ReadFilesBulk(ctx, workspace, paths)
+}
+
 type bulkReadEmptyClient struct{ bulkReadTestClient }
 
 func (c *bulkReadEmptyClient) ReadFilesBulk(context.Context, string, []string) (BulkReadResponse, error) {
