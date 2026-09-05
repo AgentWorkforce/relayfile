@@ -28,11 +28,31 @@ func (r *refusingStdin) Read([]byte) (int, error) {
 	return 0, errors.New("setup read stdin during a headless --skip-mount run")
 }
 
+// chdirForTest changes the working directory for the duration of a test and
+// restores it afterwards. testing.T.Chdir would be tidier, but it landed in Go
+// 1.24 and this module targets go 1.22 (see go.mod) — CI builds with that
+// toolchain, so using it fails the build there while passing on a newer local one.
+func chdirForTest(t *testing.T, dir string) {
+	t.Helper()
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("read working directory: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("change working directory: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(previous); err != nil {
+			t.Fatalf("restore working directory: %v", err)
+		}
+	})
+}
+
 func TestSetupSkipMountDoesNotPromptForLocalMountDirectory(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 	workDir := t.TempDir()
-	t.Chdir(workDir)
+	chdirForTest(t, workDir)
 
 	var requests []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -101,7 +121,7 @@ func TestSetupSkipMountDoesNotPromptForLocalMountDirectory(t *testing.T) {
 func TestSetupNamesUnboundCloudWorkspaceOnResolve(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
-	t.Chdir(t.TempDir())
+	chdirForTest(t, t.TempDir())
 
 	var requests []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
