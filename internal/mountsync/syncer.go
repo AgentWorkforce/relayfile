@@ -7479,7 +7479,8 @@ func chunkBootstrapReadJobs(jobs []bootstrapReadJob) [][]bootstrapReadJob {
 			size = 0
 		}
 		requestSize := bulkReadRequestSize(current, job.RemotePath)
-		if len(current) > 0 && (len(current) >= defaultBulkReadMaxFiles || size > defaultBulkReadMaxBytes-declaredBytes || requestSize > defaultBulkReadMaxRequestBytes) {
+		pathBytes := bulkReadPathBytes(current, job.RemotePath)
+		if len(current) > 0 && (len(current) >= defaultBulkReadMaxFiles || size > defaultBulkReadMaxBytes-declaredBytes || requestSize > defaultBulkReadMaxRequestBytes || pathBytes > defaultBulkReadMaxPathsBytes) {
 			batches = append(batches, current)
 			current = make([]bootstrapReadJob, 0, defaultBulkReadMaxFiles)
 			declaredBytes = 0
@@ -7507,6 +7508,14 @@ func bulkReadRequestSize(paths []bootstrapReadJob, nextPath string) int64 {
 		return defaultBulkReadMaxRequestBytes + 1
 	}
 	return int64(len(data))
+}
+
+func bulkReadPathBytes(paths []bootstrapReadJob, nextPath string) int {
+	total := len(normalizeRemotePath(nextPath))
+	for _, job := range paths {
+		total += len(normalizeRemotePath(job.RemotePath))
+	}
+	return total
 }
 
 func isBulkReadUnsupported(err error) bool {

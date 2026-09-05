@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -103,6 +104,30 @@ func TestBootstrapBulkReadBatchesAt32AndDeclaredByteLimit(t *testing.T) {
 	}
 	if client.pointReadCalls != 0 {
 		t.Fatalf("point reads = %d, want 0", client.pointReadCalls)
+	}
+}
+
+func TestChunkBootstrapReadJobsBoundsAggregatePathBytes(t *testing.T) {
+	jobs := make([]bootstrapReadJob, 0, defaultBulkReadMaxFiles)
+	for i := 0; i < defaultBulkReadMaxFiles; i++ {
+		jobs = append(jobs, bootstrapReadJob{
+			Index:      i,
+			RemotePath: fmt.Sprintf("/%s/%02d", strings.Repeat("p", 1022), i),
+			Size:       1,
+		})
+	}
+	batches := chunkBootstrapReadJobs(jobs)
+	if len(batches) < 2 {
+		t.Fatalf("got %d batch, want path-byte split", len(batches))
+	}
+	for i, batch := range batches {
+		var got int
+		for _, job := range batch {
+			got += len(normalizeRemotePath(job.RemotePath))
+		}
+		if got > defaultBulkReadMaxPathsBytes {
+			t.Fatalf("batch %d path bytes = %d, want <= %d", i, got, defaultBulkReadMaxPathsBytes)
+		}
 	}
 }
 
