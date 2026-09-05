@@ -22,6 +22,15 @@ import (
 	"github.com/agentworkforce/relayfile/internal/relayfile"
 )
 
+const (
+	maxBulkReadPaths         = 32
+	maxBulkReadRequestBytes  = 64 << 10
+	maxBulkReadPathBytes     = 4096
+	maxBulkReadPathsBytes    = 32 << 10
+	maxBulkReadContentBytes  = 32 << 20
+	maxBulkReadResponseBytes = 64 << 20
+)
+
 type ServerConfig struct {
 	JWKSURL            string
 	JWKSFetchTimeout   time.Duration
@@ -180,6 +189,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 5 && parts[3] == "fs" && parts[4] == "bulk" && r.Method == http.MethodPost:
 		requiredScope = "fs:write"
 		route = "bulk_write"
+	case len(parts) == 5 && parts[3] == "fs" && parts[4] == "bulk-read" && r.Method == http.MethodPost:
+		// The body can carry path-scoped reads with no workspace-wide fs:read
+		// grant. Authenticate the token here, then require every requested path
+		// in handleBulkRead after the strictly bounded body is decoded.
+		requiredScope = ""
+		route = "bulk_read"
 	case len(parts) == 5 && parts[3] == "fs" && parts[4] == "merge" && r.Method == http.MethodPost:
 		requiredScope = "fs:write"
 		route = "merge_file"
@@ -347,6 +362,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleTree(w, r, workspaceID, correlationID, claims)
 	case "bulk_write":
 		s.handleBulkWrite(w, r, workspaceID, correlationID, claims)
+	case "bulk_read":
+		s.handleBulkRead(w, r, workspaceID, correlationID, claims)
 	case "merge_file":
 		s.handleMergeFile(w, r, workspaceID, correlationID, claims)
 	case "export":
@@ -1709,6 +1726,163 @@ func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request, workspac
 	}
 	w.Header().Set("ETag", file.Revision)
 	writeJSON(w, http.StatusOK, file)
+}
+
+type bulkReadFileError struct {
+	Status  int    `json:"status"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type bulkReadFileResult struct {
+	Path             string                  `json:"path"`
+	Revision         string                  `json:"revision,omitempty"`
+	ContentHash      string                  `json:"contentHash,omitempty"`
+	ContentType      string                  `json:"contentType,omitempty"`
+	Content          *string                 `json:"content,omitempty"`
+	Encoding         string                  `json:"encoding,omitempty"`
+	Provider         string                  `json:"provider,omitempty"`
+	ProviderObjectID string                  `json:"providerObjectId,omitempty"`
+	LastEditedAt     string                  `json:"lastEditedAt,omitempty"`
+	Semantics        relayfile.FileSemantics `json:"semantics,omitempty"`
+	Error            *bulkReadFileError      `json:"error,omitempty"`
+}
+
+func bulkReadResult(file relayfile.File) bulkReadFileResult {
+	content := file.Content
+	return bulkReadFileResult{
+		Path:             file.Path,
+		Revision:         file.Revision,
+		ContentHash:      file.ContentHash,
+		ContentType:      file.ContentType,
+		Content:          &content,
+		Encoding:         file.Encoding,
+		Provider:         file.Provider,
+		ProviderObjectID: file.ProviderObjectID,
+		LastEditedAt:     file.LastEditedAt,
+		Semantics:        file.Semantics,
+	}
+}
+
+func bulkReadError(path string, status int, code, message string) bulkReadFileResult {
+	return bulkReadFileResult{
+		Path: path,
+		Error: &bulkReadFileError{
+			Status:  status,
+			Code:    code,
+			Message: message,
+		},
+	}
+}
+
+func (s *Server) handleBulkRead(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBulkReadRequestBytes)
+	var body struct {
+		Paths []string `json:"paths"`
+	}
+	if !s.decodeStrictJSONBody(w, r, correlationID, &body) {
+		return
+	}
+	if len(body.Paths) == 0 || len(body.Paths) > maxBulkReadPaths {
+		writeError(w, http.StatusBadRequest, "bad_request", fmt.Sprintf("paths must contain between 1 and %d entries", maxBulkReadPaths), correlationID)
+		return
+	}
+
+	paths := make([]string, 0, len(body.Paths))
+	seen := make(map[string]struct{}, len(body.Paths))
+	pathBytes := 0
+	for _, rawPath := range body.Paths {
+		if strings.TrimSpace(rawPath) == "" {
+			writeError(w, http.StatusBadRequest, "bad_request", "bulk-read paths must be non-empty", correlationID)
+			return
+		}
+		path := normalizeRoutePath(rawPath)
+		if path == "/" || len([]byte(path)) > maxBulkReadPathBytes {
+			writeError(w, http.StatusBadRequest, "bad_request", fmt.Sprintf("bulk-read path must identify a file and be at most %d bytes", maxBulkReadPathBytes), correlationID)
+			return
+		}
+		pathBytes += len([]byte(path))
+		if pathBytes > maxBulkReadPathsBytes {
+			writeError(w, http.StatusBadRequest, "bad_request", fmt.Sprintf("bulk-read paths exceed %d aggregate bytes", maxBulkReadPathsBytes), correlationID)
+			return
+		}
+		if _, duplicate := seen[path]; duplicate {
+			writeError(w, http.StatusBadRequest, "bad_request", "bulk-read paths must be unique", correlationID)
+			return
+		}
+		if !scopeMatchesPath(claims.Scopes, "fs:read", path) {
+			writeError(w, http.StatusForbidden, "forbidden", "missing required scope: fs:read", correlationID)
+			return
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+
+	forkID := strings.TrimSpace(r.URL.Query().Get("forkId"))
+	aclReader := s.aclGetFile(workspaceID)
+	if forkID != "" {
+		aclReader = s.aclGetForkFile(workspaceID, forkID)
+	}
+	type aclCacheEntry struct {
+		data []byte
+		err  error
+	}
+	aclCache := make(map[string]aclCacheEntry)
+	cachedACLReader := func(path string) ([]byte, error) {
+		path = normalizeRoutePath(path)
+		if cached, ok := aclCache[path]; ok {
+			return cached.data, cached.err
+		}
+		data, err := aclReader(path)
+		aclCache[path] = aclCacheEntry{data: data, err: err}
+		return data, err
+	}
+
+	results := make([]bulkReadFileResult, 0, len(paths))
+	var contentBytes int64
+	for _, path := range paths {
+		file, err := s.readFile(workspaceID, forkID, path)
+		if err != nil {
+			switch err {
+			case relayfile.ErrNotFound, relayfile.ErrForkExpired:
+				results = append(results, bulkReadError(path, http.StatusNotFound, "not_found", err.Error()))
+			case relayfile.ErrInvalidInput:
+				results = append(results, bulkReadError(path, http.StatusBadRequest, "bad_request", err.Error()))
+			default:
+				results = append(results, bulkReadError(path, http.StatusInternalServerError, "internal_error", "file read failed"))
+			}
+			continue
+		}
+		permissions := resolveFilePermissionsWithTarget(cachedACLReader, path, true)
+		if !filePermissionAllows(permissions, workspaceID, &claims) {
+			results = append(results, bulkReadError(path, http.StatusForbidden, "forbidden", "file access denied by permission policy"))
+			continue
+		}
+		decoded, err := decodeExportContent(file)
+		if err != nil {
+			results = append(results, bulkReadError(path, http.StatusInternalServerError, "internal_error", "file content is invalid"))
+			continue
+		}
+		if int64(len(decoded)) > maxBulkReadContentBytes-contentBytes {
+			writeError(w, http.StatusRequestEntityTooLarge, "bulk_read_response_too_large", fmt.Sprintf("bulk-read decoded content exceeds %d bytes", maxBulkReadContentBytes), correlationID)
+			return
+		}
+		contentBytes += int64(len(decoded))
+		results = append(results, bulkReadResult(file))
+	}
+
+	payload, err := json.Marshal(map[string]any{"files": results})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "bulk-read response encoding failed", correlationID)
+		return
+	}
+	if len(payload) > maxBulkReadResponseBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "bulk_read_response_too_large", fmt.Sprintf("bulk-read response exceeds %d wire bytes", maxBulkReadResponseBytes), correlationID)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(payload)
 }
 
 func (s *Server) handleBulkWrite(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
