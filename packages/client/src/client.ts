@@ -34,6 +34,8 @@ export const MIN_RELAYFILE_VERSION = '0.10.17';
 
 /** First published relayfile binary that can replace a stale daemon for API v3. */
 const MIN_RELAYFILE_VERSION_FOR_CURRENT_API = '0.10.21';
+const DEFAULT_STALE_DAEMON_DISCOVERY_TIMEOUT_MS = 5000;
+const MAX_STALE_DAEMON_DISCOVERY_TIMEOUT_MS = 10000;
 
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+].*)?$/;
 
@@ -136,6 +138,12 @@ export interface RelayfileClientOptions {
   startTimeoutMs?: number;
   /** Per-request timeout. A hung socket rejects instead of blocking forever. */
   requestTimeoutMs?: number;
+  /**
+   * Maximum time allowed to discover a stale daemon through `lsof`.
+   * Clamped to 5–10 seconds so loaded hosts get enough time without an
+   * unbounded control-plane replacement wait.
+   */
+  staleDaemonDiscoveryTimeoutMs?: number;
 }
 
 interface RequestOptions {
@@ -183,6 +191,8 @@ interface CommandResult {
   stdout: string;
   stderr: string;
   code: number | null;
+  timedOut?: boolean;
+  commandError?: string;
 }
 
 export class RelayfileControlPlaneClient {
@@ -191,6 +201,7 @@ export class RelayfileControlPlaneClient {
   private readonly autoStart: boolean;
   private readonly startTimeoutMs: number;
   private readonly requestTimeoutMs: number;
+  private readonly staleDaemonDiscoveryTimeoutMs: number;
   private ready: Promise<void> | undefined;
 
   constructor(options: RelayfileClientOptions = {}) {
@@ -199,6 +210,13 @@ export class RelayfileControlPlaneClient {
     this.autoStart = options.autoStart ?? process.env.RELAYFILE_REQUIRE_DAEMON !== '1';
     this.startTimeoutMs = options.startTimeoutMs ?? 5000;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 10000;
+    this.staleDaemonDiscoveryTimeoutMs = Math.min(
+      MAX_STALE_DAEMON_DISCOVERY_TIMEOUT_MS,
+      Math.max(
+        DEFAULT_STALE_DAEMON_DISCOVERY_TIMEOUT_MS,
+        options.staleDaemonDiscoveryTimeoutMs ?? DEFAULT_STALE_DAEMON_DISCOVERY_TIMEOUT_MS
+      )
+    );
   }
 
   private createHTTPRequest(
@@ -477,7 +495,8 @@ export class RelayfileControlPlaneClient {
     try {
       process.kill(pids[0]!, 'SIGTERM');
     } catch (err) {
-      throw new Error(
+      throw new RelayfileControlPlaneError(
+        'STALE_DAEMON_STOP_FAILED',
         `could not stop stale relayfile control-plane pid ${pids[0]}: ${
           err instanceof Error ? err.message : String(err)
         }`
@@ -485,13 +504,27 @@ export class RelayfileControlPlaneClient {
     }
 
     const deadline = Date.now() + this.startTimeoutMs;
-    while (existsSync(this.socketPath) && Date.now() < deadline) {
+    while (
+      (existsSync(this.socketPath) || this.isProcessAlive(pids[0]!)) &&
+      Date.now() < deadline
+    ) {
       await sleep(50);
     }
-    if (existsSync(this.socketPath)) {
-      throw new Error(
-        `stale relayfile control-plane pid ${pids[0]} did not release ${this.socketPath} within ${this.startTimeoutMs}ms`
+    if (existsSync(this.socketPath) || this.isProcessAlive(pids[0]!)) {
+      throw new RelayfileControlPlaneError(
+        'STALE_DAEMON_STOP_FAILED',
+        `stale relayfile control-plane pid ${pids[0]} did not release ${this.socketPath} ` +
+          `and exit within ${this.startTimeoutMs}ms`
       );
+    }
+  }
+
+  private isProcessAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code !== 'ESRCH';
     }
   }
 
@@ -506,16 +539,38 @@ export class RelayfileControlPlaneClient {
       );
     }
 
-    const result = await this.runCommand('lsof', ['-t', '--', this.socketPath], 1000);
+    const result = await this.runCommand(
+      'lsof',
+      ['-t', '--', this.socketPath],
+      this.staleDaemonDiscoveryTimeoutMs
+    );
     if (!result) {
-      throw new Error(
+      throw new RelayfileControlPlaneError(
+        'STALE_DAEMON_DISCOVERY_FAILED',
         `could not run \`lsof\` to identify the process serving ${this.socketPath} ` +
-          `(it is not installed, not on PATH, or did not exit within 1000ms); ` +
+          `(it is not installed or not on PATH); ` +
           `install lsof or stop the stale relayfile control-plane manually`
       );
     }
+    if (result.timedOut) {
+      throw new RelayfileControlPlaneError(
+        'STALE_DAEMON_DISCOVERY_FAILED',
+        `\`lsof\` timed out after ${this.staleDaemonDiscoveryTimeoutMs}ms while identifying ` +
+          `the process serving ${this.socketPath}${
+            result.stderr.trim() ? ` (stderr: ${result.stderr.trim()})` : ''
+          }`
+      );
+    }
+    if (result.commandError) {
+      throw new RelayfileControlPlaneError(
+        'STALE_DAEMON_DISCOVERY_FAILED',
+        `could not run \`lsof\` to identify the process serving ${this.socketPath}: ` +
+          `${result.commandError}${result.stderr.trim() ? ` (stderr: ${result.stderr.trim()})` : ''}`
+      );
+    }
     if (result.code !== 0) {
-      throw new Error(
+      throw new RelayfileControlPlaneError(
+        'STALE_DAEMON_DISCOVERY_FAILED',
         `lsof could not identify the process serving ${this.socketPath} (exit ${result.code}${
           result.stderr.trim() ? `: ${result.stderr.trim()}` : ''
         })`
@@ -661,11 +716,13 @@ export class RelayfileControlPlaneClient {
       child.stderr?.on('data', (chunk) => {
         stderr += String(chunk);
       });
-      child.once('error', () => finish());
+      child.once('error', (err) =>
+        finish({ stdout, stderr, code: null, commandError: err instanceof Error ? err.message : String(err) })
+      );
       child.once('close', (code) => finish({ stdout, stderr, code }));
       timeout = setTimeout(() => {
         child.kill();
-        finish();
+        finish({ stdout, stderr, code: null, timedOut: true });
       }, timeoutMs);
       timeout.unref?.();
     });

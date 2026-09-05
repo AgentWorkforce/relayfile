@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import type { ClientRequest, IncomingMessage, RequestOptions as NodeRequestOptions } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -321,6 +321,73 @@ describe('RelayfileControlPlaneClient lifecycle', () => {
       rmSync(procRoot, { recursive: true, force: true });
     }
   });
+
+  it('finds a stale owner when lsof discovery is delayed under load', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'relayfile-lsof-delay-'));
+    const lsof = join(root, 'lsof');
+    const previousPath = process.env.PATH;
+    try {
+      writeFileSync(lsof, '#!/bin/sh\nsleep 1.2\nprintf "424242\\n"\n');
+      chmodSync(lsof, 0o755);
+      process.env.PATH = `${root}:${previousPath ?? ''}`;
+
+      const socketPath = join(root, 'relayfile.sock');
+      const client = new RelayfileControlPlaneClient({ socketPath, autoStart: true });
+      vi.spyOn(lifecycleInternals(client), 'linuxSocketOwnerPids').mockReturnValue([]);
+
+      await expect(lifecycleInternals(client).socketOwnerPids()).resolves.toEqual([424242]);
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 10000);
+
+  it('reports typed timeout diagnostics from stale-owner discovery', async () => {
+    const client = new RelayfileControlPlaneClient({ socketPath: '/nope.sock', autoStart: true });
+    vi.spyOn(lifecycleInternals(client), 'linuxSocketOwnerPids').mockReturnValue([]);
+    vi.spyOn(lifecycleInternals(client), 'runCommand').mockResolvedValue({
+      stdout: '',
+      stderr: 'lsof: busy',
+      code: null,
+      timedOut: true,
+    });
+
+    await expect(lifecycleInternals(client).socketOwnerPids()).rejects.toMatchObject({
+      code: 'STALE_DAEMON_DISCOVERY_FAILED',
+      message: expect.stringMatching(/timed out after 5000ms.*stderr: lsof: busy/),
+    });
+  });
+
+  it('waits for both the stale socket and owner PID to be released', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'relayfile-stop-stale-'));
+    const socketPath = join(root, 'relayfile.sock');
+    writeFileSync(socketPath, 'stale socket marker');
+    const child = spawn(
+      process.execPath,
+      [
+        '-e',
+        `process.on('SIGTERM',()=>{require('node:fs').unlinkSync(${JSON.stringify(socketPath)});process.exit(0)});setInterval(()=>{},1000)`,
+      ],
+      { stdio: 'ignore' }
+    );
+    child.once('exit', () => rmSync(socketPath, { force: true }));
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.once('spawn', () => resolve());
+        child.once('error', reject);
+      });
+      const client = new RelayfileControlPlaneClient({ socketPath, autoStart: true, startTimeoutMs: 2000 });
+      vi.spyOn(lifecycleInternals(client), 'socketOwnerPids').mockResolvedValue([child.pid!]);
+
+      await expect(lifecycleInternals(client).stopStaleDaemon()).resolves.toBeUndefined();
+      expect(existsSync(socketPath)).toBe(false);
+      expect(() => process.kill(child.pid!, 0)).toThrow();
+    } finally {
+      child.kill('SIGKILL');
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 10000);
 
   it('blames an unavailable lsof when the fallback cannot identify the stale daemon', async () => {
     const client = new RelayfileControlPlaneClient({
