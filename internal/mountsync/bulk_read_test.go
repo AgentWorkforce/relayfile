@@ -57,6 +57,7 @@ func (c *bulkReadTestClient) ReadFile(_ context.Context, _ string, path string) 
 		c.maxPointReads = c.activePointReads
 	}
 	file, ok := c.files[path]
+	pointErr := c.pointErrs[path]
 	delay := c.pointReadDelay
 	c.mu.Unlock()
 	if delay > 0 {
@@ -68,8 +69,8 @@ func (c *bulkReadTestClient) ReadFile(_ context.Context, _ string, path string) 
 	if !ok {
 		return RemoteFile{}, &HTTPError{StatusCode: http.StatusNotFound, Code: "not_found", Message: "not found"}
 	}
-	if err := c.pointErrs[path]; err != nil {
-		return RemoteFile{}, err
+	if pointErr != nil {
+		return RemoteFile{}, pointErr
 	}
 	return file, nil
 }
