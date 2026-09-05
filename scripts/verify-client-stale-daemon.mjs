@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 
 const packageRoot = process.argv[2];
 if (!packageRoot) throw new Error('usage: node verify-client-stale-daemon.mjs <installed-package-root>');
+const expectFailure = process.argv.includes('--expect-failure');
 
 const root = mkdtempSync(join(tmpdir(), 'relayfile-462-clean-install-'));
 const socketPath = join(root, 'relayfile.sock');
@@ -36,7 +37,20 @@ const cleanup = () => { try { unlinkSync(socket); } catch {} try { server.close(
 process.on('SIGTERM', cleanup);
 process.on('SIGINT', cleanup);
 `;
+const isAlive = (pid) => {
+  try { process.kill(pid, 0); return true; } catch (error) { return error.code !== 'ESRCH'; }
+};
+const waitForCleanup = async (pid, socket) => {
+  try { process.kill(pid, 'SIGKILL'); } catch {}
+  try { unlinkSync(socket); } catch {}
+  const deadline = Date.now() + 5000;
+  while ((isAlive(pid) || existsSync(socket)) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return { processGone: !isAlive(pid), socketAbsent: !existsSync(socket) };
+};
 
+async function run() {
 try {
   writeFileSync(staleScript, serverScript(stalePidFile, '0.10.19', 1, [1]));
   writeFileSync(newScript, serverScript(newPidFile, '0.10.26', 3, [1, 2, 3]));
@@ -58,6 +72,8 @@ cat ${stalePidFile}
   chmodSync(fakeLsof, 0o755);
 
   const stale = spawn(process.execPath, [staleScript, socketPath], { stdio: 'ignore' });
+  stalePid = stale.pid;
+  if (!Number.isSafeInteger(stalePid) || stalePid <= 1) throw new Error('stale daemon did not expose a valid PID');
   await new Promise((resolve, reject) => {
     stale.once('spawn', resolve);
     stale.once('error', reject);
@@ -78,11 +94,18 @@ cat ${stalePidFile}
     pathToFileURL(join(packageRoot, 'dist/index.js')).href
   );
   const client = new RelayfileControlPlaneClient({ socketPath, autoStart: true, startTimeoutMs: 5000 });
-  const result = await client.ensureReady();
-  stalePid = Number(readFileSync(stalePidFile, 'utf8').trim());
-  if (!Number.isSafeInteger(stalePid) || stalePid <= 1) throw new Error('invalid stale PID evidence');
-  let staleAlive = true;
-  try { process.kill(stalePid, 0); } catch (error) { staleAlive = error.code !== 'ESRCH'; }
+  let result;
+  let failure;
+  try { result = await client.ensureReady(); } catch (error) { failure = error; }
+  if (expectFailure) {
+    if (!failure) throw new Error('expected released baseline to fail delayed stale-daemon replacement');
+    const cleanup = await waitForCleanup(stalePid, socketPath);
+    if (!cleanup.processGone || !cleanup.socketAbsent) throw new Error('failure-path cleanup did not remove stale daemon/socket');
+    console.log(JSON.stringify({ outcome: 'expected-fail', error: failure instanceof Error ? failure.message : String(failure), stalePid, ...cleanup }));
+    return;
+  }
+  if (failure) throw failure;
+  let staleAlive = isAlive(stalePid);
   if (staleAlive) throw new Error(`stale daemon PID ${stalePid} still exists after replacement`);
   if (!existsSync(socketPath)) throw new Error('replacement daemon did not retain the control-plane socket');
 
@@ -110,3 +133,6 @@ cat ${stalePidFile}
   delete process.env.RELAYFILE_BIN;
   rmSync(root, { recursive: true, force: true });
 }
+}
+
+await run();
