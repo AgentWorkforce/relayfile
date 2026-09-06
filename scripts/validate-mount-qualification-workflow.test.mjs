@@ -38,6 +38,17 @@ test('rejects an additional workflow event', async () => {
   assert.match(result.stderr, /qualification workflow must trigger only on push/);
 });
 
+test('does not accept a decoy push block outside the on trigger', async () => {
+  const result = await validateMutation((workflow) =>
+    workflow.replace(
+      'on:\n  push:\n    branches:\n      - main',
+      'decoy:\n  push:\n    branches:\n      - main\n\non:\n  push:\n    branches:\n      - release',
+    ),
+  );
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /push trigger must contain only the main branch/);
+});
+
 test('rejects the prefixed digest shape not emitted by upload-artifact', async () => {
   const result = await validateMutation((workflow) =>
     workflow

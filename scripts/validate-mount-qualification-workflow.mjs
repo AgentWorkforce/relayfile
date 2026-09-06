@@ -58,7 +58,7 @@ for (const fragment of required) {
 
 const onBlock = blockAtIndent(workflow, 'on:', 0);
 assert.deepEqual(directEntries(onBlock, 2), ['push:'], 'qualification workflow must trigger only on push');
-const pushBlock = blockAtIndent(workflow, 'push:', 2);
+const pushBlock = blockAtIndent(onBlock.join('\n'), 'push:', 2);
 assert.deepEqual(directEntries(pushBlock, 4), ['branches:'], 'push trigger must contain only branches');
 assert.deepEqual(directEntries(pushBlock, 6), ['- main'], 'push trigger must contain only the main branch');
 
