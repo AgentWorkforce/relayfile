@@ -79,6 +79,85 @@ func TestHTTPClientBulkReadUsesBoundedEndpointAndPreservesOrder(t *testing.T) {
 	}
 }
 
+func TestHTTPClientBulkReadRejectsEscapedRequestOver64KiB(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("request should be rejected before transport")
+	}))
+	defer server.Close()
+	paths := make([]string, 32)
+	for i := range paths {
+		paths[i] = "/" + strings.Repeat("<", 500) + strings.Repeat("a", 499) + fmt.Sprintf("%d", i)
+	}
+	client := NewHTTPClient(server.URL, "token", server.Client())
+	if _, err := client.ReadFilesBulk(context.Background(), "ws_mount", paths); err == nil {
+		t.Fatal("expected marshaled request size rejection")
+	}
+}
+
+func TestHTTPClientBulkReadRejectsMissingRequiredFields(t *testing.T) {
+	for _, body := range []string{
+		`{"files":[{"path":"/a","revision":"rev_1","contentType":"text/plain"}]}`,
+		`{"files":[{"path":"/a","revision":"rev_1","content":"a"}]}`,
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(body))
+		}))
+		client := NewHTTPClient(server.URL, "token", server.Client())
+		if _, err := client.ReadFilesBulk(context.Background(), "ws_mount", []string{"/a"}); err == nil {
+			t.Fatalf("expected missing field rejection for %s", body)
+		}
+		server.Close()
+	}
+}
+
+func TestHTTPClientBulkReadAcceptsExplicitEmptyContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"files":[{"path":"/a","revision":"rev_1","contentType":"","content":""}]}`))
+	}))
+	defer server.Close()
+	client := NewHTTPClient(server.URL, "token", server.Client())
+	if _, err := client.ReadFilesBulk(context.Background(), "ws_mount", []string{"/a"}); err != nil {
+		t.Fatalf("explicit empty fields should be valid: %v", err)
+	}
+}
+
+func TestReadResponseBodyClampsReadChunkToLimit(t *testing.T) {
+	var touches int
+	body, err := readResponseBody(&fragmentingReader{data: []byte("0123456789"), chunkSize: 2}, 5, func() { touches++ })
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	if string(body) != "01234" {
+		t.Fatalf("body = %q, want first five bytes", body)
+	}
+	if touches != 3 {
+		t.Fatalf("progress touches = %d, want one touch for each fragment through the limit", touches)
+	}
+}
+
+type fragmentingReader struct {
+	data      []byte
+	chunkSize int
+}
+
+func (r *fragmentingReader) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, io.EOF
+	}
+	n := r.chunkSize
+	if n > len(p) {
+		n = len(p)
+	}
+	if n > len(r.data) {
+		n = len(r.data)
+	}
+	copy(p[:n], r.data[:n])
+	r.data = r.data[n:]
+	return n, nil
+}
+
 func TestHTTPClientBulkReadRejectsMoreThan32PathsLocally(t *testing.T) {
 	paths := make([]string, defaultBulkReadMaxFiles+1)
 	for index := range paths {

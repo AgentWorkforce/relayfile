@@ -1388,6 +1388,28 @@ func aclTargetExists(r *http.Request) bool {
 // aclGetFile returns a function that reads ACL permissions for a given path.
 // Both Semantics and Content are read from a single ReadFile snapshot to avoid
 // TOCTOU races between the two sources.
+func permissionsFromFile(file relayfile.File) ([]byte, error) {
+	// Prefer structured semantics (authoritative source).
+	if len(file.Semantics.Permissions) > 0 {
+		return json.Marshal(file.Semantics.Permissions)
+	}
+
+	// Fall back to parsing permissions from file content
+	// (ACL markers seeded via bulk write store permissions in content as JSON).
+	if file.Content != "" {
+		var contentObj struct {
+			Semantics struct {
+				Permissions []string `json:"permissions"`
+			} `json:"semantics"`
+		}
+		if err := json.Unmarshal([]byte(file.Content), &contentObj); err == nil && len(contentObj.Semantics.Permissions) > 0 {
+			return json.Marshal(contentObj.Semantics.Permissions)
+		}
+	}
+
+	return nil, nil
+}
+
 func (s *Server) aclGetFile(workspaceID string) func(path string) ([]byte, error) {
 	return func(path string) ([]byte, error) {
 		file, err := s.store.ReadFile(workspaceID, path)
@@ -1395,25 +1417,7 @@ func (s *Server) aclGetFile(workspaceID string) func(path string) ([]byte, error
 			return nil, err
 		}
 
-		// Prefer structured semantics (authoritative source).
-		if len(file.Semantics.Permissions) > 0 {
-			return json.Marshal(file.Semantics.Permissions)
-		}
-
-		// Fall back to parsing permissions from file content
-		// (ACL markers seeded via bulk write store permissions in content as JSON)
-		if file.Content != "" {
-			var contentObj struct {
-				Semantics struct {
-					Permissions []string `json:"permissions"`
-				} `json:"semantics"`
-			}
-			if err := json.Unmarshal([]byte(file.Content), &contentObj); err == nil && len(contentObj.Semantics.Permissions) > 0 {
-				return json.Marshal(contentObj.Semantics.Permissions)
-			}
-		}
-
-		return nil, nil
+		return permissionsFromFile(file)
 	}
 }
 
@@ -1424,22 +1428,7 @@ func (s *Server) aclGetForkFile(workspaceID, forkID string) func(path string) ([
 			return nil, err
 		}
 
-		if len(file.Semantics.Permissions) > 0 {
-			return json.Marshal(file.Semantics.Permissions)
-		}
-
-		if file.Content != "" {
-			var contentObj struct {
-				Semantics struct {
-					Permissions []string `json:"permissions"`
-				} `json:"semantics"`
-			}
-			if err := json.Unmarshal([]byte(file.Content), &contentObj); err == nil && len(contentObj.Semantics.Permissions) > 0 {
-				return json.Marshal(contentObj.Semantics.Permissions)
-			}
-		}
-
-		return nil, nil
+		return permissionsFromFile(file)
 	}
 }
 
@@ -1841,6 +1830,14 @@ func (s *Server) handleBulkRead(w http.ResponseWriter, r *http.Request, workspac
 	results := make([]bulkReadFileResult, 0, len(paths))
 	var contentBytes int64
 	for _, path := range paths {
+		// Resolve inherited permissions before probing the requested path. This
+		// prevents an ACL-denied caller from distinguishing an existing file
+		// from a missing one through the per-file status.
+		permissions := resolveFilePermissionsWithTarget(cachedACLReader, path, true)
+		if !filePermissionAllows(permissions, workspaceID, &claims) {
+			results = append(results, bulkReadError(path, http.StatusForbidden, "forbidden", "file access denied by permission policy"))
+			continue
+		}
 		file, err := s.readFile(workspaceID, forkID, path)
 		if err != nil {
 			switch err {
@@ -1853,8 +1850,12 @@ func (s *Server) handleBulkRead(w http.ResponseWriter, r *http.Request, workspac
 			}
 			continue
 		}
-		permissions := resolveFilePermissionsWithTarget(cachedACLReader, path, true)
-		if !filePermissionAllows(permissions, workspaceID, &claims) {
+		// The pre-read ACL check protects existence, but the file read and ACL
+		// lookup are separate store operations. Revalidate against a fresh ACL
+		// snapshot before returning content so a concurrent target permission
+		// tightening cannot authorize the old snapshot and expose the new file.
+		freshPermissions := resolveBulkReadPermissionsForReturnedFile(aclReader, path, file)
+		if !filePermissionAllows(freshPermissions, workspaceID, &claims) {
 			results = append(results, bulkReadError(path, http.StatusForbidden, "forbidden", "file access denied by permission policy"))
 			continue
 		}
@@ -1883,6 +1884,25 @@ func (s *Server) handleBulkRead(w http.ResponseWriter, r *http.Request, workspac
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(payload)
+}
+
+// resolveBulkReadPermissionsForReturnedFile uses the exact file snapshot that
+// ReadFile returned for target-level permissions, while resolving ancestors
+// from a fresh store read. This prevents a target ACL update from being mixed
+// with content from a different file revision during a bulk read.
+func resolveBulkReadPermissionsForReturnedFile(
+	aclReader func(path string) ([]byte, error),
+	path string,
+	file relayfile.File,
+) []string {
+	targetPath := normalizeACLPath(path)
+	targetReader := func(candidate string) ([]byte, error) {
+		if normalizeACLPath(candidate) != targetPath {
+			return aclReader(candidate)
+		}
+		return permissionsFromFile(file)
+	}
+	return resolveFilePermissionsWithTarget(targetReader, path, true)
 }
 
 func (s *Server) handleBulkWrite(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
