@@ -7283,9 +7283,10 @@ type fullTreeTraversalMetrics struct {
 }
 
 type bootstrapReadJob struct {
-	Index      int
-	RemotePath string
-	Size       int64
+	Index          int
+	RemotePath     string
+	Size           int64
+	ForcePointRead bool
 }
 
 type bootstrapReadResult struct {
@@ -7384,7 +7385,7 @@ func (s *Syncer) readBootstrapFilesBulkEach(ctx context.Context, client bulkRead
 	var unsupported *bulkReadUnsupportedError
 	var executeBatch func(batch, remaining []bootstrapReadJob) error
 	executeBatch = func(batch, remaining []bootstrapReadJob) error {
-		if len(batch) == 1 && (batch[0].Size > defaultBulkReadMaxBytes || len(normalizeRemotePath(batch[0].RemotePath)) > defaultBulkReadMaxPathBytes) {
+		if len(batch) == 1 && (batch[0].ForcePointRead || batch[0].Size > defaultBulkReadMaxBytes || len(normalizeRemotePath(batch[0].RemotePath)) > defaultBulkReadMaxPathBytes) {
 			// Bulk requests deliberately exclude oversized bodies; keep the
 			// singleton point-read path so its response can be released before
 			// the next segment is dispatched.
@@ -7484,7 +7485,7 @@ func (s *Syncer) readBootstrapFilesSegmentedEach(ctx context.Context, jobs []boo
 	orderedJobs := append([]bootstrapReadJob(nil), jobs...)
 	sort.SliceStable(orderedJobs, func(i, j int) bool { return orderedJobs[i].Index < orderedJobs[j].Index })
 	for jobIndex := 0; jobIndex < len(orderedJobs); {
-		if orderedJobs[jobIndex].Size > defaultBulkReadMaxBytes || len(normalizeRemotePath(orderedJobs[jobIndex].RemotePath)) > defaultBulkReadMaxPathBytes {
+		if orderedJobs[jobIndex].Size > defaultBulkReadMaxBytes {
 			if err := execute(orderedJobs[jobIndex:jobIndex+1], orderedJobs[jobIndex:]); err != nil {
 				return err
 			}
@@ -7510,7 +7511,21 @@ func chunkBootstrapReadJobs(jobs []bootstrapReadJob) [][]bootstrapReadJob {
 	var batches [][]bootstrapReadJob
 	current := make([]bootstrapReadJob, 0, defaultBulkReadMaxFiles)
 	var declaredBytes int64
+	seenPaths := make(map[string]struct{}, len(jobs))
 	for _, job := range jobs {
+		path := normalizeRemotePath(job.RemotePath)
+		_, duplicatePath := seenPaths[path]
+		seenPaths[path] = struct{}{}
+		if len(path) > defaultBulkReadMaxPathBytes || duplicatePath {
+			job.ForcePointRead = true
+			if len(current) > 0 {
+				batches = append(batches, current)
+				current = make([]bootstrapReadJob, 0, defaultBulkReadMaxFiles)
+				declaredBytes = 0
+			}
+			batches = append(batches, []bootstrapReadJob{job})
+			continue
+		}
 		size := job.Size
 		if size < 0 {
 			size = 0

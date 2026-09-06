@@ -229,6 +229,24 @@ func TestBootstrapBulkReadPointReadsOverlongPaths(t *testing.T) {
 	}
 }
 
+func TestBootstrapBulkReadPointReadsDuplicatePaths(t *testing.T) {
+	path := "/duplicate"
+	client := &bulkReadTestClient{files: map[string]RemoteFile{
+		path: {Path: path, Revision: "rev_duplicate", ContentType: "text/plain", Content: "x"},
+	}}
+	syncer := &Syncer{workspace: "ws", client: client}
+	results := syncer.readBootstrapFiles(context.Background(), []bootstrapReadJob{
+		{Index: 0, RemotePath: path, Size: 1},
+		{Index: 1, RemotePath: path, Size: 1},
+	}, bootstrapProgress{})
+	if len(results) != 2 || results[0].Err != nil || results[1].Err != nil {
+		t.Fatalf("duplicate point-read results = %#v", results)
+	}
+	if len(client.bulkCalls) != 1 || len(client.bulkCalls[0]) != 1 || client.pointReadCalls != 1 {
+		t.Fatalf("bulk calls = %#v, point reads = %d; want one singleton bulk and one point read", client.bulkCalls, client.pointReadCalls)
+	}
+}
+
 func TestBootstrapBulkReadOversizedPointReadsAreAppliedIncrementally(t *testing.T) {
 	client := &bulkReadTestClient{
 		files: map[string]RemoteFile{
