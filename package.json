@@ -2,7 +2,7 @@
   "name": "relayfile",
   "license": "Apache-2.0",
   "private": true,
-  "version": "0.10.52",
+  "version": "0.10.54",
   "description": "relayfile — real-time filesystem for humans and agents",
   "workspaces": [
     "packages/core",
@@ -18,6 +18,7 @@
     "build": "npm run build --workspace=packages/core && npm run build --workspace=packages/sdk/typescript && npm run build --workspace=@relayfile/client && npm run build --workspace=packages/agents && npm run build --workspace=packages/local-mount && npm run build --workspace=packages/cli",
     "test": "npm run test --workspace=packages/core && npm run test --workspace=packages/sdk/typescript && npm run test --workspace=@relayfile/client && npm run test --workspace=packages/local-mount && npm run test --workspace=@relayfile/file-observer && npm run test --workspace=packages/cli && npm run test:go",
     "test:go": "go test ./...",
+    "test:release": "node --test scripts/release/*.test.mjs",
     "typecheck": "npm run typecheck --workspace=packages/sdk/typescript && npm run typecheck --workspace=@relayfile/client && npm run typecheck --workspace=packages/agents && npm run typecheck --workspace=packages/local-mount && npm run typecheck:go",
     "typecheck:go": "go vet ./...",
     "evals:compile": "node scripts/evals/compile-cases.mjs",
