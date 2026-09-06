@@ -131,6 +131,23 @@ jobs:
           CURRENT_VERSION=$(node -p "require('./package.json').version")
           echo "Current version: $CURRENT_VERSION"
 
+          # Every workspace package this release publishes. Used both by the
+          # collision guard below and by the version-sync script, so the two can
+          # never disagree about what a release covers.
+          PACKAGE_PATHS_JSON='[
+            "packages/core/package.json",
+            "packages/sdk/typescript/package.json",
+            "packages/client/package.json",
+            "packages/agents/package.json",
+            "packages/cli/package.json",
+            "packages/file-observer/package.json",
+            "packages/local-mount/package.json",
+            "packages/mount-darwin-arm64/package.json",
+            "packages/mount-darwin-x64/package.json",
+            "packages/mount-linux-arm64/package.json",
+            "packages/mount-linux-x64/package.json"
+          ]'
+
           if [ -n "$CUSTOM_VERSION" ]; then
             echo "Setting version to custom value: $CUSTOM_VERSION"
             npm version "$CUSTOM_VERSION" --no-git-tag-version --allow-same-version
@@ -142,6 +159,51 @@ jobs:
           NEW_VERSION=$(node -p "require('./package.json').version")
           echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
           echo "New version: $NEW_VERSION"
+
+          # A collision on an auto-computed version means the repo's package.json
+          # has drifted behind the registry (see the 0.10.52-vs-0.10.54 resync).
+          # Without this guard the run reaches the publish matrix before every
+          # job fails with "cannot publish over the previously published
+          # versions", which half-releases: some packages land, the rest do not.
+          #
+          # Every published package is checked, not just `relayfile`. A previous
+          # run can die partway through the matrix, leaving some names taken at a
+          # version the others never reached — checking one name would wave that
+          # straight back into the same failure.
+          #
+          # Skipped when an operator names a custom version — that is a
+          # deliberate choice, including re-running a release step by hand.
+          if [ -z "$CUSTOM_VERSION" ]; then
+            TAKEN=""
+            for PKG_NAME in $(node -e "
+              const fs = require('fs');
+              const paths = ${PACKAGE_PATHS_JSON};
+              const names = paths
+                .filter((p) => fs.existsSync(p))
+                .map((p) => JSON.parse(fs.readFileSync(p, 'utf8')).name);
+              console.log(names.join(' '));
+            "); do
+              # `npm view` exits non-zero both for "no such version" and for a
+              # registry outage. Only a genuine E404 means the version is free;
+              # treating an unanswerable query as free would let a taken version
+              # reach the publish matrix and partially release.
+              if VIEW_OUT=$(npm view "$PKG_NAME@$NEW_VERSION" version 2>&1); then
+                TAKEN="$TAKEN $PKG_NAME"
+              elif ! printf '%s' "$VIEW_OUT" | grep -q 'code E404'; then
+                echo "::error::could not determine whether $PKG_NAME@$NEW_VERSION" \
+                  "is published; refusing to release on an unanswered registry query." \
+                  "npm said: $VIEW_OUT"
+                exit 1
+              fi
+            done
+            if [ -n "$TAKEN" ]; then
+              echo "::error::version $NEW_VERSION is already published for:$TAKEN." \
+                "The repo's package.json ($CURRENT_VERSION) is behind the registry;" \
+                "resync the repo to the published version before releasing." \
+                "Publishing anyway would fail mid-matrix and half-release."
+              exit 1
+            fi
+          fi
 
           if [[ "$NEW_VERSION" == *"-"* ]]; then
             echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
@@ -155,19 +217,7 @@ jobs:
             const path = require('path');
             const version = '$NEW_VERSION';
 
-            const packagePaths = [
-              'packages/core/package.json',
-              'packages/sdk/typescript/package.json',
-              'packages/client/package.json',
-              'packages/agents/package.json',
-              'packages/cli/package.json',
-              'packages/file-observer/package.json',
-              'packages/local-mount/package.json',
-              'packages/mount-darwin-arm64/package.json',
-              'packages/mount-darwin-x64/package.json',
-              'packages/mount-linux-arm64/package.json',
-              'packages/mount-linux-x64/package.json',
-            ];
+            const packagePaths = ${PACKAGE_PATHS_JSON};
 
             for (const pkgPath of packagePaths) {
               if (fs.existsSync(pkgPath)) {
@@ -574,13 +624,18 @@ jobs:
           ( cd packages/cli/bin && sha256sum relayfile-cli-* ) >> checksums.txt
           cat checksums.txt
 
+      # `npm publish` returning success only means the registry accepted the
+      # write; the packument that `npm install` reads is CDN-cached and catches
+      # up seconds later. Regenerating packages/sdk/typescript's lockfile inside
+      # that window killed this job three times (0.10.51, 0.10.53, 0.10.54) —
+      # each time *after* the packages were already public, leaving npm ahead of
+      # the repo with no tag. The script waits for propagation, and retries only
+      # when the unresolvable spec is an internal package of *this* release; a
+      # version that was never published still fails the job.
       - name: Regenerate release lockfiles
-        run: |
-          set -euo pipefail
-          npm install --package-lock-only --ignore-scripts
-          npm install --prefix packages/sdk/typescript --package-lock-only --ignore-scripts
-          npm ci --dry-run
-          npm ci --prefix packages/sdk/typescript --dry-run
+        env:
+          RELEASE_VERSION: ${{ needs.build.outputs.new_version }}
+        run: node scripts/release/regenerate-release-lockfiles.mjs "$RELEASE_VERSION"
 
       - name: Commit version bump and create tag
         env:

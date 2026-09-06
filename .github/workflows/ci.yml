@@ -170,6 +170,29 @@ jobs:
           # The E2E harness builds and starts relayfile and relayfile-mount as part of the test flow.
           npx tsx scripts/e2e.ts --ci
 
+  release-tooling:
+    name: Release Tooling
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Nothing here talks to git; don't leave the token in .git/config.
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # Covers the registry-propagation handling in Create Release. These tests
+      # have no dependencies and must not need a network or an npm install —
+      # they are the guard against silently reintroducing the un-retried
+      # lockfile step that broke 0.10.51, 0.10.53 and 0.10.54.
+      - name: Test release scripts
+        run: npm run test:release
+
   workers-typecheck:
     name: Workers Typecheck
     runs-on: ubuntu-latest
