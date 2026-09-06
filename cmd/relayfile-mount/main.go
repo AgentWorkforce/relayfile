@@ -38,6 +38,11 @@ const (
 
 var errFuseModeUnavailable = errors.New("fuse mode is not available in this build")
 
+// relayfileMountVersion is injected by release and qualification builds. Keep
+// the fallback useful for local development and make --version independent of
+// credentials or a running Relayfile service.
+var relayfileMountVersion = "0.10.52"
+
 type mountConfig struct {
 	baseURL               string
 	token                 string
@@ -93,6 +98,7 @@ var defaultFuseRunner fuseRunner = func(context.Context, mountConfig) error {
 }
 
 func main() {
+	version := flag.Bool("version", false, "print the relayfile-mount version and exit")
 	baseURL := flag.String("base-url", envOrDefault("RELAYFILE_BASE_URL", "http://127.0.0.1:8080"), "relayfile base URL")
 	token := flag.String("token", strings.TrimSpace(os.Getenv("RELAYFILE_TOKEN")), "bearer token")
 	credsFile := flag.String("creds-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_CREDS_FILE")), "JSON credentials file containing a relayfile bearer token; takes precedence over --token")
@@ -137,6 +143,10 @@ func main() {
 	checkpointGeneration := flag.Uint64("checkpoint-generation", 0, "strictly increasing migration generation bound into --checkpoint-and-seal")
 	checkpointSealTTL := flag.Duration("checkpoint-seal-ttl", mountsync.DefaultCheckpointSealTTL, "one-use checkpoint seal lifetime (maximum 5m)")
 	flag.Parse()
+	if *version {
+		fmt.Fprintln(os.Stdout, relayfileMountVersion)
+		return
+	}
 	fullPullMinInterval, err := parseDurationWithNegativeOne(*fullPullMinIntervalArg)
 	if err != nil {
 		log.Fatalf("invalid --full-pull-min-interval: %v", err)

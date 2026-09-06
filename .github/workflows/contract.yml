@@ -40,3 +40,6 @@ jobs:
 
       - name: Validate contract surface
         run: ./scripts/check-contract-surface.sh
+
+      - name: Validate mount qualification producer contract
+        run: node scripts/validate-mount-qualification-workflow.mjs
