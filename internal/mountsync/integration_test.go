@@ -72,6 +72,13 @@ func (fc *fakeCloud) dispatch(w http.ResponseWriter, r *http.Request) {
 	// Path shape: /v1/workspaces/{id}/fs/{op}
 	path := r.URL.Path
 	switch {
+	case strings.Contains(path, "/fs/bulk-read"):
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotImplemented)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"code":    "bulk_read_unsupported",
+			"message": "fake cloud exercises the legacy point-read path",
+		})
 	case strings.Contains(path, "/fs/tree"):
 		fc.handleTree(w, r, mode)
 	case strings.Contains(path, "/fs/events"):
@@ -268,6 +275,13 @@ func (lc *largeChaosCloud) dispatch(w http.ResponseWriter, r *http.Request) {
 	n := lc.calls.Add(1)
 	path := r.URL.Path
 	switch {
+	case strings.Contains(path, "/fs/bulk-read"):
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotImplemented)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"code":    "bulk_read_unsupported",
+			"message": "large chaos cloud exercises the legacy point-read path",
+		})
 	case strings.Contains(path, "/fs/events"):
 		http.Error(w, "events not supported", http.StatusNotFound)
 		return

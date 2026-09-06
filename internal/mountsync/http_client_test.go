@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -49,6 +50,160 @@ func TestHTTPClientListTreeRequestsPrePaginationMountRuntimeExclusion(t *testing
 	}
 }
 
+func TestHTTPClientBulkReadUsesBoundedEndpointAndPreservesOrder(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/workspaces/ws_mount/fs/bulk-read" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var body struct {
+			Paths []string `json:"paths"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if got := strings.Join(body.Paths, ","); got != "/a,/b" {
+			t.Fatalf("paths = %q, want /a,/b", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"files":[{"path":"/a","revision":"rev_1","contentType":"text/plain","content":"a"},{"path":"/b","revision":"rev_2","contentType":"text/plain","content":"b"}]}`))
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, "token", server.Client())
+	response, err := client.ReadFilesBulk(context.Background(), "ws_mount", []string{"a", "/b"})
+	if err != nil {
+		t.Fatalf("bulk read failed: %v", err)
+	}
+	if len(response.Files) != 2 || response.Files[0].Content != "a" || response.Files[1].Content != "b" {
+		t.Fatalf("unexpected response: %#v", response)
+	}
+}
+
+func TestHTTPClientBulkReadRejectsEscapedRequestOver64KiB(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("request should be rejected before transport")
+	}))
+	defer server.Close()
+	paths := make([]string, 32)
+	for i := range paths {
+		paths[i] = "/" + strings.Repeat("<", 500) + strings.Repeat("a", 499) + fmt.Sprintf("%d", i)
+	}
+	client := NewHTTPClient(server.URL, "token", server.Client())
+	if _, err := client.ReadFilesBulk(context.Background(), "ws_mount", paths); err == nil {
+		t.Fatal("expected marshaled request size rejection")
+	}
+}
+
+func TestHTTPClientBulkReadRejectsMissingRequiredFields(t *testing.T) {
+	for _, body := range []string{
+		`{"files":[{"path":"/a","revision":"rev_1","contentType":"text/plain"}]}`,
+		`{"files":[{"path":"/a","revision":"rev_1","content":"a"}]}`,
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(body))
+		}))
+		client := NewHTTPClient(server.URL, "token", server.Client())
+		if _, err := client.ReadFilesBulk(context.Background(), "ws_mount", []string{"/a"}); err == nil {
+			t.Fatalf("expected missing field rejection for %s", body)
+		}
+		server.Close()
+	}
+}
+
+func TestHTTPClientBulkReadAcceptsExplicitEmptyContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"files":[{"path":"/a","revision":"rev_1","contentType":"","content":""}]}`))
+	}))
+	defer server.Close()
+	client := NewHTTPClient(server.URL, "token", server.Client())
+	if _, err := client.ReadFilesBulk(context.Background(), "ws_mount", []string{"/a"}); err != nil {
+		t.Fatalf("explicit empty fields should be valid: %v", err)
+	}
+}
+
+func TestReadResponseBodyClampsReadChunkToLimit(t *testing.T) {
+	var touches int
+	body, err := readResponseBody(&fragmentingReader{data: []byte("0123456789"), chunkSize: 2}, 5, func() { touches++ })
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	if string(body) != "01234" {
+		t.Fatalf("body = %q, want first five bytes", body)
+	}
+	if touches != 3 {
+		t.Fatalf("progress touches = %d, want one touch for each fragment through the limit", touches)
+	}
+}
+
+type fragmentingReader struct {
+	data      []byte
+	chunkSize int
+}
+
+func (r *fragmentingReader) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, io.EOF
+	}
+	n := r.chunkSize
+	if n > len(p) {
+		n = len(p)
+	}
+	if n > len(r.data) {
+		n = len(r.data)
+	}
+	copy(p[:n], r.data[:n])
+	r.data = r.data[n:]
+	return n, nil
+}
+
+func TestHTTPClientBulkReadRejectsMoreThan32PathsLocally(t *testing.T) {
+	paths := make([]string, defaultBulkReadMaxFiles+1)
+	for index := range paths {
+		paths[index] = fmt.Sprintf("/f/%d", index)
+	}
+	client := NewHTTPClient("http://127.0.0.1", "token", nil)
+	if _, err := client.ReadFilesBulk(context.Background(), "ws_mount", paths); err == nil {
+		t.Fatal("expected path limit rejection")
+	}
+}
+
+func TestHTTPClientBulkReadRejectsPathByteLimitsLocally(t *testing.T) {
+	client := NewHTTPClient("http://127.0.0.1", "token", nil)
+	if _, err := client.ReadFilesBulk(context.Background(), "ws_mount", []string{"/" + strings.Repeat("a", defaultBulkReadMaxPathBytes)}); err == nil {
+		t.Fatal("expected single-path byte limit rejection")
+	}
+
+	paths := make([]string, 9)
+	for index := range paths {
+		paths[index] = fmt.Sprintf("/%d%s", index, strings.Repeat("a", 4093))
+	}
+	if _, err := client.ReadFilesBulk(context.Background(), "ws_mount", paths); err == nil {
+		t.Fatal("expected aggregate path byte limit rejection")
+	}
+}
+
+func TestHTTPClientBulkReadUnsupportedDoesNotRetry(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotImplemented)
+		_, _ = w.Write([]byte(`{"code":"bulk_read_unsupported","message":"upgrade server"}`))
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, "token", server.Client())
+	_, err := client.ReadFilesBulk(context.Background(), "ws_mount", []string{"/a"})
+	if !isBulkReadUnsupported(err) {
+		t.Fatalf("error = %v, want typed unsupported response", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("requests = %d, want exactly one compatibility probe", got)
+	}
+}
+
 func TestHTTPClientRetriesTransientFailure(t *testing.T) {
 	var calls int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -78,6 +233,54 @@ func TestHTTPClientRetriesTransientFailure(t *testing.T) {
 	}
 	if atomic.LoadInt32(&calls) != 2 {
 		t.Fatalf("expected exactly 2 calls (1 retry), got %d", atomic.LoadInt32(&calls))
+	}
+}
+
+func TestHTTPClientBulkReadRetriesTruncatedResponseBody(t *testing.T) {
+	var calls int32
+	response := `{"files":[{"path":"/a","revision":"rev_1","contentType":"text/plain","content":"a"}]}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		call := atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		if call == 1 {
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(response)+20))
+			_, _ = w.Write([]byte(response[:len(response)/2]))
+			return
+		}
+		_, _ = w.Write([]byte(response))
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, "token", server.Client())
+	bulk, err := client.ReadFilesBulk(context.Background(), "ws_retry", []string{"/a"})
+	if err != nil {
+		t.Fatalf("expected bounded response-body retry to recover, got %v", err)
+	}
+	if len(bulk.Files) != 1 || bulk.Files[0].Content != "a" {
+		t.Fatalf("unexpected recovered response: %#v", bulk)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("requests = %d, want truncated response plus one retry", got)
+	}
+}
+
+func TestHTTPClientDoesNotReplayMutationAfterTruncatedResponseBody(t *testing.T) {
+	var calls int32
+	response := `{"path":"/a","revision":"rev_1"}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(response)+20))
+		_, _ = w.Write([]byte(response[:len(response)/2]))
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, "token", server.Client())
+	if _, err := client.WriteFile(context.Background(), "ws_retry", "/a", "", "text/plain", "a"); err == nil {
+		t.Fatal("expected truncated mutation response to fail")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("mutation requests = %d, want no replay after partial response", got)
 	}
 }
 

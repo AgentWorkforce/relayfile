@@ -9800,6 +9800,11 @@ func newMockMountsyncServer(
 
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case strings.HasSuffix(r.URL.Path, "/fs/bulk-read") && r.Method == http.MethodPost:
+			writeJSONResponse(t, w, http.StatusNotImplemented, map[string]any{
+				"code":    "bulk_read_unsupported",
+				"message": "mock server exercises the legacy point-read path",
+			})
 		case strings.HasSuffix(r.URL.Path, "/fs/tree") && r.Method == http.MethodGet:
 			entries := make([]TreeEntry, 0, len(normalizedFiles))
 			for path, file := range normalizedFiles {

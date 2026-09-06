@@ -1623,6 +1623,274 @@ func TestBulkWriteAndJSONExportEndpoints(t *testing.T) {
 	}
 }
 
+func TestBulkReadEndpointPreservesOrderErrorsAndPathScope(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
+	writeToken := mustTestJWT(t, "dev-secret", "ws_bulk_read", "Writer", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+
+	writeResp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_bulk_read/fs/bulk",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + writeToken,
+			"X-Correlation-Id": "corr_bulk_read_seed",
+		},
+		body: map[string]any{"files": []map[string]any{
+			{"path": "/allowed/a.md", "contentType": "text/plain", "content": "alpha"},
+			{"path": "/allowed/b.md", "contentType": "text/plain", "content": "bravo"},
+			{"path": "/allowed/empty.txt", "contentType": "text/plain", "content": ""},
+		}},
+	})
+	if writeResp.Code != http.StatusAccepted {
+		t.Fatalf("seed status = %d (%s)", writeResp.Code, writeResp.Body.String())
+	}
+
+	readToken := mustTestJWT(t, "dev-secret", "ws_bulk_read", "Reader", []string{"relayfile:fs:read:/allowed/**"}, time.Now().Add(time.Hour))
+	readResp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_bulk_read/fs/bulk-read",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + readToken,
+			"X-Correlation-Id": "corr_bulk_read",
+		},
+		body: map[string]any{"paths": []string{"/allowed/b.md", "/allowed/missing.md", "/allowed/a.md", "/allowed/empty.txt"}},
+	})
+	if readResp.Code != http.StatusOK {
+		t.Fatalf("bulk-read status = %d (%s)", readResp.Code, readResp.Body.String())
+	}
+	var payload struct {
+		Files []bulkReadFileResult `json:"files"`
+	}
+	if err := json.NewDecoder(readResp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode bulk-read response: %v", err)
+	}
+	if len(payload.Files) != 4 {
+		t.Fatalf("files = %d, want 4", len(payload.Files))
+	}
+	if payload.Files[0].Path != "/allowed/b.md" || payload.Files[0].Content == nil || *payload.Files[0].Content != "bravo" || payload.Files[0].Revision == "" {
+		t.Fatalf("first result = %#v", payload.Files[0])
+	}
+	if payload.Files[1].Path != "/allowed/missing.md" || payload.Files[1].Error == nil || payload.Files[1].Error.Status != http.StatusNotFound {
+		t.Fatalf("missing result = %#v", payload.Files[1])
+	}
+	if payload.Files[2].Path != "/allowed/a.md" || payload.Files[2].Content == nil || *payload.Files[2].Content != "alpha" {
+		t.Fatalf("third result = %#v", payload.Files[2])
+	}
+	if payload.Files[3].Path != "/allowed/empty.txt" || payload.Files[3].Content == nil || *payload.Files[3].Content != "" {
+		t.Fatalf("empty-file result = %#v", payload.Files[3])
+	}
+
+	denied := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_bulk_read/fs/bulk-read",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + readToken,
+			"X-Correlation-Id": "corr_bulk_read_denied",
+		},
+		body: map[string]any{"paths": []string{"/allowed/a.md", "/secret/b.md"}},
+	})
+	if denied.Code != http.StatusForbidden {
+		t.Fatalf("out-of-scope status = %d, want 403 (%s)", denied.Code, denied.Body.String())
+	}
+}
+
+func TestBulkReadErrorOmitsSuccessOnlyFields(t *testing.T) {
+	payload, err := json.Marshal(bulkReadError("/missing.txt", http.StatusNotFound, "not_found", "file not found"))
+	if err != nil {
+		t.Fatalf("marshal bulk-read error: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatalf("decode bulk-read error: %v", err)
+	}
+	if _, ok := fields["semantics"]; ok {
+		t.Fatalf("bulk-read error unexpectedly includes empty semantics: %s", payload)
+	}
+	if _, ok := fields["content"]; ok {
+		t.Fatalf("bulk-read error unexpectedly includes content: %s", payload)
+	}
+}
+
+func TestBulkReadSuccessPreservesEmptyContentType(t *testing.T) {
+	payload, err := json.Marshal(bulkReadResult(relayfile.File{
+		Path:        "/legacy.txt",
+		Revision:    "rev_legacy",
+		Content:     "legacy",
+		ContentType: "",
+	}))
+	if err != nil {
+		t.Fatalf("marshal bulk-read success: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatalf("decode bulk-read success: %v", err)
+	}
+	contentType, ok := fields["contentType"]
+	if !ok || string(contentType) != `""` {
+		t.Fatalf("contentType = %s, want explicit empty string in %s", contentType, payload)
+	}
+}
+
+func TestBulkReadEndpointRejectsDecodedContentOverflow(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	const path = "/large.txt"
+	if _, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: "ws_bulk_read_content_limit",
+		Path:        path,
+		IfMatch:     "0",
+		Content:     strings.Repeat("x", maxBulkReadContentBytes+1),
+	}); err != nil {
+		t.Fatalf("seed oversized file: %v", err)
+	}
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", "ws_bulk_read_content_limit", "Reader", []string{"fs:read"}, time.Now().Add(time.Hour))
+	resp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_bulk_read_content_limit/fs/bulk-read",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_bulk_read_content_limit",
+		},
+		body: map[string]any{"paths": []string{path}},
+	})
+	if resp.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 (%s)", resp.Code, resp.Body.String())
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode overflow response: %v", err)
+	}
+	if payload["code"] != "bulk_read_response_too_large" {
+		t.Fatalf("error code = %v, want bulk_read_response_too_large", payload["code"])
+	}
+}
+
+func TestBulkReadEndpointRejectsWireResponseOverflow(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	const path = "/wide-type.txt"
+	if _, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: "ws_bulk_read_wire_limit",
+		Path:        path,
+		IfMatch:     "0",
+		Content:     "x",
+		ContentType: strings.Repeat("x", maxBulkReadResponseBytes),
+	}); err != nil {
+		t.Fatalf("seed wide content type: %v", err)
+	}
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", "ws_bulk_read_wire_limit", "Reader", []string{"fs:read"}, time.Now().Add(time.Hour))
+	resp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_bulk_read_wire_limit/fs/bulk-read",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_bulk_read_wire_limit",
+		},
+		body: map[string]any{"paths": []string{path}},
+	})
+	if resp.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 (%s)", resp.Code, resp.Body.String())
+	}
+}
+
+func TestBulkReadEndpointRejectsMoreThan32Paths(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
+	paths := make([]string, maxBulkReadPaths+1)
+	for index := range paths {
+		paths[index] = fmt.Sprintf("/file/%d", index)
+	}
+	token := mustTestJWT(t, "dev-secret", "ws_bulk_read_limit", "Reader", []string{"fs:read"}, time.Now().Add(time.Hour))
+	resp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_bulk_read_limit/fs/bulk-read",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_bulk_read_limit",
+		},
+		body: map[string]any{"paths": paths},
+	})
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (%s)", resp.Code, resp.Body.String())
+	}
+
+	oversized := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_bulk_read_limit/fs/bulk-read",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_bulk_read_body_limit",
+		},
+		body: map[string]any{
+			"paths":   []string{"/file/0"},
+			"padding": strings.Repeat("x", maxBulkReadRequestBytes),
+		},
+	})
+	if oversized.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized body status = %d, want 413 (%s)", oversized.Code, oversized.Body.String())
+	}
+}
+
+func TestBulkReadInheritedACLDoesNotProbeDeniedPaths(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
+	owner := mustTestJWT(t, "dev-secret", "ws_bulk_acl", "Owner", []string{"fs:read", "fs:write", "finance"}, time.Now().Add(time.Hour))
+	limited := mustTestJWT(t, "dev-secret", "ws_bulk_acl", "Limited", []string{"fs:read"}, time.Now().Add(time.Hour))
+	for _, item := range []struct {
+		path string
+		body map[string]any
+	}{
+		{path: "/private/.relayfile.acl", body: map[string]any{"contentType": "text/plain", "content": "acl", "semantics": map[string]any{"permissions": []string{"scope:finance"}}}},
+		{path: "/private/exists.txt", body: map[string]any{"contentType": "text/plain", "content": "secret"}},
+	} {
+		resp := doRequest(t, server, request{method: http.MethodPut, path: "/v1/workspaces/ws_bulk_acl/fs/file?path=" + url.QueryEscape(item.path), headers: map[string]string{"Authorization": "Bearer " + owner, "X-Correlation-Id": "corr_bulk_acl_seed", "If-Match": "0"}, body: item.body})
+		if resp.Code != http.StatusAccepted {
+			t.Fatalf("seed %s status = %d (%s)", item.path, resp.Code, resp.Body.String())
+		}
+	}
+	resp := doRequest(t, server, request{method: http.MethodPost, path: "/v1/workspaces/ws_bulk_acl/fs/bulk-read", headers: map[string]string{"Authorization": "Bearer " + limited, "X-Correlation-Id": "corr_bulk_acl_read"}, body: map[string]any{"paths": []string{"/private/exists.txt", "/private/missing.txt"}}})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("bulk-read status = %d (%s)", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Files []bulkReadFileResult `json:"files"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode bulk-read response: %v", err)
+	}
+	if len(payload.Files) != 2 || payload.Files[0].Error == nil || payload.Files[1].Error == nil || payload.Files[0].Error.Status != http.StatusForbidden || payload.Files[1].Error.Status != http.StatusForbidden {
+		t.Fatalf("denied existing/missing results = %#v", payload.Files)
+	}
+}
+
+func TestBulkReadRevalidatesTargetACLFromReturnedRevision(t *testing.T) {
+	returned := relayfile.File{
+		Path:     "/private/file.txt",
+		Revision: "rev-before-tightening",
+		Semantics: relayfile.FileSemantics{
+			Permissions: []string{"public"},
+		},
+	}
+	// Simulate the ACL store changing after the file snapshot was read. The
+	// target reader must use permissions from that returned revision, while the
+	// ancestor reader remains fresh.
+	freshACLReader := func(path string) ([]byte, error) {
+		if normalizeACLPath(path) == returned.Path {
+			return json.Marshal([]string{"scope:finance"})
+		}
+		return nil, nil
+	}
+	permissions := resolveBulkReadPermissionsForReturnedFile(freshACLReader, "/private//./file.txt", returned)
+	if len(permissions) != 1 || permissions[0] != "public" {
+		t.Fatalf("target permissions = %#v, want returned-revision public grant", permissions)
+	}
+}
+
 func TestBulkWriteEndpoint(t *testing.T) {
 	server := NewServer(relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true}))
 	token := mustTestJWT(t, "dev-secret", "ws_bulk_endpoint", "Worker1", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))

@@ -748,6 +748,13 @@ func TestRunSinglePollingMountStopsOnTimerBootstrapStall(t *testing.T) {
 	nextCursor := entries[len(entries)-1].Path
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case strings.Contains(r.URL.Path, "/fs/bulk-read"):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotImplemented)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"code":    "bulk_read_unsupported",
+				"message": "test server exercises the legacy point-read path",
+			})
 		case strings.Contains(r.URL.Path, "/fs/tree"):
 			if r.URL.Query().Get("cursor") != "" {
 				cursorTreeCalls.Add(1)
