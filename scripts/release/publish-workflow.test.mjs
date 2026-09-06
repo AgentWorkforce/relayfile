@@ -58,7 +58,7 @@ function extractCollisionGuard() {
  * A throwaway repo with the real package names and an `npm` stub that reports
  * exactly `published` as taken.
  */
-function makeSandbox(published) {
+function makeSandbox(published, outage = false) {
   const dir = mkdtempSync(join(tmpdir(), 'relayfile-guard-'));
   for (const rel of EXPECTED_PACKAGE_PATHS) {
     const name = readFileSync(join(REPO, rel), 'utf8');
@@ -67,18 +67,25 @@ function makeSandbox(published) {
   }
   const bin = join(dir, 'bin');
   mkdirSync(bin);
-  // `npm view <spec> version` exits 0 only for the specs we declare published.
+  // `npm view <spec> version` exits 0 for the specs we declare published, and
+  // otherwise reproduces npm's real E404 output. `outage` instead reproduces an
+  // unanswerable query, which must never read as "this version is free".
+  const notFound = outage
+    ? 'npm error code ENOTFOUND\nnpm error network request to https://registry.npmjs.org failed'
+    : 'npm error code E404\nnpm error 404 No match found for version';
   writeFileSync(
     join(bin, 'npm'),
-    `#!/bin/sh\n[ "$1" = view ] || exit 0\nfor s in ${published.map((s) => `'${s}'`).join(' ')}; do\n  [ "$2" = "$s" ] && exit 0\ndone\nexit 1\n`,
+    `#!/bin/sh\n[ "$1" = view ] || exit 0\nfor s in ${published.map((s) => `'${s}'`).join(' ')}; do\n  [ "$2" = "$s" ] && exit 0\ndone\nprintf '%s\\n' '${notFound}' >&2\nexit 1\n`,
   );
   chmodSync(join(bin, 'npm'), 0o755);
   return { dir, bin };
 }
 
-function runGuard({ published, newVersion, customVersion = '', currentVersion = '0.10.52' }) {
-  const { dir, bin } = makeSandbox(published);
-  const script = `set -u\n${extractPackagePaths()}\n${extractCollisionGuard()}\n`;
+function runGuard({ published, newVersion, customVersion = '', currentVersion = '0.10.52', outage = false }) {
+  const { dir, bin } = makeSandbox(published, outage);
+  // GitHub Actions runs every `run:` step under `bash -e -o pipefail`; matching
+  // that here keeps this an honest test of the shipped shell.
+  const script = `set -euo pipefail\n${extractPackagePaths()}\n${extractCollisionGuard()}\n`;
   try {
     const stdout = execFileSync('bash', ['-c', script], {
       cwd: dir,
@@ -144,4 +151,12 @@ test('the guard defers to an operator-supplied custom version', () => {
 test('Create Release still runs the propagation-tolerant lockfile step', () => {
   assert.match(WORKFLOW, /node scripts\/release\/regenerate-release-lockfiles\.mjs "\$RELEASE_VERSION"/);
   assert.doesNotMatch(WORKFLOW, /npm install --prefix packages\/sdk\/typescript --package-lock-only/);
+});
+
+test('REGRESSION: an unanswerable registry query aborts instead of reading as free', () => {
+  // A registry outage makes `npm view` fail exactly like a missing version.
+  // Treating that as "free" would march a taken version into the publish matrix.
+  const result = runGuard({ published: [], newVersion: '0.10.55', outage: true });
+  assert.equal(result.code, 1);
+  assert.match(result.stdout, /could not determine whether/);
 });

@@ -183,8 +183,17 @@ jobs:
                 .map((p) => JSON.parse(fs.readFileSync(p, 'utf8')).name);
               console.log(names.join(' '));
             "); do
-              if npm view "$PKG_NAME@$NEW_VERSION" version >/dev/null 2>&1; then
+              # `npm view` exits non-zero both for "no such version" and for a
+              # registry outage. Only a genuine E404 means the version is free;
+              # treating an unanswerable query as free would let a taken version
+              # reach the publish matrix and partially release.
+              if VIEW_OUT=$(npm view "$PKG_NAME@$NEW_VERSION" version 2>&1); then
                 TAKEN="$TAKEN $PKG_NAME"
+              elif ! printf '%s' "$VIEW_OUT" | grep -q 'code E404'; then
+                echo "::error::could not determine whether $PKG_NAME@$NEW_VERSION" \
+                  "is published; refusing to release on an unanswered registry query." \
+                  "npm said: $VIEW_OUT"
+                exit 1
               fi
             done
             if [ -n "$TAKEN" ]; then

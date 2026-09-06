@@ -60,8 +60,25 @@ export const LOCKFILE_COMMANDS = [
 const DEP_TYPES = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'];
 
 /**
+ * Whether a dependency range names exactly this release's version. npm echoes
+ * the *requested range* in its ETARGET message, so `@relayfile/sdk@^0.10.54`
+ * has to be recognised as this release just as `@relayfile/core@0.10.54` does —
+ * `packages/agents` peer-depends on the sdk with a caret. Anything broader
+ * (`>=0.10.0`, `0.10.x`) deliberately does not match: it is not a pin this
+ * release created, so a failure to resolve it is not this release's lag.
+ */
+export function rangeTargetsVersion(range, version) {
+  return (
+    range === version ||
+    range === `=${version}` ||
+    range === `^${version}` ||
+    range === `~${version}`
+  );
+}
+
+/**
  * Every internal package that some release manifest pins at exactly `version`
- * (bare or caret). These are the specs that must be resolvable before a
+ * (bare, caret or tilde). These are the specs that must be resolvable before a
  * lockfile can be regenerated.
  */
 export function collectRequiredPackages({ version, manifests }) {
@@ -70,7 +87,7 @@ export function collectRequiredPackages({ version, manifests }) {
     for (const depType of DEP_TYPES) {
       for (const [name, range] of Object.entries(manifest?.[depType] ?? {})) {
         if (!name.startsWith(INTERNAL_SCOPE)) continue;
-        if (range === version || range === `^${version}`) required.add(name);
+        if (rangeTargetsVersion(range, version)) required.add(name);
       }
     }
   }
@@ -115,7 +132,7 @@ export function classifyInstallFailure({ output, version, requiredPackages }) {
 
   const required = new Set(requiredPackages);
   const offenders = unresolved.filter(
-    (spec) => !(required.has(spec.name) && spec.version === version),
+    (spec) => !(required.has(spec.name) && rangeTargetsVersion(spec.version, version)),
   );
   if (offenders.length > 0) {
     const list = offenders.map((s) => `${s.name}@${s.version}`).join(', ');

@@ -6,6 +6,7 @@ import {
   classifyInstallFailure,
   collectRequiredPackages,
   parseUnresolvedSpecs,
+  rangeTargetsVersion,
   regenerateReleaseLockfiles,
   waitForRegistryPropagation,
 } from './regenerate-release-lockfiles.mjs';
@@ -77,6 +78,38 @@ test('a non-ETARGET failure is fatal and is never retried', () => {
   });
   assert.equal(verdict.kind, 'fatal');
   assert.match(verdict.reason, /not an ETARGET failure/);
+});
+
+test('REGRESSION: a caret-pinned internal package is propagation lag, not fatal', () => {
+  // npm echoes the requested *range*, and packages/agents peer-depends on the
+  // sdk with a caret. Comparing the raw range against the bare version made
+  // "^0.10.54" read as a different version and aborted without retrying —
+  // reintroducing the exact race this script exists to fix.
+  const verdict = classifyInstallFailure({
+    output: 'npm error code ETARGET\nnpm error notarget No matching version found for @relayfile/sdk@^0.10.54.',
+    version: VERSION,
+    requiredPackages: ['@relayfile/sdk'],
+  });
+  assert.equal(verdict.kind, 'propagation');
+});
+
+test('a broad range is still fatal — it is not a pin this release created', () => {
+  for (const range of ['>=0.10.0', '0.10.x', '^0.9.0']) {
+    const verdict = classifyInstallFailure({
+      output: `npm error code ETARGET\nnpm error notarget No matching version found for @relayfile/sdk@${range}.`,
+      version: VERSION,
+      requiredPackages: ['@relayfile/sdk'],
+    });
+    assert.equal(verdict.kind, 'fatal', `${range} must not be retried`);
+  }
+});
+
+test('rangeTargetsVersion accepts this release\'s pin styles and nothing wider', () => {
+  assert.ok(rangeTargetsVersion('0.10.54', VERSION));
+  assert.ok(rangeTargetsVersion('^0.10.54', VERSION));
+  assert.ok(rangeTargetsVersion('~0.10.54', VERSION));
+  assert.ok(!rangeTargetsVersion('>=0.10.54', VERSION));
+  assert.ok(!rangeTargetsVersion('0.10.53', VERSION));
 });
 
 /* ------------------------- required-package set --------------------------- */
