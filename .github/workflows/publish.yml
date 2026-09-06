@@ -131,6 +131,23 @@ jobs:
           CURRENT_VERSION=$(node -p "require('./package.json').version")
           echo "Current version: $CURRENT_VERSION"
 
+          # Every workspace package this release publishes. Used both by the
+          # collision guard below and by the version-sync script, so the two can
+          # never disagree about what a release covers.
+          PACKAGE_PATHS_JSON='[
+            "packages/core/package.json",
+            "packages/sdk/typescript/package.json",
+            "packages/client/package.json",
+            "packages/agents/package.json",
+            "packages/cli/package.json",
+            "packages/file-observer/package.json",
+            "packages/local-mount/package.json",
+            "packages/mount-darwin-arm64/package.json",
+            "packages/mount-darwin-x64/package.json",
+            "packages/mount-linux-arm64/package.json",
+            "packages/mount-linux-x64/package.json"
+          ]'
+
           if [ -n "$CUSTOM_VERSION" ]; then
             echo "Setting version to custom value: $CUSTOM_VERSION"
             npm version "$CUSTOM_VERSION" --no-git-tag-version --allow-same-version
@@ -148,13 +165,35 @@ jobs:
           # Without this guard the run reaches the publish matrix before every
           # job fails with "cannot publish over the previously published
           # versions", which half-releases: some packages land, the rest do not.
+          #
+          # Every published package is checked, not just `relayfile`. A previous
+          # run can die partway through the matrix, leaving some names taken at a
+          # version the others never reached — checking one name would wave that
+          # straight back into the same failure.
+          #
           # Skipped when an operator names a custom version — that is a
           # deliberate choice, including re-running a release step by hand.
-          if [ -z "$CUSTOM_VERSION" ] && npm view "relayfile@$NEW_VERSION" version >/dev/null 2>&1; then
-            echo "::error::relayfile@$NEW_VERSION is already published." \
-              "main's package.json ($CURRENT_VERSION) is behind the registry;" \
-              "resync the repo to the published version before releasing."
-            exit 1
+          if [ -z "$CUSTOM_VERSION" ]; then
+            TAKEN=""
+            for PKG_NAME in $(node -e "
+              const fs = require('fs');
+              const paths = ${PACKAGE_PATHS_JSON};
+              const names = paths
+                .filter((p) => fs.existsSync(p))
+                .map((p) => JSON.parse(fs.readFileSync(p, 'utf8')).name);
+              console.log(names.join(' '));
+            "); do
+              if npm view "$PKG_NAME@$NEW_VERSION" version >/dev/null 2>&1; then
+                TAKEN="$TAKEN $PKG_NAME"
+              fi
+            done
+            if [ -n "$TAKEN" ]; then
+              echo "::error::version $NEW_VERSION is already published for:$TAKEN." \
+                "The repo's package.json ($CURRENT_VERSION) is behind the registry;" \
+                "resync the repo to the published version before releasing." \
+                "Publishing anyway would fail mid-matrix and half-release."
+              exit 1
+            fi
           fi
 
           if [[ "$NEW_VERSION" == *"-"* ]]; then
@@ -169,19 +208,7 @@ jobs:
             const path = require('path');
             const version = '$NEW_VERSION';
 
-            const packagePaths = [
-              'packages/core/package.json',
-              'packages/sdk/typescript/package.json',
-              'packages/client/package.json',
-              'packages/agents/package.json',
-              'packages/cli/package.json',
-              'packages/file-observer/package.json',
-              'packages/local-mount/package.json',
-              'packages/mount-darwin-arm64/package.json',
-              'packages/mount-darwin-x64/package.json',
-              'packages/mount-linux-arm64/package.json',
-              'packages/mount-linux-x64/package.json',
-            ];
+            const packagePaths = ${PACKAGE_PATHS_JSON};
 
             for (const pkgPath of packagePaths) {
               if (fs.existsSync(pkgPath)) {

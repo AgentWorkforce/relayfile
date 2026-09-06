@@ -50,13 +50,27 @@ correct tag target is the version-resync commit on `main` (the commit whose tree
 actually reads `0.10.54`), so this must run **after** that commit lands:
 
 ```bash
+set -euo pipefail
 RUN=34034791408
 gh run download "$RUN" -R AgentWorkforce/relayfile --pattern 'relayfile-mount-*' --dir mount-binaries
 gh run download "$RUN" -R AgentWorkforce/relayfile --name build-output --dir build-output
-find mount-binaries -type f -exec mv {} mount-binaries/ \; 2>/dev/null || true
+# gh nests each artifact in a directory named after the artifact, which is also
+# the filename — so flatten via a staging dir, or mv walks into the directory.
+mkdir -p mount-staging
+find mount-binaries -mindepth 2 -type f -name 'relayfile-mount-*' -exec mv -f {} mount-staging/ \;
+rm -rf mount-binaries && mv mount-staging mount-binaries
+
+# Never checksum a partial download — Create Release verifies the same four.
+for SUFFIX in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
+  test -f "mount-binaries/relayfile-mount-${SUFFIX}" \
+    || { echo "missing relayfile-mount-${SUFFIX}" >&2; exit 1; }
+done
+test "$(ls build-output/packages/cli/bin/relayfile-cli-* | wc -l)" -eq 6
 
 ( cd mount-binaries && sha256sum relayfile-mount-* ) > checksums.txt
 ( cd build-output/packages/cli/bin && sha256sum relayfile-cli-* ) >> checksums.txt
+# Confirm against the sums recorded below before pushing anything.
+grep -c . checksums.txt   # expect 10
 
 git tag -a v0.10.54 -m "Release v0.10.54" <resync-commit>
 git push origin v0.10.54
