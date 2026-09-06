@@ -38,10 +38,10 @@ const (
 
 var errFuseModeUnavailable = errors.New("fuse mode is not available in this build")
 
-// relayfileMountVersion is injected by release and qualification builds. Keep
-// the fallback useful for local development and make --version independent of
-// credentials or a running Relayfile service.
-var relayfileMountVersion = "0.10.52"
+// relayfileMountVersion is injected by release and qualification builds. Local
+// builds intentionally report "dev" rather than duplicating the package
+// version; release workflows resolve the canonical version from packages/cli.
+var relayfileMountVersion = "dev"
 
 type mountConfig struct {
 	baseURL               string
