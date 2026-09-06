@@ -17,7 +17,15 @@ func init() {
 }
 
 func runFuseMount(ctx context.Context, cfg mountConfig) error {
-	httpClient := mountsync.NewHTTPClient(cfg.baseURL, cfg.token, &http.Client{Timeout: cfg.timeout})
+	httpClient, err := mountsync.NewHTTPClientWithMountCorrelationID(
+		cfg.baseURL,
+		cfg.token,
+		&http.Client{Timeout: cfg.timeout},
+		cfg.requestCorrelationID,
+	)
+	if err != nil {
+		return fmt.Errorf("configure mount request correlation: %w", err)
+	}
 	installCredsFileRefresh(httpClient, cfg)
 	if cfg.logHTTPStatus {
 		httpClient.SetHTTPStatusLogger(log.Default())

@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -233,6 +235,120 @@ func TestHTTPClientRetriesTransientFailure(t *testing.T) {
 	}
 	if atomic.LoadInt32(&calls) != 2 {
 		t.Fatalf("expected exactly 2 calls (1 retry), got %d", atomic.LoadInt32(&calls))
+	}
+}
+
+func TestHTTPClientMountCorrelationIsStableAcrossEndpointsAndRetries(t *testing.T) {
+	const mountCorrelationID = "mount_qualification_0123456789abcdef"
+	var mu sync.Mutex
+	attempts := map[string]int{}
+	seen := make([]string, 0, 5)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts[r.URL.Path]++
+		attempt := attempts[r.URL.Path]
+		seen = append(seen, r.Header.Get("X-Correlation-Id"))
+		mu.Unlock()
+
+		if r.Header.Get("X-Correlation-Id") != mountCorrelationID {
+			t.Fatalf("request did not use the configured mount correlation")
+		}
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/fs/bulk-read"):
+			if attempt == 1 {
+				http.Error(w, `{"code":"unavailable"}`, http.StatusServiceUnavailable)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"files":[{"path":"/bulk.txt","revision":"rev_1","contentType":"text/plain","content":"bulk"}]}`))
+		case strings.HasSuffix(r.URL.Path, "/fs/file"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"path":"/point.txt","revision":"rev_2","contentType":"text/plain","content":"point"}`))
+		case strings.HasSuffix(r.URL.Path, "/fs/export"):
+			if attempt == 1 {
+				http.Error(w, `{"code":"unavailable"}`, http.StatusServiceUnavailable)
+				return
+			}
+			w.Header().Set("Content-Type", "application/x-tar")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewHTTPClientWithMountCorrelationID(server.URL, "token", server.Client(), mountCorrelationID)
+	if err != nil {
+		t.Fatalf("configure mount correlation: %v", err)
+	}
+	var statusLogs bytes.Buffer
+	client.SetHTTPStatusLogger(log.New(&statusLogs, "", 0))
+	if _, err := client.ReadFilesBulk(context.Background(), "ws_mount", []string{"/bulk.txt"}); err != nil {
+		t.Fatalf("bulk read: %v", err)
+	}
+	if _, err := client.ReadFile(context.Background(), "ws_mount", "/point.txt"); err != nil {
+		t.Fatalf("point read: %v", err)
+	}
+	tarBody, err := client.ExportGithubWorkingTreeTar(context.Background(), "ws_mount", GithubWorkingTreeSeedRequest{
+		Owner: "AgentWorkforce", Repo: "relayfile", PathPrefix: "/github/repos/AgentWorkforce/relayfile/contents", HeadSHA: "abc123",
+	})
+	if err != nil {
+		t.Fatalf("tar export: %v", err)
+	}
+	_ = tarBody.Body.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 5 {
+		t.Fatalf("requests = %d, want bulk retry + point + tar retry", len(seen))
+	}
+	for _, correlationID := range seen {
+		if correlationID != mountCorrelationID {
+			t.Fatal("configured mount correlation changed between requests")
+		}
+	}
+	if strings.Contains(statusLogs.String(), mountCorrelationID) {
+		t.Fatal("HTTP status logs exposed the raw mount correlation")
+	}
+}
+
+func TestHTTPClientMountCorrelationValidationIsBoundedAndRedacted(t *testing.T) {
+	invalid := []string{
+		"short",
+		" mount_qualification_01234567",
+		"mount qualification 01234567",
+		strings.Repeat("a", 129),
+	}
+	for _, value := range invalid {
+		_, err := NewHTTPClientWithMountCorrelationID("http://127.0.0.1", "token", nil, value)
+		if err == nil {
+			t.Fatal("expected invalid mount correlation to be rejected")
+		}
+		if strings.Contains(err.Error(), value) {
+			t.Fatal("validation error exposed the raw mount correlation")
+		}
+	}
+}
+
+func TestHTTPClientMountCorrelationsRemainIsolated(t *testing.T) {
+	seen := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Header.Get("X-Correlation-Id")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"path":"/file.txt","revision":"rev_1","contentType":"text/plain","content":"ok"}`))
+	}))
+	defer server.Close()
+
+	for _, correlationID := range []string{"mount_qualification_aaaaaaaa", "mount_qualification_bbbbbbbb"} {
+		client, err := NewHTTPClientWithMountCorrelationID(server.URL, "token", server.Client(), correlationID)
+		if err != nil {
+			t.Fatalf("configure mount correlation: %v", err)
+		}
+		if _, err := client.ReadFile(context.Background(), "ws_mount", "/file.txt"); err != nil {
+			t.Fatalf("read file: %v", err)
+		}
+	}
+	if first, second := <-seen, <-seen; first == second {
+		t.Fatal("independent mount clients reused a correlation")
 	}
 }
 

@@ -142,6 +142,7 @@ Queue backend precedence is:
 | `RELAYFILE_MOUNT_PROVIDER` | string | unset | No | Provider filter for events |
 | `RELAYFILE_LOCAL_DIR` | string | unset | Yes | Local mirror directory |
 | `RELAYFILE_MOUNT_STATE_FILE` | string | unset | No | Sync state file |
+| `RELAYFILE_MOUNT_CORRELATION_ID` | string | generated per request | No | Stable 8-128 character request correlation for one mount process; when set, the same value is reused across bulk, point, export, and retry requests and is never written to logs |
 | `RELAYFILE_MOUNT_INTERVAL` | duration | `2s` | No | Polling interval |
 | `RELAYFILE_MOUNT_INTERVAL_JITTER` | float | `0.2` | No | Clamped into the `0..1` range |
 | `RELAYFILE_MOUNT_TIMEOUT` | duration | `15s` | No | Per-sync timeout |
@@ -170,6 +171,7 @@ the `workspace_id`/`wks` claim in the active token, then the default stored by
 | `RELAYFILE_REMOTE_PATH` | string | `/` | Mount command default |
 | `RELAYFILE_MOUNT_PROVIDER` | string | unset | Mount command provider filter |
 | `RELAYFILE_MOUNT_STATE_FILE` | string | unset | Mount command state-file default |
+| `RELAYFILE_MOUNT_CORRELATION_ID` | string | generated per request | Stable request correlation inherited by foreground, background, and checkpoint mount processes; accepts the same bounded character set as `relayfile-mount` |
 | `RELAYFILE_MOUNT_MODE` | string | `poll` | Mount mode for `relayfile mount`; only `poll` is supported in this checkout |
 | `RELAYFILE_MOUNT_FUSE` | bool | `false` | Legacy opt-in checked by the CLI to reject unsupported FUSE mode with a clear error |
 | `RELAYFILE_MOUNT_INTERVAL` | duration | `30s` | Mount command interval default |

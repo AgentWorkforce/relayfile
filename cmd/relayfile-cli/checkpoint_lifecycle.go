@@ -1170,6 +1170,10 @@ func checkpointSubprocessEnv(env []string) []string {
 	out := make([]string, 0, len(env))
 	for _, item := range env {
 		key := strings.SplitN(item, "=", 2)[0]
+		if key == "RELAYFILE_MOUNT_CORRELATION_ID" {
+			out = append(out, item)
+			continue
+		}
 		if _, skip := blocked[key]; skip || strings.HasPrefix(key, "RELAYFILE_MOUNT_") {
 			continue
 		}
