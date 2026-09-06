@@ -47,6 +47,7 @@ type mountConfig struct {
 	baseURL               string
 	token                 string
 	credsFile             string
+	requestCorrelationID  string
 	workspaceID           string
 	remotePath            string
 	remotePaths           []string
@@ -201,6 +202,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("invalid sync mode: %v", err)
 	}
+	requestCorrelationID := os.Getenv("RELAYFILE_MOUNT_CORRELATION_ID")
+	if err := mountsync.ValidateMountCorrelationID(requestCorrelationID); err != nil {
+		log.Fatalf("invalid mount request correlation: %v", err)
+	}
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -209,6 +214,7 @@ func main() {
 		baseURL:               *baseURL,
 		token:                 resolvedToken,
 		credsFile:             resolvedCredsFile,
+		requestCorrelationID:  requestCorrelationID,
 		workspaceID:           strings.TrimSpace(*workspaceID),
 		remotePath:            mountscope.FirstPath(allRemotePaths, envOrDefault("RELAYFILE_REMOTE_PATH", "/")),
 		remotePaths:           mountscope.NormalizePaths(allRemotePaths, envOrDefault("RELAYFILE_REMOTE_PATH", "/")),
@@ -480,7 +486,15 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 	// bootstrap body read mid-stream. Cancellation is owned by the
 	// per-cycle / bootstrap / cursor contexts; NewSyncHTTPClient wires a
 	// transport that bounds connect/handshake/time-to-first-byte only.
-	client := mountsync.NewHTTPClient(cfg.baseURL, cfg.token, mountsync.NewSyncHTTPClient())
+	client, err := mountsync.NewHTTPClientWithMountCorrelationID(
+		cfg.baseURL,
+		cfg.token,
+		mountsync.NewSyncHTTPClient(),
+		cfg.requestCorrelationID,
+	)
+	if err != nil {
+		return fmt.Errorf("configure mount request correlation: %w", err)
+	}
 	installCredsFileRefresh(client, cfg)
 	if cfg.logHTTPStatus {
 		client.SetHTTPStatusLogger(log.Default())

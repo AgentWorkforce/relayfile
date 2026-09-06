@@ -669,6 +669,21 @@ func TestInstallCredsFileRefreshToleratesParseFailureWithoutRetry(t *testing.T) 
 	}
 }
 
+func TestRunSinglePollingMountRejectsUnsafeCorrelationWithoutEchoingIt(t *testing.T) {
+	const unsafeCorrelation = "mount qualification private value"
+	err := runSinglePollingMount(context.Background(), mountConfig{
+		baseURL:              "http://127.0.0.1",
+		token:                "test-token",
+		requestCorrelationID: unsafeCorrelation,
+	})
+	if err == nil || !strings.Contains(err.Error(), "RELAYFILE_MOUNT_CORRELATION_ID") {
+		t.Fatalf("expected bounded mount correlation validation, got %v", err)
+	}
+	if strings.Contains(err.Error(), unsafeCorrelation) {
+		t.Fatal("mount startup error exposed the raw correlation")
+	}
+}
+
 // TestRunSinglePollingMountStopsOnBootstrapStall proves the typed hard failure
 // leaves the polling runner immediately. main turns this returned error into a
 // nonzero process exit, so the ticker cannot retry the same checkpoint.

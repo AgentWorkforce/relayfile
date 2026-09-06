@@ -49,6 +49,7 @@ var (
 	checkpointSessionPattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$`)
 	checkpointRevisionPattern       = regexp.MustCompile(`^(?:0|rev_[0-9]+)$`)
 	checkpointEventCursorPattern    = regexp.MustCompile(`^(?:0|evt_[0-9]+)$`)
+	mountCorrelationIDPattern       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$`)
 )
 
 var sensitiveLogQueryValue = regexp.MustCompile(`(?i)([?&](?:token|access_token|api_key)=)[^&#\s"']*`)
@@ -610,17 +611,18 @@ type LazyMaterializeClient interface {
 }
 
 type HTTPClient struct {
-	baseURL          string
-	token            string
-	tokenMu          sync.RWMutex
-	tokenRefreshMu   sync.RWMutex
-	tokenRefreshFunc AuthTokenRefreshFunc
-	httpClient       *http.Client
-	maxRetries       int
-	baseDelay        time.Duration
-	maxDelay         time.Duration
-	httpStatusLogMu  sync.RWMutex
-	httpStatusLogger Logger
+	baseURL            string
+	token              string
+	mountCorrelationID string
+	tokenMu            sync.RWMutex
+	tokenRefreshMu     sync.RWMutex
+	tokenRefreshFunc   AuthTokenRefreshFunc
+	httpClient         *http.Client
+	maxRetries         int
+	baseDelay          time.Duration
+	maxDelay           time.Duration
+	httpStatusLogMu    sync.RWMutex
+	httpStatusLogger   Logger
 }
 
 // AuthTokenRefreshFunc returns a replacement bearer token after the current
@@ -700,6 +702,38 @@ func NewHTTPClient(baseURL, token string, httpClient *http.Client) *HTTPClient {
 		baseDelay:  100 * time.Millisecond,
 		maxDelay:   defaultRetryAfterMaxDelay,
 	}
+}
+
+// NewHTTPClientWithMountCorrelationID configures one stable correlation ID for
+// every REST request issued by this mount client, including retries. An empty
+// value preserves the default per-request correlation behavior used by other
+// HTTPClient consumers.
+func NewHTTPClientWithMountCorrelationID(baseURL, token string, httpClient *http.Client, correlationID string) (*HTTPClient, error) {
+	client := NewHTTPClient(baseURL, token, httpClient)
+	if err := ValidateMountCorrelationID(correlationID); err != nil {
+		return nil, err
+	}
+	client.mountCorrelationID = correlationID
+	return client, nil
+}
+
+// ValidateMountCorrelationID checks the environment-only mount correlation
+// without including its value in any returned error.
+func ValidateMountCorrelationID(correlationID string) error {
+	if correlationID == "" {
+		return nil
+	}
+	if correlationID != strings.TrimSpace(correlationID) || !mountCorrelationIDPattern.MatchString(correlationID) {
+		return errors.New("RELAYFILE_MOUNT_CORRELATION_ID must start with a letter or digit and contain 8-128 letters, digits, '.', '_', ':', or '-'")
+	}
+	return nil
+}
+
+func (c *HTTPClient) correlationIDForRequest() string {
+	if c.mountCorrelationID != "" {
+		return c.mountCorrelationID
+	}
+	return correlationID()
 }
 
 func (c *HTTPClient) SetHTTPStatusLogger(logger Logger) {
@@ -1075,7 +1109,7 @@ func (c *HTTPClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID
 			return GithubWorkingTreeTar{}, err
 		}
 		req.Header.Set("Authorization", "Bearer "+requestToken)
-		req.Header.Set("X-Correlation-Id", correlationID())
+		req.Header.Set("X-Correlation-Id", c.correlationIDForRequest())
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
 			if attempt < c.maxRetries {
@@ -1226,7 +1260,7 @@ func (c *HTTPClient) doJSONWithLimit(
 			return err
 		}
 		req.Header.Set("Authorization", "Bearer "+requestToken)
-		req.Header.Set("X-Correlation-Id", correlationID())
+		req.Header.Set("X-Correlation-Id", c.correlationIDForRequest())
 		if body != nil {
 			req.Header.Set("Content-Type", "application/json")
 		}

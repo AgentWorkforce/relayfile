@@ -7437,6 +7437,10 @@ func runMount(args []string) error {
 		}
 		return err
 	}
+	mountCorrelationID := os.Getenv("RELAYFILE_MOUNT_CORRELATION_ID")
+	if err := mountsync.ValidateMountCorrelationID(mountCorrelationID); err != nil {
+		return fmt.Errorf("invalid mount request correlation: %w", err)
+	}
 	fullPullMinInterval, fullPullIntervalErr := parseDurationWithNegativeOne(*fullPullMinIntervalArg)
 	if fullPullIntervalErr != nil {
 		return fmt.Errorf("invalid --full-pull-min-interval: %w", fullPullIntervalErr)
@@ -7901,9 +7905,12 @@ func runMount(args []string) error {
 		// bootstrap full-pull streams large bodies well past *timeout, and
 		// net/http's http.Client.Timeout would abort it mid-stream regardless
 		// of context. Per-cycle/bootstrap/cursor contexts own cancellation.
-		client := mountsync.NewHTTPClient(serverURL, tokenValue, &http.Client{
+		client, clientErr := mountsync.NewHTTPClientWithMountCorrelationID(serverURL, tokenValue, &http.Client{
 			Transport: newWritebackFailureTransport(scope.LocalDir, log.Default(), mountsync.NewSyncTransport()),
-		})
+		}, mountCorrelationID)
+		if clientErr != nil {
+			return fmt.Errorf("configure mount request correlation: %w", clientErr)
+		}
 		syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
 			WorkspaceID:               workspaceID,
 			RemoteRoot:                scope.RemotePath,

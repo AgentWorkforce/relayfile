@@ -785,8 +785,13 @@ func TestCheckpointRestartContractRejectsFUSEAndNeverPersistsTokens(t *testing.T
 	if strings.Contains(joined, "--token") || strings.Contains(joined, "one-use-token") {
 		t.Fatalf("restart argv contains bearer material: %s", joined)
 	}
-	env := checkpointSubprocessEnv([]string{"PATH=/bin", "RELAYFILE_TOKEN=secret", "RELAYFILE_MOUNT_MODE=fuse"})
-	if strings.Join(env, " ") != "PATH=/bin" {
+	env := checkpointSubprocessEnv([]string{
+		"PATH=/bin",
+		"RELAYFILE_TOKEN=secret",
+		"RELAYFILE_MOUNT_MODE=fuse",
+		"RELAYFILE_MOUNT_CORRELATION_ID=mount_checkpoint_01234567",
+	})
+	if strings.Join(env, " ") != "PATH=/bin RELAYFILE_MOUNT_CORRELATION_ID=mount_checkpoint_01234567" {
 		t.Fatalf("restart environment retained unsafe overrides: %v", env)
 	}
 }
