@@ -8,7 +8,7 @@ but *before* the step that commits the version bump and pushes the tag.
 | npm version | published (registry) | source commit | workflow run | tag |
 |---|---|---|---|---|
 | 0.10.51 | 2026-08-27 | [`0b69080`](https://github.com/AgentWorkforce/relayfile/commit/0b69080) | [33114371583](https://github.com/AgentWorkforce/relayfile/actions/runs/33114371583) | missing |
-| 0.10.52 | 2026-09-01 | [`77e44b3`](https://github.com/AgentWorkforce/relayfile/commit/77e44b3) | 33532262935 | `v0.10.52` |
+| 0.10.52 | 2026-09-01 | [`77e44b3`](https://github.com/AgentWorkforce/relayfile/commit/77e44b3) | [33532262935](https://github.com/AgentWorkforce/relayfile/actions/runs/33532262935) | `v0.10.52` |
 | 0.10.53 | 2026-09-02 | [`fdc112d`](https://github.com/AgentWorkforce/relayfile/commit/fdc112d) | [33624732208](https://github.com/AgentWorkforce/relayfile/actions/runs/33624732208) | missing |
 | 0.10.54 | 2026-09-06 | [`b315e9c`](https://github.com/AgentWorkforce/relayfile/commit/b315e9c) | [34034791408](https://github.com/AgentWorkforce/relayfile/actions/runs/34034791408) | missing |
 
