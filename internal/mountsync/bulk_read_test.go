@@ -212,6 +212,23 @@ func TestBootstrapBulkReadPointReadsDeclaredOversizedFiles(t *testing.T) {
 	}
 }
 
+func TestBootstrapBulkReadPointReadsOverlongPaths(t *testing.T) {
+	path := "/" + strings.Repeat("a", defaultBulkReadMaxPathBytes)
+	client := &bulkReadTestClient{files: map[string]RemoteFile{
+		path: {Path: path, Revision: "rev_long", ContentType: "text/plain", Content: "x"},
+	}}
+	syncer := &Syncer{workspace: "ws", client: client}
+	results := syncer.readBootstrapFiles(context.Background(), []bootstrapReadJob{{
+		Index: 0, RemotePath: path, Size: 1,
+	}}, bootstrapProgress{})
+	if len(results) != 1 || results[0].Err != nil || results[0].File.Content != "x" {
+		t.Fatalf("overlong point-read results = %#v", results)
+	}
+	if len(client.bulkCalls) != 0 || client.pointReadCalls != 1 {
+		t.Fatalf("bulk calls = %d, point reads = %d; want 0, 1", len(client.bulkCalls), client.pointReadCalls)
+	}
+}
+
 func TestBootstrapBulkReadOversizedPointReadsAreAppliedIncrementally(t *testing.T) {
 	client := &bulkReadTestClient{
 		files: map[string]RemoteFile{
@@ -238,7 +255,7 @@ func TestBootstrapBulkReadOversizedPointReadsAreAppliedIncrementally(t *testing.
 	if err != nil {
 		t.Fatalf("incremental read = %v", err)
 	}
-	if len(applied) != 2 || len(pointReadsAtCallback) != 2 || pointReadsAtCallback[0] != 1 || client.maxPointReads != 1 {
+	if len(applied) != 2 || len(pointReadsAtCallback) != 2 || pointReadsAtCallback[0] != 1 || pointReadsAtCallback[1] != 2 || client.maxPointReads != 1 {
 		t.Fatalf("applied=%v point reads at callback=%v max concurrent point reads=%d, want 2, [1 2], and 1", applied, pointReadsAtCallback, client.maxPointReads)
 	}
 }

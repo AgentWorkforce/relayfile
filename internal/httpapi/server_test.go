@@ -1712,6 +1712,70 @@ func TestBulkReadErrorOmitsSuccessOnlyFields(t *testing.T) {
 	}
 }
 
+func TestBulkReadEndpointRejectsDecodedContentOverflow(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	const path = "/large.txt"
+	if _, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: "ws_bulk_read_content_limit",
+		Path:        path,
+		IfMatch:     "0",
+		Content:     strings.Repeat("x", maxBulkReadContentBytes+1),
+	}); err != nil {
+		t.Fatalf("seed oversized file: %v", err)
+	}
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", "ws_bulk_read_content_limit", "Reader", []string{"fs:read"}, time.Now().Add(time.Hour))
+	resp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_bulk_read_content_limit/fs/bulk-read",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_bulk_read_content_limit",
+		},
+		body: map[string]any{"paths": []string{path}},
+	})
+	if resp.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 (%s)", resp.Code, resp.Body.String())
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode overflow response: %v", err)
+	}
+	if payload["code"] != "bulk_read_response_too_large" {
+		t.Fatalf("error code = %v, want bulk_read_response_too_large", payload["code"])
+	}
+}
+
+func TestBulkReadEndpointRejectsWireResponseOverflow(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	const path = "/wide-type.txt"
+	if _, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: "ws_bulk_read_wire_limit",
+		Path:        path,
+		IfMatch:     "0",
+		Content:     "x",
+		ContentType: strings.Repeat("x", maxBulkReadResponseBytes),
+	}); err != nil {
+		t.Fatalf("seed wide content type: %v", err)
+	}
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", "ws_bulk_read_wire_limit", "Reader", []string{"fs:read"}, time.Now().Add(time.Hour))
+	resp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_bulk_read_wire_limit/fs/bulk-read",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_bulk_read_wire_limit",
+		},
+		body: map[string]any{"paths": []string{path}},
+	})
+	if resp.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 (%s)", resp.Code, resp.Body.String())
+	}
+}
+
 func TestBulkReadEndpointRejectsMoreThan32Paths(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)
@@ -1752,7 +1816,9 @@ func TestBulkReadEndpointRejectsMoreThan32Paths(t *testing.T) {
 }
 
 func TestBulkReadInheritedACLDoesNotProbeDeniedPaths(t *testing.T) {
-	server := NewServer(relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true}))
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
 	owner := mustTestJWT(t, "dev-secret", "ws_bulk_acl", "Owner", []string{"fs:read", "fs:write", "finance"}, time.Now().Add(time.Hour))
 	limited := mustTestJWT(t, "dev-secret", "ws_bulk_acl", "Limited", []string{"fs:read"}, time.Now().Add(time.Hour))
 	for _, item := range []struct {

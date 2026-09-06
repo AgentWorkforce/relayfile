@@ -7379,22 +7379,12 @@ func (s *Syncer) readBootstrapFilesEach(ctx context.Context, jobs []bootstrapRea
 	return s.readBootstrapFilesIndividuallyEach(ctx, jobs, prog, handle)
 }
 
-func (s *Syncer) readBootstrapFilesBulk(ctx context.Context, client bulkReadClient, jobs []bootstrapReadJob, prog bootstrapProgress) []bootstrapReadResult {
-	results := make([]bootstrapReadResult, 0, len(jobs))
-	_ = s.readBootstrapFilesBulkEach(ctx, client, jobs, prog, func(result bootstrapReadResult) error {
-		results = append(results, result)
-		return nil
-	})
-	sort.Slice(results, func(i, j int) bool { return results[i].Index < results[j].Index })
-	return results
-}
-
 func (s *Syncer) readBootstrapFilesBulkEach(ctx context.Context, client bulkReadClient, jobs []bootstrapReadJob, prog bootstrapProgress, handle func(bootstrapReadResult) error) error {
 	ctx = withResponseProgress(ctx, prog.touch)
 	var unsupported *bulkReadUnsupportedError
 	var executeBatch func(batch, remaining []bootstrapReadJob) error
 	executeBatch = func(batch, remaining []bootstrapReadJob) error {
-		if len(batch) == 1 && batch[0].Size > defaultBulkReadMaxBytes {
+		if len(batch) == 1 && (batch[0].Size > defaultBulkReadMaxBytes || len(normalizeRemotePath(batch[0].RemotePath)) > defaultBulkReadMaxPathBytes) {
 			// Bulk requests deliberately exclude oversized bodies; keep the
 			// singleton point-read path so its response can be released before
 			// the next segment is dispatched.
@@ -7494,7 +7484,7 @@ func (s *Syncer) readBootstrapFilesSegmentedEach(ctx context.Context, jobs []boo
 	orderedJobs := append([]bootstrapReadJob(nil), jobs...)
 	sort.SliceStable(orderedJobs, func(i, j int) bool { return orderedJobs[i].Index < orderedJobs[j].Index })
 	for jobIndex := 0; jobIndex < len(orderedJobs); {
-		if orderedJobs[jobIndex].Size > defaultBulkReadMaxBytes {
+		if orderedJobs[jobIndex].Size > defaultBulkReadMaxBytes || len(normalizeRemotePath(orderedJobs[jobIndex].RemotePath)) > defaultBulkReadMaxPathBytes {
 			if err := execute(orderedJobs[jobIndex:jobIndex+1], orderedJobs[jobIndex:]); err != nil {
 				return err
 			}
@@ -7577,16 +7567,6 @@ func isBulkReadResponseTooLarge(err error) bool {
 	return errors.As(err, &httpErr) &&
 		httpErr.StatusCode == http.StatusRequestEntityTooLarge &&
 		httpErr.Code == "bulk_read_response_too_large"
-}
-
-func (s *Syncer) readBootstrapFilesIndividually(ctx context.Context, jobs []bootstrapReadJob, prog bootstrapProgress) []bootstrapReadResult {
-	results := make([]bootstrapReadResult, 0, len(jobs))
-	_ = s.readBootstrapFilesIndividuallyEach(ctx, jobs, prog, func(result bootstrapReadResult) error {
-		results = append(results, result)
-		return nil
-	})
-	sort.Slice(results, func(i, j int) bool { return results[i].Index < results[j].Index })
-	return results
 }
 
 func (s *Syncer) readBootstrapFilesIndividuallyEach(ctx context.Context, jobs []bootstrapReadJob, prog bootstrapProgress, handle func(bootstrapReadResult) error) error {
