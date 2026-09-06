@@ -19,6 +19,7 @@ const newScript = join(root, 'new-daemon.mjs');
 const previousPath = process.env.PATH;
 let stalePid;
 let replacementPid;
+let tornDown = false;
 
 const hello = (version, apiVersion, supportedApiVersions) =>
   JSON.stringify({ daemonVersion: version, apiVersion, supportedApiVersions });
@@ -49,6 +50,36 @@ const waitForCleanup = async (pid, socket) => {
   }
   return { processGone: !isAlive(pid), socketAbsent: !existsSync(socket) };
 };
+
+const teardown = () => {
+  if (tornDown) return;
+  tornDown = true;
+  for (const pid of [replacementPid, stalePid]) {
+    if (!Number.isSafeInteger(pid) || pid <= 1) continue;
+    try { process.kill(pid, 'SIGKILL'); } catch {}
+  }
+  // A replacement daemon that started but was never tracked still owns
+  // newPidFile; discover it before rmSync destroys the only record of it.
+  if (!Number.isSafeInteger(replacementPid) && existsSync(newPidFile)) {
+    try {
+      const discoveredPid = Number(readFileSync(newPidFile, 'utf8').trim());
+      if (Number.isSafeInteger(discoveredPid) && discoveredPid > 1) {
+        try { process.kill(discoveredPid, 'SIGKILL'); } catch {}
+      }
+    } catch {}
+  }
+  if (previousPath === undefined) delete process.env.PATH;
+  else process.env.PATH = previousPath;
+  delete process.env.RELAYFILE_BIN;
+  rmSync(root, { recursive: true, force: true });
+};
+
+for (const [signal, exitCode] of [['SIGINT', 130], ['SIGTERM', 143]]) {
+  process.on(signal, () => {
+    teardown();
+    process.exit(exitCode);
+  });
+}
 
 async function run() {
 try {
@@ -94,13 +125,23 @@ cat ${stalePidFile}
     pathToFileURL(join(packageRoot, 'dist/index.js')).href
   );
   const client = new RelayfileControlPlaneClient({ socketPath, autoStart: true, startTimeoutMs: 5000 });
+  // On Linux, procfs resolves the real socket owner before the delayed fake
+  // lsof ever runs; force the miss so both baseline and candidate runs
+  // actually exercise the delayed-lsof discovery path under test.
+  client.linuxSocketOwnerPids = () => [];
   let result;
   let failure;
   try { result = await client.ensureReady(); } catch (error) { failure = error; }
   if (expectFailure) {
     if (!failure) throw new Error('expected released baseline to fail delayed stale-daemon replacement');
+    // Assert the post-failure state BEFORE tearing anything down: a discovery
+    // timeout must leave the stale daemon running, its socket present, and no
+    // replacement started, so a client that killed or leaked either is caught.
+    if (!isAlive(stalePid)) throw new Error('stale daemon should still be running after discovery-timeout failure');
+    if (!existsSync(socketPath)) throw new Error('stale socket should still be present after discovery-timeout failure');
+    if (existsSync(newPidFile)) throw new Error('no replacement daemon should be started after discovery-timeout failure');
     const cleanup = await waitForCleanup(stalePid, socketPath);
-    if (!cleanup.processGone || !cleanup.socketAbsent) throw new Error('failure-path cleanup did not remove stale daemon/socket');
+    if (!cleanup.processGone || !cleanup.socketAbsent) throw new Error('harness teardown did not remove the stale daemon/socket');
     console.log(JSON.stringify({ outcome: 'expected-fail', error: failure instanceof Error ? failure.message : String(failure), stalePid, ...cleanup }));
     return;
   }
@@ -124,14 +165,7 @@ cat ${stalePidFile}
   });
   console.log(JSON.stringify({ outcome: 'pass', daemonVersion: '0.10.26', apiVersion: 3, stalePid, newPid: replacementPid, cleaned: true, result }));
 } finally {
-  for (const pid of [replacementPid, stalePid]) {
-    if (!Number.isSafeInteger(pid) || pid <= 1) continue;
-    try { process.kill(pid, 'SIGKILL'); } catch {}
-  }
-  if (previousPath === undefined) delete process.env.PATH;
-  else process.env.PATH = previousPath;
-  delete process.env.RELAYFILE_BIN;
-  rmSync(root, { recursive: true, force: true });
+  teardown();
 }
 }
 

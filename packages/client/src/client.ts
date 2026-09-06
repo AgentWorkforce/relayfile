@@ -36,6 +36,8 @@ export const MIN_RELAYFILE_VERSION = '0.10.17';
 const MIN_RELAYFILE_VERSION_FOR_CURRENT_API = '0.10.21';
 const DEFAULT_STALE_DAEMON_DISCOVERY_TIMEOUT_MS = 5000;
 const MAX_STALE_DAEMON_DISCOVERY_TIMEOUT_MS = 10000;
+const DEFAULT_STALE_DAEMON_TERMINATION_TIMEOUT_MS = 5000;
+const MAX_STALE_DAEMON_TERMINATION_TIMEOUT_MS = 10000;
 
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+].*)?$/;
 
@@ -144,6 +146,13 @@ export interface RelayfileClientOptions {
    * unbounded control-plane replacement wait.
    */
   staleDaemonDiscoveryTimeoutMs?: number;
+  /**
+   * Maximum time allowed for a stale daemon to release the socket and exit
+   * after SIGTERM. Clamped to 5–10 seconds and never inherited from
+   * `startTimeoutMs`, so an oversized or non-finite start budget cannot make
+   * stale-daemon replacement wait forever.
+   */
+  staleDaemonTerminationTimeoutMs?: number;
 }
 
 interface RequestOptions {
@@ -202,6 +211,7 @@ export class RelayfileControlPlaneClient {
   private readonly startTimeoutMs: number;
   private readonly requestTimeoutMs: number;
   private readonly staleDaemonDiscoveryTimeoutMs: number;
+  private readonly staleDaemonTerminationTimeoutMs: number;
   private ready: Promise<void> | undefined;
 
   constructor(options: RelayfileClientOptions = {}) {
@@ -222,6 +232,16 @@ export class RelayfileControlPlaneClient {
           )
         )
       : DEFAULT_STALE_DAEMON_DISCOVERY_TIMEOUT_MS;
+    const requestedStaleDaemonTerminationTimeoutMs = options.staleDaemonTerminationTimeoutMs;
+    this.staleDaemonTerminationTimeoutMs = Number.isFinite(requestedStaleDaemonTerminationTimeoutMs)
+      ? Math.min(
+          MAX_STALE_DAEMON_TERMINATION_TIMEOUT_MS,
+          Math.max(
+            DEFAULT_STALE_DAEMON_TERMINATION_TIMEOUT_MS,
+            requestedStaleDaemonTerminationTimeoutMs!
+          )
+        )
+      : DEFAULT_STALE_DAEMON_TERMINATION_TIMEOUT_MS;
   }
 
   private createHTTPRequest(
@@ -400,8 +420,17 @@ export class RelayfileControlPlaneClient {
         await this.stopStaleDaemon();
         hello = await this.startDaemonAndConnect(installedVersion);
       } catch (err) {
-        if (err instanceof RelayfileControlPlaneError && err.code === 'VERSION_INCOMPATIBLE') {
-          throw err;
+        if (err instanceof RelayfileControlPlaneError) {
+          // VERSION_INCOMPATIBLE from the replacement handshake and the typed
+          // stale-daemon discovery/termination codes are actionable as-is;
+          // wrapping them would hide the diagnosis ensureReady callers need.
+          if (
+            err.code === 'VERSION_INCOMPATIBLE' ||
+            err.code === 'STALE_DAEMON_DISCOVERY_FAILED' ||
+            err.code === 'STALE_DAEMON_STOP_FAILED'
+          ) {
+            throw err;
+          }
         }
         throw this.versionMismatchError(
           hello,
@@ -508,7 +537,7 @@ export class RelayfileControlPlaneClient {
       );
     }
 
-    const deadline = Date.now() + this.startTimeoutMs;
+    const deadline = Date.now() + this.staleDaemonTerminationTimeoutMs;
     while (
       (existsSync(this.socketPath) || this.isProcessAlive(pids[0]!)) &&
       Date.now() < deadline
@@ -519,7 +548,7 @@ export class RelayfileControlPlaneClient {
       throw new RelayfileControlPlaneError(
         'STALE_DAEMON_STOP_FAILED',
         `stale relayfile control-plane pid ${pids[0]} did not release ${this.socketPath} ` +
-          `and exit within ${this.startTimeoutMs}ms`
+          `and exit within ${this.staleDaemonTerminationTimeoutMs}ms`
       );
     }
   }

@@ -12,6 +12,7 @@ import {
   RELAYFILE_API_VERSION,
   RelayfileControlPlaneClient,
   RelayfileControlPlaneError,
+  type RelayfileClientOptions,
   assertRelayfileVersion,
   compareSemver,
   defaultRelayfileSocketPath,
@@ -63,7 +64,10 @@ describe('RelayfileControlPlaneClient lifecycle', () => {
       command: string,
       args: string[],
       timeoutMs: number
-    ): Promise<{ stdout: string; stderr: string; code: number | null } | undefined>;
+    ): Promise<
+      | { stdout: string; stderr: string; code: number | null; timedOut?: boolean; commandError?: string }
+      | undefined
+    >;
     createHTTPRequest(
       options: NodeRequestOptions,
       onResponse: (response: IncomingMessage) => void
@@ -322,26 +326,30 @@ describe('RelayfileControlPlaneClient lifecycle', () => {
     }
   });
 
-  it('finds a stale owner when lsof discovery is delayed under load', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'relayfile-lsof-delay-'));
-    const lsof = join(root, 'lsof');
-    const previousPath = process.env.PATH;
-    try {
-      writeFileSync(lsof, '#!/bin/sh\nsleep 1.2\nprintf "424242\\n"\n');
-      chmodSync(lsof, 0o755);
-      process.env.PATH = `${root}:${previousPath ?? ''}`;
+  it.skipIf(process.platform === 'win32')(
+    'finds a stale owner when lsof discovery is delayed under load',
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), 'relayfile-lsof-delay-'));
+      const lsof = join(root, 'lsof');
+      const previousPath = process.env.PATH;
+      try {
+        writeFileSync(lsof, '#!/bin/sh\nsleep 1.2\nprintf "424242\\n"\n');
+        chmodSync(lsof, 0o755);
+        process.env.PATH = `${root}:${previousPath ?? ''}`;
 
-      const socketPath = join(root, 'relayfile.sock');
-      const client = new RelayfileControlPlaneClient({ socketPath, autoStart: true });
-      vi.spyOn(lifecycleInternals(client), 'linuxSocketOwnerPids').mockReturnValue([]);
+        const socketPath = join(root, 'relayfile.sock');
+        const client = new RelayfileControlPlaneClient({ socketPath, autoStart: true });
+        vi.spyOn(lifecycleInternals(client), 'linuxSocketOwnerPids').mockReturnValue([]);
 
-      await expect(lifecycleInternals(client).socketOwnerPids()).resolves.toEqual([424242]);
-    } finally {
-      if (previousPath === undefined) delete process.env.PATH;
-      else process.env.PATH = previousPath;
-      rmSync(root, { recursive: true, force: true });
-    }
-  }, 10000);
+        await expect(lifecycleInternals(client).socketOwnerPids()).resolves.toEqual([424242]);
+      } finally {
+        if (previousPath === undefined) delete process.env.PATH;
+        else process.env.PATH = previousPath;
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    10000
+  );
 
   it('reports typed timeout diagnostics from stale-owner discovery', async () => {
     const client = new RelayfileControlPlaneClient({ socketPath: '/nope.sock', autoStart: true });
@@ -412,6 +420,56 @@ describe('RelayfileControlPlaneClient lifecycle', () => {
     }
   }, 10000);
 
+  it('clamps the stale-daemon termination timeout into the 5–10 second budget', () => {
+    const terminationTimeoutOf = (options: RelayfileClientOptions) =>
+      new RelayfileControlPlaneClient({ socketPath: '/nope.sock', ...options }) as unknown as {
+        staleDaemonTerminationTimeoutMs: number;
+      };
+    expect(terminationTimeoutOf({}).staleDaemonTerminationTimeoutMs).toBe(5000);
+    expect(terminationTimeoutOf({ staleDaemonTerminationTimeoutMs: 100 }).staleDaemonTerminationTimeoutMs).toBe(5000);
+    expect(terminationTimeoutOf({ staleDaemonTerminationTimeoutMs: 7000 }).staleDaemonTerminationTimeoutMs).toBe(7000);
+    expect(terminationTimeoutOf({ staleDaemonTerminationTimeoutMs: 60000 }).staleDaemonTerminationTimeoutMs).toBe(10000);
+    expect(
+      terminationTimeoutOf({ staleDaemonTerminationTimeoutMs: Number.POSITIVE_INFINITY })
+        .staleDaemonTerminationTimeoutMs
+    ).toBe(5000);
+    expect(terminationTimeoutOf({ staleDaemonTerminationTimeoutMs: Number.NaN }).staleDaemonTerminationTimeoutMs).toBe(
+      5000
+    );
+  });
+
+  it('bounds the stale-daemon termination wait when startTimeoutMs is unbounded', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'relayfile-stop-bound-'));
+    const socketPath = join(root, 'relayfile.sock');
+    writeFileSync(socketPath, 'stale socket marker');
+    const child = spawn(
+      process.execPath,
+      ['-e', 'process.on("SIGTERM",()=>{});setInterval(()=>{},1000)'],
+      { stdio: 'ignore' }
+    );
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.once('spawn', () => resolve());
+        child.once('error', reject);
+      });
+      const client = new RelayfileControlPlaneClient({
+        socketPath,
+        autoStart: true,
+        startTimeoutMs: Number.POSITIVE_INFINITY,
+      });
+      vi.spyOn(lifecycleInternals(client), 'socketOwnerPids').mockResolvedValue([child.pid!]);
+
+      const started = Date.now();
+      await expect(lifecycleInternals(client).stopStaleDaemon()).rejects.toMatchObject({
+        code: 'STALE_DAEMON_STOP_FAILED',
+      });
+      expect(Date.now() - started).toBeLessThan(12000);
+    } finally {
+      child.kill('SIGKILL');
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 20000);
+
   it('blames an unavailable lsof when the fallback cannot identify the stale daemon', async () => {
     const client = new RelayfileControlPlaneClient({
       socketPath: '/nope.sock',
@@ -431,12 +489,54 @@ describe('RelayfileControlPlaneClient lifecycle', () => {
 
     const error = await client.ensureReady().catch((err: unknown) => err);
 
-    expect(error).toMatchObject({ code: 'VERSION_INCOMPATIBLE' });
+    expect(error).toMatchObject({ code: 'STALE_DAEMON_DISCOVERY_FAILED' });
     expect(error).toHaveProperty('message', expect.stringContaining('could not run `lsof`'));
-    expect(error).toHaveProperty(
-      'message',
-      expect.stringContaining('Automatic stale-daemon replacement failed')
-    );
+  });
+
+  it('preserves STALE_DAEMON_DISCOVERY_FAILED through ensureReady instead of wrapping it', async () => {
+    const client = new RelayfileControlPlaneClient({ socketPath: '/nope.sock', autoStart: true });
+    vi.spyOn(lifecycleInternals(client), 'installedBinaryVersion').mockResolvedValue('0.10.26');
+    vi.spyOn(lifecycleInternals(client), 'linuxSocketOwnerPids').mockReturnValue([]);
+    vi.spyOn(lifecycleInternals(client), 'runCommand').mockResolvedValue({
+      stdout: '',
+      stderr: 'lsof: busy',
+      code: null,
+      timedOut: true,
+    });
+    vi.spyOn(client, 'hello').mockResolvedValue({
+      daemonVersion: '0.10.19',
+      apiVersion: 1,
+      supportedApiVersions: [1],
+    });
+
+    await expect(client.ensureReady()).rejects.toMatchObject({
+      code: 'STALE_DAEMON_DISCOVERY_FAILED',
+      message: expect.stringMatching(/timed out after 5000ms.*stderr: lsof: busy/),
+    });
+  });
+
+  it('preserves STALE_DAEMON_STOP_FAILED through ensureReady instead of wrapping it', async () => {
+    const client = new RelayfileControlPlaneClient({ socketPath: '/nope.sock', autoStart: true });
+    vi.spyOn(lifecycleInternals(client), 'installedBinaryVersion').mockResolvedValue('0.10.26');
+    vi.spyOn(lifecycleInternals(client), 'socketOwnerPids').mockResolvedValue([424242]);
+    const kill = vi.spyOn(process, 'kill').mockImplementation((pid) => {
+      if (pid === 424242) throw new Error('EPERM');
+      return true;
+    });
+    vi.spyOn(client, 'hello').mockResolvedValue({
+      daemonVersion: '0.10.19',
+      apiVersion: 1,
+      supportedApiVersions: [1],
+    });
+
+    try {
+      await expect(client.ensureReady()).rejects.toMatchObject({
+        code: 'STALE_DAEMON_STOP_FAILED',
+        message: expect.stringContaining('could not stop stale relayfile control-plane pid 424242'),
+      });
+    } finally {
+      kill.mockRestore();
+    }
   });
 
   it('auto-start with a missing binary fails fast with DAEMON_UNAVAILABLE (no crash)', async () => {
