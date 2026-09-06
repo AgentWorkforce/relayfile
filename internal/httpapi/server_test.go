@@ -1695,6 +1695,23 @@ func TestBulkReadEndpointPreservesOrderErrorsAndPathScope(t *testing.T) {
 	}
 }
 
+func TestBulkReadErrorOmitsSuccessOnlyFields(t *testing.T) {
+	payload, err := json.Marshal(bulkReadError("/missing.txt", http.StatusNotFound, "not_found", "file not found"))
+	if err != nil {
+		t.Fatalf("marshal bulk-read error: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatalf("decode bulk-read error: %v", err)
+	}
+	if _, ok := fields["semantics"]; ok {
+		t.Fatalf("bulk-read error unexpectedly includes empty semantics: %s", payload)
+	}
+	if _, ok := fields["content"]; ok {
+		t.Fatalf("bulk-read error unexpectedly includes content: %s", payload)
+	}
+}
+
 func TestBulkReadEndpointRejectsMoreThan32Paths(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)

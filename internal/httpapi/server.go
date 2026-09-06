@@ -1724,21 +1724,22 @@ type bulkReadFileError struct {
 }
 
 type bulkReadFileResult struct {
-	Path             string                  `json:"path"`
-	Revision         string                  `json:"revision,omitempty"`
-	ContentHash      string                  `json:"contentHash,omitempty"`
-	ContentType      string                  `json:"contentType,omitempty"`
-	Content          *string                 `json:"content,omitempty"`
-	Encoding         string                  `json:"encoding,omitempty"`
-	Provider         string                  `json:"provider,omitempty"`
-	ProviderObjectID string                  `json:"providerObjectId,omitempty"`
-	LastEditedAt     string                  `json:"lastEditedAt,omitempty"`
-	Semantics        relayfile.FileSemantics `json:"semantics,omitempty"`
-	Error            *bulkReadFileError      `json:"error,omitempty"`
+	Path             string                   `json:"path"`
+	Revision         string                   `json:"revision,omitempty"`
+	ContentHash      string                   `json:"contentHash,omitempty"`
+	ContentType      string                   `json:"contentType,omitempty"`
+	Content          *string                  `json:"content,omitempty"`
+	Encoding         string                   `json:"encoding,omitempty"`
+	Provider         string                   `json:"provider,omitempty"`
+	ProviderObjectID string                   `json:"providerObjectId,omitempty"`
+	LastEditedAt     string                   `json:"lastEditedAt,omitempty"`
+	Semantics        *relayfile.FileSemantics `json:"semantics,omitempty"`
+	Error            *bulkReadFileError       `json:"error,omitempty"`
 }
 
 func bulkReadResult(file relayfile.File) bulkReadFileResult {
 	content := file.Content
+	semantics := file.Semantics
 	return bulkReadFileResult{
 		Path:             file.Path,
 		Revision:         file.Revision,
@@ -1749,7 +1750,7 @@ func bulkReadResult(file relayfile.File) bulkReadFileResult {
 		Provider:         file.Provider,
 		ProviderObjectID: file.ProviderObjectID,
 		LastEditedAt:     file.LastEditedAt,
-		Semantics:        file.Semantics,
+		Semantics:        &semantics,
 	}
 }
 
