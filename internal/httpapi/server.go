@@ -1727,7 +1727,7 @@ type bulkReadFileResult struct {
 	Path             string                   `json:"path"`
 	Revision         string                   `json:"revision,omitempty"`
 	ContentHash      string                   `json:"contentHash,omitempty"`
-	ContentType      string                   `json:"contentType,omitempty"`
+	ContentType      *string                  `json:"contentType,omitempty"`
 	Content          *string                  `json:"content,omitempty"`
 	Encoding         string                   `json:"encoding,omitempty"`
 	Provider         string                   `json:"provider,omitempty"`
@@ -1739,12 +1739,13 @@ type bulkReadFileResult struct {
 
 func bulkReadResult(file relayfile.File) bulkReadFileResult {
 	content := file.Content
+	contentType := file.ContentType
 	semantics := file.Semantics
 	return bulkReadFileResult{
 		Path:             file.Path,
 		Revision:         file.Revision,
 		ContentHash:      file.ContentHash,
-		ContentType:      file.ContentType,
+		ContentType:      &contentType,
 		Content:          &content,
 		Encoding:         file.Encoding,
 		Provider:         file.Provider,

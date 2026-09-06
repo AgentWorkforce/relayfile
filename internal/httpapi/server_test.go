@@ -1712,6 +1712,26 @@ func TestBulkReadErrorOmitsSuccessOnlyFields(t *testing.T) {
 	}
 }
 
+func TestBulkReadSuccessPreservesEmptyContentType(t *testing.T) {
+	payload, err := json.Marshal(bulkReadResult(relayfile.File{
+		Path:        "/legacy.txt",
+		Revision:    "rev_legacy",
+		Content:     "legacy",
+		ContentType: "",
+	}))
+	if err != nil {
+		t.Fatalf("marshal bulk-read success: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatalf("decode bulk-read success: %v", err)
+	}
+	contentType, ok := fields["contentType"]
+	if !ok || string(contentType) != `""` {
+		t.Fatalf("contentType = %s, want explicit empty string in %s", contentType, payload)
+	}
+}
+
 func TestBulkReadEndpointRejectsDecodedContentOverflow(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)
