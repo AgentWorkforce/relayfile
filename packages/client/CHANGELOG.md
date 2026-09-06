@@ -4,7 +4,9 @@ All notable changes to this package will be documented in this file.
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Fixed
+
+- Stale-daemon replacement now tolerates loaded hosts during process discovery, reports typed timeout diagnostics, and verifies the old daemon PID and socket have exited before restart.
 
 ## [0.10.52] - 2026-09-01
 
