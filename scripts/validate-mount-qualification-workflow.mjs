@@ -48,8 +48,10 @@ const required = [
   'test ! -L "$binary"',
   'chmod 755 "$binary"',
   'test "$("$binary" --version)" = "$EXPECTED_VERSION"',
-  'if(!/^[0-9a-f]{64}$/.test(a.payload.artifactDigest))',
-  '(.payload.artifactDigest | test("^[0-9a-f]{64}$"))',
+  'if(!/^[0-9a-f]{64}$/.test(rawDigest))',
+  'artifactDigest:"sha256:"+rawDigest',
+  'attestationArtifactDigest:"sha256:"+rawDigest',
+  '(.payload.artifactDigest | test("^sha256:[0-9a-f]{64}$"))',
 ];
 
 for (const fragment of required) {

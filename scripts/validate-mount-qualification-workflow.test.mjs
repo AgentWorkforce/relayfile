@@ -21,7 +21,7 @@ async function validateMutation(mutate) {
   }
 }
 
-test('accepts the canonical push-to-main workflow and bare upload-artifact digest', () => {
+test('accepts the canonical push-to-main workflow and normalized artifact digests', () => {
   const result = spawnSync(process.execPath, [validator], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
 });
@@ -48,11 +48,12 @@ test('ignores a decoy push block outside the on trigger', async () => {
   assert.equal(result.status, 0, result.stderr);
 });
 
-test('rejects the prefixed digest shape not emitted by upload-artifact', async () => {
+test('rejects a raw digest in the sealed attestation or consumer request', async () => {
   const result = await validateMutation((workflow) =>
     workflow
-      .replace('if(!/^[0-9a-f]{64}$/.test(a.payload.artifactDigest))', 'if(!/^sha256:[0-9a-f]{64}$/.test(a.payload.artifactDigest))')
-      .replace('(.payload.artifactDigest | test("^[0-9a-f]{64}$"))', '(.payload.artifactDigest | test("^sha256:[0-9a-f]{64}$"))'),
+      .replace('artifactDigest:"sha256:"+rawDigest', 'artifactDigest:rawDigest')
+      .replace('attestationArtifactDigest:"sha256:"+rawDigest', 'attestationArtifactDigest:rawDigest')
+      .replace('(.payload.artifactDigest | test("^sha256:[0-9a-f]{64}$"))', '(.payload.artifactDigest | test("^[0-9a-f]{64}$"))'),
   );
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /qualification workflow missing/);
