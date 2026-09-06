@@ -125,16 +125,37 @@ func TestHTTPClientBulkReadAcceptsExplicitEmptyContent(t *testing.T) {
 
 func TestReadResponseBodyClampsReadChunkToLimit(t *testing.T) {
 	var touches int
-	body, err := readResponseBody(strings.NewReader("0123456789"), 5, func() { touches++ })
+	body, err := readResponseBody(&fragmentingReader{data: []byte("0123456789"), chunkSize: 2}, 5, func() { touches++ })
 	if err != nil {
 		t.Fatalf("read response body: %v", err)
 	}
 	if string(body) != "01234" {
 		t.Fatalf("body = %q, want first five bytes", body)
 	}
-	if touches != 1 {
-		t.Fatalf("progress touches = %d, want one bounded chunk", touches)
+	if touches != 3 {
+		t.Fatalf("progress touches = %d, want one touch for each fragment through the limit", touches)
 	}
+}
+
+type fragmentingReader struct {
+	data      []byte
+	chunkSize int
+}
+
+func (r *fragmentingReader) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, io.EOF
+	}
+	n := r.chunkSize
+	if n > len(p) {
+		n = len(p)
+	}
+	if n > len(r.data) {
+		n = len(r.data)
+	}
+	copy(p[:n], r.data[:n])
+	r.data = r.data[n:]
+	return n, nil
 }
 
 func TestHTTPClientBulkReadRejectsMoreThan32PathsLocally(t *testing.T) {
