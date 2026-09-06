@@ -1,8 +1,34 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-const path = '.github/workflows/relayfile-mount-qualification.yml';
-const workflow = await readFile(path, 'utf8');
+const workflowPath = process.argv[2] ?? '.github/workflows/relayfile-mount-qualification.yml';
+const publishPath = process.argv[3] ?? '.github/workflows/publish.yml';
+const workflow = await readFile(workflowPath, 'utf8');
+
+function blockAtIndent(source, header, indent) {
+  const lines = source.split(/\r?\n/);
+  const prefix = ' '.repeat(indent);
+  const start = lines.findIndex((line) => line === `${prefix}${header}`);
+  assert.notEqual(start, -1, `qualification workflow must contain ${header}`);
+
+  let end = start + 1;
+  while (end < lines.length) {
+    const line = lines[end];
+    if (line.trim() && !line.trimStart().startsWith('#')) {
+      const currentIndent = line.length - line.trimStart().length;
+      if (currentIndent <= indent) break;
+    }
+    end += 1;
+  }
+  return lines.slice(start + 1, end);
+}
+
+function directEntries(lines, indent) {
+  return lines
+    .filter((line) => line.trim() && !line.trimStart().startsWith('#'))
+    .filter((line) => line.length - line.trimStart().length === indent)
+    .map((line) => line.trim());
+}
 
 const required = [
   'name: Relayfile mount qualification',
@@ -22,19 +48,21 @@ const required = [
   'test ! -L "$binary"',
   'chmod 755 "$binary"',
   'test "$("$binary" --version)" = "$EXPECTED_VERSION"',
+  'if(!/^[0-9a-f]{64}$/.test(a.payload.artifactDigest))',
+  '(.payload.artifactDigest | test("^[0-9a-f]{64}$"))',
 ];
 
 for (const fragment of required) {
   assert(workflow.includes(fragment), `qualification workflow missing ${fragment}`);
 }
 
-assert.match(
-  workflow,
-  /^on:\s*\n\s+push:\s*\n\s+branches:\s*\n\s+-\s+main\s*$/m,
-  'qualification workflow must trigger only on pushes to main',
-);
-const verifyBlock = workflow.match(/^  verify:\s*\n([\s\S]*)/m)?.[1];
-assert(verifyBlock, 'qualification workflow must contain a verify job');
+const onBlock = blockAtIndent(workflow, 'on:', 0);
+assert.deepEqual(directEntries(onBlock, 2), ['push:'], 'qualification workflow must trigger only on push');
+const pushBlock = blockAtIndent(workflow, 'push:', 2);
+assert.deepEqual(directEntries(pushBlock, 4), ['branches:'], 'push trigger must contain only branches');
+assert.deepEqual(directEntries(pushBlock, 6), ['- main'], 'push trigger must contain only the main branch');
+
+const verifyBlock = blockAtIndent(workflow, 'verify:', 2).join('\n');
 assert.match(verifyBlock, /^    needs:\s*build\s*$/m);
 assert.match(
   verifyBlock,
@@ -50,7 +78,7 @@ assert.match(workflow, /ref:"main"/);
 assert.match(workflow, /schemaVersion:1/);
 assert.match(workflow, /workflowPath:"\.github\/workflows\/relayfile-mount-qualification\.yml"/);
 
-const publish = await readFile('.github/workflows/publish.yml', 'utf8');
+const publish = await readFile(publishPath, 'utf8');
 assert.match(publish, /-X main\.relayfileMountVersion=\$\{VERSION\}/);
 assert.doesNotMatch(publish, /-X main\.version=/);
 

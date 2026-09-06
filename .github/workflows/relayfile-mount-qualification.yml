@@ -71,7 +71,7 @@ jobs:
         run: |
           FILE_SHA256=$(sha256sum qualification/relayfile-mount-linux-amd64 | cut -d' ' -f1)
           export FILE_SHA256
-          node -e 'const fs=require("node:fs"); const a={schemaVersion:1,kind:"relayfileMount",producer:{repository:process.env.GITHUB_REPOSITORY,workflow:"Relayfile mount qualification",workflowPath:".github/workflows/relayfile-mount-qualification.yml",event:"push",ref:"main",sourceGitSha:process.env.GITHUB_SHA,runId:String(process.env.GITHUB_RUN_ID),runAttempt:String(process.env.GITHUB_RUN_ATTEMPT)},payload:{artifact:"relayfile-mount-qualification-linux-amd64",artifactDigest:process.env.BINARY_ARTIFACT_DIGEST,file:"relayfile-mount-linux-amd64",fileSha256:process.env.FILE_SHA256},release:{version:"v"+process.env.RELAYFILE_VERSION}}; if(a.producer.repository!=="AgentWorkforce/relayfile") throw new Error("non-canonical producer repository"); if(!/^sha256:[0-9a-f]{64}$/.test(a.payload.artifactDigest)) throw new Error("invalid artifact digest"); fs.writeFileSync("qualification/relayfile-mount-qualification-attestation.json",JSON.stringify(a,null,2)+"\n")'
+          node -e 'const fs=require("node:fs"); const a={schemaVersion:1,kind:"relayfileMount",producer:{repository:process.env.GITHUB_REPOSITORY,workflow:"Relayfile mount qualification",workflowPath:".github/workflows/relayfile-mount-qualification.yml",event:"push",ref:"main",sourceGitSha:process.env.GITHUB_SHA,runId:String(process.env.GITHUB_RUN_ID),runAttempt:String(process.env.GITHUB_RUN_ATTEMPT)},payload:{artifact:"relayfile-mount-qualification-linux-amd64",artifactDigest:process.env.BINARY_ARTIFACT_DIGEST,file:"relayfile-mount-linux-amd64",fileSha256:process.env.FILE_SHA256},release:{version:"v"+process.env.RELAYFILE_VERSION}}; if(a.producer.repository!=="AgentWorkforce/relayfile") throw new Error("non-canonical producer repository"); if(!/^[0-9a-f]{64}$/.test(a.payload.artifactDigest)) throw new Error("invalid artifact digest"); fs.writeFileSync("qualification/relayfile-mount-qualification-attestation.json",JSON.stringify(a,null,2)+"\n")'
 
       - name: Upload canonical attestation artifact
         id: attestation
@@ -145,7 +145,7 @@ jobs:
             .producer.runAttempt == $attempt and .release.version == $version and
             .payload.artifact == "relayfile-mount-qualification-linux-amd64" and
             .payload.file == "relayfile-mount-linux-amd64" and
-            (.payload.artifactDigest | test("^sha256:[0-9a-f]{64}$")) and
+            (.payload.artifactDigest | test("^[0-9a-f]{64}$")) and
             (.payload.fileSha256 | test("^[0-9a-f]{64}$"))
           ' "$attest"
           test "$("$binary" --version)" = "$EXPECTED_VERSION"
