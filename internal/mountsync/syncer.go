@@ -906,14 +906,13 @@ func decodedRemoteContentSize(content, encoding string) (int64, error) {
 	if normalizeEncoding(encoding) != "base64" {
 		return int64(len(content)), nil
 	}
-	decoded, err := base64.StdEncoding.DecodeString(content)
-	if err != nil {
-		decoded, err = base64.RawStdEncoding.DecodeString(content)
+	for _, decoderEncoding := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding} {
+		decodedBytes, err := io.Copy(io.Discard, base64.NewDecoder(decoderEncoding, strings.NewReader(content)))
+		if err == nil {
+			return decodedBytes, nil
+		}
 	}
-	if err != nil {
-		return 0, errors.New("invalid base64 content")
-	}
-	return int64(len(decoded)), nil
+	return 0, errors.New("invalid base64 content")
 }
 
 func (c *HTTPClient) WriteFile(ctx context.Context, workspaceID, path, baseRevision, contentType, content string) (WriteResult, error) {

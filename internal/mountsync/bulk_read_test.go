@@ -2,6 +2,7 @@ package mountsync
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -423,6 +424,17 @@ func TestValidateBulkReadResponseRejectsAggregateDecodedOverflow(t *testing.T) {
 	}}})
 	if err == nil {
 		t.Fatal("expected aggregate byte overflow")
+	}
+}
+
+func TestDecodedRemoteContentSizeStreamsBase64(t *testing.T) {
+	content := base64.StdEncoding.EncodeToString([]byte("streamed content"))
+	size, err := decodedRemoteContentSize(content, "base64")
+	if err != nil || size != int64(len("streamed content")) {
+		t.Fatalf("decoded size = %d, err = %v; want %d", size, err, len("streamed content"))
+	}
+	if _, err := decodedRemoteContentSize("not-base64", "base64"); err == nil {
+		t.Fatal("invalid base64 content unexpectedly accepted")
 	}
 }
 
