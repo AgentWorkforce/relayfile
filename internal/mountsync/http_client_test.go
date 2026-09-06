@@ -123,6 +123,20 @@ func TestHTTPClientBulkReadAcceptsExplicitEmptyContent(t *testing.T) {
 	}
 }
 
+func TestReadResponseBodyClampsReadChunkToLimit(t *testing.T) {
+	var touches int
+	body, err := readResponseBody(strings.NewReader("0123456789"), 5, func() { touches++ })
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	if string(body) != "01234" {
+		t.Fatalf("body = %q, want first five bytes", body)
+	}
+	if touches != 1 {
+		t.Fatalf("progress touches = %d, want one bounded chunk", touches)
+	}
+}
+
 func TestHTTPClientBulkReadRejectsMoreThan32PathsLocally(t *testing.T) {
 	paths := make([]string, defaultBulkReadMaxFiles+1)
 	for index := range paths {

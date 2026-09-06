@@ -1174,6 +1174,13 @@ func readResponseBody(body io.Reader, limit int64, touch func()) ([]byte, error)
 	for {
 		count, err := body.Read(buffer)
 		if count > 0 {
+			remaining := limit - int64(result.Len())
+			if int64(count) > remaining {
+				count = int(remaining)
+			}
+			if count == 0 {
+				return result.Bytes(), nil
+			}
 			_, _ = result.Write(buffer[:count])
 			if touch != nil {
 				touch()
@@ -7633,7 +7640,6 @@ func (s *Syncer) readBootstrapFilesIndividuallyBatchEach(ctx context.Context, jo
 	sort.SliceStable(results, func(i, j int) bool { return results[i].Index < results[j].Index })
 	for _, result := range results {
 		if handleErr = handle(result); handleErr != nil {
-			cancel()
 			break
 		}
 	}
