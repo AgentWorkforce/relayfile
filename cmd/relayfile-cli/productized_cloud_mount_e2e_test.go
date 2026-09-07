@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -364,6 +365,8 @@ func (m *productizedRelayfileMock) serveHTTP(w http.ResponseWriter, r *http.Requ
 		writeMockJSON(w, http.StatusOK, mountsync.EventFeed{Events: []mountsync.FilesystemEvent{}})
 	case strings.HasSuffix(r.URL.Path, "/fs/file") && r.Method == http.MethodGet:
 		m.serveReadFile(w, r)
+	case strings.HasSuffix(r.URL.Path, "/fs/bulk-read") && r.Method == http.MethodPost:
+		m.serveBulkRead(w, r)
 	case strings.HasSuffix(r.URL.Path, "/fs/bulk") && r.Method == http.MethodPost:
 		m.serveBulkWrite(w, r)
 	default:
@@ -372,6 +375,38 @@ func (m *productizedRelayfileMock) serveHTTP(w http.ResponseWriter, r *http.Requ
 			"message": fmt.Sprintf("unhandled route %s %s", r.Method, r.URL.Path),
 		})
 	}
+}
+
+func (m *productizedRelayfileMock) serveBulkRead(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Paths []string `json:"paths"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeMockJSON(w, http.StatusBadRequest, map[string]any{"code": "bad_request", "message": "invalid bulk-read request"})
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	files := make([]mountsync.BulkReadFileResult, 0, len(request.Paths))
+	for _, requestedPath := range request.Paths {
+		path := normalizeMockRemotePath(requestedPath)
+		file, ok := m.files[path]
+		if !ok {
+			files = append(files, mountsync.BulkReadFileResult{
+				Path:  path,
+				Error: &mountsync.BulkReadFileError{Status: http.StatusNotFound, Code: "not_found", Message: "file not found"},
+			})
+			continue
+		}
+		files = append(files, mountsync.BulkReadFileResult{
+			Path:        file.Path,
+			Revision:    file.Revision,
+			ContentType: file.ContentType,
+			Content:     file.Content,
+			Encoding:    file.Encoding,
+		})
+	}
+	writeMockJSON(w, http.StatusOK, mountsync.BulkReadResponse{Files: files})
 }
 
 func (m *productizedRelayfileMock) authorized(token string) bool {
@@ -430,6 +465,10 @@ func (m *productizedRelayfileMock) serveExport(w http.ResponseWriter, r *http.Re
 
 func (m *productizedRelayfileMock) serveTree(w http.ResponseWriter, r *http.Request) {
 	root := normalizeMockRemotePath(r.URL.Query().Get("path"))
+	depth := 1
+	if requested, err := strconv.Atoi(r.URL.Query().Get("depth")); err == nil && requested > 0 {
+		depth = requested
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -446,16 +485,17 @@ func (m *productizedRelayfileMock) serveTree(w http.ResponseWriter, r *http.Requ
 			continue
 		}
 		parts := strings.Split(relative, "/")
-		if len(parts) == 1 {
+		if len(parts) <= depth {
 			entries = append(entries, treeEntry{Path: file.Path, Type: "file", Revision: file.Revision})
-			continue
 		}
-		dirPath := normalizeMockRemotePath(root + "/" + parts[0])
-		if _, seen := seenDirs[dirPath]; seen {
-			continue
+		for directoryDepth := 1; directoryDepth < len(parts) && directoryDepth <= depth; directoryDepth++ {
+			dirPath := normalizeMockRemotePath(root + "/" + strings.Join(parts[:directoryDepth], "/"))
+			if _, seen := seenDirs[dirPath]; seen {
+				continue
+			}
+			seenDirs[dirPath] = struct{}{}
+			entries = append(entries, treeEntry{Path: dirPath, Type: "dir", Revision: "dir_rev_1"})
 		}
-		seenDirs[dirPath] = struct{}{}
-		entries = append(entries, treeEntry{Path: dirPath, Type: "dir", Revision: "dir_rev_1"})
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
 	writeMockJSON(w, http.StatusOK, treeResponse{Path: root, Entries: entries})

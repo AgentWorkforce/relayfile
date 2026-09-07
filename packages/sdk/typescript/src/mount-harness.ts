@@ -6,6 +6,7 @@ import { RelayFileApiError } from "./errors.js";
 import { RelayFileClient } from "./client.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
+const MAX_TREE_PAGES_PER_DIRECTORY = 4_096;
 
 export interface RelayfileMountHarnessConfig {
   baseUrl: string;
@@ -190,11 +191,13 @@ class RelayfileMountHarness implements RelayfileMountHarnessHandle {
 
     const desiredFiles = new Map<string, string>();
     const desiredDirectories = new Set<string>([""]);
+    const visitedRemoteDirectories = new Set<string>();
 
     await this.collectRemoteTree(
       this.config.remotePath,
       desiredFiles,
-      desiredDirectories
+      desiredDirectories,
+      visitedRemoteDirectories
     );
 
     for (const relativeDir of [...desiredDirectories].sort((left, right) => left.localeCompare(right))) {
@@ -227,28 +230,61 @@ class RelayfileMountHarness implements RelayfileMountHarnessHandle {
   private async collectRemoteTree(
     remotePath: string,
     desiredFiles: Map<string, string>,
-    desiredDirectories: Set<string>
+    desiredDirectories: Set<string>,
+    visitedRemoteDirectories: Set<string>
   ): Promise<void> {
-    const tree = await this.client.listTree(this.config.workspaceId, {
-      path: remotePath,
-      depth: 1,
-    });
+    if (visitedRemoteDirectories.has(remotePath)) {
+      return;
+    }
+    visitedRemoteDirectories.add(remotePath);
 
-    for (const entry of tree.entries) {
-      const relativePath = relativeRemotePath(this.config.remotePath, entry.path);
-      if (relativePath === "") {
-        continue;
+    let cursor: string | undefined;
+    const seenCursors = new Set<string>();
+    let pageCount = 0;
+    for (;;) {
+      pageCount += 1;
+      if (pageCount > MAX_TREE_PAGES_PER_DIRECTORY) {
+        throw new Error(
+          `Relayfile tree pagination exceeded ${MAX_TREE_PAGES_PER_DIRECTORY} pages for ${remotePath}.`
+        );
+      }
+      const tree = await this.client.listTree(this.config.workspaceId, {
+        path: remotePath,
+        depth: 1,
+        cursor,
+      });
+
+      for (const entry of tree.entries) {
+        const relativePath = relativeRemotePath(this.config.remotePath, entry.path);
+        if (relativePath === "") {
+          continue;
+        }
+
+        if (entry.type === "dir") {
+          desiredDirectories.add(relativePath);
+          await this.collectRemoteTree(
+            entry.path,
+            desiredFiles,
+            desiredDirectories,
+            visitedRemoteDirectories
+          );
+          continue;
+        }
+
+        desiredDirectories.add(path.posix.dirname(relativePath) === "." ? "" : path.posix.dirname(relativePath));
+        const file = await this.client.readFile(this.config.workspaceId, entry.path);
+        desiredFiles.set(relativePath, decodeContent(file.content, file.encoding));
       }
 
-      if (entry.type === "dir") {
-        desiredDirectories.add(relativePath);
-        await this.collectRemoteTree(entry.path, desiredFiles, desiredDirectories);
-        continue;
+      const nextCursor = tree.nextCursor?.trim() || undefined;
+      if (!nextCursor) {
+        return;
       }
-
-      desiredDirectories.add(path.posix.dirname(relativePath) === "." ? "" : path.posix.dirname(relativePath));
-      const file = await this.client.readFile(this.config.workspaceId, entry.path);
-      desiredFiles.set(relativePath, decodeContent(file.content, file.encoding));
+      if (seenCursors.has(nextCursor) || nextCursor === cursor) {
+        throw new Error(`Relayfile tree cursor repeated for ${remotePath}.`);
+      }
+      seenCursors.add(nextCursor);
+      cursor = nextCursor;
     }
   }
 

@@ -260,6 +260,7 @@ func TestPullDoesNotDeleteLocalFilesWhenCloudExportEmpty(t *testing.T) {
 	}
 	stateFile := filepath.Join(localDir, ".relayfile-mount-state.json")
 	if err := writeMountState(stateFile, mountState{
+		BootstrapComplete: true,
 		Files: map[string]trackedFile{
 			"/notion/keep.md": {Revision: "rev_1", ContentType: "text/markdown", Hash: hashString("# keep me")},
 		},

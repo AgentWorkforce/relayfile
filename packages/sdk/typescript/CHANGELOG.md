@@ -6,7 +6,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Fixed
+
+- The mount harness now follows every tree page, including empty ACL-filtered pages, and fails safely on repeated or non-terminating cursors.
 
 ## [0.10.54] - 2026-09-06
 

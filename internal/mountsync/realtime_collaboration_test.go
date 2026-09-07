@@ -1192,5 +1192,11 @@ func TestWebSocketURLScopesToMountRoot(t *testing.T) {
 		if ru.Query().Has("path") {
 			t.Fatalf("root mount %q must keep the unscoped dial, got %s", root, rootURL)
 		}
+		if got := ru.Query().Get("from"); got != "now" || ru.Query().Get("cursor") != "" {
+			t.Fatalf("fresh root mount must use from=now without cursor, got %s", rootURL)
+		}
+	}
+	if got := u.Query().Get("from"); got != "now" || u.Query().Get("cursor") != "" {
+		t.Fatalf("fresh scoped mount must use from=now without cursor, got %s", scoped)
 	}
 }

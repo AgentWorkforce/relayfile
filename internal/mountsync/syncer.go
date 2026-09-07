@@ -6204,7 +6204,9 @@ func (s *Syncer) pullRemoteFull(ctx context.Context, conflicted map[string]struc
 			return err
 		}
 	}
-	if client, ok := s.client.(exportSnapshotClient); ok {
+	if !s.state.BootstrapComplete {
+		s.logf("skipping atomic export for initial bootstrap; using bounded resumable tree pull")
+	} else if client, ok := s.client.(exportSnapshotClient); ok {
 		used, err := s.pullRemoteFullExport(ctx, client, conflicted, prog)
 		if used {
 			return err
@@ -6944,6 +6946,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			filesThisTraversal >= s.bootstrapMaxFilesPerCycle
 	}
 	var transientBootstrapAbort bool
+	invalidCursorRestarts := 0
 	prunedRuntimeRoots := map[string]struct{}{}
 	var page TreeResponse
 	pageLoaded := false
@@ -6958,6 +6961,26 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			})
 			metrics.listCalls++
 			if err != nil {
+				if cursor != "" && isInvalidTreeCursorError(err) {
+					invalidCursorRestarts++
+					invalidCursor := cursor
+					cursor = ""
+					pageOffset = 0
+					pageLoaded = false
+					// Replaying the current directory and its local-hash fast path is
+					// idempotent. It is not safe to grant snapshot-delete authority to
+					// this recovery traversal because it began from a persisted frontier.
+					startedFromEmpty = false
+					if persistErr := persistTraversal(0, true); persistErr != nil {
+						return persistErr
+					}
+					if invalidCursorRestarts > 1 {
+						s.recordCloudFailure(err)
+						return fmt.Errorf("relayfile tree cursor recovery exhausted after clearing invalid cursor: %w", err)
+					}
+					s.logf("relayfile rejected persisted tree cursor for %s; cleared cursor and restarting the current traversal without snapshot deletes (cursor_length=%d)", currentDirectory, len(invalidCursor))
+					continue
+				}
 				s.recordCloudFailure(err)
 				return err
 			}
@@ -7301,6 +7324,17 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 	s.fullPullAuthoritative = true
 	s.markBootstrapComplete()
 	return nil
+}
+
+func isInvalidTreeCursorError(err error) bool {
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	code := strings.ToLower(strings.TrimSpace(httpErr.Code))
+	message := strings.ToLower(strings.TrimSpace(httpErr.Message))
+	return code == "invalid_cursor" || code == "invalid_tree_cursor" ||
+		(code == "bad_request" && strings.Contains(message, "invalid tree cursor"))
 }
 
 type fullTreeTraversalMetrics struct {
@@ -11359,6 +11393,11 @@ func (c *HTTPClient) websocketURL(workspaceID, cursor, remoteRoot string) (strin
 	q.Set("token", c.Token())
 	if cursor = strings.TrimSpace(cursor); cursor != "" {
 		q.Set("cursor", cursor)
+	} else {
+		// A fresh socket must begin at the live edge. Omitting both cursor and
+		// from=now asks the server's legacy default to replay history, which
+		// can turn startup into an unbounded event catch-up before bootstrap.
+		q.Set("from", "now")
 	}
 	// Root mounts keep the historical unscoped dial: the server treats a
 	// missing/"/" path as the workspace-wide subscription those tokens carry.

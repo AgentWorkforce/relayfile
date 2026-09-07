@@ -3019,8 +3019,14 @@ func TestMountUsesRecordedLocalDirWhenOmitted(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
-		case "/v1/workspaces/ws_demo/fs/export":
-			_, _ = w.Write([]byte(`[{"path":"/notion/Docs/A.md","revision":"rev_1","contentType":"text/markdown","content":"# A"}]`))
+		case "/v1/workspaces/ws_demo/fs/tree":
+			_, _ = w.Write([]byte(`{"path":"/","entries":[{"path":"/notion/Docs/A.md","type":"file","revision":"rev_1","size":3}],"nextCursor":null}`))
+		case "/v1/workspaces/ws_demo/fs/file":
+			_, _ = w.Write([]byte(`{"path":"/notion/Docs/A.md","revision":"rev_1","contentType":"text/markdown","content":"# A"}`))
+		case "/v1/workspaces/ws_demo/fs/bulk-read":
+			// Model a version-skewed server: the optional bulk endpoint is unavailable.
+			w.WriteHeader(http.StatusNotImplemented)
+			_, _ = w.Write([]byte(`{"code":"bulk_read_unsupported","message":"upgrade server"}`))
 		case "/v1/workspaces/ws_demo/fs/events":
 			_, _ = w.Write([]byte(`{"events":[{"eventId":"evt_1","type":"file.created","path":"/notion/Docs/A.md","revision":"rev_1"}]}`))
 		case "/v1/workspaces/ws_demo/sync/status":
@@ -3329,8 +3335,8 @@ func TestSpawnBackgroundMountProcessRegistersRealChild(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
-		case "/v1/workspaces/ws_background/fs/export":
-			_, _ = w.Write([]byte(`[]`))
+		case "/v1/workspaces/ws_background/fs/tree":
+			_, _ = w.Write([]byte(`{"path":"/","entries":[],"nextCursor":null}`))
 		case "/v1/workspaces/ws_background/fs/events":
 			_, _ = w.Write([]byte(`{"events":[]}`))
 		case "/v1/workspaces/ws_background/sync/status":
@@ -4058,8 +4064,14 @@ func TestMountUsesLegacyRecordedLocalDirWhenOmitted(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
-		case "/v1/workspaces/demo/fs/export":
-			_, _ = w.Write([]byte(`[{"path":"/notion/Docs/Legacy.md","revision":"rev_1","contentType":"text/markdown","content":"# Legacy"}]`))
+		case "/v1/workspaces/demo/fs/tree":
+			_, _ = w.Write([]byte(`{"path":"/","entries":[{"path":"/notion/Docs/Legacy.md","type":"file","revision":"rev_1","size":8}],"nextCursor":null}`))
+		case "/v1/workspaces/demo/fs/file":
+			_, _ = w.Write([]byte(`{"path":"/notion/Docs/Legacy.md","revision":"rev_1","contentType":"text/markdown","content":"# Legacy"}`))
+		case "/v1/workspaces/demo/fs/bulk-read":
+			// Model a version-skewed server: the optional bulk endpoint is unavailable.
+			w.WriteHeader(http.StatusNotImplemented)
+			_, _ = w.Write([]byte(`{"code":"bulk_read_unsupported","message":"upgrade server"}`))
 		case "/v1/workspaces/demo/fs/events":
 			_, _ = w.Write([]byte(`{"events":[{"eventId":"evt_1","type":"file.created","path":"/notion/Docs/Legacy.md","revision":"rev_1"}]}`))
 		case "/v1/workspaces/demo/sync/status":
@@ -4421,8 +4433,14 @@ func TestMountRehomeAllowsExplicitMoveAndPersistsLocalDir(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
-		case "/v1/workspaces/ws_demo/fs/export":
-			_, _ = w.Write([]byte(`[{"path":"/notion/Docs/Rehomed.md","revision":"rev_1","contentType":"text/markdown","content":"# Rehomed"}]`))
+		case "/v1/workspaces/ws_demo/fs/tree":
+			_, _ = w.Write([]byte(`{"path":"/","entries":[{"path":"/notion/Docs/Rehomed.md","type":"file","revision":"rev_1","size":9}],"nextCursor":null}`))
+		case "/v1/workspaces/ws_demo/fs/file":
+			_, _ = w.Write([]byte(`{"path":"/notion/Docs/Rehomed.md","revision":"rev_1","contentType":"text/markdown","content":"# Rehomed"}`))
+		case "/v1/workspaces/ws_demo/fs/bulk-read":
+			// Model a version-skewed server: the optional bulk endpoint is unavailable.
+			w.WriteHeader(http.StatusNotImplemented)
+			_, _ = w.Write([]byte(`{"code":"bulk_read_unsupported","message":"upgrade server"}`))
 		case "/v1/workspaces/ws_demo/fs/events":
 			_, _ = w.Write([]byte(`{"events":[{"eventId":"evt_1","type":"file.created","path":"/notion/Docs/Rehomed.md","revision":"rev_1"}]}`))
 		case "/v1/workspaces/ws_demo/sync/status":
@@ -4512,7 +4530,7 @@ func TestMountOnceRefreshesDelegatedWorkspaceTokenBeforeSync(t *testing.T) {
 	}
 
 	eventCalls := 0
-	exportCalls := 0
+	treeCalls := 0
 	refreshCalls := 0
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -4542,13 +4560,13 @@ func TestMountOnceRefreshesDelegatedWorkspaceTokenBeforeSync(t *testing.T) {
 				t.Fatalf("unexpected events Authorization: %q", gotAuth)
 			}
 			_, _ = w.Write([]byte(`{"events":[]}`))
-		case "/v1/workspaces/ws_refresh/fs/export":
-			exportCalls++
+		case "/v1/workspaces/ws_refresh/fs/tree":
+			treeCalls++
 			gotAuth := r.Header.Get("Authorization")
 			if gotAuth != "Bearer "+newToken {
-				t.Fatalf("unexpected refreshed export Authorization: %q", gotAuth)
+				t.Fatalf("unexpected refreshed tree Authorization: %q", gotAuth)
 			}
-			_, _ = w.Write([]byte(`[]`))
+			_, _ = w.Write([]byte(`{"path":"/","entries":[],"nextCursor":null}`))
 		case "/v1/workspaces/ws_refresh/sync/status":
 			_, _ = w.Write([]byte(`{"workspaceId":"ws_refresh","providers":[]}`))
 		default:
@@ -4574,8 +4592,8 @@ func TestMountOnceRefreshesDelegatedWorkspaceTokenBeforeSync(t *testing.T) {
 	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
 		t.Fatalf("run mount failed: %v", err)
 	}
-	if refreshCalls != 1 || exportCalls != 1 {
-		t.Fatalf("expected 1 refresh and 1 export call, got refresh=%d events=%d export=%d", refreshCalls, eventCalls, exportCalls)
+	if refreshCalls != 1 || treeCalls != 1 {
+		t.Fatalf("expected 1 refresh and 1 tree call, got refresh=%d events=%d tree=%d", refreshCalls, eventCalls, treeCalls)
 	}
 	if _, err := os.Stat(credentialsPath()); !os.IsNotExist(err) {
 		t.Fatalf("expected refreshed relayfile token not to be persisted, got err=%v", err)
@@ -5588,8 +5606,8 @@ func TestWritebackSkipStuckUsesDelegatedCredentialsWithoutLegacyCredentials(t *t
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
-		case "/v1/workspaces/ws_demo/fs/export":
-			_, _ = w.Write([]byte(`[]`))
+		case "/v1/workspaces/ws_demo/fs/tree":
+			_, _ = w.Write([]byte(`{"path":"/","entries":[],"nextCursor":null}`))
 		case "/v1/workspaces/ws_demo/fs/events":
 			_, _ = w.Write([]byte(`{"events":[]}`))
 		default:
@@ -7403,7 +7421,7 @@ func TestLoginCredentialsAuthorizeMountAndStatusWithoutAgentRelay(t *testing.T) 
 
 	localDir := t.TempDir()
 	token := testJWTWithWorkspace("ws_saved")
-	var healthCalls, exportCalls, eventsCalls, statusCalls int
+	var healthCalls, treeCalls, eventsCalls, statusCalls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got, want := r.Header.Get("Authorization"), "Bearer "+token; got != want {
 			t.Fatalf("Authorization = %q, want %q", got, want)
@@ -7413,9 +7431,9 @@ func TestLoginCredentialsAuthorizeMountAndStatusWithoutAgentRelay(t *testing.T) 
 		case "/health":
 			healthCalls++
 			w.WriteHeader(http.StatusOK)
-		case "/v1/workspaces/ws_saved/fs/export":
-			exportCalls++
-			_, _ = w.Write([]byte(`[]`))
+		case "/v1/workspaces/ws_saved/fs/tree":
+			treeCalls++
+			_, _ = w.Write([]byte(`{"path":"/","entries":[],"nextCursor":null}`))
 		case "/v1/workspaces/ws_saved/fs/events":
 			eventsCalls++
 			_, _ = w.Write([]byte(`{"events":[]}`))
@@ -7452,8 +7470,8 @@ func TestLoginCredentialsAuthorizeMountAndStatusWithoutAgentRelay(t *testing.T) 
 	if err := run([]string{"status", "demo"}, strings.NewReader(""), &stdout, &stdout); err != nil {
 		t.Fatalf("run status with saved login failed: %v\noutput:\n%s", err, stdout.String())
 	}
-	if healthCalls != 1 || exportCalls == 0 || eventsCalls == 0 || statusCalls == 0 {
-		t.Fatalf("unexpected request counts: health=%d export=%d events=%d status=%d", healthCalls, exportCalls, eventsCalls, statusCalls)
+	if healthCalls != 1 || treeCalls == 0 || eventsCalls == 0 || statusCalls == 0 {
+		t.Fatalf("unexpected request counts: health=%d tree=%d events=%d status=%d", healthCalls, treeCalls, eventsCalls, statusCalls)
 	}
 	creds, err := loadCredentials()
 	if err != nil {

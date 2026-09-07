@@ -176,6 +176,20 @@ func TestBootstrapBulkReadFallbackRequiresExplicitUnsupported(t *testing.T) {
 			t.Fatalf("point reads = %d, want 0", client.pointReadCalls)
 		}
 	})
+
+	t.Run("whole-request 403 does not fan out", func(t *testing.T) {
+		client := &bulkReadTestClient{
+			files:   map[string]RemoteFile{"/a": file},
+			bulkErr: &HTTPError{StatusCode: http.StatusForbidden, Code: "forbidden", Message: "denied"},
+		}
+		results := (&Syncer{workspace: "ws", client: client}).readBootstrapFiles(context.Background(), jobs, bootstrapProgress{})
+		if len(results) != 1 || results[0].Err == nil {
+			t.Fatalf("403 results = %#v, want failure", results)
+		}
+		if client.pointReadCalls != 0 {
+			t.Fatalf("point reads = %d, want 0; whole-request 403 must not fan out", client.pointReadCalls)
+		}
+	})
 }
 
 func TestBootstrapBulkReadUnsupportedDoesNotRereadOversizedPointJobs(t *testing.T) {
