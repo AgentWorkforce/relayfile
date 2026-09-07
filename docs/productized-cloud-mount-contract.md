@@ -236,6 +236,24 @@ Every mirror directory **MUST** contain a machine-readable
 }
 ```
 
+The document above is illustrative, not exhaustive: the mount also publishes
+per-file state, traversal counters, breaker and outbox summaries, and an
+in-progress `bootstrap` block.
+
+Two writers in the mount process update this file — the syncer's public state
+and the CLI's provider/daemon mirror. They **MUST** produce one merged
+document: a write from either writer **MUST NOT** remove keys owned by the
+other. Consumers may therefore treat an absent key as "this mount does not
+report it", never as "the other writer won the race". A guard that reads a key
+one writer does not emit **MUST** treat the absence as unknown rather than
+healthy.
+
+`bootstrap` is the readiness barrier. While it is non-null the mirror is still
+completing its first full-tree pull, and a consumer **MUST NOT** treat the
+mount as ready no matter how recent `lastSuccessfulReconcileAt` is. A single
+reconcile is budget-bounded, so `relayfile-mount --once` resumes its persisted
+checkpoint until `bootstrap` clears before it returns.
+
 Plus:
 
 - `.relay/conflicts/` — one file per unresolved conflict (§8.3).
