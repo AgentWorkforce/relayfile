@@ -7639,9 +7639,15 @@ func bulkReadPathBytes(paths []bootstrapReadJob, nextPath string) int {
 
 func isBulkReadUnsupported(err error) bool {
 	var httpErr *HTTPError
-	return errors.As(err, &httpErr) &&
-		httpErr.StatusCode == http.StatusNotImplemented &&
-		httpErr.Code == "bulk_read_unsupported"
+	if !errors.As(err, &httpErr) {
+		return false
+	}
+	switch httpErr.StatusCode {
+	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusNotImplemented:
+		return true
+	default:
+		return false
+	}
 }
 
 func isBulkReadResponseTooLarge(err error) bool {
