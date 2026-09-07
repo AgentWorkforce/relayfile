@@ -2178,7 +2178,7 @@ func TestHandleLocalChangeSkipsNestedMountRuntimeState(t *testing.T) {
 	}
 }
 
-func TestReconcileUsesExportSnapshotForInitialPull(t *testing.T) {
+func TestReconcileUsesBoundedTreeForFreshScopedInitialPull(t *testing.T) {
 	base := &fakeClient{
 		files: map[string]RemoteFile{
 			"/github/repos/demo/README.md": {
@@ -2210,18 +2210,116 @@ func TestReconcileUsesExportSnapshotForInitialPull(t *testing.T) {
 		t.Fatalf("reconcile failed: %v", err)
 	}
 
-	if client.exportCalls != 1 {
-		t.Fatalf("expected one export snapshot call, got %d", client.exportCalls)
+	if client.exportCalls != 0 {
+		t.Fatalf("fresh scoped bootstrap must skip atomic export, got %d calls", client.exportCalls)
 	}
-	if base.listTreeCalls != 0 {
-		t.Fatalf("expected export bootstrap to avoid list tree, got %d calls", base.listTreeCalls)
+	if base.listTreeCalls == 0 {
+		t.Fatal("fresh scoped bootstrap did not use bounded tree traversal")
 	}
-	if client.readFileCalls != 0 {
-		t.Fatalf("expected export bootstrap to avoid per-file reads, got %d calls", client.readFileCalls)
+	if client.readFileCalls == 0 {
+		t.Fatal("fresh scoped bootstrap did not read its bounded tree results")
 	}
 	assertLocalFileContent(t, filepath.Join(localDir, "repos", "demo", "README.md"), "# Demo")
 	if _, err := os.Stat(filepath.Join(localDir, "notion", "Docs", "A.md")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected remote root filter to exclude notion file, stat err=%v", err)
+	}
+}
+
+func TestReconcileSkipsAtomicExportForWorkspaceRoot(t *testing.T) {
+	base := &fakeClient{
+		files: map[string]RemoteFile{
+			"/README.md": {
+				Path:        "/README.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# Root",
+			},
+		},
+	}
+	client := &fakeExportClient{fakeClient: base}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_root",
+		RemoteRoot:  "/",
+		LocalRoot:   t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+	if client.exportCalls != 0 {
+		t.Fatalf("root bootstrap must skip non-resumable export, got %d calls", client.exportCalls)
+	}
+	if base.listTreeCalls == 0 || client.readFileCalls == 0 {
+		t.Fatalf("root bootstrap did not use resumable tree/read path: tree=%d read=%d", base.listTreeCalls, client.readFileCalls)
+	}
+}
+
+func TestReconcileSkipsAtomicExportWhenTreeCheckpointExists(t *testing.T) {
+	base := &fakeClient{
+		files: map[string]RemoteFile{
+			"/github/README.md": {
+				Path:        "/github/README.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# GitHub",
+			},
+		},
+	}
+	client := &fakeExportClient{fakeClient: base}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_resume",
+		RemoteRoot:  "/github",
+		LocalRoot:   t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.state.BootstrapDirectories = []string{"/github"}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+	if client.exportCalls != 0 {
+		t.Fatalf("resumed bootstrap must not restart atomic export, got %d calls", client.exportCalls)
+	}
+	if base.listTreeCalls == 0 {
+		t.Fatal("resumed bootstrap did not continue bounded tree traversal")
+	}
+}
+
+func TestReconcileSkipsAtomicExportWhenOnlyTreeCursorCheckpointExists(t *testing.T) {
+	base := &fakeClient{
+		files: map[string]RemoteFile{
+			"/github/README.md": {
+				Path:        "/github/README.md",
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Content:     "# GitHub",
+			},
+		},
+	}
+	client := &fakeExportClient{fakeClient: base}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_mount_cursor_resume",
+		RemoteRoot:  "/github",
+		LocalRoot:   t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.state.BootstrapCursor = "/github/README.md"
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+	if client.exportCalls != 0 {
+		t.Fatalf("cursor-only resume must not restart atomic export, got %d calls", client.exportCalls)
+	}
+	if base.listTreeCalls == 0 {
+		t.Fatal("cursor-only resume did not continue bounded tree traversal")
 	}
 }
 
@@ -2249,6 +2347,7 @@ func TestReconcileFallsBackToTreeWhenExportJSONTruncated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new syncer failed: %v", err)
 	}
+	syncer.state.BootstrapComplete = true
 
 	if err := syncer.Reconcile(context.Background()); err != nil {
 		t.Fatalf("reconcile should fall back to tree after truncated export: %v", err)
@@ -2294,6 +2393,7 @@ func TestReconcileFallsBackToTreeWhenExportDurableObjectOverloaded(t *testing.T)
 	if err != nil {
 		t.Fatalf("new syncer failed: %v", err)
 	}
+	syncer.state.BootstrapComplete = true
 
 	if err := syncer.Reconcile(context.Background()); err != nil {
 		t.Fatalf("reconcile should fall back to tree after DO overload: %v", err)
@@ -2367,6 +2467,7 @@ func TestReconcileFallsBackToTreeWhenExportPayloadTooLarge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new syncer failed: %v", err)
 	}
+	syncer.state.BootstrapComplete = true
 
 	if err := syncer.Reconcile(context.Background()); err != nil {
 		t.Fatalf("reconcile should fall back to tree after 413: %v", err)
@@ -2412,6 +2513,7 @@ func TestReconcileFallsBackToTreeWhenExportExceedsSubDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new syncer failed: %v", err)
 	}
+	syncer.state.BootstrapComplete = true
 
 	if err := syncer.Reconcile(context.Background()); err != nil {
 		t.Fatalf("reconcile should fall back to tree after export sub-deadline: %v", err)
@@ -2461,6 +2563,7 @@ func TestReconcileFallsBackToTreeWhenExportExceedsHardBootstrapCap(t *testing.T)
 	if err != nil {
 		t.Fatalf("new syncer failed: %v", err)
 	}
+	syncer.state.BootstrapComplete = true
 
 	if err := syncer.Reconcile(context.Background()); err != nil {
 		t.Fatalf("reconcile should fall back to tree before hard bootstrap cap: %v", err)
@@ -2509,6 +2612,7 @@ func TestReconcileFallsBackToTreeWhenExportWorkspaceBusy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new syncer failed: %v", err)
 	}
+	syncer.state.BootstrapComplete = true
 
 	if err := syncer.Reconcile(context.Background()); err != nil {
 		t.Fatalf("reconcile should fall back to tree after 429 workspace_busy: %v", err)
@@ -2544,6 +2648,7 @@ func TestExportEmptyButPopulatedTreeRecoversViaTreePull(t *testing.T) {
 	localDir := t.TempDir()
 	stateFile := filepath.Join(localDir, ".relayfile-mount-state.json")
 	if err := writeMountState(stateFile, mountState{
+		BootstrapComplete: true,
 		Files: map[string]trackedFile{
 			"/notion/Docs/A.md": {Revision: "rev_1", ContentType: "text/markdown", Hash: hashString("# A")},
 		},
@@ -2576,12 +2681,9 @@ func TestExportEmptyButPopulatedTreeRecoversViaTreePull(t *testing.T) {
 	}
 }
 
-// TestFailedExportDoesNotAdvanceCursorOrCompleteBootstrap pins the pivotal
-// cursor-safety property: a propagated export failure (a transient 5xx that is
-// retried as an export, not a fall-through) must not advance EventsCursor nor
-// mark the bootstrap complete, so the next cycle re-attempts cleanly instead of
-// short-circuiting past unsynced content.
-func TestFailedExportDoesNotAdvanceCursorOrCompleteBootstrap(t *testing.T) {
+// TestFailedPostBootstrapExportDoesNotAdvanceCursor pins the cursor-safety
+// property for the remaining audit-export path.
+func TestFailedPostBootstrapExportDoesNotAdvanceCursor(t *testing.T) {
 	base := &fakeClient{
 		files: map[string]RemoteFile{
 			"/notion/Docs/A.md": {
@@ -2605,6 +2707,7 @@ func TestFailedExportDoesNotAdvanceCursorOrCompleteBootstrap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new syncer failed: %v", err)
 	}
+	syncer.state.BootstrapComplete = true
 
 	if err := syncer.Reconcile(context.Background()); err == nil {
 		t.Fatalf("expected a propagated 502 export error, got nil")
@@ -2618,8 +2721,8 @@ func TestFailedExportDoesNotAdvanceCursorOrCompleteBootstrap(t *testing.T) {
 	if strings.TrimSpace(syncer.state.EventsCursor) != "" {
 		t.Fatalf("failed export must not advance the events cursor, got %q", syncer.state.EventsCursor)
 	}
-	if syncer.state.BootstrapComplete {
-		t.Fatalf("failed export must not mark bootstrap complete")
+	if !syncer.state.BootstrapComplete {
+		t.Fatalf("failed post-bootstrap export must not clear bootstrap completion")
 	}
 }
 
@@ -3841,6 +3944,7 @@ func TestFullPullDoesNotStarveLocalDraftAdmissionOrReceiptSettlement(t *testing.
 	if err != nil {
 		t.Fatalf("NewSyncer: %v", err)
 	}
+	syncer.state.BootstrapComplete = true
 
 	pullDone := make(chan error, 1)
 	go func() { pullDone <- syncer.SyncOnce(context.Background()) }()
@@ -4063,6 +4167,7 @@ func TestTreeFullPullDoesNotStarveOrClobberConcurrentWriteback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSyncer: %v", err)
 	}
+	syncer.state.BootstrapComplete = true
 
 	pullDone := make(chan error, 1)
 	go func() { pullDone <- syncer.SyncOnce(context.Background()) }()

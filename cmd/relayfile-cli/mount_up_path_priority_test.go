@@ -135,6 +135,16 @@ func (c *concurrentCredentialFailureClient) ExportFiles(ctx context.Context, _, 
 	}
 }
 
+func (c *concurrentCredentialFailureClient) ListTree(ctx context.Context, _, _ string, _ int, _ string) (mountsync.TreeResponse, error) {
+	c.exportOnce.Do(func() { close(c.exportStarted) })
+	select {
+	case <-c.release:
+		return mountsync.TreeResponse{}, ErrDelegatedRelayfileCredentialsExpired
+	case <-ctx.Done():
+		return mountsync.TreeResponse{}, ctx.Err()
+	}
+}
+
 func (c *concurrentCredentialFailureClient) WriteFilesBulk(ctx context.Context, _ string, _ []mountsync.BulkWriteFile) (mountsync.BulkWriteResponse, error) {
 	c.bulkOnce.Do(func() { close(c.bulkStarted) })
 	select {
@@ -149,6 +159,12 @@ func (c *blockingBootstrapClient) ExportFiles(ctx context.Context, _, _ string) 
 	c.exportOnce.Do(func() { close(c.exportStarted) })
 	<-ctx.Done()
 	return nil, ctx.Err()
+}
+
+func (c *blockingBootstrapClient) ListTree(ctx context.Context, _, _ string, _ int, _ string) (mountsync.TreeResponse, error) {
+	c.exportOnce.Do(func() { close(c.exportStarted) })
+	<-ctx.Done()
+	return mountsync.TreeResponse{}, ctx.Err()
 }
 
 func (c *blockingBootstrapClient) WriteFilesBulk(_ context.Context, _ string, files []mountsync.BulkWriteFile) (mountsync.BulkWriteResponse, error) {

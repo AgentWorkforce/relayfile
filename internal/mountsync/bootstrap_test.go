@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strings"
@@ -43,6 +45,30 @@ type bootstrapClient struct {
 	readFileCalls atomic.Int64
 	activeReads   atomic.Int64
 	maxActiveRead atomic.Int64
+}
+
+type invalidCursorBootstrapClient struct {
+	*bootstrapClient
+	mu                  sync.Mutex
+	cursors             []string
+	rejectEveryNonEmpty bool
+	failFirstFresh      bool
+}
+
+func (c *invalidCursorBootstrapClient) ListTree(ctx context.Context, workspaceID, path string, depth int, cursor string) (TreeResponse, error) {
+	c.mu.Lock()
+	c.cursors = append(c.cursors, cursor)
+	if cursor != "" && (c.rejectEveryNonEmpty || strings.HasPrefix(cursor, "tc2.") || strings.HasPrefix(cursor, "/")) {
+		c.mu.Unlock()
+		return TreeResponse{}, &HTTPError{StatusCode: http.StatusBadRequest, Code: "bad_request", Message: "invalid tree cursor"}
+	}
+	if cursor == "" && c.failFirstFresh {
+		c.failFirstFresh = false
+		c.mu.Unlock()
+		return TreeResponse{}, &HTTPError{StatusCode: http.StatusServiceUnavailable, Code: "unavailable", Message: "retry"}
+	}
+	c.mu.Unlock()
+	return c.bootstrapClient.ListTree(ctx, workspaceID, path, depth, cursor)
 }
 
 func newBootstrapClient(fileCount, pageSize int) *bootstrapClient {
@@ -622,6 +648,117 @@ func TestBootstrapResumesFromPersistedCursor(t *testing.T) {
 	}
 	if got := countLocalFiles(t, localDir); got != 50 {
 		t.Fatalf("expected 50 files mirrored after resume, got %d", got)
+	}
+}
+
+func TestBootstrapInvalidPersistedCursorClearsCheckpointAndRestartsSafely(t *testing.T) {
+	base := newBootstrapClient(2, 2)
+	client := &invalidCursorBootstrapClient{
+		bootstrapClient: base,
+		failFirstFresh:  true,
+	}
+	localDir := t.TempDir()
+	staleLocal := filepath.Join(localDir, "stale-local.txt")
+	if err := os.WriteFile(staleLocal, []byte("preserve me"), 0o644); err != nil {
+		t.Fatalf("write stale local file: %v", err)
+	}
+	s := newBootstrapSyncer(t, client, localDir, SyncerOptions{RootCtx: context.Background()})
+	s.loaded = true
+	s.state = mountState{
+		Files: map[string]trackedFile{
+			"/stale-local.txt": {Revision: "rev_stale", Hash: hashString("preserve me")},
+		},
+		BootstrapDirectories: []string{"/"},
+		BootstrapCursor:      "tc2.persisted-cursor",
+		BootstrapPageOffset:  17,
+		BootstrapFilesSynced: 17,
+	}
+
+	err := s.pullRemoteFullTree(context.Background(), nil, bootstrapProgress{})
+	var unavailable *HTTPError
+	if !errors.As(err, &unavailable) || unavailable.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("first traversal error = %v, want 503", err)
+	}
+	st := loadPersistedState(t, localDir)
+	if st.BootstrapCursor != "" || st.BootstrapPageOffset != 0 {
+		t.Fatalf("recovered checkpoint = cursor %q offset %d, want cleared", st.BootstrapCursor, st.BootstrapPageOffset)
+	}
+	if _, err := os.Stat(staleLocal); err != nil {
+		t.Fatalf("cursor recovery failure deleted local state: %v", err)
+	}
+
+	if err := s.pullRemoteFullTree(context.Background(), nil, bootstrapProgress{}); err != nil {
+		t.Fatalf("fresh traversal after cursor recovery: %v", err)
+	}
+	if _, err := os.Stat(staleLocal); err != nil {
+		t.Fatalf("recovered traversal performed unsafe snapshot delete: %v", err)
+	}
+	for remotePath := range base.files {
+		localPath, err := s.remoteToLocalPath(remotePath)
+		if err != nil {
+			t.Fatalf("map %s: %v", remotePath, err)
+		}
+		if _, err := os.Stat(localPath); err != nil {
+			t.Fatalf("recovered traversal did not materialize %s: %v", remotePath, err)
+		}
+	}
+	client.mu.Lock()
+	cursors := append([]string(nil), client.cursors...)
+	client.mu.Unlock()
+	if !reflect.DeepEqual(cursors, []string{"tc2.persisted-cursor", "", ""}) {
+		t.Fatalf("tree cursors = %#v, want invalid then fresh restart per traversal", cursors)
+	}
+}
+
+func TestBootstrapInvalidCursorRecoveryIsBoundedAndNeverPersistsRejectedCursor(t *testing.T) {
+	base := newBootstrapClient(2, 1)
+	client := &invalidCursorBootstrapClient{
+		bootstrapClient:     base,
+		rejectEveryNonEmpty: true,
+	}
+	localDir := t.TempDir()
+	s := newBootstrapSyncer(t, client, localDir, SyncerOptions{RootCtx: context.Background()})
+	s.loaded = true
+	s.state = mountState{
+		Files:                map[string]trackedFile{},
+		BootstrapDirectories: []string{"/"},
+		BootstrapCursor:      "tc2.persisted-cursor",
+		BootstrapPageOffset:  4,
+	}
+
+	err := s.pullRemoteFullTree(context.Background(), nil, bootstrapProgress{})
+	if err == nil || !strings.Contains(err.Error(), "tree cursor recovery exhausted") {
+		t.Fatalf("bounded cursor recovery error = %v", err)
+	}
+	st := loadPersistedState(t, localDir)
+	if st.BootstrapCursor != "" || st.BootstrapPageOffset != 0 {
+		t.Fatalf("exhausted recovery persisted rejected cursor %q offset %d", st.BootstrapCursor, st.BootstrapPageOffset)
+	}
+	client.mu.Lock()
+	cursors := append([]string(nil), client.cursors...)
+	client.mu.Unlock()
+	if !reflect.DeepEqual(cursors, []string{"tc2.persisted-cursor", "", "/f/00000.txt"}) {
+		t.Fatalf("cursor recovery calls = %#v, want one bounded restart", cursors)
+	}
+}
+
+func TestInvalidTreeCursorErrorClassificationIsNarrow(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"tc3 server shape", &HTTPError{StatusCode: 400, Code: "bad_request", Message: "invalid tree cursor"}, true},
+		{"future explicit code", &HTTPError{StatusCode: 400, Code: "invalid_tree_cursor"}, true},
+		{"unrelated bad request", &HTTPError{StatusCode: 400, Code: "bad_request", Message: "invalid depth"}, false},
+		{"wrong status", &HTTPError{StatusCode: 403, Code: "invalid_tree_cursor"}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isInvalidTreeCursorError(tc.err); got != tc.want {
+				t.Fatalf("isInvalidTreeCursorError(%v) = %t, want %t", tc.err, got, tc.want)
+			}
+		})
 	}
 }
 

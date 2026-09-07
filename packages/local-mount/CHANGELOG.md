@@ -6,7 +6,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Fixed
+
+- Large initial mounts now use resumable tree pagination and bounded bulk reads instead of an atomic workspace export. Persisted tree cursors rejected after a server cursor-version change are cleared once and restarted without granting snapshot-delete authority.
 
 ## [0.10.54] - 2026-09-06
 

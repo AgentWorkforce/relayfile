@@ -136,44 +136,54 @@ func TestBootstrapBulkReadFallbackRequiresExplicitUnsupported(t *testing.T) {
 	jobs := []bootstrapReadJob{{Index: 0, RemotePath: "/a", Size: 1}}
 	file := RemoteFile{Path: "/a", Revision: "rev_1", ContentType: "text/plain", Content: "a"}
 
-	t.Run("typed 501 falls back", func(t *testing.T) {
-		client := &bulkReadTestClient{
-			files:   map[string]RemoteFile{"/a": file},
-			bulkErr: &HTTPError{StatusCode: http.StatusNotImplemented, Code: "bulk_read_unsupported", Message: "unsupported"},
-		}
-		syncer := &Syncer{workspace: "ws", client: client}
-		results := syncer.readBootstrapFiles(context.Background(), jobs, bootstrapProgress{})
-		if len(results) != 1 || results[0].Err != nil {
-			t.Fatalf("fallback results = %#v", results)
-		}
-		if client.pointReadCalls != 1 {
-			t.Fatalf("point reads = %d, want 1", client.pointReadCalls)
-		}
-		secondJobs := []bootstrapReadJob{{Index: 1, RemotePath: "/b", Size: 1}}
-		client.files["/b"] = RemoteFile{Path: "/b", Revision: "rev_2", ContentType: "text/plain", Content: "b"}
-		second := syncer.readBootstrapFiles(context.Background(), secondJobs, bootstrapProgress{})
-		if len(second) != 1 || second[0].Err != nil {
-			t.Fatalf("second fallback results = %#v", second)
-		}
-		if len(client.bulkCalls) != 1 {
-			t.Fatalf("bulk compatibility probes = %d, want exactly 1", len(client.bulkCalls))
-		}
-		if client.pointReadCalls != 2 {
-			t.Fatalf("point reads = %d, want 2 across both checkpoints", client.pointReadCalls)
-		}
-	})
+	for _, test := range []struct {
+		name   string
+		status int
+		code   string
+	}{
+		{name: "missing route 404", status: http.StatusNotFound, code: "not_found"},
+		{name: "unsupported method 405", status: http.StatusMethodNotAllowed, code: "method_not_allowed"},
+		{name: "not implemented 501", status: http.StatusNotImplemented, code: "bulk_read_unsupported"},
+	} {
+		t.Run(test.name+" falls back", func(t *testing.T) {
+			client := &bulkReadTestClient{
+				files:   map[string]RemoteFile{"/a": file},
+				bulkErr: &HTTPError{StatusCode: test.status, Code: test.code, Message: "unsupported"},
+			}
+			syncer := &Syncer{workspace: "ws", client: client}
+			results := syncer.readBootstrapFiles(context.Background(), jobs, bootstrapProgress{})
+			if len(results) != 1 || results[0].Err != nil {
+				t.Fatalf("fallback results = %#v", results)
+			}
+			if client.pointReadCalls != 1 {
+				t.Fatalf("point reads = %d, want 1", client.pointReadCalls)
+			}
+			secondJobs := []bootstrapReadJob{{Index: 1, RemotePath: "/b", Size: 1}}
+			client.files["/b"] = RemoteFile{Path: "/b", Revision: "rev_2", ContentType: "text/plain", Content: "b"}
+			second := syncer.readBootstrapFiles(context.Background(), secondJobs, bootstrapProgress{})
+			if len(second) != 1 || second[0].Err != nil {
+				t.Fatalf("second fallback results = %#v", second)
+			}
+			if len(client.bulkCalls) != 1 {
+				t.Fatalf("bulk compatibility probes = %d, want exactly 1", len(client.bulkCalls))
+			}
+			if client.pointReadCalls != 2 {
+				t.Fatalf("point reads = %d, want 2 across both checkpoints", client.pointReadCalls)
+			}
+		})
+	}
 
-	t.Run("ordinary 404 stays a bulk failure", func(t *testing.T) {
+	t.Run("whole-request 403 does not fan out", func(t *testing.T) {
 		client := &bulkReadTestClient{
 			files:   map[string]RemoteFile{"/a": file},
-			bulkErr: &HTTPError{StatusCode: http.StatusNotFound, Code: "not_found", Message: "route not found"},
+			bulkErr: &HTTPError{StatusCode: http.StatusForbidden, Code: "forbidden", Message: "denied"},
 		}
 		results := (&Syncer{workspace: "ws", client: client}).readBootstrapFiles(context.Background(), jobs, bootstrapProgress{})
 		if len(results) != 1 || results[0].Err == nil {
-			t.Fatalf("404 results = %#v, want failure", results)
+			t.Fatalf("403 results = %#v, want failure", results)
 		}
 		if client.pointReadCalls != 0 {
-			t.Fatalf("point reads = %d, want 0", client.pointReadCalls)
+			t.Fatalf("point reads = %d, want 0; whole-request 403 must not fan out", client.pointReadCalls)
 		}
 	})
 }
@@ -376,6 +386,56 @@ func TestBootstrapBulkReadSplitsWireTooLargeBatches(t *testing.T) {
 	if client.pointReadCalls != 0 || len(client.bulkCalls) != 2 {
 		t.Fatalf("point reads = %d, bulk calls = %d; want 0, 2", client.pointReadCalls, len(client.bulkCalls))
 	}
+}
+
+func TestBootstrapBulkReadNested413Then404FallsBackOnlyUnresolvedJobs(t *testing.T) {
+	files := map[string]RemoteFile{}
+	jobs := make([]bootstrapReadJob, 0, 4)
+	for index, path := range []string{"/a", "/b", "/c", "/d"} {
+		files[path] = RemoteFile{Path: path, Revision: fmt.Sprintf("rev_%d", index), ContentType: "text/plain", Content: path[1:]}
+		jobs = append(jobs, bootstrapReadJob{Index: index, RemotePath: path, Size: 1})
+	}
+	client := &nestedUnsupportedBulkReadClient{
+		bulkReadTestClient: &bulkReadTestClient{files: files},
+	}
+	results := (&Syncer{workspace: "ws", client: client}).readBootstrapFiles(
+		context.Background(),
+		jobs,
+		bootstrapProgress{},
+	)
+
+	if len(results) != len(jobs) {
+		t.Fatalf("results = %d, want %d", len(results), len(jobs))
+	}
+	for index, result := range results {
+		if result.Err != nil || result.RemotePath != jobs[index].RemotePath {
+			t.Fatalf("result %d = %#v, want one ordered success for %s", index, result, jobs[index].RemotePath)
+		}
+	}
+	if client.pointReadCalls != 2 {
+		t.Fatalf("point reads = %d, want only unresolved /c and /d", client.pointReadCalls)
+	}
+	if got := client.bulkCalls; len(got) != 3 || !equalStrings(got[1], []string{"/a", "/b"}) || !equalStrings(got[2], []string{"/c", "/d"}) {
+		t.Fatalf("bulk calls = %#v, want full 413 then left success and right 404", got)
+	}
+}
+
+type nestedUnsupportedBulkReadClient struct{ *bulkReadTestClient }
+
+func (c *nestedUnsupportedBulkReadClient) ReadFilesBulk(ctx context.Context, workspace string, paths []string) (BulkReadResponse, error) {
+	if len(paths) == 4 {
+		c.mu.Lock()
+		c.bulkCalls = append(c.bulkCalls, append([]string(nil), paths...))
+		c.mu.Unlock()
+		return BulkReadResponse{}, &HTTPError{StatusCode: http.StatusRequestEntityTooLarge, Code: "bulk_read_response_too_large", Message: "split"}
+	}
+	if len(paths) > 0 && paths[0] == "/c" {
+		c.mu.Lock()
+		c.bulkCalls = append(c.bulkCalls, append([]string(nil), paths...))
+		c.mu.Unlock()
+		return BulkReadResponse{}, &HTTPError{StatusCode: http.StatusNotFound, Code: "not_found", Message: "route unavailable"}
+	}
+	return c.bulkReadTestClient.ReadFilesBulk(ctx, workspace, paths)
 }
 
 type bulkReadWireTooLargeClient struct{ *bulkReadTestClient }

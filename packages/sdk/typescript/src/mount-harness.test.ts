@@ -102,6 +102,165 @@ describe("relayfile mount harness", () => {
       readFile(path.join(localDir, "research/late-update.md"), "utf8")
     ).rejects.toMatchObject({ code: "ENOENT" });
   });
+
+  it("follows opaque tree cursors across empty pages without repeating directories", async () => {
+    const treeCalls: Array<{ path: string; cursor?: string }> = [];
+    const readCalls: string[] = [];
+    const client = {
+      async listTree(
+        _workspaceId: string,
+        options: { path?: string; cursor?: string }
+      ) {
+        const remotePath = options.path ?? "/";
+        treeCalls.push({ path: remotePath, cursor: options.cursor });
+        if (remotePath === "/notion") {
+          if (!options.cursor) {
+            return { path: remotePath, entries: [], nextCursor: "root-empty" };
+          }
+          return {
+            path: remotePath,
+            entries: [
+              { path: "/notion/research", type: "dir", revision: "dir" },
+            ],
+            nextCursor: null,
+          };
+        }
+        if (options.cursor === undefined) {
+          return {
+            path: remotePath,
+            entries: [
+              {
+                path: "/notion/research/brief.md",
+                type: "file",
+                revision: "rev_brief",
+              },
+            ],
+            nextCursor: "child-empty",
+          };
+        }
+        if (options.cursor === "child-empty") {
+          return {
+            path: remotePath,
+            entries: [],
+            nextCursor: "child-last",
+          };
+        }
+        return {
+          path: remotePath,
+          entries: [
+            {
+              path: "/notion/research/second.md",
+              type: "file",
+              revision: "rev_second",
+            },
+          ],
+          nextCursor: null,
+        };
+      },
+      async readFile(_workspaceId: string, remotePath: string) {
+        readCalls.push(remotePath);
+        return {
+          path: remotePath,
+          revision: `rev_${readCalls.length}`,
+          contentType: "text/markdown",
+          content: `${remotePath}\n`,
+          encoding: "utf-8" as const,
+        };
+      },
+    };
+
+    const harness = await startMountHarness({
+      env: {
+        RELAYFILE_BASE_URL: relayBaseUrl,
+        RELAYFILE_TOKEN: "rf_token_rw",
+        RELAYFILE_WORKSPACE: "ws_harness",
+        RELAYFILE_REMOTE_PATH: "/notion",
+        RELAYFILE_LOCAL_DIR: localDir,
+      },
+      pollIntervalMs: 60_000,
+      client: client as never,
+    });
+
+    expect(treeCalls).toEqual([
+      { path: "/notion", cursor: undefined },
+      { path: "/notion", cursor: "root-empty" },
+      { path: "/notion/research", cursor: undefined },
+      { path: "/notion/research", cursor: "child-empty" },
+      { path: "/notion/research", cursor: "child-last" },
+    ]);
+    expect(readCalls).toEqual([
+      "/notion/research/brief.md",
+      "/notion/research/second.md",
+    ]);
+    await expect(
+      readFile(path.join(localDir, "research/brief.md"), "utf8")
+    ).resolves.toBe("/notion/research/brief.md\n");
+    await expect(
+      readFile(path.join(localDir, "research/second.md"), "utf8")
+    ).resolves.toBe("/notion/research/second.md\n");
+
+    await harness.stop();
+  });
+
+  it("rejects a repeated tree cursor instead of looping", async () => {
+    let calls = 0;
+    const client = {
+      async listTree(_workspaceId: string, options: { path?: string }) {
+        calls += 1;
+        return {
+          path: options.path ?? "/",
+          entries: [],
+          nextCursor: "repeated-cursor",
+        };
+      },
+    };
+
+    await expect(
+      startMountHarness({
+        env: {
+          RELAYFILE_BASE_URL: relayBaseUrl,
+          RELAYFILE_TOKEN: "rf_token_rw",
+          RELAYFILE_WORKSPACE: "ws_harness",
+          RELAYFILE_REMOTE_PATH: "/notion",
+          RELAYFILE_LOCAL_DIR: localDir,
+        },
+        pollIntervalMs: 60_000,
+        client: client as never,
+      })
+    ).rejects.toThrow("Relayfile tree cursor repeated for /notion");
+    expect(calls).toBe(2);
+  });
+
+  it("bounds pagination when every empty page returns a unique cursor", async () => {
+    let calls = 0;
+    const client = {
+      async listTree(_workspaceId: string, options: { path?: string }) {
+        calls += 1;
+        return {
+          path: options.path ?? "/",
+          entries: [],
+          nextCursor: `unique-cursor-${calls}`,
+        };
+      },
+    };
+
+    await expect(
+      startMountHarness({
+        env: {
+          RELAYFILE_BASE_URL: relayBaseUrl,
+          RELAYFILE_TOKEN: "rf_token_rw",
+          RELAYFILE_WORKSPACE: "ws_harness",
+          RELAYFILE_REMOTE_PATH: "/notion",
+          RELAYFILE_LOCAL_DIR: localDir,
+        },
+        pollIntervalMs: 60_000,
+        client: client as never,
+      })
+    ).rejects.toThrow(
+      "Relayfile tree pagination exceeded 4096 pages for /notion"
+    );
+    expect(calls).toBe(4_096);
+  });
 });
 
 async function loadHelpers() {
