@@ -6,6 +6,10 @@ All notable changes to this package will be documented in this file.
 
 _No unreleased changes._
 
+## [0.10.55] - 2026-09-07
+
+_No user-visible changes in this release._
+
 ## [0.10.54] - 2026-09-06
 
 ### Fixed
@@ -144,7 +148,8 @@ _No user-visible changes in this release._
 
 - Added the initial typed relayfile control-plane client.
 
-[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.10.54...HEAD
+[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.10.55...HEAD
+[0.10.55]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.55
 [0.10.54]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.54
 [0.10.52]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.52
 [0.10.50]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.50

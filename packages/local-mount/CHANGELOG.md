@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [0.10.55] - 2026-09-07
+
 ### Fixed
 
 - Large initial mounts now use resumable tree pagination and bounded bulk reads instead of an atomic workspace export. Persisted tree cursors rejected after a server cursor-version change are cleared once and restarted without granting snapshot-delete authority.
@@ -691,7 +695,8 @@ Initial release.
 - Directory-only ignore patterns (e.g. `cache/`) match directories without swallowing like-named files.
 - README documenting the mount lifecycle, dotfile semantics, and auto-sync behavior. ([#48])
 
-[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.10.54...HEAD
+[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.10.55...HEAD
+[0.10.55]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.55
 [0.10.54]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.54
 [0.10.52]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.52
 [0.10.50]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.50

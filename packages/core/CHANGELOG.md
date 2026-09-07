@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.10.55] - 2026-09-07
+
+_No user-visible changes in this release._
+
 ## [0.10.54] - 2026-09-06
 
 _No user-visible changes in this release._
@@ -604,7 +608,8 @@ _No user-visible changes in this release._
 ### Added
 - Optional `contentIdentity` on write operations, enabling server-side deduplication of identical payloads. ([#54])
 
-[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.10.54...HEAD
+[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.10.55...HEAD
+[0.10.55]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.55
 [0.10.54]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.54
 [0.10.52]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.52
 [0.10.50]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.50
