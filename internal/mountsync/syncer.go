@@ -305,6 +305,7 @@ type HTTPError struct {
 	StatusCode int
 	Code       string
 	Message    string
+	Action     string
 }
 
 func (e *HTTPError) Error() string {
@@ -312,6 +313,19 @@ func (e *HTTPError) Error() string {
 		return fmt.Sprintf("http %d %s: %s", e.StatusCode, e.Code, e.Message)
 	}
 	return fmt.Sprintf("http %d: %s", e.StatusCode, e.Message)
+}
+
+// isCursorExpired is the explicit server recovery contract for an event
+// cursor that has aged out of the retention window. The action is carried so
+// clients can distinguish this from another future 410; older servers that
+// omit it are accepted when the stable error code is present.
+func isCursorExpired(err error) bool {
+	var httpErr *HTTPError
+	return errors.As(err, &httpErr) &&
+		httpErr.StatusCode == http.StatusGone &&
+		strings.EqualFold(strings.TrimSpace(httpErr.Code), "cursor_expired") &&
+		(strings.TrimSpace(httpErr.Action) == "" ||
+			strings.EqualFold(strings.TrimSpace(httpErr.Action), "full_resync"))
 }
 
 type IncrementalReadNotReadyError struct {
@@ -1148,6 +1162,7 @@ func (c *HTTPClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID
 		var errPayload struct {
 			Code    string `json:"code"`
 			Message string `json:"message"`
+			Action  string `json:"action"`
 		}
 		_ = json.Unmarshal(payloadBytes, &errPayload)
 		return GithubWorkingTreeTar{}, &HTTPError{
@@ -1303,6 +1318,7 @@ func (c *HTTPClient) doJSONWithLimit(
 		var errPayload struct {
 			Code    string `json:"code"`
 			Message string `json:"message"`
+			Action  string `json:"action"`
 		}
 		_ = json.Unmarshal(payloadBytes, &errPayload)
 
@@ -1347,6 +1363,7 @@ func (c *HTTPClient) doJSONWithLimit(
 			StatusCode: resp.StatusCode,
 			Code:       errPayload.Code,
 			Message:    errPayload.Message,
+			Action:     errPayload.Action,
 		}
 	}
 }
@@ -6018,10 +6035,21 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 			return err
 		}
 		var httpErr *HTTPError
-		if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusNotFound {
+		cursorExpired := isCursorExpired(err)
+		if !errors.As(err, &httpErr) ||
+			(httpErr.StatusCode != http.StatusNotFound && !cursorExpired) {
 			return err
 		}
-		s.logf("events feed unavailable; falling back to full pull")
+		if cursorExpired {
+			s.logf("events cursor expired; clearing watermark and performing full resync")
+			// A cursor gap means the event stream can no longer prove that the
+			// existing materialized tree is complete. Prevent the restart fast
+			// path from merely seeding a fresh tip over that gap; the flag is
+			// cleared by markBootstrapComplete after one authoritative pull.
+			s.forceFullReconcile = true
+		} else {
+			s.logf("events feed unavailable; falling back to full pull")
+		}
 		s.state.EventsCursor = ""
 		s.state.IncrementalCheckpoint = nil
 		s.state.IncrementalBacklogDraining = false
