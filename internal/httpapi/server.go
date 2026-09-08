@@ -2374,6 +2374,18 @@ func (s *Server) eventVisibleToClaims(workspaceID string, claims tokenClaims, ev
 	if !scopeMatchesPath(claims.Scopes, "fs:read", path) {
 		return false
 	}
+	if event.Type == "file.deleted" && event.ACLPermissions == nil {
+		// Fail closed: relayfile.snapshotACLPermissions guarantees every
+		// delete event produced by ACL-snapshot-aware code carries a non-nil
+		// ACLPermissions slice (empty when no rule applied). A nil slice here
+		// means either a state.json written before the snapshot mechanism
+		// existed, or a producer that forgot to snapshot — in both cases the
+		// deleted file's own permissions can no longer be resolved (the file
+		// is gone from ws.Files), so we cannot rule out a file-level deny
+		// that would have hidden this path. Denying visibility is the only
+		// choice that cannot leak a hidden file's prior existence/deletion.
+		return false
+	}
 	if event.ACLPermissions != nil && !filePermissionAllows(event.ACLPermissions, workspaceID, &claims, "read", path) {
 		return false
 	}

@@ -297,6 +297,433 @@ func TestACLDeleteEventSnapshotAndPathNormalization(t *testing.T) {
 	}
 }
 
+// TestACLAckRenameDeleteEventHiddenFromDeniedAgent is the adversarial,
+// real-code end-to-end proof for the ack-rename half of ACL-423:
+// reconcileAckedDraftLocked emits the draft's file.deleted directly via
+// appendWorkspaceEventLocked (classification-exempt, bypassing
+// recordWriteWithACLPermissionsLocked), so it must independently snapshot
+// the draft's ACL before the File record disappears from ws.Files. This
+// drives the real WriteFile -> AcknowledgeWriteback production path (not a
+// synthetic relayfile.Event) and asserts what a file-level-denied agent
+// actually receives over both the HTTP events feed and the websocket
+// catch-up feed.
+func TestACLAckRenameDeleteEventHiddenFromDeniedAgent(t *testing.T) {
+	t.Parallel()
+	const workspaceID = "ws_acl_ack_rename_delete"
+	const draftPath = "/slack/channels/C0ALQ06AAUT/messages/messages 0e89a031-65f0-480e-a823-ab1d94b324ea.json"
+	const canonicalPath = "/slack/channels/C0ALQ06AAUT/messages/1780018871.351819.json"
+	const denyRule = "deny:agent:Limited"
+
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true, ExternalWritebackMode: true})
+	t.Cleanup(store.Close)
+	created, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: workspaceID,
+		Path:        draftPath,
+		IfMatch:     "0",
+		ContentType: "application/json",
+		Content:     `{"text":"hi"}`,
+		// allow:public makes this an ordinary "everyone but Limited" ACL —
+		// filePermissionAllows fails closed for ANY agent once an
+		// enforceable rule exists with no matching allow, so a bare
+		// deny:agent:Limited alone would (correctly) also hide this from
+		// Trusted, and the test needs a genuine visible/hidden split to be
+		// adversarial.
+		Semantics:     relayfile.FileSemantics{Permissions: []string{"allow:public", denyRule}},
+		CorrelationID: "corr_draft_write",
+	})
+	if err != nil {
+		t.Fatalf("seed protected draft failed: %v", err)
+	}
+	if _, err := store.AcknowledgeWriteback(workspaceID, created.OpID, relayfile.WritebackAck{
+		Success:    true,
+		ExternalID: "1780018871.351819",
+	}, "corr_ack_1"); err != nil {
+		t.Fatalf("ack failed: %v", err)
+	}
+	if _, err := store.ReadFile(workspaceID, canonicalPath); err != nil {
+		t.Fatalf("expected the draft renamed to the canonical path: %v", err)
+	}
+
+	server := httptest.NewServer(NewServer(store))
+	// Cleanup (not defer): a parallel subtest resumes only after this
+	// function body returns, which happens immediately once t.Run hits
+	// t.Parallel() — a plain defer here would close the server out from
+	// under the still-pending subtests.
+	t.Cleanup(server.Close)
+
+	cases := []struct {
+		name        string
+		agentName   string
+		wantVisible bool
+	}{
+		{name: "file_level_denied_agent_cannot_see_draft_ever_existed", agentName: "Limited", wantVisible: false},
+		{name: "unrestricted_agent_sees_the_full_rename", agentName: "Trusted", wantVisible: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			token := mustTestJWT(t, "dev-secret", workspaceID, tc.agentName, []string{"fs:read"}, time.Now().Add(time.Hour))
+			headers := map[string]string{"Authorization": "Bearer " + token, "X-Correlation-Id": "corr_" + tc.name}
+
+			resp := doRequest(t, NewServer(store), request{method: http.MethodGet, path: "/v1/workspaces/" + workspaceID + "/fs/events?limit=100", headers: headers})
+			if resp.Code != http.StatusOK {
+				t.Fatalf("events returned %d: %s", resp.Code, resp.Body.String())
+			}
+			var feed relayfile.EventFeed
+			if err := json.NewDecoder(resp.Body).Decode(&feed); err != nil {
+				t.Fatalf("decode events: %v", err)
+			}
+			var sawDraftDelete, sawCanonicalCreate bool
+			for _, event := range feed.Events {
+				if event.Type == "file.deleted" && event.Path == draftPath {
+					sawDraftDelete = true
+				}
+				if event.Type == "file.created" && event.Path == canonicalPath {
+					sawCanonicalCreate = true
+				}
+			}
+			if sawDraftDelete != tc.wantVisible {
+				t.Fatalf("HTTP feed: draft delete visibility = %v, want %v (events=%+v)", sawDraftDelete, tc.wantVisible, feed.Events)
+			}
+			if sawCanonicalCreate != tc.wantVisible {
+				t.Fatalf("HTTP feed: canonical create visibility = %v, want %v (events=%+v)", sawCanonicalCreate, tc.wantVisible, feed.Events)
+			}
+
+			wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/workspaces/" + workspaceID + "/fs/ws?token=" + token
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			conn, _, err := websocket.Dial(ctx, wsURL, nil)
+			if err != nil {
+				t.Fatalf("websocket dial failed: %v", err)
+			}
+			defer conn.Close(websocket.StatusNormalClosure, "")
+
+			if tc.wantVisible {
+				var originalCreated map[string]any
+				if err := wsjson.Read(ctx, conn, &originalCreated); err != nil {
+					t.Fatalf("read original draft-created catch-up event: %v", err)
+				}
+				if originalCreated["type"] != "file.created" || originalCreated["path"] != draftPath {
+					t.Fatalf("unexpected first catch-up event: %+v", originalCreated)
+				}
+				var deleted map[string]any
+				if err := wsjson.Read(ctx, conn, &deleted); err != nil {
+					t.Fatalf("read draft-deleted catch-up event: %v", err)
+				}
+				if deleted["type"] != "file.deleted" || deleted["path"] != draftPath {
+					t.Fatalf("unexpected second catch-up event: %+v", deleted)
+				}
+				var createdEvt map[string]any
+				if err := wsjson.Read(ctx, conn, &createdEvt); err != nil {
+					t.Fatalf("read canonical-created catch-up event: %v", err)
+				}
+				if createdEvt["type"] != "file.created" || createdEvt["path"] != canonicalPath {
+					t.Fatalf("unexpected third catch-up event: %+v", createdEvt)
+				}
+			}
+			// Whether or not the rename was visible, no further catch-up
+			// events remain queued: for the denied agent this proves ZERO
+			// leakage (not even a truncated/garbled event — the original
+			// draft creation is denied the same way), and for the
+			// unrestricted agent it proves nothing beyond the three expected
+			// events was emitted.
+			if err := wsjson.Write(ctx, conn, map[string]any{"type": "ping"}); err != nil {
+				t.Fatalf("write ping failed: %v", err)
+			}
+			var pong map[string]any
+			if err := wsjson.Read(ctx, conn, &pong); err != nil || pong["type"] != "pong" {
+				t.Fatalf("expected pong immediately after catch-up (wantVisible=%v), got %+v (%v)", tc.wantVisible, pong, err)
+			}
+		})
+	}
+}
+
+// TestACLSweepDeleteEventHiddenFromDeniedAgent is the adversarial, real-code
+// end-to-end proof for the sweep half of ACL-423: SweepWritebackDrafts's
+// removal also goes through removeDraftLocked's classification-exempt
+// appendWorkspaceEventLocked call. This drives WriteFile -> ack (clearing the
+// pending op, mirroring how a delivered draft's op stops blocking the sweep)
+// -> the real SweepWritebackDrafts entry point, then asserts visibility over
+// the real HTTP events endpoint for a file-level-denied agent vs. an
+// unrestricted one.
+func TestACLSweepDeleteEventHiddenFromDeniedAgent(t *testing.T) {
+	t.Parallel()
+	const workspaceID = "ws_acl_sweep_delete"
+	const residuePath = "/slack/channels/C0ALQ06AAUT/messages/messages 15250fcf-de54-44b0-a808-c8e514480647.json"
+	const denyRule = "deny:agent:Limited"
+
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true, ExternalWritebackMode: true})
+	t.Cleanup(store.Close)
+	created, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: workspaceID,
+		Path:        residuePath,
+		IfMatch:     "0",
+		ContentType: "application/json",
+		Content:     `{"text":"old"}`,
+		// allow:public + deny:agent:Limited: see the comment in
+		// TestACLAckRenameDeleteEventHiddenFromDeniedAgent on why a bare
+		// deny rule alone can't produce a visible/hidden split here.
+		Semantics:     relayfile.FileSemantics{Permissions: []string{"allow:public", denyRule}},
+		CorrelationID: "corr_residue_write",
+	})
+	if err != nil {
+		t.Fatalf("seed protected residue failed: %v", err)
+	}
+	// Ack without an externalId: the op stops blocking the sweep (no longer
+	// pending/running) while the draft itself is left untouched — exactly
+	// the "delivered, but pre-dates the rename-at-ack contract" residue
+	// shape SweepWritebackDrafts exists to drain.
+	if _, err := store.AcknowledgeWriteback(workspaceID, created.OpID, relayfile.WritebackAck{Success: true}, "corr_ack_1"); err != nil {
+		t.Fatalf("ack failed: %v", err)
+	}
+	if _, err := store.ReadFile(workspaceID, residuePath); err != nil {
+		t.Fatalf("draft must remain until swept: %v", err)
+	}
+	sweepResult, err := store.SweepWritebackDrafts(workspaceID, relayfile.SweepDraftsRequest{Apply: true, CorrelationID: "corr_sweep_1"})
+	if err != nil {
+		t.Fatalf("sweep failed: %v", err)
+	}
+	if len(sweepResult.Removed) != 1 || sweepResult.Removed[0].Path != residuePath {
+		t.Fatalf("expected the protected residue swept, got %v", sweepResult.Removed)
+	}
+
+	server := NewServer(store)
+
+	cases := []struct {
+		name        string
+		agentName   string
+		wantVisible bool
+	}{
+		{name: "file_level_denied_agent_cannot_see_swept_residue", agentName: "Limited", wantVisible: false},
+		{name: "unrestricted_agent_sees_swept_residue", agentName: "Trusted", wantVisible: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			token := mustTestJWT(t, "dev-secret", workspaceID, tc.agentName, []string{"fs:read"}, time.Now().Add(time.Hour))
+			headers := map[string]string{"Authorization": "Bearer " + token, "X-Correlation-Id": "corr_" + tc.name}
+			resp := doRequest(t, server, request{method: http.MethodGet, path: "/v1/workspaces/" + workspaceID + "/fs/events?limit=100", headers: headers})
+			if resp.Code != http.StatusOK {
+				t.Fatalf("events returned %d: %s", resp.Code, resp.Body.String())
+			}
+			var feed relayfile.EventFeed
+			if err := json.NewDecoder(resp.Body).Decode(&feed); err != nil {
+				t.Fatalf("decode events: %v", err)
+			}
+			var sawResidueDelete bool
+			for _, event := range feed.Events {
+				if event.Type == "file.deleted" && event.Path == residuePath {
+					sawResidueDelete = true
+				}
+			}
+			if sawResidueDelete != tc.wantVisible {
+				t.Fatalf("residue delete visibility = %v, want %v (events=%+v)", sawResidueDelete, tc.wantVisible, feed.Events)
+			}
+		})
+	}
+}
+
+// TestLegacyFileDeletedEventWithoutACLSnapshotFailsClosedAfterUpgrade covers
+// finding (2): a state.json written before the ACL-snapshot mechanism
+// existed (or by any producer that failed to snapshot) has file.deleted
+// events with no recoverable ACL history. Since the deleted file's own File
+// record — the only place a file-level permission could have lived — is
+// gone, there is no way to tell "definitely never restricted" apart from
+// "restricted, but we can no longer prove it". This simulates that upgrade
+// by round-tripping a real on-disk snapshot through the JSON state backend
+// and surgically removing one event's recorded ACL snapshot (as if it had
+// been written by code that pre-dates ACLPermissionsByEvent), then asserts:
+//   - the reloaded legacy event comes back with ACLPermissions == nil
+//     (relayfile-side migration signal for "unknown"),
+//   - it fails closed over both the internal visibility check and the real
+//     HTTP events endpoint, even for an agent with no matching deny rule —
+//     because we cannot rule one out,
+//   - a sibling delete event whose (empty) snapshot DID survive reload
+//     stays visible, and a brand-new delete created after the reload in the
+//     same process also stays visible — the fail-closed rule must not
+//     swallow ordinary, fully-verified post-upgrade behavior.
+func TestLegacyFileDeletedEventWithoutACLSnapshotFailsClosedAfterUpgrade(t *testing.T) {
+	t.Parallel()
+	const workspaceID = "ws_legacy_acl_upgrade"
+	const protectedPath = "/legacy/protected.md"
+	const unrestrictedPath = "/legacy/public.md"
+	const denyRule = "deny:agent:Limited"
+
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{
+		StateBackend:   relayfile.NewJSONFileStateBackend(statePath),
+		DisableWorkers: true,
+	})
+
+	protected, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: workspaceID,
+		Path:        protectedPath,
+		IfMatch:     "0",
+		Content:     "secret",
+		Semantics:   relayfile.FileSemantics{Permissions: []string{denyRule}},
+	})
+	if err != nil {
+		t.Fatalf("seed protected file failed: %v", err)
+	}
+	if _, err := store.DeleteFile(relayfile.DeleteRequest{WorkspaceID: workspaceID, Path: protectedPath, IfMatch: protected.TargetRevision}); err != nil {
+		t.Fatalf("delete protected file failed: %v", err)
+	}
+	unrestricted, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: workspaceID,
+		Path:        unrestrictedPath,
+		IfMatch:     "0",
+		Content:     "public",
+	})
+	if err != nil {
+		t.Fatalf("seed unrestricted file failed: %v", err)
+	}
+	if _, err := store.DeleteFile(relayfile.DeleteRequest{WorkspaceID: workspaceID, Path: unrestrictedPath, IfMatch: unrestricted.TargetRevision}); err != nil {
+		t.Fatalf("delete unrestricted file failed: %v", err)
+	}
+
+	feed, err := store.GetEvents(workspaceID, "", "", 100)
+	if err != nil {
+		t.Fatalf("get events failed: %v", err)
+	}
+	var protectedDeleteID, unrestrictedDeleteID string
+	for _, event := range feed.Events {
+		switch {
+		case event.Type == "file.deleted" && event.Path == protectedPath:
+			protectedDeleteID = event.EventID
+		case event.Type == "file.deleted" && event.Path == unrestrictedPath:
+			unrestrictedDeleteID = event.EventID
+		}
+	}
+	if protectedDeleteID == "" || unrestrictedDeleteID == "" {
+		t.Fatalf("expected both delete events recorded, got %+v", feed.Events)
+	}
+	store.Close()
+
+	// Surgically strip the recorded ACL snapshot for the protected delete
+	// only, simulating a state.json written before ACLPermissionsByEvent
+	// existed (the unrestricted delete's entry — empty but present — is left
+	// alone, simulating an entry that DID survive from a version with this
+	// fix already applied).
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read state.json: %v", err)
+	}
+	var snapshot map[string]any
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		t.Fatalf("unmarshal state.json: %v", err)
+	}
+	workspaces, _ := snapshot["workspaces"].(map[string]any)
+	wsSnapshot, _ := workspaces[workspaceID].(map[string]any)
+	aclMap, _ := wsSnapshot["aclPermissionsByEvent"].(map[string]any)
+	if aclMap == nil {
+		t.Fatalf("expected aclPermissionsByEvent in persisted snapshot: %+v", wsSnapshot)
+	}
+	if _, ok := aclMap[protectedDeleteID]; !ok {
+		t.Fatalf("expected a persisted ACL snapshot entry for the protected delete before stripping it: %+v", aclMap)
+	}
+	delete(aclMap, protectedDeleteID)
+	patched, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("marshal patched state.json: %v", err)
+	}
+	if err := os.WriteFile(statePath, patched, 0o644); err != nil {
+		t.Fatalf("write patched state.json: %v", err)
+	}
+
+	// Reopen exactly as a fresh process would on upgrade.
+	reloaded := relayfile.NewStoreWithOptions(relayfile.StoreOptions{
+		StateBackend:   relayfile.NewJSONFileStateBackend(statePath),
+		DisableWorkers: true,
+	})
+	t.Cleanup(reloaded.Close)
+	server := NewServer(reloaded)
+	// AnyAgent carries no ACL rule targeting it anywhere: the point is that
+	// fail-closed hides the legacy event even from an agent nothing denies.
+	claims := tokenClaims{WorkspaceID: workspaceID, AgentName: "AnyAgent", Scopes: map[string]struct{}{"fs:read": {}}}
+
+	reloadedFeed, err := reloaded.GetEvents(workspaceID, "", "", 100)
+	if err != nil {
+		t.Fatalf("get reloaded events failed: %v", err)
+	}
+	var checkedProtected, checkedUnrestricted bool
+	for _, event := range reloadedFeed.Events {
+		switch event.EventID {
+		case protectedDeleteID:
+			checkedProtected = true
+			if event.ACLPermissions != nil {
+				t.Fatalf("expected the legacy delete event to reload with ACLPermissions == nil (unknown), got %v", event.ACLPermissions)
+			}
+			if server.eventVisibleToClaims(workspaceID, claims, event) {
+				t.Fatal("legacy delete event with no recoverable ACL snapshot must fail closed, even for an agent no rule names — the deleted file may have had a file-level deny we can no longer verify")
+			}
+		case unrestrictedDeleteID:
+			checkedUnrestricted = true
+			if event.ACLPermissions == nil {
+				t.Fatal("expected the sibling delete event's surviving (empty) ACL snapshot to reload as non-nil")
+			}
+			if !server.eventVisibleToClaims(workspaceID, claims, event) {
+				t.Fatal("preserving allowed behavior: a delete event whose ACL snapshot survived reload (even empty) must remain visible")
+			}
+		}
+	}
+	if !checkedProtected || !checkedUnrestricted {
+		t.Fatalf("expected to find both delete events after reload, got %+v", reloadedFeed.Events)
+	}
+
+	// A brand-new delete created after the upgrade, in the same reloaded
+	// process, must also stay visible: the fail-closed rule is scoped to
+	// genuinely unsnapshotted events, not "any file.deleted with no
+	// permissions".
+	freshPath := "/legacy/fresh.md"
+	fresh, err := reloaded.WriteFile(relayfile.WriteRequest{WorkspaceID: workspaceID, Path: freshPath, IfMatch: "0", Content: "fresh"})
+	if err != nil {
+		t.Fatalf("seed fresh file failed: %v", err)
+	}
+	if _, err := reloaded.DeleteFile(relayfile.DeleteRequest{WorkspaceID: workspaceID, Path: freshPath, IfMatch: fresh.TargetRevision}); err != nil {
+		t.Fatalf("delete fresh file failed: %v", err)
+	}
+	freshFeed, err := reloaded.GetEvents(workspaceID, "", "", 100)
+	if err != nil {
+		t.Fatalf("get fresh events failed: %v", err)
+	}
+	var freshVisible, sawFresh bool
+	for _, event := range freshFeed.Events {
+		if event.Type == "file.deleted" && event.Path == freshPath {
+			sawFresh = true
+			freshVisible = server.eventVisibleToClaims(workspaceID, claims, event)
+		}
+	}
+	if !sawFresh {
+		t.Fatalf("expected the fresh post-upgrade delete event, got %+v", freshFeed.Events)
+	}
+	if !freshVisible {
+		t.Fatal("a fresh, fully-snapshotted post-upgrade delete event must remain visible")
+	}
+
+	// And confirm the leak is actually closed over the real HTTP surface,
+	// not just the internal helper.
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	token := mustTestJWT(t, "dev-secret", workspaceID, "AnyAgent", []string{"fs:read"}, time.Now().Add(time.Hour))
+	resp := doRequest(t, server, request{
+		method:  http.MethodGet,
+		path:    "/v1/workspaces/" + workspaceID + "/fs/events?limit=100",
+		headers: map[string]string{"Authorization": "Bearer " + token, "X-Correlation-Id": "corr_legacy_http"},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("events returned %d: %s", resp.Code, resp.Body.String())
+	}
+	var httpFeed relayfile.EventFeed
+	if err := json.NewDecoder(resp.Body).Decode(&httpFeed); err != nil {
+		t.Fatalf("decode events: %v", err)
+	}
+	for _, event := range httpFeed.Events {
+		if event.Path == protectedPath && event.Type == "file.deleted" {
+			t.Fatalf("legacy unsnapshotted delete leaked over HTTP: %+v", event)
+		}
+	}
+}
+
 func TestFileEventsWebSocketCursorCatchUpDrainsMoreThanOnePage(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)

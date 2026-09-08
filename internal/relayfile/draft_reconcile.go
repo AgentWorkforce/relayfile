@@ -207,6 +207,12 @@ func (s *Store) reconcileAckedDraftLocked(workspaceID string, ws *workspaceState
 	// consumers are eventId-keyed, so neither convention affects cursors.
 	nowTS := nowRFC3339NanoUTC()
 	revision := s.nextRevisionLocked()
+	// Snapshot the draft's own ACL state before it disappears from ws.Files:
+	// the file.deleted event below is the only remaining record of what
+	// governed reads at draftPath, and it must carry that snapshot so a
+	// file-level denied agent cannot learn the draft existed/was deleted by
+	// watching the event feed. See snapshotACLPermissions.
+	aclPermissions := snapshotACLPermissions(resolvePermissionsFromFiles(ws.Files, draftPath, true))
 	delete(ws.Files, draftPath)
 	file.Path = targetPath
 	file.Revision = revision
@@ -218,14 +224,15 @@ func (s *Store) reconcileAckedDraftLocked(workspaceID string, ws *workspaceState
 	ws.ProviderIndex[key] = targetPath
 
 	s.appendWorkspaceEventLocked(workspaceID, ws, Event{
-		EventID:       s.nextEventIDLocked(),
-		Type:          "file.deleted",
-		Path:          draftPath,
-		Revision:      revision,
-		Origin:        "system",
-		Provider:      provider,
-		CorrelationID: correlationID,
-		Timestamp:     nowTS,
+		EventID:        s.nextEventIDLocked(),
+		Type:           "file.deleted",
+		Path:           draftPath,
+		Revision:       revision,
+		Origin:         "system",
+		Provider:       provider,
+		CorrelationID:  correlationID,
+		Timestamp:      nowTS,
+		ACLPermissions: aclPermissions,
 	})
 	s.appendWorkspaceEventLocked(workspaceID, ws, Event{
 		EventID:       s.nextEventIDLocked(),
@@ -270,18 +277,23 @@ func (s *Store) removeDraftLocked(workspaceID string, ws *workspaceState, draftP
 	if _, exists := ws.Files[draftPath]; !exists {
 		return
 	}
+	// Snapshot before delete — see the matching comment in
+	// reconcileAckedDraftLocked. This path is shared by ack-time draft
+	// cleanup and SweepWritebackDrafts, so both call sites inherit the fix.
+	aclPermissions := snapshotACLPermissions(resolvePermissionsFromFiles(ws.Files, draftPath, true))
 	delete(ws.Files, draftPath)
 	revision := s.nextRevisionLocked()
 	ws.Revision = revision
 	s.appendWorkspaceEventLocked(workspaceID, ws, Event{
-		EventID:       s.nextEventIDLocked(),
-		Type:          "file.deleted",
-		Path:          draftPath,
-		Revision:      revision,
-		Origin:        "system",
-		Provider:      provider,
-		CorrelationID: correlationID,
-		Timestamp:     nowRFC3339NanoUTC(),
+		EventID:        s.nextEventIDLocked(),
+		Type:           "file.deleted",
+		Path:           draftPath,
+		Revision:       revision,
+		Origin:         "system",
+		Provider:       provider,
+		ACLPermissions: aclPermissions,
+		CorrelationID:  correlationID,
+		Timestamp:      nowRFC3339NanoUTC(),
 	})
 }
 

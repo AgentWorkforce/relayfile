@@ -3806,11 +3806,14 @@ func (s *Store) recordWriteWithContentIdentityAndACLPermissionsLocked(ws *worksp
 		CorrelationID: correlationID,
 		Timestamp:     nowTS,
 	}
-	if !snapshotACL && strings.HasPrefix(eventType, "file.") {
-		aclPermissions = resolvePermissionsFromFiles(ws.Files, path, eventType != "file.deleted")
-	}
-	if snapshotACL || aclPermissions != nil {
-		event.ACLPermissions = append([]string(nil), aclPermissions...)
+	if strings.HasPrefix(eventType, "file.") {
+		if !snapshotACL {
+			aclPermissions = resolvePermissionsFromFiles(ws.Files, path, eventType != "file.deleted")
+		}
+		// Always non-nil (snapshotACLPermissions), even when aclPermissions is
+		// nil/empty: a nil Event.ACLPermissions must mean "never evaluated",
+		// not "evaluated, no rules applied" — see snapshotACLPermissions.
+		event.ACLPermissions = snapshotACLPermissions(aclPermissions)
 	}
 	s.appendWorkspaceEventLocked(workspaceID, ws, event)
 
@@ -4400,7 +4403,7 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 				CorrelationID: correlationID,
 				Timestamp:     now,
 			}
-			event.ACLPermissions = append([]string(nil), aclPermissions...)
+			event.ACLPermissions = snapshotACLPermissions(aclPermissions)
 			s.appendWorkspaceEventLocked(workspaceID, ws, event)
 		}
 	}
@@ -4447,7 +4450,7 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 		CorrelationID: correlationID,
 		Timestamp:     now,
 	}
-	event.ACLPermissions = append([]string(nil), resolvePermissionsFromFiles(ws.Files, path, true)...)
+	event.ACLPermissions = snapshotACLPermissions(resolvePermissionsFromFiles(ws.Files, path, true))
 	s.appendWorkspaceEventLocked(workspaceID, ws, event)
 }
 
@@ -4577,8 +4580,17 @@ func (s *Store) loadFromDisk() error {
 				ws.ACLPermissionsByEvent = map[string][]string{}
 			}
 			for index := range ws.Events {
+				// A present map entry (even one whose value is empty/nil)
+				// means this event's ACL snapshot was actually computed —
+				// restore it as a non-nil slice so it stays distinguishable
+				// from a legacy event, which has no entry at all here and is
+				// left with ACLPermissions == nil. httpapi.eventVisibleToClaims
+				// fails closed on Type=="file.deleted" with a nil snapshot,
+				// so an absent entry (pre-dating this snapshot mechanism, or
+				// written by a version with the now-fixed nil-collapse bug)
+				// is hidden rather than assumed unrestricted.
 				if permissions, ok := ws.ACLPermissionsByEvent[ws.Events[index].EventID]; ok {
-					ws.Events[index].ACLPermissions = append([]string(nil), permissions...)
+					ws.Events[index].ACLPermissions = snapshotACLPermissions(permissions)
 				}
 			}
 		}
@@ -5170,6 +5182,23 @@ func queryFilesFromEntries(iterate func(func(string, File)), req FileQueryReques
 	}
 
 	return FileQueryResponse{Items: items, NextCursor: nextCursor}, nil
+}
+
+// snapshotACLPermissions returns a defensive copy of permissions that is
+// NEVER nil, even when permissions is nil/empty. Event.ACLPermissions relies
+// on the nil/non-nil distinction to tell "no ACL snapshot was ever computed
+// for this event" (nil — legacy, pre-dates the snapshot mechanism, or a
+// producer bug) apart from "ACL was evaluated and no rules applied" (non-nil
+// empty slice). Every delete-event producer must route its computed
+// permissions through this helper before assigning Event.ACLPermissions;
+// skipping it silently reintroduces the nil ambiguity that lets a legacy or
+// unsnapshotted delete fail open instead of closed. See
+// httpapi.eventVisibleToClaims, which fails closed on Type=="file.deleted"
+// with ACLPermissions == nil.
+func snapshotACLPermissions(permissions []string) []string {
+	out := make([]string, len(permissions))
+	copy(out, permissions)
+	return out
 }
 
 func resolvePermissionsFromFiles(files map[string]File, path string, includeTarget bool) []string {
@@ -5860,7 +5889,7 @@ func (s *Store) appendWorkspaceEventLocked(workspaceID string, ws *workspaceStat
 		if ws.ACLPermissionsByEvent == nil {
 			ws.ACLPermissionsByEvent = map[string][]string{}
 		}
-		ws.ACLPermissionsByEvent[event.EventID] = append([]string(nil), event.ACLPermissions...)
+		ws.ACLPermissionsByEvent[event.EventID] = snapshotACLPermissions(event.ACLPermissions)
 	}
 	s.publishEvent(workspaceID, event)
 }
