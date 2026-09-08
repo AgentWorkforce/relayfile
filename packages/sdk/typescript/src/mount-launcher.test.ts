@@ -389,13 +389,18 @@ describe("default mount launcher", () => {
       // Let the child exit and waitForReady enter its fake-timer backoff.
       await new Promise<void>((resolve) => setImmediate(resolve))
       await instance.stop()
+      // Install the rejection handler before releasing the backoff: the
+      // delayed waitForReady continuation rejects immediately after the
+      // timer advances, and attaching expect() afterward can report an
+      // unhandled rejection under strict runners.
+      const readyFailure = expect(instance.ready).rejects.toMatchObject({
+        code: "mount_launch_failed"
+      })
       // Releasing the backoff after stop() proves that the post-delay guard,
       // rather than test timing, prevents restartOnceMount().
       await vi.advanceTimersByTimeAsync(20)
 
-      await expect(instance.ready).rejects.toMatchObject({
-        code: "mount_launch_failed"
-      })
+      await readyFailure
       expect(spawnImpl).toHaveBeenCalledTimes(1)
     } finally {
       await rm(tempRoot, { recursive: true, force: true })
