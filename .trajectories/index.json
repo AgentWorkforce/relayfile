@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-09-08T18:34:25.966Z",
+  "lastUpdated": "2026-09-08T18:35:41.344Z",
   "trajectories": {
     "traj_4pvrlmqfnzng": {
       "title": "Review PR #278 in AgentWorkforce/relayfile",
@@ -235,9 +235,10 @@
     },
     "traj_jm05ulo6q9n9": {
       "title": "Repair Relayfile release baseline with cryptographic provenance attestation",
-      "status": "active",
+      "status": "completed",
       "startedAt": "2026-09-08T18:34:14.911Z",
-      "path": "/private/tmp/relayfile-release-snapshot-fix-0908/.trajectories/active/traj_jm05ulo6q9n9.json"
+      "completedAt": "2026-09-08T18:35:41.168Z",
+      "path": "/private/tmp/relayfile-release-snapshot-fix-0908/.trajectories/completed/2026-09/traj_jm05ulo6q9n9.json"
     }
   }
 }
