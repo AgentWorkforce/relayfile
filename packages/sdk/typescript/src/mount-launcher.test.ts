@@ -304,6 +304,46 @@ describe("default mount launcher", () => {
     }
   })
 
+  it("reports and cleans up a timeout when resumable retries exhaust the readiness budget", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] })
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-default-launcher-resume-timeout-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const child = new FakeChildProcess()
+    const spawnImpl = vi.fn().mockImplementation(() => {
+      queueMicrotask(() => exitFakeChild(child, 75))
+      return child as never
+    })
+    const launcher = createDefaultMountLauncher({
+      spawnImpl,
+      readyPollIntervalMs: 10
+    })
+
+    try {
+      await writeReadyState(localDir)
+      const instance = await launcher.start({
+        env: createMountEnv(localDir),
+        background: false,
+        readyTimeoutMs: 5
+      })
+      const readyFailure = expect(instance.ready).rejects.toBeInstanceOf(
+        MountReadyTimeoutError
+      )
+
+      await vi.advanceTimersByTimeAsync(10)
+
+      await readyFailure
+      expect(spawnImpl).toHaveBeenCalledTimes(1)
+      expect(instance.stopped).toBe(true)
+      await expect(
+        stat(path.join(localDir, ".relay", "mount.pid"))
+      ).rejects.toMatchObject({ code: "ENOENT" })
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
   it("does not resolve foreground readiness after shutdown begins", async () => {
     const tempRoot = await mkdtemp(
       path.join(os.tmpdir(), "relayfile-default-launcher-stop-ready-race-")
@@ -388,14 +428,13 @@ describe("default mount launcher", () => {
 
       // Let the child exit and waitForReady enter its fake-timer backoff.
       await new Promise<void>((resolve) => setImmediate(resolve))
-      await instance.stop()
-      // Install the rejection handler before releasing the backoff: the
-      // delayed waitForReady continuation rejects immediately after the
-      // timer advances, and attaching expect() afterward can report an
-      // unhandled rejection under strict runners.
+      // Install the rejection handler before stop(): once shutdown marks the
+      // instance as stopping, the ready loop may reject at its next microtask
+      // boundary even before the controlled backoff is advanced.
       const readyFailure = expect(instance.ready).rejects.toMatchObject({
         code: "mount_launch_failed"
       })
+      await instance.stop()
       // Releasing the backoff after stop() proves that the post-delay guard,
       // rather than test timing, prevents restartOnceMount().
       await vi.advanceTimersByTimeAsync(20)

@@ -345,6 +345,19 @@ class RelayfileMountProcessInstance
         throw new MountModeUnavailableError("fuse")
       }
 
+      // A typed foreground yield is retryable only inside the caller's
+      // readiness budget. Once that budget is exhausted, report the public
+      // timeout contract and run normal shutdown cleanup instead of falling
+      // through to the generic early-exit error.
+      if (this.isResumableOnceExit() && this.now() >= timeoutAt) {
+        const error = new MountReadyTimeoutError(
+          this.localDir,
+          this.input.readyTimeoutMs
+        )
+        await this.stop()
+        throw error
+      }
+
       if (this.exited) {
         if (
           this.isResumableOnceExit() &&

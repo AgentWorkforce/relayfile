@@ -1,0 +1,57 @@
+{
+  "id": "traj_i42n2cyvnl75",
+  "version": 1,
+  "task": {
+    "title": "Fix PR 477 resumable readiness timeout contract",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#477"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-09-08T20:05:48.457Z",
+  "completedAt": "2026-09-08T20:12:17.950Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-09-08T20:12:17.347Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_f40mjrxnbvgx",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-09-08T20:12:17.347Z",
+      "endedAt": "2026-09-08T20:12:17.950Z",
+      "events": [
+        {
+          "ts": 1788898337348,
+          "type": "decision",
+          "content": "Timeout must win over generic early exit for a resumable exit-75 child: Timeout must win over generic early exit for a resumable exit-75 child",
+          "raw": {
+            "question": "Timeout must win over generic early exit for a resumable exit-75 child",
+            "chosen": "Timeout must win over generic early exit for a resumable exit-75 child",
+            "alternatives": [],
+            "reasoning": "The public readyTimeoutMs contract requires MountReadyTimeoutError plus stop cleanup once retry budget expires; ordinary non-resumable exits still retain their specific launch failure."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Fixed exit-75 deadline handling and eliminated the shutdown-test unhandled-rejection window; focused tests passed 20 repeated runs plus the full launcher test and SDK typecheck.",
+    "approach": "Standard approach",
+    "confidence": 0.94
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/private/tmp/relayfile-once-timeout-fix-0908",
+  "tags": [],
+  "_trace": {
+    "startRef": "7788cbcc0868db34d33cbfe173368d3095b7afbf",
+    "endRef": "7788cbcc0868db34d33cbfe173368d3095b7afbf"
+  }
+}
