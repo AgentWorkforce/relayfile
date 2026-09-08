@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import {
+  backoffDelay,
   comparePackageContent,
   normalizePackRecord,
   normalizeRegistryRecord,
@@ -142,6 +143,39 @@ test("post-publish propagation retries an absent registry response", async () =>
   assert.equal(result.package.status, "published");
   assert.equal(state.publishes, 1);
   assert.equal(state.views, 3);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("post-publish propagation retry delays are capped per wait and in total", async () => {
+  const dir = sandbox();
+  const state = { views: 0, publishes: 0 };
+  const delays = [];
+  await assert.rejects(
+    reconcilePackage({
+      packageDir: dir,
+      tag: "next",
+      sourceSha: "a".repeat(40),
+      runId: 1,
+      runAttempt: 1,
+      npm: fakeNpm({
+        state,
+        registry: { integrity: "sha512-local", shasum: "sha1-local" },
+        viewError: "npm error code E404",
+      }),
+      attempts: 99,
+      delayMs: 5,
+      maxDelayMs: 10,
+      maxTotalRetryDelayMs: 23,
+      sleep: async (delay) => delays.push(delay),
+    }),
+    /post-publish verification failed/,
+  );
+  assert.deepEqual(delays, [5, 10, 8]);
+  assert.equal(
+    delays.reduce((total, delay) => total + delay, 0),
+    23,
+  );
+  assert.equal(backoffDelay({ attempt: 9 }), 30000);
   rmSync(dir, { recursive: true, force: true });
 });
 

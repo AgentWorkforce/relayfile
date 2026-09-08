@@ -20,6 +20,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -28,6 +29,18 @@ import { fileURLToPath } from "node:url";
 
 export const DEFAULT_ATTEMPTS = 10;
 export const DEFAULT_DELAY_MS = 5000;
+// Match lockfile propagation retries: no individual pause exceeds 30 seconds.
+export const MAX_DELAY_MS = 30000;
+// Keep every package-matrix job bounded even when a registry stays unavailable.
+export const MAX_TOTAL_RETRY_DELAY_MS = 5 * 60 * 1000;
+
+export function backoffDelay({
+  attempt,
+  baseDelayMs = DEFAULT_DELAY_MS,
+  maxDelayMs = MAX_DELAY_MS,
+}) {
+  return Math.min(baseDelayMs * 2 ** (attempt - 1), maxDelayMs);
+}
 
 function run(command, args, { cwd = process.cwd(), env = process.env } = {}) {
   return new Promise((resolveResult) => {
@@ -246,6 +259,8 @@ export async function reconcilePackage({
   sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
   attempts = DEFAULT_ATTEMPTS,
   delayMs = DEFAULT_DELAY_MS,
+  maxDelayMs = MAX_DELAY_MS,
+  maxTotalRetryDelayMs = MAX_TOTAL_RETRY_DELAY_MS,
 }) {
   const manifest = JSON.parse(
     readFileSync(resolve(packageDir, "package.json"), "utf8"),
@@ -316,6 +331,7 @@ export async function reconcilePackage({
       status = "published";
 
       let lastError;
+      let totalRetryDelayMs = 0;
       for (let attempt = 1; attempt <= attempts; attempt += 1) {
         try {
           const after = await queryRegistry({
@@ -338,7 +354,17 @@ export async function reconcilePackage({
         } catch (error) {
           lastError = error;
           if (error.fatal || attempt === attempts) break;
-          await sleep(delayMs * 2 ** (attempt - 1));
+          const remainingDelayMs = Math.max(
+            0,
+            maxTotalRetryDelayMs - totalRetryDelayMs,
+          );
+          const delay = Math.min(
+            backoffDelay({ attempt, baseDelayMs: delayMs, maxDelayMs }),
+            remainingDelayMs,
+          );
+          if (delay === 0) break;
+          totalRetryDelayMs += delay;
+          await sleep(delay);
         }
       }
       if (!registry) {
@@ -377,7 +403,9 @@ export async function reconcilePackage({
   return attestation;
 }
 
-const entrypoint = process.argv[1] ? resolve(process.argv[1]) : "";
+const entrypoint = process.argv[1]
+  ? realpathSync(resolve(process.argv[1]))
+  : "";
 if (entrypoint && fileURLToPath(import.meta.url) === entrypoint) {
   const args = parseArgs(process.argv.slice(2));
   try {

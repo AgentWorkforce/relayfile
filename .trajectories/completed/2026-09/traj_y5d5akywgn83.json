@@ -78,9 +78,7 @@
     "approach": "Standard approach",
     "confidence": 0.9
   },
-  "commits": [
-    "fb0361c1"
-  ],
+  "commits": ["fb0361c1"],
   "filesChanged": [
     ".github/workflows/publish.yml",
     ".trajectories/index.json",

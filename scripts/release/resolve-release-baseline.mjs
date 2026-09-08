@@ -18,10 +18,12 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import {
   isCompletePackageAttestation,
   isSha1Shasum,
@@ -673,7 +675,10 @@ function parseArgs(argv) {
   return values;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+const entrypoint = process.argv[1]
+  ? realpathSync(resolve(process.argv[1]))
+  : "";
+if (entrypoint && fileURLToPath(import.meta.url) === entrypoint) {
   try {
     const args = parseArgs(process.argv.slice(2));
     const result = resolveReleaseBaseline({

@@ -54,9 +54,7 @@
             "confidence": 0.9
           },
           "significance": "high",
-          "tags": [
-            "confidence:0.9"
-          ]
+          "tags": ["confidence:0.9"]
         }
       ]
     }
@@ -68,7 +66,7 @@
   },
   "commits": [],
   "filesChanged": [],
-  "projectId": "/private/tmp/relayfile-release-snapshot-fix-0908",
+  "projectId": "AgentWorkforce/relayfile",
   "tags": [],
   "_trace": {
     "startRef": "1873c3cf5ecbed21cd34e929952ccd7059837dcb",

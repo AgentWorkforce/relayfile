@@ -1,9 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 
 import {
   RELEASE_BINARY_NAMES,
@@ -19,6 +26,35 @@ import {
 
 const VALID_INTEGRITY = `sha512-${"A".repeat(86)}==`;
 const VALID_SHASUM = "a".repeat(40);
+const SCRIPTS_DIRECTORY = fileURLToPath(new URL(".", import.meta.url));
+
+function runCliFromSpacedPath() {
+  const directory = mkdtempSync(join(tmpdir(), "relayfile baseline cli "));
+  const entrypoint = join(directory, "resolve release baseline.mjs");
+  copyFileSync(
+    join(SCRIPTS_DIRECTORY, "resolve-release-baseline.mjs"),
+    entrypoint,
+  );
+  copyFileSync(
+    join(SCRIPTS_DIRECTORY, "create-release-attestation.mjs"),
+    join(directory, "create-release-attestation.mjs"),
+  );
+  try {
+    return spawnSync(
+      process.execPath,
+      [
+        entrypoint,
+        "--source-sha",
+        "a".repeat(40),
+        "--current-version",
+        "not-a-version",
+      ],
+      { encoding: "utf8" },
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
 
 function attestationFor(candidate, overrides = {}) {
   const packages = RELEASE_PACKAGE_NAMES.map((name) => ({
@@ -46,7 +82,7 @@ function attestationFor(candidate, overrides = {}) {
       },
     },
   }));
-  return {
+  const attestation = {
     schemaVersion: 1,
     kind: "relayfileRelease",
     sourceSha: candidate.parent,
@@ -71,7 +107,12 @@ function attestationFor(candidate, overrides = {}) {
       file,
       sha256: "b".repeat(64),
     })),
+  };
+  return {
+    ...attestation,
     ...overrides,
+    producer: { ...attestation.producer, ...overrides.producer },
+    tag: { ...attestation.tag, ...overrides.tag },
   };
 }
 
@@ -242,6 +283,15 @@ test("missing, invalid, and mismatched external attestations fail closed", () =>
     assert.equal(result.latestTag, "", name);
     rmSync(cwd, { recursive: true, force: true });
   }
+});
+
+test("baseline CLI executes when its entrypoint path contains spaces", () => {
+  const result = runCliFromSpacedPath();
+  assert.notEqual(result.status, 0);
+  assert.match(
+    `${result.stdout}${result.stderr}`,
+    /current package version is not strict SemVer/,
+  );
 });
 
 test("same-workflow reruns accept only exact run/source/tree metadata", () => {

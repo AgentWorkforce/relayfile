@@ -1,8 +1,14 @@
 #!/usr/bin/env node
 /** Build the machine-verifiable release record attached to a GitHub Release. */
 
-import { readFileSync, writeFileSync, readdirSync } from "node:fs";
+import {
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+  readdirSync,
+} from "node:fs";
 import { basename, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const SHA256 = /^[0-9a-f]{64}$/;
 const GIT_SHA = /^[0-9a-f]{40}$/;
@@ -291,7 +297,10 @@ function parseArgs(argv) {
   return values;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+const entrypoint = process.argv[1]
+  ? realpathSync(resolve(process.argv[1]))
+  : "";
+if (entrypoint && fileURLToPath(import.meta.url) === entrypoint) {
   const args = parseArgs(process.argv.slice(2));
   try {
     const packages = readPackageAttestations(args.package_dir);

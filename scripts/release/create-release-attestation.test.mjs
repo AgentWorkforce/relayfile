@@ -1,5 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 
 import {
   buildReleaseAttestation,
@@ -12,6 +17,22 @@ const VALID_INTEGRITY = `sha512-${"A".repeat(86)}==`;
 const OTHER_INTEGRITY = `sha512-${"A".repeat(85)}Q==`;
 const VALID_SHASUM = "a".repeat(40);
 const OTHER_SHASUM = "b".repeat(40);
+const SCRIPT = fileURLToPath(
+  new URL("./create-release-attestation.mjs", import.meta.url),
+);
+
+function runCliFromSpacedPath(args) {
+  const directory = mkdtempSync(join(tmpdir(), "relayfile attestation cli "));
+  const entrypoint = join(directory, "create release attestation.mjs");
+  copyFileSync(SCRIPT, entrypoint);
+  try {
+    return spawnSync(process.execPath, [entrypoint, ...args(directory)], {
+      encoding: "utf8",
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
 
 function packageRecords(
   sourceSha,
@@ -95,6 +116,17 @@ test("attestation accepts matching optional npm digest fields", () => {
     });
     assert.equal(result.packages[0].package.local[omittedField], null);
   }
+});
+
+test("attestation CLI executes when its entrypoint path contains spaces", () => {
+  const result = runCliFromSpacedPath((directory) => [
+    "--package-dir",
+    join(directory, "missing-package-attestations"),
+    "--checksums",
+    join(directory, "missing-checksums"),
+  ]);
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stdout}${result.stderr}`, /ENOENT/);
 });
 
 test("attestation rejects a package from a different source", () => {

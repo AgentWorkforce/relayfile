@@ -1,0 +1,63 @@
+{
+  "id": "traj_y0ud3lb6tkt0",
+  "version": 1,
+  "task": {
+    "title": "Harden release CLI entrypoints and bounded registry propagation retries"
+  },
+  "status": "completed",
+  "startedAt": "2026-09-08T20:45:57.250Z",
+  "completedAt": "2026-09-08T20:50:19.439Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-09-08T20:50:18.750Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_z33hk4o5sidd",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-09-08T20:50:18.750Z",
+      "endedAt": "2026-09-08T20:50:19.439Z",
+      "events": [
+        {
+          "ts": 1788900618751,
+          "type": "decision",
+          "content": "Accepted entrypoint, retry-budget, fixture-isolation, and portable-trajectory repairs: Accepted entrypoint, retry-budget, fixture-isolation, and portable-trajectory repairs",
+          "raw": {
+            "question": "Accepted entrypoint, retry-budget, fixture-isolation, and portable-trajectory repairs",
+            "chosen": "Accepted entrypoint, retry-budget, fixture-isolation, and portable-trajectory repairs",
+            "alternatives": [],
+            "reasoning": "Spaced paths can differ from Node's canonical module path; package retries were unbounded; shallow fixture overrides confounded negative provenance tests; and PR-added trajectory metadata contained checkout-specific paths."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1788900619121,
+          "type": "reflection",
+          "content": "Added real spaced-path CLI tests, bounded registry retry delays to 30 seconds each and five minutes cumulative, deep-merged negative fixtures, and normalized PR trajectory metadata. The release suite passed twice.",
+          "raw": {
+            "confidence": 0.94
+          },
+          "significance": "high",
+          "tags": ["confidence:0.94"]
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Hardened release CLI entry recognition, propagation retry bounds, provenance fixture isolation, and portable trajectory metadata; release suite passed twice.",
+    "approach": "Standard approach",
+    "confidence": 0.94
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "1bd242ab09dc14db87fffba9ab2e958899ac1a44",
+    "endRef": "1bd242ab09dc14db87fffba9ab2e958899ac1a44"
+  }
+}
