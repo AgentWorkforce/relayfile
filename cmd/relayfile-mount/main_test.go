@@ -755,6 +755,72 @@ func TestRunSinglePollingMountReportsErrorForNormalCycleFailure(t *testing.T) {
 	}
 }
 
+// TestRunSinglePollingMountKeepsSuccessOnUnrelatedFailureAfterBootstrapComplete
+// is the end-to-end counterpart of
+// TestFinishInitialBootstrapKeepsSuccessAfterPriorCompletion: it exercises the
+// real syncer against a persistent localDir/stateDir (the ensureRelayfileMount
+// pattern of reusing a mount point across invocations), rather than injected
+// callbacks. A workspace that already finished its full-tree bootstrap in one
+// --once run must not have a later, unrelated --once cycle failure reported
+// as an incomplete bootstrap.
+func TestRunSinglePollingMountKeepsSuccessOnUnrelatedFailureAfterBootstrapComplete(t *testing.T) {
+	entries := []mountsync.TreeEntry{
+		{Path: "/f/one.txt", Type: "file"},
+		{Path: "/f/two.txt", Type: "file"},
+	}
+	var failing atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if failing.Load() {
+			http.Error(w, "transient", http.StatusBadGateway)
+			return
+		}
+		switch {
+		case strings.Contains(r.URL.Path, "/fs/tree"):
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(mountsync.TreeResponse{Entries: entries})
+		case strings.Contains(r.URL.Path, "/fs/file"):
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(mountsync.RemoteFile{
+				Path:        r.URL.Query().Get("path"),
+				ContentType: "text/plain",
+				Content:     "content",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	localDir := t.TempDir()
+	cfg := mountConfig{
+		baseURL:          server.URL,
+		token:            "test-token",
+		workspaceID:      "ws_already_bootstrapped",
+		remotePath:       "/",
+		localDir:         localDir,
+		stateDir:         t.TempDir(),
+		mountKind:        mountsync.MountKindDaemon,
+		syncMode:         syncModeMirror,
+		interval:         time.Hour,
+		timeout:          30 * time.Second,
+		websocketEnabled: false,
+		once:             true,
+	}
+
+	if err := runSinglePollingMount(context.Background(), cfg); err != nil {
+		t.Fatalf("initial bootstrap run failed: %v", err)
+	}
+	statePath := filepath.Join(localDir, ".relay", "state.json")
+	if ready, reason := sandboxInitialSyncGuard(statePath); !ready {
+		t.Fatalf("expected the first --once run to leave bootstrap complete: %s", reason)
+	}
+
+	failing.Store(true)
+	if err := runSinglePollingMount(context.Background(), cfg); err != nil {
+		t.Fatalf("expected --once to succeed on an already-bootstrapped mount despite an unrelated cycle failure, got %v", err)
+	}
+}
+
 // TestRunSinglePollingMountStopsOnTimerBootstrapStall exercises the polling
 // timer path, not just the initial cycle. The first page commits a partial
 // checkpoint and its next-page error remains nonfatal; the following timer

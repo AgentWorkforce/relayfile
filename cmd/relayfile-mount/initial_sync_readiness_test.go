@@ -217,6 +217,7 @@ func TestFinishInitialBootstrapReturnsOnCancelledContext(t *testing.T) {
 	err := finishInitialBootstrap(ctx, mountConfig{localDir: localDir},
 		func(bool) error { cycles++; return nil },
 		func() error { return nil },
+		false,
 	)
 	if err == nil {
 		t.Fatalf("expected cancellation to produce an error")
@@ -245,6 +246,7 @@ func TestFinishInitialBootstrapDoesNotRetryAFailedFirstCycle(t *testing.T) {
 	err := finishInitialBootstrap(context.Background(), mountConfig{localDir: localDir},
 		func(bool) error { cycles++; return nil },
 		func() error { return cause },
+		false,
 	)
 	if err == nil {
 		t.Fatalf("expected error for failed first cycle")
@@ -279,6 +281,7 @@ func TestFinishInitialBootstrapStopsAfterAFailedResumeCycle(t *testing.T) {
 			}
 			return cause
 		},
+		false,
 	)
 	if err == nil {
 		t.Fatalf("expected error after failed resume cycle")
@@ -316,6 +319,7 @@ func TestFinishInitialBootstrapPrefersMidCycleCancellation(t *testing.T) {
 			}
 			return cause
 		},
+		false,
 	)
 	if err == nil {
 		t.Fatalf("expected cancellation to produce an error")
@@ -353,6 +357,151 @@ func bootstrapInProgressDir(t *testing.T) string {
 	return localDir
 }
 
+// bootstrapAlreadyCompleteDir writes a public state with no bootstrap block
+// and a non-empty lastSuccessfulReconcileAt, mirroring a mount whose full-tree
+// bootstrap already finished in a previous process (see bootstrapAlreadyComplete).
+func bootstrapAlreadyCompleteDir(t *testing.T) string {
+	t.Helper()
+	localDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(localDir, ".relay"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, ".relay", "state.json"),
+		[]byte(`{"status":"ready","lastSuccessfulReconcileAt":"2026-09-08T00:00:00Z"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return localDir
+}
+
+// writeBootstrapCompleteState overwrites localDir's public state with a
+// completed-bootstrap snapshot, simulating a resume cycle that finishes the
+// tree walk.
+func writeBootstrapCompleteState(t *testing.T, localDir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(localDir, ".relay", "state.json"),
+		[]byte(`{"status":"ready","lastSuccessfulReconcileAt":"2026-09-08T00:00:05Z"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestFinishInitialBootstrapKeepsSuccessAfterPriorCompletion pins the fix for
+// the false-failure counterpart of relayfile#455: a mount whose bootstrap
+// already finished before this process ran its first cycle must not be
+// reported as an incomplete bootstrap just because that unrelated cycle hit
+// a transient error or a cancelled root context.
+func TestFinishInitialBootstrapKeepsSuccessAfterPriorCompletion(t *testing.T) {
+	t.Run("unrelated cycle failure", func(t *testing.T) {
+		localDir := bootstrapAlreadyCompleteDir(t)
+		cycles := 0
+		err := finishInitialBootstrap(context.Background(), mountConfig{localDir: localDir},
+			func(bool) error { cycles++; return nil },
+			func() error { return errors.New("transient cloud error unrelated to bootstrap") },
+			true,
+		)
+		if err != nil {
+			t.Fatalf("expected success for an already-complete checkpoint despite an unrelated cycle failure, got %v", err)
+		}
+		if cycles != 0 {
+			t.Errorf("ran %d resume cycles for an already-complete checkpoint, want 0", cycles)
+		}
+	})
+
+	t.Run("cancelled root context", func(t *testing.T) {
+		localDir := bootstrapAlreadyCompleteDir(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		cycles := 0
+		err := finishInitialBootstrap(ctx, mountConfig{localDir: localDir},
+			func(bool) error { cycles++; return nil },
+			func() error { return nil },
+			true,
+		)
+		if err != nil {
+			t.Fatalf("expected success for an already-complete checkpoint despite a cancelled root context, got %v", err)
+		}
+		if cycles != 0 {
+			t.Errorf("ran %d resume cycles for an already-complete checkpoint, want 0", cycles)
+		}
+	})
+
+	t.Run("not already bootstrapped still fails", func(t *testing.T) {
+		// Control: the same failure, without alreadyBootstrapped, must still
+		// be reported -- the guard must not become unconditional.
+		localDir := bootstrapAlreadyCompleteDir(t)
+		cause := errors.New("transient cloud error unrelated to bootstrap")
+		err := finishInitialBootstrap(context.Background(), mountConfig{localDir: localDir},
+			func(bool) error { return nil },
+			func() error { return cause },
+			false,
+		)
+		if err == nil {
+			t.Fatalf("expected error when alreadyBootstrapped is false, got nil")
+		}
+		if !errors.Is(err, cause) {
+			t.Fatalf("expected cause %v, got %v", cause, err)
+		}
+	})
+}
+
+// TestFinishInitialBootstrapPrefersCompletionOverMidCycleSignals pins the
+// in-loop counterpart: when a resume cycle actually finishes the persisted
+// checkpoint, a rootCtx cancellation or an unrelated lastCycleErr recorded by
+// that same cycle must not turn the completed bootstrap into a reported
+// failure. The checkpoint (read immediately after the cycle returns) is the
+// authoritative signal, checked before either.
+func TestFinishInitialBootstrapPrefersCompletionOverMidCycleSignals(t *testing.T) {
+	t.Run("mid-cycle cancellation", func(t *testing.T) {
+		localDir := bootstrapInProgressDir(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		cycles := 0
+		err := finishInitialBootstrap(ctx, mountConfig{localDir: localDir},
+			func(bool) error {
+				cycles++
+				writeBootstrapCompleteState(t, localDir)
+				cancel()
+				return nil
+			},
+			func() error { return nil },
+			false,
+		)
+		if err != nil {
+			t.Fatalf("expected success when the cycle that raced cancellation finished the checkpoint, got %v", err)
+		}
+		if cycles != 1 {
+			t.Fatalf("ran %d resume cycles, want exactly 1", cycles)
+		}
+	})
+
+	t.Run("mid-cycle unrelated lastCycleErr", func(t *testing.T) {
+		localDir := bootstrapInProgressDir(t)
+		cause := errors.New("transient cloud error unrelated to bootstrap")
+		cycles := 0
+		err := finishInitialBootstrap(context.Background(), mountConfig{localDir: localDir},
+			func(bool) error {
+				cycles++
+				writeBootstrapCompleteState(t, localDir)
+				return nil
+			},
+			// nil for the pre-loop check (mirrors the caller's already-run
+			// first cycle succeeding), then the unrelated error once the
+			// resume cycle above has actually run.
+			func() error {
+				if cycles == 0 {
+					return nil
+				}
+				return cause
+			},
+			false,
+		)
+		if err != nil {
+			t.Fatalf("expected success when the cycle that recorded an unrelated lastCycleErr finished the checkpoint, got %v", err)
+		}
+		if cycles != 1 {
+			t.Fatalf("ran %d resume cycles, want exactly 1", cycles)
+		}
+	})
+}
+
 // TestFinishInitialBootstrapStopsWhenCheckpointStopsAdvancing pins the
 // no-progress bound: a cycle that keeps succeeding without moving any
 // resumable coordinate must not spin to the cycle ceiling.
@@ -363,6 +512,7 @@ func TestFinishInitialBootstrapStopsWhenCheckpointStopsAdvancing(t *testing.T) {
 	err := finishInitialBootstrap(context.Background(), mountConfig{localDir: localDir},
 		func(bool) error { cycles++; return nil }, // never advances the checkpoint
 		func() error { return nil },
+		false,
 	)
 	if err == nil {
 		t.Fatalf("expected error when checkpoint stops advancing")
