@@ -120,7 +120,10 @@ test("read-only preflight blocks every publish under mixed absent/conflict state
   assert.equal(results[0].status, "fulfilled");
   assert.equal(results[0].value.package.status, "absent");
   assert.equal(results[1].status, "rejected");
-  assert.match(results[1].reason.message, /conflicts with the local release tarball/);
+  assert.match(
+    results[1].reason.message,
+    /conflicts with the local release tarball/,
+  );
   assert.equal(absentState.publishes, 0);
   assert.equal(conflictState.publishes, 0);
   rmSync(absentDir, { recursive: true, force: true });
