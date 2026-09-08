@@ -320,15 +320,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, authErr.status, authErr.code, authErr.message, getCorrelationID(r))
 		return
 	}
-	if aclPath, includeTarget, ok := aclCheckPath(route, r); ok {
-		aclReader := s.aclGetFile(workspaceID)
-		if forkID := strings.TrimSpace(r.URL.Query().Get("forkId")); forkID != "" {
-			aclReader = s.aclGetForkFile(workspaceID, forkID)
-		}
-		permissions := resolveFilePermissionsWithTarget(aclReader, aclPath, includeTarget)
-		if !filePermissionAllows(permissions, workspaceID, &claims, strings.TrimPrefix(requiredScope, "fs:"), aclPath) {
-			writeError(w, http.StatusForbidden, "forbidden", "access denied by ACL", getCorrelationID(r))
-			return
+	action, actionOK := fileActionFromScope(requiredScope)
+	if actionOK {
+		if aclPath, includeTarget, ok := aclCheckPath(route, r); ok {
+			aclReader := s.aclGetFile(workspaceID)
+			if forkID := strings.TrimSpace(r.URL.Query().Get("forkId")); forkID != "" {
+				aclReader = s.aclGetForkFile(workspaceID, forkID)
+			}
+			permissions := resolveFilePermissionsWithTarget(aclReader, aclPath, includeTarget)
+			allowDescendants := route == "tree" || route == "query_files"
+			if !filePermissionAllows(permissions, workspaceID, &claims, action, aclPath, allowDescendants) {
+				writeError(w, http.StatusForbidden, "forbidden", "access denied by ACL", getCorrelationID(r))
+				return
+			}
 		}
 	}
 	correlationID := getCorrelationID(r)
@@ -1380,6 +1384,17 @@ func aclCheckPath(route string, r *http.Request) (string, bool, bool) {
 	}
 }
 
+func fileActionFromScope(requiredScope string) (string, bool) {
+	switch requiredScope {
+	case "fs:read":
+		return "read", true
+	case "fs:write":
+		return "write", true
+	default:
+		return "", false
+	}
+}
+
 func aclTargetExists(r *http.Request) bool {
 	ifMatch := normalizeIfMatchHeader(r.Header.Get("If-Match"))
 	return ifMatch != "" && ifMatch != "*"
@@ -1483,7 +1498,7 @@ func validateForkCommitEntries(workspaceID string, claims tokenClaims, entries [
 		if !scopeMatchesPath(claims.Scopes, "fs:write", entry.Path) {
 			return &forkCommitAuthorizationError{message: "fork commit denied by path scope"}
 		}
-		if !filePermissionAllows(entry.Permissions, workspaceID, &claims, "write", entry.Path) {
+		if !filePermissionAllows(entry.Permissions, workspaceID, &claims, "write", entry.Path, false) {
 			return &forkCommitAuthorizationError{message: "fork commit denied by permission policy"}
 		}
 	}
@@ -1641,7 +1656,7 @@ func (s *Server) handleTree(w http.ResponseWriter, r *http.Request, workspaceID,
 			}
 			for _, item := range batch.Items {
 				effectivePermissions := s.resolveFilePermissions(workspaceID, forkID, item.Path, true)
-				if !filePermissionAllows(effectivePermissions, workspaceID, &claims, "read", item.Path) {
+				if !filePermissionAllows(effectivePermissions, workspaceID, &claims, "read", item.Path, false) {
 					continue
 				}
 				visibleFiles[item.Path] = struct{}{}
@@ -1709,7 +1724,7 @@ func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request, workspac
 		return
 	}
 	effectivePermissions := s.resolveFilePermissions(workspaceID, forkID, path, true)
-	if !filePermissionAllows(effectivePermissions, workspaceID, &claims, "read", path) {
+	if !filePermissionAllows(effectivePermissions, workspaceID, &claims, "read", path, false) {
 		writeError(w, http.StatusForbidden, "forbidden", "file access denied by permission policy", correlationID)
 		return
 	}
@@ -1941,7 +1956,7 @@ func (s *Server) handleBulkWrite(w http.ResponseWriter, r *http.Request, workspa
 		_, readErr := s.readFile(workspaceID, forkID, path)
 		if readErr == nil {
 			existingPermissions := s.resolveFilePermissions(workspaceID, forkID, path, true)
-			if !filePermissionAllows(existingPermissions, workspaceID, &claims, "write", path) {
+			if !filePermissionAllows(existingPermissions, workspaceID, &claims, "write", path, false) {
 				errorsOut = append(errorsOut, relayfile.BulkWriteError{
 					Path:    path,
 					Code:    "forbidden",
@@ -1951,7 +1966,7 @@ func (s *Server) handleBulkWrite(w http.ResponseWriter, r *http.Request, workspa
 			}
 		} else if readErr == relayfile.ErrNotFound || readErr == relayfile.ErrForkExpired {
 			inheritedPermissions := s.resolveFilePermissions(workspaceID, forkID, path, false)
-			if !filePermissionAllows(inheritedPermissions, workspaceID, &claims, "write", path) {
+			if !filePermissionAllows(inheritedPermissions, workspaceID, &claims, "write", path, false) {
 				errorsOut = append(errorsOut, relayfile.BulkWriteError{
 					Path:    path,
 					Code:    "forbidden",
@@ -2016,7 +2031,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request, workspaceI
 			continue
 		}
 		effectivePermissions := s.store.ResolveFilePermissions(workspaceID, file.Path, true)
-		if !filePermissionAllows(effectivePermissions, workspaceID, &claims, "read", file.Path) {
+		if !filePermissionAllows(effectivePermissions, workspaceID, &claims, "read", file.Path, false) {
 			continue
 		}
 		visible = append(visible, file)
@@ -2058,13 +2073,13 @@ func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request, workspa
 	_, readErr := s.readFile(workspaceID, forkID, path)
 	if readErr == nil {
 		existingPermissions := s.resolveFilePermissions(workspaceID, forkID, path, true)
-		if !filePermissionAllows(existingPermissions, workspaceID, &claims, "write", path) {
+		if !filePermissionAllows(existingPermissions, workspaceID, &claims, "write", path, false) {
 			writeError(w, http.StatusForbidden, "forbidden", "file access denied by permission policy", correlationID)
 			return
 		}
 	} else if readErr == relayfile.ErrNotFound || readErr == relayfile.ErrForkExpired {
 		inheritedPermissions := s.resolveFilePermissions(workspaceID, forkID, path, false)
-		if !filePermissionAllows(inheritedPermissions, workspaceID, &claims, "write", path) {
+		if !filePermissionAllows(inheritedPermissions, workspaceID, &claims, "write", path, false) {
 			writeError(w, http.StatusForbidden, "forbidden", "file access denied by permission policy", correlationID)
 			return
 		}
@@ -2143,13 +2158,13 @@ func (s *Server) handleMergeFile(w http.ResponseWriter, r *http.Request, workspa
 	_, readErr := s.store.ReadFile(workspaceID, path)
 	if readErr == nil {
 		existingPermissions := s.store.ResolveFilePermissions(workspaceID, path, true)
-		if !filePermissionAllows(existingPermissions, workspaceID, &claims, "write", path) {
+		if !filePermissionAllows(existingPermissions, workspaceID, &claims, "write", path, false) {
 			writeError(w, http.StatusForbidden, "forbidden", "file access denied by permission policy", correlationID)
 			return
 		}
 	} else if readErr == relayfile.ErrNotFound {
 		inheritedPermissions := s.store.ResolveFilePermissions(workspaceID, path, false)
-		if !filePermissionAllows(inheritedPermissions, workspaceID, &claims, "write", path) {
+		if !filePermissionAllows(inheritedPermissions, workspaceID, &claims, "write", path, false) {
 			writeError(w, http.StatusForbidden, "forbidden", "file access denied by permission policy", correlationID)
 			return
 		}
@@ -2232,7 +2247,7 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request, worksp
 	_, readErr := s.readFile(workspaceID, forkID, path)
 	if readErr == nil {
 		existingPermissions := s.resolveFilePermissions(workspaceID, forkID, path, true)
-		if !filePermissionAllows(existingPermissions, workspaceID, &claims, "write", path) {
+		if !filePermissionAllows(existingPermissions, workspaceID, &claims, "write", path, false) {
 			writeError(w, http.StatusForbidden, "forbidden", "file access denied by permission policy", correlationID)
 			return
 		}
@@ -2368,7 +2383,7 @@ func (s *Server) handleQueryFiles(w http.ResponseWriter, r *http.Request, worksp
 			if permission != "" && !stringSliceContainsExact(effectivePermissions, permission) {
 				continue
 			}
-			if !filePermissionAllows(effectivePermissions, workspaceID, &claims, "read", item.Path) {
+			if !filePermissionAllows(effectivePermissions, workspaceID, &claims, "read", item.Path, false) {
 				continue
 			}
 			items = append(items, item)

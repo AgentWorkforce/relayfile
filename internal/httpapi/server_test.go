@@ -3133,6 +3133,61 @@ func TestTreeEndpointFiltersUnauthorizedFiles(t *testing.T) {
 	}
 }
 
+func TestTreeEndpointAllowsDescendantScopedACL(t *testing.T) {
+	server := NewServer(relayfile.NewStore())
+	workspaceID := "ws_tree_descendant"
+	ownerToken := mustTestJWT(t, "dev-secret", workspaceID, "Owner", []string{"relayfile:fs:read:*", "relayfile:fs:write:*"}, time.Now().Add(time.Hour))
+	limitedToken := mustTestJWT(t, "dev-secret", workspaceID, "Limited", []string{"relayfile:fs:read:/allowed/**"}, time.Now().Add(time.Hour))
+
+	writeFileForTest(t, server, ownerToken, workspaceID, "/allowed/document.md", "0", "descendant", "corr_tree_descendant_file")
+
+	aclWrite := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=/allowed/.relayfile.acl",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + ownerToken,
+			"X-Correlation-Id": "corr_tree_descendant_acl",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "text/plain",
+			"content":     "marker",
+			"semantics": map[string]any{
+				"permissions": []string{"allow:scope:relayfile:fs:read:/allowed/document.md"},
+			},
+		},
+	})
+	if aclWrite.Code != http.StatusAccepted {
+		t.Fatalf("expected ACL marker write 202, got %d (%s)", aclWrite.Code, aclWrite.Body.String())
+	}
+
+	treeResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/tree?path=/allowed",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + limitedToken,
+			"X-Correlation-Id": "corr_tree_descendant",
+		},
+	})
+	if treeResp.Code != http.StatusOK {
+		t.Fatalf("expected tree 200 for descendant ACL, got %d (%s)", treeResp.Code, treeResp.Body.String())
+	}
+	var tree relayfile.TreeResponse
+	if err := json.NewDecoder(treeResp.Body).Decode(&tree); err != nil {
+		t.Fatalf("decode tree response: %v", err)
+	}
+	found := false
+	for _, entry := range tree.Entries {
+		if entry.Path == "/allowed/document.md" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected descendant file in tree entries, got %+v", tree.Entries)
+	}
+}
+
 func TestFilePermissionPolicyDenyOverridesAllowAndPublic(t *testing.T) {
 	server := NewServer(relayfile.NewStore())
 	ownerToken := mustTestJWT(t, "dev-secret", "ws_perm_deny", "Owner", []string{"fs:read", "fs:write", "finance"}, time.Now().Add(time.Hour))
@@ -3359,6 +3414,23 @@ func TestFilePermissionPolicyPathOverridesWithRelayAuthScopes(t *testing.T) {
 		t.Fatalf("expected readonly path write 403, got %d (%s)", protectedWrite.Code, protectedWrite.Body.String())
 	}
 
+	relativeProtectedWrite := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=protected/document.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_perm_relative_2",
+			"If-Match":         protected.TargetRevision,
+		},
+		body: map[string]any{
+			"contentType": "text/markdown",
+			"content":     "still protected",
+		},
+	})
+	if relativeProtectedWrite.Code != http.StatusForbidden {
+		t.Fatalf("expected normalized relative write 403, got %d (%s)", relativeProtectedWrite.Code, relativeProtectedWrite.Body.String())
+	}
+
 	ignoredRead := doRequest(t, server, request{
 		method: http.MethodGet,
 		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=/ignored/document.md",
@@ -3400,6 +3472,73 @@ func TestFilePermissionPolicyPathOverridesWithRelayAuthScopes(t *testing.T) {
 	)
 	if updated.TargetRevision == allowed.TargetRevision {
 		t.Fatalf("expected allowed path write to advance revision")
+	}
+}
+
+func TestCloudProducerScopeShape(t *testing.T) {
+	server := NewServer(relayfile.NewStore())
+	workspaceID := "ws_cloud_scope_shape"
+	ownerToken := mustTestJWT(t, "dev-secret", workspaceID, "Owner", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+	workerToken := mustTestJWT(t, "dev-secret", workspaceID, "Worker", []string{"relayfile:fs:read:*", "relayfile:fs:write:*"}, time.Now().Add(time.Hour))
+
+	writeFileForTest(t, server, ownerToken, workspaceID, "/protected/Document.md", "0", "protected", "corr_cloud_scope_protected")
+	writeFileForTest(t, server, ownerToken, workspaceID, "/secret/Doc.md", "0", "secret", "corr_cloud_scope_secret")
+	writeFileForTest(t, server, ownerToken, workspaceID, "/public/Doc.md", "0", "public", "corr_cloud_scope_public")
+
+	markerResp := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=/.relayfile.acl",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + ownerToken,
+			"X-Correlation-Id": "corr_cloud_scope_acl",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "text/plain",
+			"content":     "cloud marker",
+			"semantics": map[string]any{
+				"permissions": []string{
+					"allow:scope:workspace:relayfile-local:read:*",
+					"allow:scope:workspace:relayfile-local:write:*",
+					"deny:scope:relayfile:fs:write:/protected/*",
+					"deny:scope:relayfile:fs:read:/secret/*",
+					"deny:scope:relayfile:fs:write:/secret/*",
+				},
+			},
+		},
+	})
+	if markerResp.Code != http.StatusAccepted {
+		t.Fatalf("expected ACL marker 202, got %d (%s)", markerResp.Code, markerResp.Body.String())
+	}
+
+	for _, tt := range []struct {
+		name       string
+		path       string
+		method     string
+		wantStatus int
+	}{
+		{"protected read", "/protected/Document.md", http.MethodGet, http.StatusOK},
+		{"protected write", "/protected/Document.md", http.MethodPut, http.StatusForbidden},
+		{"secret read", "/secret/Doc.md", http.MethodGet, http.StatusForbidden},
+		{"secret write", "/secret/Doc.md", http.MethodPut, http.StatusForbidden},
+		{"public read", "/public/Doc.md", http.MethodGet, http.StatusOK},
+	} {
+		req := request{
+			method: tt.method,
+			path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=" + tt.path,
+			headers: map[string]string{
+				"Authorization":    "Bearer " + workerToken,
+				"X-Correlation-Id": "corr_cloud_scope_" + tt.name,
+			},
+		}
+		if tt.method == http.MethodPut {
+			req.headers["If-Match"] = "0"
+			req.body = map[string]any{"contentType": "text/markdown", "content": "test"}
+		}
+		resp := doRequest(t, server, req)
+		if resp.Code != tt.wantStatus {
+			t.Fatalf("%s: expected %d, got %d (%s)", tt.name, tt.wantStatus, resp.Code, resp.Body.String())
+		}
 	}
 }
 
