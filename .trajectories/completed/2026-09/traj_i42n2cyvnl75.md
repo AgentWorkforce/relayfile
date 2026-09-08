@@ -2,7 +2,7 @@
 
 > **Status:** ✅ Completed
 > **Task:** relayfile#477
-> **Confidence:** 94%
+> **Confidence:** 75%
 > **Started:** September 8, 2026 at 10:05 PM
 > **Completed:** September 8, 2026 at 10:12 PM
 
@@ -10,7 +10,7 @@
 
 ## Summary
 
-Fixed exit-75 deadline handling and eliminated the shutdown-test unhandled-rejection window; focused tests passed 20 repeated runs plus the full launcher test and SDK typecheck.
+Fixed exit-75 deadline handling and eliminated the shutdown-test unhandled-rejection window. Self-reported and non-gating: focused tests were reported to pass 20 repeated runs plus the full launcher test and SDK typecheck; this trajectory contains no captured command/output evidence.
 
 **Approach:** Standard approach
 

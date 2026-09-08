@@ -2,7 +2,7 @@
 
 > **Status:** ✅ Completed
 > **Task:** relayfile#477
-> **Confidence:** 98%
+> **Confidence:** 75%
 > **Started:** September 8, 2026 at 09:52 PM
 > **Completed:** September 8, 2026 at 09:52 PM
 
@@ -10,7 +10,7 @@
 
 ## Summary
 
-Attached the SDK shutdown race rejection matcher before advancing the fake retry timer, eliminating strict-runner unhandled rejection exposure. Focused launcher test passed 100 repetitions; launcher 25/25, SDK typecheck/build, Go relevant tests/race/vet, diff and secret scans passed.
+Attached the SDK shutdown race rejection matcher before advancing the fake retry timer, eliminating strict-runner unhandled rejection exposure. Self-reported and non-gating: launcher repetitions, SDK checks, Go checks, diff review, and secret scans were reported to pass; this trajectory contains no captured command/output evidence.
 
 **Approach:** Standard approach
 

@@ -42,9 +42,9 @@
     }
   ],
   "retrospective": {
-    "summary": "Fixed exit-75 deadline handling and eliminated the shutdown-test unhandled-rejection window; focused tests passed 20 repeated runs plus the full launcher test and SDK typecheck.",
+    "summary": "Fixed exit-75 deadline handling and eliminated the shutdown-test unhandled-rejection window. Self-reported and non-gating: focused tests were reported to pass 20 repeated runs plus the full launcher test and SDK typecheck; this trajectory contains no captured command/output evidence.",
     "approach": "Standard approach",
-    "confidence": 0.94
+    "confidence": 0.75
   },
   "commits": ["02d76bbc"],
   "filesChanged": [
