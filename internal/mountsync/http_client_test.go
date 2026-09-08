@@ -602,6 +602,29 @@ func TestHTTPClientListEvents(t *testing.T) {
 	}
 }
 
+func TestHTTPClientListEventsPreservesCursorExpiredRecoveryAction(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusGone)
+		_, _ = w.Write([]byte(`{"code":"cursor_expired","message":"full resync required","action":"full_resync"}`))
+	}))
+	defer server.Close()
+
+	_, err := NewHTTPClient(server.URL, "token", server.Client()).ListEvents(
+		context.Background(), "ws_events", "", "evt_pruned", 1,
+	)
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("expected HTTPError, got %v", err)
+	}
+	if !isCursorExpired(err) {
+		t.Fatalf("expected cursor-expired recovery classification, got %#v", httpErr)
+	}
+	if httpErr.Action != "full_resync" {
+		t.Fatalf("action = %q, want full_resync", httpErr.Action)
+	}
+}
+
 func TestHTTPClientExportFilesUsesPathFilter(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/workspaces/ws_export/fs/export" {

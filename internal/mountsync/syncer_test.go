@@ -11030,6 +11030,61 @@ func TestPullRemoteIncrementalReturnsDeadlineWhenNoPageProgress(t *testing.T) {
 	}
 }
 
+func TestPullRemoteCursorExpiredClearsWatermarkAndBootstraps(t *testing.T) {
+	localDir := t.TempDir()
+	client := &fakeClient{
+		files: map[string]RemoteFile{
+			"/notion/Docs/fresh.md": {
+				Path:        "/notion/Docs/fresh.md",
+				Revision:    "rev_fresh",
+				ContentType: "text/markdown",
+				Content:     "# Fresh\n",
+			},
+		},
+		events: []FilesystemEvent{{
+			EventID: "evt_fresh", Type: "file.updated",
+			Path: "/notion/Docs/fresh.md", Revision: "rev_fresh",
+		}},
+		listEventsErrAfter: 0,
+		listEventsErr: &HTTPError{
+			StatusCode: http.StatusGone,
+			Code:       "cursor_expired",
+			Action:     "full_resync",
+			Message:    "event cursor is no longer available",
+		},
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:      "ws_cursor_expired",
+		RemoteRoot:       "/notion",
+		LocalRoot:        localDir,
+		FullPullEvery:    -1,
+		WebSocket:        boolPtr(false),
+		CursorTimeout:    time.Second,
+		BootstrapTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+	syncer.loaded = true
+	syncer.state = mountState{
+		Files: map[string]trackedFile{
+			"/notion/Docs/stale.md": {Revision: "rev_stale"},
+		},
+		EventsCursor:      "evt_pruned",
+		BootstrapComplete: true,
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("cursor-expired reconcile should perform full resync: %v", err)
+	}
+	if got := syncer.state.EventsCursor; got != "evt_fresh" {
+		t.Fatalf("EventsCursor = %q, want resynced evt_fresh", got)
+	}
+	if client.listTreeCalls == 0 {
+		t.Fatal("cursor expiry did not enter the full-tree resync path")
+	}
+}
+
 func TestPullRemoteIncrementalResumesWithinAppliedPage(t *testing.T) {
 	files := map[string]RemoteFile{}
 	events := make([]FilesystemEvent, 0, 10)
