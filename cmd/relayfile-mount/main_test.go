@@ -718,10 +718,10 @@ func TestRunSinglePollingMountStopsOnBootstrapStall(t *testing.T) {
 	}
 }
 
-// TestRunSinglePollingMountKeepsNormalCycleFailuresNonFatal verifies that a
-// normal cloud error keeps its historical per-cycle retry behavior rather
-// than terminating the mount runner.
-func TestRunSinglePollingMountKeepsNormalCycleFailuresNonFatal(t *testing.T) {
+// TestRunSinglePollingMountReportsErrorForNormalCycleFailure asserts that
+// a normal cloud error during --once is surfaced so the process exits nonzero instead
+// of pretending the bootstrap completed.
+func TestRunSinglePollingMountReportsErrorForNormalCycleFailure(t *testing.T) {
 	t.Setenv("RELAYFILE_BOOTSTRAP_STALL_CYCLES", "2")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "transient", http.StatusBadGateway)
@@ -742,8 +742,16 @@ func TestRunSinglePollingMountKeepsNormalCycleFailuresNonFatal(t *testing.T) {
 		websocketEnabled: false,
 		once:             true,
 	})
-	if err != nil {
-		t.Fatalf("normal cycle failure must remain nonfatal to the runner, got %v", err)
+	if err == nil {
+		t.Fatalf("expected --once to return an error when bootstrap is incomplete")
+	}
+	var incomplete *initialBootstrapIncompleteError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("unexpected error type: %v", err)
+	}
+	var httpErr *mountsync.HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected a 502 HTTP cause, got %v", err)
 	}
 }
 

@@ -6,7 +6,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Fixed
+
+- `relayfile-mount --once` now exits nonzero when the initial pull has not completed, preventing a timed-out large bootstrap from being reported as a successful mount.
 
 ## [0.10.56] - 2026-09-08
 

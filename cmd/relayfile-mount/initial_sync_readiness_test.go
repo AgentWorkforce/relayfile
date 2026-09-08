@@ -183,8 +183,15 @@ func TestInitialSyncOnceStopsWhenRootContextEnds(t *testing.T) {
 
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Fatalf("cancelled --once must not change the exit code, got %v", err)
+		if err == nil {
+			t.Fatalf("cancelled --once must report an error, got nil")
+		}
+		var incomplete *initialBootstrapIncompleteError
+		if !errors.As(err, &incomplete) {
+			t.Fatalf("unexpected error type: %v", err)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected context.DeadlineExceeded cause, got %v", err)
 		}
 	case <-time.After(60 * time.Second):
 		t.Fatal("--once did not stop after its root context was cancelled")
@@ -211,8 +218,15 @@ func TestFinishInitialBootstrapReturnsOnCancelledContext(t *testing.T) {
 		func(bool) error { cycles++; return nil },
 		func() error { return nil },
 	)
-	if err != nil {
-		t.Fatalf("cancellation must not change the exit code, got %v", err)
+	if err == nil {
+		t.Fatalf("expected cancellation to produce an error")
+	}
+	var incomplete *initialBootstrapIncompleteError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("unexpected error type for cancellation: %v", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled cause, got %v", err)
 	}
 	if cycles != 0 {
 		t.Errorf("ran %d cycles on an already-cancelled context, want 0", cycles)
@@ -227,12 +241,20 @@ func TestFinishInitialBootstrapDoesNotRetryAFailedFirstCycle(t *testing.T) {
 	localDir := bootstrapInProgressDir(t)
 
 	cycles := 0
+	cause := errors.New("transient cloud error")
 	err := finishInitialBootstrap(context.Background(), mountConfig{localDir: localDir},
 		func(bool) error { cycles++; return nil },
-		func() error { return errors.New("transient cloud error") },
+		func() error { return cause },
 	)
-	if err != nil {
-		t.Fatalf("a failed first cycle must not become an error, got %v", err)
+	if err == nil {
+		t.Fatalf("expected error for failed first cycle")
+	}
+	var incomplete *initialBootstrapIncompleteError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("unexpected error type: %v", err)
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("expected cause %v, got %v", cause, err)
 	}
 	if cycles != 0 {
 		t.Errorf("ran %d resume cycles after a failed first cycle, want 0", cycles)
@@ -247,6 +269,7 @@ func TestFinishInitialBootstrapStopsAfterAFailedResumeCycle(t *testing.T) {
 	localDir := bootstrapInProgressDir(t)
 
 	cycles := 0
+	cause := errors.New("transient cloud error")
 	err := finishInitialBootstrap(context.Background(), mountConfig{localDir: localDir},
 		func(bool) error { cycles++; return nil },
 		// nil for the pre-loop check, then an error once a resume cycle has run.
@@ -254,14 +277,64 @@ func TestFinishInitialBootstrapStopsAfterAFailedResumeCycle(t *testing.T) {
 			if cycles == 0 {
 				return nil
 			}
-			return errors.New("transient cloud error")
+			return cause
 		},
 	)
-	if err != nil {
-		t.Fatalf("a failed resume cycle must not become an error, got %v", err)
+	if err == nil {
+		t.Fatalf("expected error after failed resume cycle")
+	}
+	var incomplete *initialBootstrapIncompleteError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("unexpected error type: %v", err)
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("expected cause %v, got %v", cause, err)
 	}
 	if cycles != 1 {
 		t.Errorf("ran %d resume cycles, want exactly 1 before the failure stopped the loop", cycles)
+	}
+}
+
+// TestFinishInitialBootstrapPrefersMidCycleCancellation pins the race where
+// the root deadline fires inside run. Cancellation is the authoritative reason
+// even if the cycle also records a transient provider failure before returning.
+func TestFinishInitialBootstrapPrefersMidCycleCancellation(t *testing.T) {
+	localDir := bootstrapInProgressDir(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cause := errors.New("transient cloud error")
+
+	cycles := 0
+	err := finishInitialBootstrap(ctx, mountConfig{localDir: localDir},
+		func(bool) error {
+			cycles++
+			cancel()
+			return nil
+		},
+		func() error {
+			if cycles == 0 {
+				return nil
+			}
+			return cause
+		},
+	)
+	if err == nil {
+		t.Fatalf("expected cancellation to produce an error")
+	}
+	var incomplete *initialBootstrapIncompleteError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("unexpected error type: %v", err)
+	}
+	if incomplete.reason != "context cancelled before bootstrap completed" {
+		t.Fatalf("expected mid-cycle cancellation reason, got %q", incomplete.reason)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled cause, got %v", err)
+	}
+	if errors.Is(err, cause) {
+		t.Fatalf("cancellation must take precedence over the concurrent cycle failure: %v", err)
+	}
+	if cycles != 1 {
+		t.Fatalf("ran %d resume cycles, want exactly 1", cycles)
 	}
 }
 
@@ -291,8 +364,15 @@ func TestFinishInitialBootstrapStopsWhenCheckpointStopsAdvancing(t *testing.T) {
 		func(bool) error { cycles++; return nil }, // never advances the checkpoint
 		func() error { return nil },
 	)
-	if err != nil {
-		t.Fatalf("a stalled checkpoint must not change the exit code, got %v", err)
+	if err == nil {
+		t.Fatalf("expected error when checkpoint stops advancing")
+	}
+	var incomplete *initialBootstrapIncompleteError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("unexpected error type: %v", err)
+	}
+	if incomplete.reason != "bootstrap checkpoint stopped advancing" {
+		t.Fatalf("expected stalled reason, got %q", incomplete.reason)
 	}
 	if cycles != onceBootstrapStableCycleLimit {
 		t.Errorf("ran %d cycles on a stalled checkpoint, want %d", cycles, onceBootstrapStableCycleLimit)

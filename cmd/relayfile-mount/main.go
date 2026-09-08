@@ -869,16 +869,16 @@ const onceBootstrapStableCycleLimit = 3
 //
 // The loop is bounded three ways: rootCtx cancellation (the caller's
 // `timeout`/idle watchdog), a terminal error from the cycle, and a
-// no-progress guard. Cancellation deliberately returns nil so the exit code
-// keeps its historical meaning; the readiness guard downstream still sees the
-// incomplete bootstrap and reports a resumable TEMPFAIL.
+// no-progress guard. Every incomplete exit returns a typed error so `--once`
+// cannot report success while the persisted checkpoint still requires work.
 func finishInitialBootstrap(rootCtx context.Context, cfg mountConfig, run func(reconcile bool) error, lastCycleErr func() error) error {
+	if err := rootCtx.Err(); err != nil {
+		state := readBootstrapResumeState(cfg.localDir)
+		return newInitialBootstrapIncompleteError(state, "context cancelled before bootstrap resumed", err)
+	}
 	if err := lastCycleErr(); err != nil {
-		// The cycle failed rather than yielding on its budget. Retrying here
-		// would turn one transient cloud error into a stall escalation, so
-		// keep `--once`'s historical single-attempt behavior and let the
-		// readiness guard downstream report a resumable TEMPFAIL.
-		return nil
+		state := readBootstrapResumeState(cfg.localDir)
+		return newInitialBootstrapIncompleteError(state, "initial cycle failed", err)
 	}
 	state := readBootstrapResumeState(cfg.localDir)
 	if !state.inProgress {
@@ -889,14 +889,21 @@ func finishInitialBootstrap(rootCtx context.Context, cfg mountConfig, run func(r
 	for cycle := 0; cycle < maxOnceBootstrapResumeCycles; cycle++ {
 		if err := rootCtx.Err(); err != nil {
 			log.Printf("initial sync: stopping before bootstrap completed: %v", err)
-			return nil
+			return newInitialBootstrapIncompleteError(state, "context cancelled before bootstrap completed", err)
 		}
-		if err := run(true); err != nil {
-			return err
+		cycleErr := run(true)
+		if err := rootCtx.Err(); err != nil {
+			log.Printf("initial sync: stopping before bootstrap completed: %v", err)
+			next := readBootstrapResumeState(cfg.localDir)
+			return newInitialBootstrapIncompleteError(next, "context cancelled before bootstrap completed", err)
+		}
+		if cycleErr != nil {
+			return cycleErr
 		}
 		if err := lastCycleErr(); err != nil {
 			log.Printf("initial sync: stopping after a failed resume cycle: %v", err)
-			return nil
+			next := readBootstrapResumeState(cfg.localDir)
+			return newInitialBootstrapIncompleteError(next, "resume cycle failed", err)
 		}
 		next := readBootstrapResumeState(cfg.localDir)
 		if !next.inProgress {
@@ -918,11 +925,11 @@ func finishInitialBootstrap(rootCtx context.Context, cfg mountConfig, run func(r
 		stableCycles++
 		if stableCycles >= onceBootstrapStableCycleLimit {
 			log.Printf("initial sync: bootstrap checkpoint stopped advancing at %s; leaving it for the next run", formatBootstrapProgress(state.synced, state.total))
-			return nil
+			return newInitialBootstrapIncompleteError(state, "bootstrap checkpoint stopped advancing", nil)
 		}
 	}
 	log.Printf("initial sync: bootstrap still incomplete after %d resume cycles; leaving the checkpoint for the next run", maxOnceBootstrapResumeCycles)
-	return nil
+	return newInitialBootstrapIncompleteError(state, fmt.Sprintf("bootstrap still incomplete after %d resume cycles", maxOnceBootstrapResumeCycles), nil)
 }
 
 // bootstrapResumeState is one read of the public bootstrap block: how far the
@@ -939,6 +946,41 @@ type bootstrapResumeState struct {
 	synced     int
 	total      int
 	checkpoint string
+}
+
+type initialBootstrapIncompleteError struct {
+	state  bootstrapResumeState
+	reason string
+	cause  error
+}
+
+func newInitialBootstrapIncompleteError(state bootstrapResumeState, reason string, cause error) error {
+	if reason == "" {
+		reason = "bootstrap incomplete"
+	}
+	return &initialBootstrapIncompleteError{
+		state:  state,
+		reason: reason,
+		cause:  cause,
+	}
+}
+
+func (e *initialBootstrapIncompleteError) Error() string {
+	message := "initial bootstrap incomplete"
+	if e.reason != "" {
+		message = message + ": " + e.reason
+	}
+	if e.state.inProgress {
+		message = message + fmt.Sprintf(" (%s)", formatBootstrapProgress(e.state.synced, e.state.total))
+	}
+	if e.cause != nil {
+		message = message + ": " + e.cause.Error()
+	}
+	return message
+}
+
+func (e *initialBootstrapIncompleteError) Unwrap() error {
+	return e.cause
 }
 
 func readBootstrapResumeState(localDir string) bootstrapResumeState {
