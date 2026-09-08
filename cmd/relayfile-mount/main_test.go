@@ -896,7 +896,7 @@ func TestRunSinglePollingMountRejectsStalePublicCompletionAfterWriteOnlyToMirror
 }
 
 func TestMountProcessExitCodeOnlyMarksTypedOnceBootstrapIncompleteRetryable(t *testing.T) {
-	incomplete := newInitialBootstrapIncompleteError(
+	incomplete := newResumableInitialBootstrapIncompleteError(
 		bootstrapResumeState{inProgress: true, synced: 10, total: 20},
 		"resume bound reached",
 		context.DeadlineExceeded,
@@ -914,12 +914,26 @@ func TestMountProcessExitCodeOnlyMarksTypedOnceBootstrapIncompleteRetryable(t *t
 	if got := mountProcessExitCode(mountConfig{once: true}, fmt.Errorf("wrapped: %w", incomplete)); got != initialBootstrapIncompleteExitCode {
 		t.Fatalf("wrapped typed --once incomplete exit = %d, want %d", got, initialBootstrapIncompleteExitCode)
 	}
-	secondIncomplete := newInitialBootstrapIncompleteError(bootstrapResumeState{}, "another scope", nil)
+	secondIncomplete := newResumableInitialBootstrapIncompleteError(bootstrapResumeState{}, "another scope", nil)
 	if got := mountProcessExitCode(mountConfig{once: true}, errors.Join(incomplete, secondIncomplete)); got != initialBootstrapIncompleteExitCode {
 		t.Fatalf("all-incomplete scoped aggregate exit = %d, want %d", got, initialBootstrapIncompleteExitCode)
 	}
 	if got := mountProcessExitCode(mountConfig{once: true}, errors.Join(incomplete, errors.New("fatal sibling"))); got != 1 {
 		t.Fatalf("mixed scoped aggregate exit = %d, want generic failure", got)
+	}
+	fatalProvider := newInitialBootstrapIncompleteError(
+		bootstrapResumeState{inProgress: true, synced: 10, total: 20},
+		"initial cycle failed",
+		&mountsync.HTTPError{StatusCode: http.StatusBadGateway, Message: "bad gateway"},
+	)
+	if got := mountProcessExitCode(mountConfig{once: true}, fatalProvider); got != 1 {
+		t.Fatalf("fatal provider --once exit = %d, want generic failure", got)
+	}
+	if got := mountProcessExitCode(mountConfig{once: true}, fmt.Errorf("wrapped provider: %w", fatalProvider)); got != 1 {
+		t.Fatalf("wrapped fatal provider --once exit = %d, want generic failure", got)
+	}
+	if got := mountProcessExitCode(mountConfig{once: true}, errors.Join(incomplete, fatalProvider)); got != 1 {
+		t.Fatalf("mixed resumable/fatal provider aggregate exit = %d, want generic failure", got)
 	}
 }
 
@@ -1423,9 +1437,62 @@ func TestRunScopedPollingMountsCancelsSiblingsOnGenericErrorInOnceMode(t *testin
 	}
 }
 
+// TestRunScopedPollingMountsCancelsSiblingsOnMixedIncompleteAndFatalError
+// pins the all-branches rule for joined outcomes. A provider failure may be
+// wrapped alongside a resumable bootstrap checkpoint, but the aggregate is
+// fatal and must still cancel a sibling instead of being downgraded by a
+// one-branch errors.As match.
+func TestRunScopedPollingMountsCancelsSiblingsOnMixedIncompleteAndFatalError(t *testing.T) {
+	resumable := newResumableInitialBootstrapIncompleteError(
+		bootstrapResumeState{inProgress: true, synced: 1, total: 10},
+		"checkpoint stopped advancing",
+		nil,
+	)
+	fatalProvider := &mountsync.HTTPError{StatusCode: http.StatusBadGateway, Message: "bad gateway"}
+	wantErr := errors.Join(resumable, fmt.Errorf("provider request: %w", fatalProvider))
+	var canceled atomic.Bool
+	started := make(chan string, 2)
+	releaseFailingMount := make(chan struct{})
+	var once sync.Once
+
+	err := runScopedPollingMountsWithRunner(
+		context.Background(),
+		mountConfig{localDir: t.TempDir(), stateDir: t.TempDir(), once: true},
+		[]string{"/github", "/slack"},
+		func(ctx context.Context, cfg mountConfig) error {
+			started <- cfg.remotePath
+			if strings.HasSuffix(cfg.remotePath, "/github") {
+				<-releaseFailingMount
+				return wantErr
+			}
+			once.Do(func() { close(releaseFailingMount) })
+			<-ctx.Done()
+			canceled.Store(true)
+			return nil
+		},
+	)
+	if !errors.Is(err, fatalProvider) {
+		t.Fatalf("expected aggregate error to include fatal provider error, got %v", err)
+	}
+	if !errors.Is(err, resumable) {
+		t.Fatalf("expected aggregate error to include resumable scope error, got %v", err)
+	}
+	if !canceled.Load() {
+		t.Fatal("expected mixed resumable/fatal --once error to cancel sibling")
+	}
+	close(started)
+	seen := map[string]bool{}
+	for path := range started {
+		seen[path] = true
+	}
+	if !seen["/github"] || !seen["/slack"] {
+		t.Fatalf("expected both scoped mounts to start, saw %v", seen)
+	}
+}
+
 // TestRunScopedPollingMountsLetsHealthySiblingFinishOnNonTerminalError pins
 // the counterpart: in --once mode (cfg.once), a failed or stalled scope
-// reporting the typed *initialBootstrapIncompleteError outcome
+// reporting the explicitly resumable *initialBootstrapIncompleteError outcome
 // finishInitialBootstrap returns for a resume-cycle ceiling, a stall bound,
 // or a cancelled rootCtx must not cancel a healthy sibling still making
 // progress within its own bound. The healthy sibling runs to its own bounded
@@ -1440,10 +1507,10 @@ func TestRunScopedPollingMountsCancelsSiblingsOnGenericErrorInOnceMode(t *testin
 // TestRunScopedPollingMountsCancelsSiblingsOnGenericErrorInDaemonMode
 // (outside --once, any error still cancels) and
 // TestRunScopedPollingMountsCancelsSiblingsOnGenericErrorInOnceMode (inside
-// --once, only the specific *initialBootstrapIncompleteError type is
-// exempted -- a generic error still cancels).
+// --once, only the explicitly resumable outcome is exempted -- a generic or
+// fatal error still cancels).
 func TestRunScopedPollingMountsLetsHealthySiblingFinishOnNonTerminalError(t *testing.T) {
-	nonTerminalErr := newInitialBootstrapIncompleteError(
+	nonTerminalErr := newResumableInitialBootstrapIncompleteError(
 		bootstrapResumeState{inProgress: true, synced: 1, total: 10},
 		"bootstrap checkpoint stopped advancing",
 		nil,

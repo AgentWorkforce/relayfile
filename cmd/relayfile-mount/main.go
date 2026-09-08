@@ -291,8 +291,8 @@ func onlyInitialBootstrapIncomplete(err error) bool {
 	if err == nil {
 		return false
 	}
-	if _, ok := err.(*initialBootstrapIncompleteError); ok {
-		return true
+	if incomplete, ok := err.(*initialBootstrapIncompleteError); ok {
+		return incomplete.resumable
 	}
 	if joined, ok := err.(interface{ Unwrap() []error }); ok {
 		children := joined.Unwrap()
@@ -497,8 +497,9 @@ func runScopedPollingMountsWithRunner(
 	// Cancellation is fail-fast by default: any non-nil error cancels the
 	// shared ctx, including a generic initialization/runtime error and every
 	// error observed in daemon mode (--once is not set). The ONLY narrow
-	// exception is cfg.once with a *initialBootstrapIncompleteError -- the
-	// typed, bounded outcome finishInitialBootstrap returns when a scope
+	// exception is cfg.once with an explicitly resumable
+	// *initialBootstrapIncompleteError -- the bounded outcome
+	// finishInitialBootstrap returns when a scope
 	// merely ran out of its own --once resume-cycle ceiling, hit its stall
 	// bound, or observed its own rootCtx cancellation while still in
 	// progress. That specific outcome must not cut short a healthy sibling
@@ -517,8 +518,7 @@ func runScopedPollingMountsWithRunner(
 			continue
 		}
 		errs = append(errs, err)
-		var incomplete *initialBootstrapIncompleteError
-		suppressSiblingCancellation := cfg.once && errors.As(err, &incomplete)
+		suppressSiblingCancellation := cfg.once && onlyInitialBootstrapIncomplete(err)
 		if !suppressSiblingCancellation {
 			cancel()
 		}
@@ -1021,7 +1021,7 @@ func finishInitialBootstrap(rootCtx context.Context, cfg mountConfig, run func(r
 		return nil
 	}
 	if err := rootCtx.Err(); err != nil {
-		return newInitialBootstrapIncompleteError(state, "context cancelled before bootstrap resumed", err)
+		return newResumableInitialBootstrapIncompleteError(state, "context cancelled before bootstrap resumed", err)
 	}
 	if err := lastCycleErr(); err != nil && !cycleYielded(err) {
 		return newInitialBootstrapIncompleteError(state, "initial cycle failed", err)
@@ -1031,7 +1031,7 @@ func finishInitialBootstrap(rootCtx context.Context, cfg mountConfig, run func(r
 	for cycle := 0; cycle < maxOnceBootstrapResumeCycles; cycle++ {
 		if err := rootCtx.Err(); err != nil {
 			log.Printf("initial sync: stopping before bootstrap completed: %v", err)
-			return newInitialBootstrapIncompleteError(state, "context cancelled before bootstrap completed", err)
+			return newResumableInitialBootstrapIncompleteError(state, "context cancelled before bootstrap completed", err)
 		}
 		cycleErr := run(true)
 		// The checkpoint is read once, immediately after the cycle returns,
@@ -1058,7 +1058,7 @@ func finishInitialBootstrap(rootCtx context.Context, cfg mountConfig, run func(r
 		}
 		if err := rootCtx.Err(); err != nil {
 			log.Printf("initial sync: stopping before bootstrap completed: %v", err)
-			return newInitialBootstrapIncompleteError(next, "context cancelled before bootstrap completed", err)
+			return newResumableInitialBootstrapIncompleteError(next, "context cancelled before bootstrap completed", err)
 		}
 		if err := lastCycleErr(); err != nil && !cycleYielded(err) {
 			log.Printf("initial sync: stopping after a failed resume cycle: %v", err)
@@ -1079,11 +1079,11 @@ func finishInitialBootstrap(rootCtx context.Context, cfg mountConfig, run func(r
 		stableCycles++
 		if stableCycles >= onceBootstrapStableCycleLimit {
 			log.Printf("initial sync: bootstrap checkpoint stopped advancing at %s; leaving it for the next run", formatBootstrapProgress(state.synced, state.total))
-			return newInitialBootstrapIncompleteError(state, "bootstrap checkpoint stopped advancing", nil)
+			return newResumableInitialBootstrapIncompleteError(state, "bootstrap checkpoint stopped advancing", nil)
 		}
 	}
 	log.Printf("initial sync: bootstrap still incomplete after %d resume cycles; leaving the checkpoint for the next run", maxOnceBootstrapResumeCycles)
-	return newInitialBootstrapIncompleteError(state, fmt.Sprintf("bootstrap still incomplete after %d resume cycles", maxOnceBootstrapResumeCycles), nil)
+	return newResumableInitialBootstrapIncompleteError(state, fmt.Sprintf("bootstrap still incomplete after %d resume cycles", maxOnceBootstrapResumeCycles), nil)
 }
 
 // bootstrapResumeState is one read of the public bootstrap block: how far the
@@ -1126,16 +1126,29 @@ type initialBootstrapIncompleteError struct {
 	state  bootstrapResumeState
 	reason string
 	cause  error
+	// resumable is deliberately explicit. A provider, configuration, or other
+	// cycle failure can leave bootstrap incomplete too, but must remain fatal at
+	// the process boundary rather than becoming an SDK retry signal.
+	resumable bool
 }
 
 func newInitialBootstrapIncompleteError(state bootstrapResumeState, reason string, cause error) error {
+	return newInitialBootstrapIncompleteErrorWithResumable(state, reason, cause, false)
+}
+
+func newResumableInitialBootstrapIncompleteError(state bootstrapResumeState, reason string, cause error) error {
+	return newInitialBootstrapIncompleteErrorWithResumable(state, reason, cause, true)
+}
+
+func newInitialBootstrapIncompleteErrorWithResumable(state bootstrapResumeState, reason string, cause error, resumable bool) error {
 	if reason == "" {
 		reason = "bootstrap incomplete"
 	}
 	return &initialBootstrapIncompleteError{
-		state:  state,
-		reason: reason,
-		cause:  cause,
+		state:     state,
+		reason:    reason,
+		cause:     cause,
+		resumable: resumable,
 	}
 }
 

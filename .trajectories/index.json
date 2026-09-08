@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-09-08T16:20:28.927Z",
+  "lastUpdated": "2026-09-08T16:42:14.596Z",
   "trajectories": {
     "traj_4pvrlmqfnzng": {
       "title": "Review PR #278 in AgentWorkforce/relayfile",
@@ -204,6 +204,13 @@
       "startedAt": "2026-08-27T20:19:59.085Z",
       "completedAt": "2026-08-27T20:20:27.355Z",
       "path": ".trajectories/completed/2026-08/traj_7n063n1f3wai.json"
+    },
+    "traj_7745k45nt2wr": {
+      "title": "Repair PR #477 resumable exit classification",
+      "status": "completed",
+      "startedAt": "2026-09-08T16:34:03.552Z",
+      "completedAt": "2026-09-08T16:42:13.645Z",
+      "path": ".trajectories/completed/2026-09/traj_7745k45nt2wr.json"
     }
   }
 }
