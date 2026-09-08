@@ -25,7 +25,7 @@
         {
           "ts": 1788899973362,
           "type": "decision",
-          "content": "Accepted optional digest validation repair: Accepted optional digest validation repair",
+          "content": "Accepted optional digest validation repair",
           "raw": {
             "question": "Accepted optional digest validation repair",
             "chosen": "Accepted optional digest validation repair",
@@ -37,7 +37,7 @@
         {
           "ts": 1788899973707,
           "type": "reflection",
-          "content": "Aligned release attestation and baseline validation with the reconciliation contract; added integrity-only, shasum-only, and baseline regressions. Release suite is green.",
+          "content": "Self-reported, non-gating session note: the agent stated that it aligned attestation and baseline validation with the reconciliation contract and observed the release suite passing. This trajectory captured no command, commit, or changed-file evidence.",
           "raw": {
             "confidence": 0.92
           },
@@ -48,7 +48,7 @@
     }
   ],
   "retrospective": {
-    "summary": "Allowed canonical optional npm digests only when the local tarball and registry share one matching value; preserved malformed and incomparable digest refusal.",
+    "summary": "Decision record only: chose to accept an optional npm digest only when the local tarball and registry share one canonical matching value, while refusing malformed or incomparable digests. This trajectory captured no command, commit, or changed-file evidence and is non-gating.",
     "approach": "Standard approach",
     "confidence": 0.92
   },

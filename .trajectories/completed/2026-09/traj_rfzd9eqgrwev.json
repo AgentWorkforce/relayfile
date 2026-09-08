@@ -29,7 +29,7 @@
         {
           "ts": 1788885562573,
           "type": "decision",
-          "content": "Pinned every publish-workflow action to a full commit SHA and retained major-version comments: Pinned every publish-workflow action to a full commit SHA and retained major-version comments",
+          "content": "Pinned every publish-workflow action to a full commit SHA and retained major-version comments",
           "raw": {
             "question": "Pinned every publish-workflow action to a full commit SHA and retained major-version comments",
             "chosen": "Pinned every publish-workflow action to a full commit SHA and retained major-version comments",
@@ -41,7 +41,7 @@
         {
           "ts": 1788885562891,
           "type": "decision",
-          "content": "Validated package and dry_run inputs once, exported safe outputs, and consumed only mapped values downstream: Validated package and dry_run inputs once, exported safe outputs, and consumed only mapped values downstream",
+          "content": "Validated package and dry_run inputs once, exported safe outputs, and consumed only mapped values downstream",
           "raw": {
             "question": "Validated package and dry_run inputs once, exported safe outputs, and consumed only mapped values downstream",
             "chosen": "Validated package and dry_run inputs once, exported safe outputs, and consumed only mapped values downstream",

@@ -29,7 +29,7 @@
         {
           "ts": 1788884729434,
           "type": "decision",
-          "content": "Moved custom release input values into step env and scoped GitHub permissions per job: Moved custom release input values into step env and scoped GitHub permissions per job",
+          "content": "Moved custom release input values into step env and scoped GitHub permissions per job",
           "raw": {
             "question": "Moved custom release input values into step env and scoped GitHub permissions per job",
             "chosen": "Moved custom release input values into step env and scoped GitHub permissions per job",
@@ -41,7 +41,7 @@
         {
           "ts": 1788884729753,
           "type": "decision",
-          "content": "Generate attestation before remote tag push and reuse tags by parent/tree equivalence: Generate attestation before remote tag push and reuse tags by parent/tree equivalence",
+          "content": "Generate attestation before remote tag push and reuse tags by parent/tree equivalence",
           "raw": {
             "question": "Generate attestation before remote tag push and reuse tags by parent/tree equivalence",
             "chosen": "Generate attestation before remote tag push and reuse tags by parent/tree equivalence",

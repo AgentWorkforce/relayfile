@@ -9,7 +9,7 @@
 
 ## Summary
 
-Allowed canonical optional npm digests only when the local tarball and registry share one matching value; preserved malformed and incomparable digest refusal.
+Decision record only: chose to accept an optional npm digest only when the local tarball and registry share one canonical matching value, while refusing malformed or incomparable digests. This trajectory captured no command, commit, or changed-file evidence and is non-gating.
 
 **Approach:** Standard approach
 
@@ -28,5 +28,5 @@ Allowed canonical optional npm digests only when the local tarball and registry 
 ### 1. Work
 *Agent: default*
 
-- Accepted optional digest validation repair: Accepted optional digest validation repair
-- Aligned release attestation and baseline validation with the reconciliation contract; added integrity-only, shasum-only, and baseline regressions. Release suite is green.
+- Accepted optional digest validation repair
+- Self-reported, non-gating session note: the agent stated that it aligned attestation and baseline validation with the reconciliation contract and observed the release suite passing. This trajectory captured no command, commit, or changed-file evidence.

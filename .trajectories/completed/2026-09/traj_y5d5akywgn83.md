@@ -33,8 +33,8 @@ Repaired fresh review findings: custom version is env-only, attestation precedes
 ### 1. Work
 *Agent: default*
 
-- Moved custom release input values into step env and scoped GitHub permissions per job: Moved custom release input values into step env and scoped GitHub permissions per job
-- Generate attestation before remote tag push and reuse tags by parent/tree equivalence: Generate attestation before remote tag push and reuse tags by parent/tree equivalence
+- Moved custom release input values into step env and scoped GitHub permissions per job
+- Generate attestation before remote tag push and reuse tags by parent/tree equivalence
 - Fresh review findings are repaired: release retries are tag-safe, binaries are an exact validated set, registry ambiguity fails closed, and permissions are least-privilege.
 
 ---

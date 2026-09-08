@@ -10,7 +10,7 @@
 
 ## Summary
 
-Repaired PR #479 review findings at aa6248c: resolved relative CLI entrypoint guard with fileURLToPath/path resolution and executable relative-path regression coverage; asserted exact dispatch GITHUB_OUTPUT/GITHUB_ENV mappings; corrected traj_9ecscwloe7cl to canonical project provenance and withdrew unsupported GREEN/pre-existing-issue claims. The validation results recorded below are contemporaneous self-reports only: this trajectory captured no command output, commits, or changed-file evidence and must not be used as a merge gate.
+Session record only: the agent reported resolving PR #479 entrypoint, dispatch-output, and trajectory-provenance findings at aa6248c. These implementation and validation statements are self-reported and non-gating because this trajectory captured no command output, commits, or changed-file evidence.
 
 **Approach:** Standard approach
 
@@ -36,6 +36,6 @@ Repaired PR #479 review findings at aa6248c: resolved relative CLI entrypoint gu
 
 _Agent: default_
 
-- Accepted four current unresolved review findings as valid and scoped repairs: Accepted four current unresolved review findings as valid and scoped repairs
-- Corrected traj_9ecscwloe7cl as historical non-gating provenance: Corrected traj_9ecscwloe7cl as historical non-gating provenance
+- Accepted four current unresolved review findings as valid and scoped repairs
+- Corrected traj_9ecscwloe7cl as historical non-gating provenance
 - Self-reported, non-gating session note: the agent stated that it patched the two code/test findings, corrected two historical-provenance claims, and observed the release tests and validation scans passing. This trajectory captured no commands, outputs, commits, or changed-file evidence, so those claims require independent verification.

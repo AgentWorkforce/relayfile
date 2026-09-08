@@ -9,7 +9,7 @@
 
 ## Summary
 
-Strictly validated SHA-512 SRI/SHA-1 digests in release attestation builder and baseline validator; bound artifacts to annotated tag source/tree/run/attempt metadata; added regressions and passed 64-test Node22 release suite plus actionlint/Prettier/diff checks.
+Decision record only: chose strict SHA-512 SRI and SHA-1 validation and binding artifacts to annotated tag source, tree, run, and attempt metadata. This trajectory captured no command, commit, changed-file, or test evidence and is non-gating.
 
 **Approach:** Standard approach
 
@@ -32,6 +32,6 @@ Strictly validated SHA-512 SRI/SHA-1 digests in release attestation builder and 
 ### 1. Work
 *Agent: default*
 
-- Bind validated artifacts to annotated tag run metadata: Bind validated artifacts to annotated tag run metadata
-- Validate exact npm digest formats in both attestation builder and baseline validator: Validate exact npm digest formats in both attestation builder and baseline validator
-- Focused and full release suites pass with metadata and malformed-digest regressions; final gates remain before commit.
+- Bind validated artifacts to annotated tag run metadata
+- Validate exact npm digest formats in both attestation builder and baseline validator
+- Self-reported, non-gating session note: the agent stated that focused and full release suites passed. This trajectory captured no command, commit, changed-file, or test evidence.

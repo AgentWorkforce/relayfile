@@ -9,7 +9,7 @@
 
 ## Summary
 
-Hardened release CLI entry recognition, propagation retry bounds, provenance fixture isolation, and portable trajectory metadata; release suite passed twice.
+Decision record only: accepted entrypoint, retry-budget, fixture-isolation, and portable-trajectory repairs. This trajectory captured no command, commit, changed-file, or test evidence and is non-gating.
 
 **Approach:** Standard approach
 
@@ -28,5 +28,5 @@ Hardened release CLI entry recognition, propagation retry bounds, provenance fix
 ### 1. Work
 *Agent: default*
 
-- Accepted entrypoint, retry-budget, fixture-isolation, and portable-trajectory repairs: Accepted entrypoint, retry-budget, fixture-isolation, and portable-trajectory repairs
-- Added real spaced-path CLI tests, bounded registry retry delays to 30 seconds each and five minutes cumulative, deep-merged negative fixtures, and normalized PR trajectory metadata. The release suite passed twice.
+- Accepted entrypoint, retry-budget, fixture-isolation, and portable-trajectory repairs
+- Self-reported, non-gating session note: the agent stated that it added spaced-path tests, bounded retry delays, isolated fixtures, normalized trajectory metadata, and observed the release suite passing twice. This trajectory captured no command, commit, changed-file, or test evidence.

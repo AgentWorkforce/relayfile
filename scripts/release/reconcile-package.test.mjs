@@ -9,6 +9,10 @@ import {
   comparePackageContent,
   normalizePackRecord,
   normalizeRegistryRecord,
+  REGISTRY_FETCH_RETRIES,
+  REGISTRY_FETCH_RETRY_MAX_TIMEOUT_MS,
+  REGISTRY_FETCH_RETRY_MIN_TIMEOUT_MS,
+  REGISTRY_QUERY_TIMEOUT_MS,
   registryErrorKind,
   reconcilePackage,
 } from "./reconcile-package.mjs";
@@ -22,8 +26,9 @@ function sandbox() {
   return dir;
 }
 
-function fakeNpm({ state, registry, viewError }) {
-  return async (command, args, { cwd }) => {
+function fakeNpm({ state, registry, viewError, onView }) {
+  return async (command, args, options) => {
+    const { cwd } = options;
     assert.equal(command, "npm");
     if (args[0] === "pack") {
       const filename = "relayfile-test-1.2.3.tgz";
@@ -45,6 +50,7 @@ function fakeNpm({ state, registry, viewError }) {
     }
     if (args[0] === "view") {
       state.views += 1;
+      onView?.(args, options);
       if (viewError) return { code: 1, stdout: "", stderr: viewError };
       return { code: 0, stdout: JSON.stringify(registry), stderr: "" };
     }
@@ -166,6 +172,7 @@ test("post-publish propagation retry delays are capped per wait and in total", a
       delayMs: 5,
       maxDelayMs: 10,
       maxTotalRetryDelayMs: 23,
+      now: () => 0,
       sleep: async (delay) => delays.push(delay),
     }),
     /post-publish verification failed/,
@@ -176,6 +183,63 @@ test("post-publish propagation retry delays are capped per wait and in total", a
     23,
   );
   assert.equal(backoffDelay({ attempt: 9 }), 30000);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("registry commands and their retry time share the total retry budget", async () => {
+  const dir = sandbox();
+  const state = { views: 0, publishes: 0 };
+  const timeouts = [];
+  const argsSeen = [];
+  const delays = [];
+  let clock = 0;
+  const npm = fakeNpm({
+    state,
+    registry: { integrity: "sha512-local", shasum: "sha1-local" },
+    viewError: "npm error code E404",
+    onView: (args, options) => {
+      argsSeen.push(args);
+      timeouts.push(options.timeout);
+      if (state.views > 1) clock += Math.min(9, options.timeout);
+    },
+  });
+
+  await assert.rejects(
+    reconcilePackage({
+      packageDir: dir,
+      tag: "next",
+      sourceSha: "a".repeat(40),
+      runId: 1,
+      runAttempt: 1,
+      npm,
+      attempts: 99,
+      delayMs: 5,
+      maxDelayMs: 10,
+      maxTotalRetryDelayMs: 23,
+      now: () => clock,
+      sleep: async (delay) => {
+        delays.push(delay);
+        clock += delay;
+      },
+    }),
+    /post-publish verification failed/,
+  );
+
+  assert.deepEqual(timeouts, [REGISTRY_QUERY_TIMEOUT_MS, 23, 9]);
+  assert.deepEqual(delays, [5]);
+  for (const args of argsSeen) {
+    assert.ok(args.includes(`--fetch-retries=${REGISTRY_FETCH_RETRIES}`));
+    assert.ok(
+      args.includes(
+        `--fetch-retry-mintimeout=${REGISTRY_FETCH_RETRY_MIN_TIMEOUT_MS}`,
+      ),
+    );
+    assert.ok(
+      args.includes(
+        `--fetch-retry-maxtimeout=${REGISTRY_FETCH_RETRY_MAX_TIMEOUT_MS}`,
+      ),
+    );
+  }
   rmSync(dir, { recursive: true, force: true });
 });
 

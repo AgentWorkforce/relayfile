@@ -9,6 +9,6 @@
 
 ## Summary
 
-Repaired release version/tag gates, strict registry normalization, and full signed attestation schema validation; Node22 suite/actionlint/Prettier/diff/secrets passed.
+Historical self-report about release version, tag, registry, and attestation work. This trajectory captured no decisions, commands, commits, changed files, or test evidence and is not a release approval or merge gate.
 
 **Approach:** Standard approach

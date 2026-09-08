@@ -29,7 +29,7 @@
         {
           "ts": 1788899183537,
           "type": "decision",
-          "content": "Accepted four current unresolved review findings as valid and scoped repairs: Accepted four current unresolved review findings as valid and scoped repairs",
+          "content": "Accepted four current unresolved review findings as valid and scoped repairs",
           "raw": {
             "question": "Accepted four current unresolved review findings as valid and scoped repairs",
             "chosen": "Accepted four current unresolved review findings as valid and scoped repairs",
@@ -41,7 +41,7 @@
         {
           "ts": 1788899183854,
           "type": "decision",
-          "content": "Corrected traj_9ecscwloe7cl as historical non-gating provenance: Corrected traj_9ecscwloe7cl as historical non-gating provenance",
+          "content": "Corrected traj_9ecscwloe7cl as historical non-gating provenance",
           "raw": {
             "question": "Corrected traj_9ecscwloe7cl as historical non-gating provenance",
             "chosen": "Corrected traj_9ecscwloe7cl as historical non-gating provenance",
@@ -76,7 +76,7 @@
     }
   ],
   "retrospective": {
-    "summary": "Repaired PR #479 review findings at aa6248c: resolved relative CLI entrypoint guard with fileURLToPath/path resolution and executable relative-path regression coverage; asserted exact dispatch GITHUB_OUTPUT/GITHUB_ENV mappings; corrected traj_9ecscwloe7cl to canonical project provenance and withdrew unsupported GREEN/pre-existing-issue claims. Validation results mentioned in this record are self-reported and non-gating because the trajectory captured no command output, commits, or changed-file evidence.",
+    "summary": "Session record only: the agent reported resolving PR #479 entrypoint, dispatch-output, and trajectory-provenance findings at aa6248c. These implementation and validation statements are self-reported and non-gating because this trajectory captured no command output, commits, or changed-file evidence.",
     "approach": "Standard approach",
     "confidence": 0.96
   },

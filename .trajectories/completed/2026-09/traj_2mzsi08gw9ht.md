@@ -10,7 +10,7 @@
 
 ## Summary
 
-Hardened immutable release snapshot inputs, restored executable shell coverage, and repaired newly added Trail records with tracked relative sources.
+Decision record only: chose to validate release inputs before npm CLI parsing, restore executable workflow harnesses, and keep Trail sources repository-relative. This trajectory captured no command, commit, or changed-file evidence and is non-gating.
 
 **Approach:** Standard approach
 
@@ -29,4 +29,4 @@ Hardened immutable release snapshot inputs, restored executable shell coverage, 
 ### 1. Work
 *Agent: default*
 
-- Validated release inputs before npm CLI parsing and restored executable workflow harnesses: Validated release inputs before npm CLI parsing and restored executable workflow harnesses
+- Validated release inputs before npm CLI parsing and restored executable workflow harnesses

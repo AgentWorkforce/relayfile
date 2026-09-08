@@ -33,8 +33,8 @@ Pinned all publish workflow actions to immutable commit SHAs, validated and mapp
 ### 1. Work
 *Agent: default*
 
-- Pinned every publish-workflow action to a full commit SHA and retained major-version comments: Pinned every publish-workflow action to a full commit SHA and retained major-version comments
-- Validated package and dry_run inputs once, exported safe outputs, and consumed only mapped values downstream: Validated package and dry_run inputs once, exported safe outputs, and consumed only mapped values downstream
+- Pinned every publish-workflow action to a full commit SHA and retained major-version comments
+- Validated package and dry_run inputs once, exported safe outputs, and consumed only mapped values downstream
 - Release hardening is implemented; action refs and dispatch input paths are immutable or validated, and automated validation is green.
 
 ---

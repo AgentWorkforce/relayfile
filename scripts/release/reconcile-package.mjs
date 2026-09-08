@@ -25,13 +25,20 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, resolve } from "node:path";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 
 export const DEFAULT_ATTEMPTS = 10;
 export const DEFAULT_DELAY_MS = 5000;
 // Match lockfile propagation retries: no individual pause exceeds 30 seconds.
 export const MAX_DELAY_MS = 30000;
-// Keep every package-matrix job bounded even when a registry stays unavailable.
+// Bound each npm view, including npm's own retry loop, so a stalled registry
+// command cannot sit outside the post-publish retry budget.
+export const REGISTRY_QUERY_TIMEOUT_MS = 30000;
+export const REGISTRY_FETCH_RETRIES = 1;
+export const REGISTRY_FETCH_RETRY_MIN_TIMEOUT_MS = 1000;
+export const REGISTRY_FETCH_RETRY_MAX_TIMEOUT_MS = 5000;
+// Keep post-publish registry verification bounded when npm stays unavailable.
 export const MAX_TOTAL_RETRY_DELAY_MS = 5 * 60 * 1000;
 
 export function backoffDelay({
@@ -42,12 +49,16 @@ export function backoffDelay({
   return Math.min(baseDelayMs * 2 ** (attempt - 1), maxDelayMs);
 }
 
-function run(command, args, { cwd = process.cwd(), env = process.env } = {}) {
+function run(
+  command,
+  args,
+  { cwd = process.cwd(), env = process.env, timeout } = {},
+) {
   return new Promise((resolveResult) => {
     execFile(
       command,
       args,
-      { cwd, env, maxBuffer: 32 * 1024 * 1024 },
+      { cwd, env, maxBuffer: 32 * 1024 * 1024, timeout },
       (error, stdout, stderr) => {
         resolveResult({
           code: error ? (typeof error.code === "number" ? error.code : 1) : 0,
@@ -185,7 +196,13 @@ export function comparePackageContent(local, registry) {
   return { kind: "identical" };
 }
 
-async function queryRegistry({ name, version, cwd, npm = run }) {
+async function queryRegistry({
+  name,
+  version,
+  cwd,
+  npm = run,
+  timeoutMs = REGISTRY_QUERY_TIMEOUT_MS,
+}) {
   const result = await npm(
     "npm",
     [
@@ -195,8 +212,11 @@ async function queryRegistry({ name, version, cwd, npm = run }) {
       "--json",
       "--prefer-online",
       "--no-fund",
+      `--fetch-retries=${REGISTRY_FETCH_RETRIES}`,
+      `--fetch-retry-mintimeout=${REGISTRY_FETCH_RETRY_MIN_TIMEOUT_MS}`,
+      `--fetch-retry-maxtimeout=${REGISTRY_FETCH_RETRY_MAX_TIMEOUT_MS}`,
     ],
-    { cwd },
+    { cwd, timeout: timeoutMs },
   );
   if (result.code !== 0) {
     const kind = registryErrorKind(result);
@@ -261,6 +281,8 @@ export async function reconcilePackage({
   delayMs = DEFAULT_DELAY_MS,
   maxDelayMs = MAX_DELAY_MS,
   maxTotalRetryDelayMs = MAX_TOTAL_RETRY_DELAY_MS,
+  registryQueryTimeoutMs = REGISTRY_QUERY_TIMEOUT_MS,
+  now = () => performance.now(),
 }) {
   const manifest = JSON.parse(
     readFileSync(resolve(packageDir, "package.json"), "utf8"),
@@ -286,6 +308,7 @@ export async function reconcilePackage({
       version,
       cwd: packageDir,
       npm,
+      timeoutMs: registryQueryTimeoutMs,
     });
     if (current.kind === "present") {
       const comparison = comparePackageContent(local, current.record);
@@ -331,15 +354,36 @@ export async function reconcilePackage({
       status = "published";
 
       let lastError;
-      let totalRetryDelayMs = 0;
+      let consumedRetryBudgetMs = 0;
       for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        const remainingQueryBudgetMs = Math.max(
+          0,
+          maxTotalRetryDelayMs - consumedRetryBudgetMs,
+        );
+        if (remainingQueryBudgetMs === 0) {
+          lastError = new Error("registry retry budget exhausted");
+          break;
+        }
+        const queryStartedAt = now();
+        let after;
+        let queryError;
         try {
-          const after = await queryRegistry({
+          after = await queryRegistry({
             name,
             version,
             cwd: packageDir,
             npm,
+            timeoutMs: Math.min(registryQueryTimeoutMs, remainingQueryBudgetMs),
           });
+        } catch (error) {
+          queryError = error;
+        }
+        consumedRetryBudgetMs += Math.min(
+          remainingQueryBudgetMs,
+          Math.max(0, now() - queryStartedAt),
+        );
+        try {
+          if (queryError) throw queryError;
           if (after.kind !== "present")
             throw new Error("registry still reports the package as absent");
           const comparison = comparePackageContent(local, after.record);
@@ -356,14 +400,14 @@ export async function reconcilePackage({
           if (error.fatal || attempt === attempts) break;
           const remainingDelayMs = Math.max(
             0,
-            maxTotalRetryDelayMs - totalRetryDelayMs,
+            maxTotalRetryDelayMs - consumedRetryBudgetMs,
           );
           const delay = Math.min(
             backoffDelay({ attempt, baseDelayMs: delayMs, maxDelayMs }),
             remainingDelayMs,
           );
           if (delay === 0) break;
-          totalRetryDelayMs += delay;
+          consumedRetryBudgetMs += delay;
           await sleep(delay);
         }
       }

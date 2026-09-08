@@ -29,7 +29,7 @@
         {
           "ts": 1788886563344,
           "type": "decision",
-          "content": "Validated release inputs before npm CLI parsing and restored executable workflow harnesses: Validated release inputs before npm CLI parsing and restored executable workflow harnesses",
+          "content": "Validated release inputs before npm CLI parsing and restored executable workflow harnesses",
           "raw": {
             "question": "Validated release inputs before npm CLI parsing and restored executable workflow harnesses",
             "chosen": "Validated release inputs before npm CLI parsing and restored executable workflow harnesses",
@@ -42,7 +42,7 @@
     }
   ],
   "retrospective": {
-    "summary": "Hardened immutable release snapshot inputs, restored executable shell coverage, and repaired newly added Trail records with tracked relative sources.",
+    "summary": "Decision record only: chose to validate release inputs before npm CLI parsing, restore executable workflow harnesses, and keep Trail sources repository-relative. This trajectory captured no command, commit, or changed-file evidence and is non-gating.",
     "approach": "Standard approach",
     "confidence": 0.95
   },

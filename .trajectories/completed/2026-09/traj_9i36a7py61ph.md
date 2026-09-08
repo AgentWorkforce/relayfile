@@ -10,7 +10,7 @@
 
 ## Summary
 
-Repaired release snapshot provenance: automatic tag collisions fail before package jobs, exact reruns preserve immutable tag run metadata through child/top-level attestations, and package attestations require complete canonical fields and exact source/run identity. Added adversarial regressions; 68 release tests and static gates pass.
+Decision record only: chose to reject untrusted automatic tag collisions before package jobs, preserve immutable tag producer metadata across exact reruns, and validate complete child attestations before composition. This trajectory captured no command, commit, file, or test evidence and is non-gating.
 
 **Approach:** Standard approach
 
@@ -37,6 +37,6 @@ Repaired release snapshot provenance: automatic tag collisions fail before packa
 ### 1. Work
 *Agent: default*
 
-- Preserve immutable tag producer metadata across exact same-workflow reruns: Preserve immutable tag producer metadata across exact same-workflow reruns
-- Reject automatic version targets that already have an untrusted tag: Reject automatic version targets that already have an untrusted tag
-- Validate complete package child attestations before composition: Validate complete package child attestations before composition
+- Preserve immutable tag producer metadata across exact same-workflow reruns
+- Reject automatic version targets that already have an untrusted tag
+- Validate complete package child attestations before composition
