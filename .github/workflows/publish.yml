@@ -81,6 +81,7 @@ jobs:
     outputs:
       new_version: ${{ steps.bump.outputs.new_version }}
       is_prerelease: ${{ steps.bump.outputs.is_prerelease }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
 
     steps:
       - name: Validate release mode
@@ -102,6 +103,17 @@ jobs:
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Resolve immutable source snapshot
+        id: source
+        run: |
+          set -euo pipefail
+          SOURCE_SHA=$(git rev-parse HEAD)
+          test "$SOURCE_SHA" = "$GITHUB_SHA"
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          echo "Building immutable source snapshot $SOURCE_SHA"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -160,53 +172,12 @@ jobs:
           echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
           echo "New version: $NEW_VERSION"
 
-          # A collision on an auto-computed version means the repo's package.json
-          # has drifted behind the registry (see the 0.10.52-vs-0.10.54 resync).
-          # Without this guard the run reaches the publish matrix before every
-          # job fails with "cannot publish over the previously published
-          # versions", which half-releases: some packages land, the rest do not.
-          #
-          # Every published package is checked, not just `relayfile`. A previous
-          # run can die partway through the matrix, leaving some names taken at a
-          # version the others never reached — checking one name would wave that
-          # straight back into the same failure.
-          #
-          # Skipped when an operator names a custom version — that is a
-          # deliberate choice, including re-running a release step by hand.
-          if [ -z "$CUSTOM_VERSION" ]; then
-            TAKEN=""
-            for PKG_NAME in $(node -e "
-              const fs = require('fs');
-              const paths = ${PACKAGE_PATHS_JSON};
-              const names = paths
-                .filter((p) => fs.existsSync(p))
-                .map((p) => JSON.parse(fs.readFileSync(p, 'utf8')).name);
-              console.log(names.join(' '));
-            "); do
-              # `npm view` exits non-zero both for "no such version" and for a
-              # registry outage. Only a genuine E404 means the version is free;
-              # treating an unanswerable query as free would let a taken version
-              # reach the publish matrix and partially release.
-              if VIEW_OUT=$(npm view "$PKG_NAME@$NEW_VERSION" version 2>&1); then
-                TAKEN="$TAKEN $PKG_NAME"
-              elif ! printf '%s' "$VIEW_OUT" | grep -q 'code E404'; then
-                echo "::error::could not determine whether $PKG_NAME@$NEW_VERSION" \
-                  "is published; refusing to release on an unanswered registry query." \
-                  "npm said: $VIEW_OUT"
-                exit 1
-              fi
-            done
-            if [ -n "$TAKEN" ]; then
-              echo "::error::version $NEW_VERSION is already published for:$TAKEN." \
-                "The repo's package.json ($CURRENT_VERSION) is behind the registry;" \
-                "resync the repo to the published version before releasing." \
-                "Publishing anyway would fail mid-matrix and half-release."
-              exit 1
-            fi
-          fi
-
           if [[ "$NEW_VERSION" == *"-"* ]]; then
             echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+            if [ "${{ github.event.inputs.tag }}" = "latest" ]; then
+              echo "ERROR: prereleases may not use the npm latest dist-tag" >&2
+              exit 1
+            fi
           else
             echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
           fi
@@ -241,6 +212,9 @@ jobs:
             }
           "
 
+      - name: Test release tooling on the immutable source
+        run: npm run test:release
+
       # Rename each package's `## [Unreleased]` section to `## [X.Y.Z] - <today>`
       # and reopen an empty Unreleased section. Skipped on prereleases and dry
       # runs — prereleases would fragment a single logical release into many
@@ -270,6 +244,7 @@ jobs:
           name: build-output
           path: |
             package.json
+            package-lock.json
             packages/core/package.json
             packages/core/dist/
             packages/core/CHANGELOG.md
@@ -337,6 +312,14 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build.outputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Verify immutable source snapshot
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ needs.build.outputs.source_sha }}"
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -429,6 +412,14 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build.outputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Verify immutable source snapshot
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ needs.build.outputs.source_sha }}"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -466,18 +457,31 @@ jobs:
       - name: Update npm for OIDC support
         run: npm install -g npm@11
 
-      - name: Dry run check
-        if: github.event.inputs.dry_run == 'true'
-        working-directory: ${{ matrix.path }}
+      - name: Reconcile package with NPM
+        env:
+          NPM_TAG: ${{ github.event.inputs.tag }}
+          RELEASE_DRY_RUN: ${{ github.event.inputs.dry_run }}
+          SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
+          RELEASE_VERSION: ${{ needs.build.outputs.new_version }}
         run: |
-          PACKAGE_NAME=$(node -p "require('./package.json').name")
-          echo "Dry run - would publish ${PACKAGE_NAME}"
-          npm publish --dry-run --access public --tag ${{ github.event.inputs.tag }} --ignore-scripts
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/package-attestations"
+          node "$GITHUB_WORKSPACE/scripts/release/reconcile-package.mjs" \
+            --package-dir "$GITHUB_WORKSPACE/${{ matrix.path }}" \
+            --tag "$NPM_TAG" \
+            --dry-run "$RELEASE_DRY_RUN" \
+            --source-sha "$SOURCE_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --output "$GITHUB_WORKSPACE/package-attestations/${{ matrix.package }}.json"
 
-      - name: Publish to NPM
-        if: github.event.inputs.dry_run != 'true'
-        working-directory: ${{ matrix.path }}
-        run: npm publish --access public --provenance --tag ${{ github.event.inputs.tag }} --ignore-scripts
+      - name: Upload package attestation
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-attestation-${{ matrix.package }}
+          path: package-attestations/${{ matrix.package }}.json
+          if-no-files-found: error
+          retention-days: 1
 
   # Publish single package (when not 'all')
   publish-single:
@@ -493,6 +497,14 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build.outputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Verify immutable source snapshot
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ needs.build.outputs.source_sha }}"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -551,18 +563,31 @@ jobs:
       - name: Update npm for OIDC support
         run: npm install -g npm@11
 
-      - name: Dry run check
-        if: github.event.inputs.dry_run == 'true'
-        working-directory: ${{ steps.resolve-package.outputs.path }}
+      - name: Reconcile package with NPM
+        env:
+          NPM_TAG: ${{ github.event.inputs.tag }}
+          RELEASE_DRY_RUN: ${{ github.event.inputs.dry_run }}
+          SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
+          RELEASE_VERSION: ${{ needs.build.outputs.new_version }}
         run: |
-          PACKAGE_NAME=$(node -p "require('./package.json').name")
-          echo "Dry run - would publish ${PACKAGE_NAME}"
-          npm publish --dry-run --access public --tag ${{ github.event.inputs.tag }} --ignore-scripts
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/package-attestations"
+          node "$GITHUB_WORKSPACE/scripts/release/reconcile-package.mjs" \
+            --package-dir "$GITHUB_WORKSPACE/${{ steps.resolve-package.outputs.path }}" \
+            --tag "$NPM_TAG" \
+            --dry-run "$RELEASE_DRY_RUN" \
+            --source-sha "$SOURCE_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --output "$GITHUB_WORKSPACE/package-attestations/${{ github.event.inputs.package }}.json"
 
-      - name: Publish to NPM
-        if: github.event.inputs.dry_run != 'true'
-        working-directory: ${{ steps.resolve-package.outputs.path }}
-        run: npm publish --access public --provenance --tag ${{ github.event.inputs.tag }} --ignore-scripts
+      - name: Upload package attestation
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-attestation-${{ github.event.inputs.package }}
+          path: package-attestations/${{ github.event.inputs.package }}.json
+          if-no-files-found: error
+          retention-days: 1
 
   create-release:
     name: Create Release
@@ -580,6 +605,12 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ needs.build.outputs.source_sha }}
+
+      - name: Verify immutable source snapshot
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ needs.build.outputs.source_sha }}"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -600,6 +631,13 @@ jobs:
           path: mount-binaries
           merge-multiple: true
 
+      - name: Download package attestations
+        uses: actions/download-artifact@v4
+        with:
+          pattern: package-attestation-*
+          path: package-attestations
+          merge-multiple: true
+
       - name: Verify mount binaries present
         run: |
           set -euo pipefail
@@ -611,6 +649,8 @@ jobs:
             fi
           done
           chmod +x mount-binaries/relayfile-mount-*
+          test -d package-attestations
+          test "$(find package-attestations -type f -name '*.json' | wc -l | tr -d ' ')" -eq 11
 
       - name: Generate checksums
         run: |
@@ -640,9 +680,12 @@ jobs:
       - name: Commit version bump and create tag
         env:
           NEW_VERSION: ${{ needs.build.outputs.new_version }}
+          SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
         run: |
+          set -euo pipefail
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
 
           git add \
             package.json package-lock.json \
@@ -657,17 +700,46 @@ jobs:
             packages/mount-linux-arm64/package.json packages/mount-linux-x64/package.json
           if ! git diff --staged --quiet; then
             git commit -m "chore(release): v${NEW_VERSION}"
-            git push
           fi
 
-          git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}"
-          git push origin "v${NEW_VERSION}"
+          if git show-ref --verify --quiet "refs/tags/v${NEW_VERSION}"; then
+            TAG_COMMIT=$(git rev-list -n 1 "refs/tags/v${NEW_VERSION}")
+            test "$TAG_COMMIT" = "$(git rev-parse HEAD)"
+            echo "Reusing existing tag v${NEW_VERSION} at $TAG_COMMIT"
+          else
+            git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}"
+            git push origin "refs/tags/v${NEW_VERSION}:refs/tags/v${NEW_VERSION}"
+            TAG_COMMIT=$(git rev-list -n 1 "refs/tags/v${NEW_VERSION}")
+          fi
+          test "$TAG_COMMIT" = "$(git rev-parse HEAD)"
+          echo "TAG_COMMIT=$TAG_COMMIT" >> "$GITHUB_ENV"
+
+      - name: Generate release attestation
+        env:
+          SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
+          RELEASE_VERSION: ${{ needs.build.outputs.new_version }}
+          NPM_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          test -n "${TAG_COMMIT:-}"
+          node scripts/release/create-release-attestation.mjs \
+            --package-dir package-attestations \
+            --checksums checksums.txt \
+            --source-sha "$SOURCE_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --version "$RELEASE_VERSION" \
+            --tag "v$RELEASE_VERSION" \
+            --tag-commit "$TAG_COMMIT" \
+            --repository "$GITHUB_REPOSITORY" \
+            --output release-attestation.json
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.build.outputs.new_version }}
           name: v${{ needs.build.outputs.new_version }}
+          prerelease: ${{ needs.build.outputs.is_prerelease }}
           body: |
             ## relayfile v${{ needs.build.outputs.new_version }}
 
@@ -716,13 +788,21 @@ jobs:
             packages/cli/bin/relayfile-cli-*
             mount-binaries/relayfile-mount-*
             checksums.txt
+            release-attestation.json
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   summary:
     name: Summary
-    needs: [build, publish-packages, publish-single, build-mount-binaries, create-release]
+    needs:
+      [
+        build,
+        publish-packages,
+        publish-single,
+        build-mount-binaries,
+        create-release,
+      ]
     runs-on: ubuntu-latest
     if: always()
 
