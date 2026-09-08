@@ -304,7 +304,7 @@ describe("default mount launcher", () => {
     }
   })
 
-  it("reports and cleans up a timeout when resumable retries exhaust the readiness budget", async () => {
+  it("reports and cleans up a timeout when the readiness budget expires before a resumable retry", async () => {
     vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] })
     const tempRoot = await mkdtemp(
       path.join(os.tmpdir(), "relayfile-default-launcher-resume-timeout-")
@@ -423,7 +423,9 @@ describe("default mount launcher", () => {
       const instance = await launcher.start({
         env: createMountEnv(localDir),
         background: false,
-        readyTimeoutMs: 250
+        // The controlled backoff crosses this deadline after stop(), proving
+        // explicit shutdown still wins over the resumable-timeout branch.
+        readyTimeoutMs: 5
       })
 
       // Let the child exit and waitForReady enter its fake-timer backoff.
@@ -435,8 +437,8 @@ describe("default mount launcher", () => {
         code: "mount_launch_failed"
       })
       await instance.stop()
-      // Releasing the backoff after stop() proves that the post-delay guard,
-      // rather than test timing, prevents restartOnceMount().
+      // Releasing the backoff after stop() crosses the ready deadline and
+      // proves explicit shutdown wins over both timeout and restart handling.
       await vi.advanceTimersByTimeAsync(20)
 
       await readyFailure

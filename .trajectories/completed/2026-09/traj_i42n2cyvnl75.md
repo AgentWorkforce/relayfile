@@ -18,15 +18,17 @@ Fixed exit-75 deadline handling and eliminated the shutdown-test unhandled-rejec
 
 ## Key Decisions
 
-### Timeout must win over generic early exit for a resumable exit-75 child
-- **Chose:** Timeout must win over generic early exit for a resumable exit-75 child
-- **Reasoning:** The public readyTimeoutMs contract requires MountReadyTimeoutError plus stop cleanup once retry budget expires; ordinary non-resumable exits still retain their specific launch failure.
+### Timeout must win over generic early exit for a resumable exit-75 child unless explicit shutdown is already in progress
+
+- **Chose:** Timeout must win over generic early exit for a resumable exit-75 child unless explicit shutdown is already in progress
+- **Reasoning:** The public readyTimeoutMs contract requires MountReadyTimeoutError plus stop cleanup once retry budget expires. A concurrent explicit stop retains shutdown's terminal launch-failure precedence, and ordinary non-resumable exits retain their specific launch failure.
 
 ---
 
 ## Chapters
 
 ### 1. Work
-*Agent: default*
 
-- Timeout must win over generic early exit for a resumable exit-75 child: Timeout must win over generic early exit for a resumable exit-75 child
+_Agent: default_
+
+- Timeout must win over generic early exit for a resumable exit-75 child unless explicit shutdown is already in progress: Timeout must win over generic early exit for a resumable exit-75 child unless explicit shutdown is already in progress

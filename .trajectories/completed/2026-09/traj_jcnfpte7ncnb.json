@@ -46,13 +46,9 @@
     "approach": "Standard approach",
     "confidence": 0.98
   },
-  "commits": [
-    "c0d9a80e"
-  ],
-  "filesChanged": [
-    "packages/sdk/typescript/src/mount-launcher.test.ts"
-  ],
-  "projectId": "/private/tmp/relayfile-once-timeout-fix-0908",
+  "commits": ["c0d9a80e"],
+  "filesChanged": ["packages/sdk/typescript/src/mount-launcher.test.ts"],
+  "projectId": "AgentWorkforce/relayfile",
   "tags": [],
   "_trace": {
     "startRef": "ceaa7c2d177a20f2ac54e7bc7c522b4123e35f9f",

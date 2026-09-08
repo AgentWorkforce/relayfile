@@ -349,7 +349,11 @@ class RelayfileMountProcessInstance
       // readiness budget. Once that budget is exhausted, report the public
       // timeout contract and run normal shutdown cleanup instead of falling
       // through to the generic early-exit error.
-      if (this.isResumableOnceExit() && this.now() >= timeoutAt) {
+      if (
+        !this.stopping &&
+        this.isResumableOnceExit() &&
+        this.now() >= timeoutAt
+      ) {
         const error = new MountReadyTimeoutError(
           this.localDir,
           this.input.readyTimeoutMs
