@@ -1804,6 +1804,45 @@ func TestProviderUpsertWithoutPathDisambiguatesSanitizedIDCollision(t *testing.T
 	}
 }
 
+func TestProviderUpsertWithoutPathFailsClosedOnAmbiguousIdentity(t *testing.T) {
+	const provider = "external"
+	const objectID = "object_ambiguous"
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	store.mu.Lock()
+	ws := store.ensureWorkspaceLocked("ws_provider_upsert_ambiguous")
+	for _, path := range []string{"/external/first.md", "/external/second.md"} {
+		ws.Files[path] = File{
+			Path:             path,
+			Content:          "must survive " + path,
+			ContentType:      "text/markdown",
+			Provider:         provider,
+			ProviderObjectID: objectID,
+		}
+	}
+	beforeRevision := ws.Revision
+	store.applyProviderUpsertLocked(ws, provider, ApplyAction{
+		Type:             ActionFileUpsert,
+		ProviderObjectID: objectID,
+		Content:          "must not replace an arbitrary duplicate",
+	}, "corr_provider_upsert_ambiguous")
+	first := ws.Files["/external/first.md"]
+	second := ws.Files["/external/second.md"]
+	events := append([]Event(nil), ws.Events...)
+	gotRevision := ws.Revision
+	store.mu.Unlock()
+
+	if first.Content != "must survive /external/first.md" || second.Content != "must survive /external/second.md" {
+		t.Fatalf("ambiguous pathless upsert mutated a duplicate: first=%+v second=%+v", first, second)
+	}
+	if gotRevision != beforeRevision {
+		t.Fatalf("ambiguous pathless upsert advanced file revision: got %s want %s", gotRevision, beforeRevision)
+	}
+	if len(events) != 1 || events[0].Type != "sync.reconcile" || events[0].Path != "" {
+		t.Fatalf("ambiguous pathless upsert events = %+v, want one pathless sync.reconcile", events)
+	}
+}
+
 func TestProviderDeleteWithoutPathEmitsReconcileControlEvent(t *testing.T) {
 	store := NewStore()
 	t.Cleanup(store.Close)

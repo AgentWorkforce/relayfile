@@ -4618,6 +4618,15 @@ func resolveProviderObjectUpsertPathLocked(ws *workspaceState, provider, objectI
 	if resolved, ok := resolveProviderObjectPathLocked(ws, provider, objectID); ok {
 		return resolved, true
 	}
+	// A failed lookup can mean either no projection or an ambiguous corrupt
+	// state with multiple projections for the same identity. Only the former
+	// may allocate a fallback path; choosing one of several matches would make
+	// a pathless upsert mutate an arbitrary duplicate instead of failing closed.
+	for _, file := range ws.Files {
+		if providerObjectMatchesFile(file, provider, objectID) {
+			return "", false
+		}
+	}
 
 	legacyPath := fallbackProviderPath(provider, objectID)
 	if legacyPath == "/" {

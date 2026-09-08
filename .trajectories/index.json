@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-09-08T18:12:03.089Z",
+  "lastUpdated": "2026-09-08T18:17:10.919Z",
   "trajectories": {
     "traj_4pvrlmqfnzng": {
       "title": "Review PR #278 in AgentWorkforce/relayfile",
@@ -218,6 +218,13 @@
       "startedAt": "2026-09-08T18:05:42.152Z",
       "completedAt": "2026-09-08T18:12:02.896Z",
       "path": "/private/tmp/relayfile-acl423-fix-0908/.trajectories/completed/2026-09/traj_l5ctfmv1nb5j.json"
+    },
+    "traj_f5e9ezrw8o6g": {
+      "title": "Fail closed on ambiguous provider-object pathless upserts",
+      "status": "completed",
+      "startedAt": "2026-09-08T18:17:10.022Z",
+      "completedAt": "2026-09-08T18:17:10.768Z",
+      "path": "/private/tmp/relayfile-acl423-fix-0908/.trajectories/completed/2026-09/traj_f5e9ezrw8o6g.json"
     }
   }
 }
