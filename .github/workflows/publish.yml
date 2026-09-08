@@ -248,6 +248,30 @@ jobs:
             echo "Trusted release baseline: $BASELINE_VERSION"
           fi
 
+          # A custom version must not be allowed to reach package
+          # reconciliation when it is already the source version or already
+          # tagged. The only exception is an exact same-workflow recovery:
+          # resolve-release-baseline has cryptographically verified the tag's
+          # source/tree/run metadata and exposed its version as resumable.
+          RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
+          RESUMABLE_CUSTOM=false
+          if [ "$RUN_ATTEMPT" -gt 1 ] && [ -n "$CUSTOM_VERSION" ] && \
+            [ -n "$RESUMABLE_VERSION" ] && [ "$CUSTOM_VERSION" = "$RESUMABLE_VERSION" ]; then
+            RESUMABLE_CUSTOM=true
+          fi
+          if [ -n "$CUSTOM_VERSION" ]; then
+            if [ "$CUSTOM_VERSION" = "$CURRENT_VERSION" ] && [ "$RESUMABLE_CUSTOM" != true ]; then
+              echo "custom_version must differ from the source version unless this is an exact resumable release attempt" >&2
+              exit 1
+            fi
+            if git rev-parse --git-dir >/dev/null 2>&1 && \
+              git show-ref --verify --quiet "refs/tags/v${CUSTOM_VERSION}" && \
+              [ "$RESUMABLE_CUSTOM" != true ]; then
+              echo "custom_version v${CUSTOM_VERSION} already has a conflicting release tag" >&2
+              exit 1
+            fi
+          fi
+
           # Every workspace package this release publishes. Used both by the
           # collision guard below and by the version-sync script, so the two can
           # never disagree about what a release covers.
@@ -277,7 +301,6 @@ jobs:
               pkg.version = process.env.BASELINE_VERSION;
               fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
             '
-            RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
             if [ "$RUN_ATTEMPT" -gt 1 ] && [ -n "$RESUMABLE_VERSION" ]; then
               echo "Reusing resumable release tag version: $RESUMABLE_VERSION"
               npm version "$RESUMABLE_VERSION" --no-git-tag-version --allow-same-version

@@ -20,6 +20,10 @@ import {
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import {
+  RELEASE_BINARY_NAMES,
+  RELEASE_PACKAGE_NAMES,
+} from "./create-release-attestation.mjs";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const WORKFLOW = readFileSync(
@@ -98,13 +102,26 @@ function runDispatchValidation({ packageInput, dryRunInput }) {
   }
 }
 
-function runVersionStep({ customVersion = "", versionType = "patch" }) {
+function runVersionStep({
+  customVersion = "",
+  versionType = "patch",
+  npmStub = false,
+}) {
   const dir = mkdtempSync(join(tmpdir(), "relayfile-version-"));
   const output = join(dir, "output");
   writeFileSync(
     join(dir, "package.json"),
     JSON.stringify({ name: "relayfile-test-release", version: "1.2.3" }) + "\n",
   );
+  if (npmStub) {
+    const bin = join(dir, "bin");
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, "npm"),
+      '#!/bin/sh\nif [ "${1:-}" = publish ]; then touch "$PWD/npm-published"; fi\nexit 0\n',
+    );
+    chmodSync(join(bin, "npm"), 0o755);
+  }
   try {
     const result = runBash(extractStepRun("Version all packages"), {
       cwd: dir,
@@ -115,19 +132,26 @@ function runVersionStep({ customVersion = "", versionType = "patch" }) {
         NPM_TAG: "next",
         GITHUB_OUTPUT: output,
         GITHUB_WORKSPACE: REPO,
+        ...(npmStub ? { PATH: `${join(dir, "bin")}:${process.env.PATH}` } : {}),
       },
     });
+    const published = existsSync(join(dir, "npm-published"));
     return {
       ...result,
       packageJson: readFileSync(join(dir, "package.json"), "utf8"),
       outputFile: existsSync(output) ? readFileSync(output, "utf8") : "",
+      published,
     };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-function runVersionStepAfterTaggedRelease() {
+function runVersionStepAfterTaggedRelease({
+  customVersion = "",
+  runAttempt = "1",
+  tagMetadata = false,
+} = {}) {
   const dir = mkdtempSync(join(tmpdir(), "relayfile-version-tag-"));
   const output = join(dir, "output");
   git(dir, "init", "-q");
@@ -154,19 +178,71 @@ function runVersionStepAfterTaggedRelease() {
   git(dir, "commit", "-qam", "chore(release): v1.2.4");
   const releaseCommit = git(dir, "rev-parse", "HEAD");
   const releaseTree = git(dir, "rev-parse", "HEAD^{tree}");
-  git(dir, "tag", "-a", "v1.2.4", releaseCommit, "-m", "Release v1.2.4");
+  const tagArgs = [
+    "tag",
+    "-a",
+    "v1.2.4",
+    releaseCommit,
+    "-m",
+    "Release v1.2.4",
+  ];
+  if (tagMetadata) {
+    tagArgs.push(
+      "-m",
+      `source-sha=${sourceSha}`,
+      "-m",
+      `tag-tree=${releaseTree}`,
+      "-m",
+      "workflow-run-id=12345",
+      "-m",
+      "workflow-run-attempt=1",
+    );
+  }
+  git(dir, ...tagArgs);
   const releaseAttestation = join(dir, "release-attestation.json");
   writeFileSync(
     releaseAttestation,
     JSON.stringify({
       kind: "relayfileRelease",
+      schemaVersion: 1,
       sourceSha,
       version: "1.2.4",
       producer: {
         repository: "AgentWorkforce/relayfile",
+        workflow: "Publish Package",
         workflowPath: ".github/workflows/publish.yml",
+        workflowRunId: "12345",
+        workflowRunAttempt: "1",
       },
       tag: { name: "v1.2.4", commit: releaseCommit, tree: releaseTree },
+      versions: Object.fromEntries(
+        RELEASE_PACKAGE_NAMES.map((name) => [name, "1.2.4"]),
+      ),
+      packages: RELEASE_PACKAGE_NAMES.map((name) => ({
+        sourceSha,
+        package: {
+          name,
+          version: "1.2.4",
+          status: "already-published",
+          local: {
+            file: "package.tgz",
+            size: 1,
+            sha256: "a".repeat(64),
+            integrity: "sha512-local",
+            shasum: "sha1-local",
+          },
+          registry: {
+            name,
+            version: "1.2.4",
+            integrity: "sha512-local",
+            shasum: "sha1-local",
+          },
+        },
+      })),
+      binaries: RELEASE_BINARY_NAMES.map((file) => ({
+        file,
+        sha256: "b".repeat(64),
+      })),
     }) + "\n",
   );
   const fakeGhDir = join(dir, "fake-gh");
@@ -198,16 +274,16 @@ exit 1
   const result = runBash(extractStepRun("Version all packages"), {
     cwd: dir,
     env: {
-      CUSTOM_VERSION: "",
+      CUSTOM_VERSION: customVersion,
       VERSION_TYPE: "patch",
       PREID: "beta",
       NPM_TAG: "next",
       GITHUB_OUTPUT: output,
       GITHUB_WORKSPACE: REPO,
       SOURCE_SHA: sourceSha,
-      GITHUB_RUN_ATTEMPT: "1",
+      GITHUB_RUN_ATTEMPT: runAttempt,
       GITHUB_RUN_ID: "12345",
-      RELEASE_RUN_ATTEMPT: "1",
+      RELEASE_RUN_ATTEMPT: runAttempt,
       RELEASE_RUN_ID: "12345",
       RELEASE_REPOSITORY: "AgentWorkforce/relayfile",
       FAKE_RELEASE_ATTESTATION: releaseAttestation,
@@ -423,10 +499,45 @@ test("version step executes strict custom and bump validation", () => {
   assert.match(invalidBump.packageJson, /"version"\s*:\s*"1\.2\.3"/);
 });
 
+test("same-source custom versions fail before any package publish", () => {
+  const result = runVersionStep({
+    customVersion: "1.2.3",
+    npmStub: true,
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(
+    result.stdout,
+    /custom_version must differ from the source version/,
+  );
+  assert.equal(result.published, false);
+  const guard = WORKFLOW.indexOf(
+    "custom_version must differ from the source version",
+  );
+  const build = WORKFLOW.indexOf("- name: Build packages");
+  const reconcile = WORKFLOW.indexOf("scripts/release/reconcile-package.mjs");
+  assert.ok(guard >= 0 && guard < build && guard < reconcile);
+});
+
 test("next dispatch bumps beyond a prior trusted release tag", () => {
   const result = runVersionStepAfterTaggedRelease();
   assert.equal(result.status, 0, result.stdout);
   assert.match(result.packageJson, /"version"\s*:\s*"1\.2\.5"/);
+});
+
+test("custom versions colliding with an existing tag fail before publication", () => {
+  const result = runVersionStepAfterTaggedRelease({ customVersion: "1.2.4" });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout, /already has a conflicting release tag/);
+});
+
+test("only an exact verified same-workflow rerun may reuse a tagged custom version", () => {
+  const result = runVersionStepAfterTaggedRelease({
+    customVersion: "1.2.4",
+    runAttempt: "2",
+    tagMetadata: true,
+  });
+  assert.equal(result.status, 0, result.stdout);
+  assert.match(result.packageJson, /"version"\s*:\s*"1\.2\.4"/);
 });
 
 test("reconciliation CLI shell harness covers canonical E404, collision, and outage", () => {

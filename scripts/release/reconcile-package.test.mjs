@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import {
   comparePackageContent,
   normalizePackRecord,
+  normalizeRegistryRecord,
   registryErrorKind,
   reconcilePackage,
 } from "./reconcile-package.mjs";
@@ -391,4 +392,25 @@ test("normalizes npm view dist JSON array output", async () => {
   });
   assert.equal(result.package.status, "already-published");
   rmSync(dir, { recursive: true, force: true });
+});
+
+test("rejects ambiguous or wrong-version registry records", () => {
+  assert.equal(
+    normalizeRegistryRecord(
+      [{ integrity: "sha512-local" }, { integrity: "sha512-other" }],
+      { name: "@relayfile/test", version: "1.2.3" },
+    ),
+    null,
+  );
+  assert.equal(
+    normalizeRegistryRecord(
+      {
+        name: "@relayfile/test",
+        version: "1.2.4",
+        integrity: "sha512-local",
+      },
+      { name: "@relayfile/test", version: "1.2.3" },
+    ),
+    null,
+  );
 });

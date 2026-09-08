@@ -22,6 +22,10 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import {
+  RELEASE_BINARY_NAMES,
+  RELEASE_PACKAGE_NAMES,
+} from "./create-release-attestation.mjs";
 
 export const RELEASE_REPOSITORY = "AgentWorkforce/relayfile";
 export const RELEASE_WORKFLOW_PATH = ".github/workflows/publish.yml";
@@ -62,6 +66,7 @@ export const RELEASE_COMMIT_PATHS = new Set([
 const VERSION =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
 const SHA = /^[0-9a-f]{40}$/;
+const SHA256 = /^[0-9a-f]{64}$/;
 const RUN_ID = /^\d+$/;
 
 export function parseStrictVersion(value) {
@@ -347,13 +352,108 @@ export function validateReleaseAttestation(
   } = {},
 ) {
   if (!attestation || attestation.kind !== "relayfileRelease") return false;
+  if (attestation.schemaVersion !== 1) return false;
   if (attestation.sourceSha !== candidate.parent) return false;
   if (attestation.version !== candidate.version.raw) return false;
   if (attestation.tag?.name !== candidate.tag) return false;
   if (attestation.tag?.commit !== candidate.commit) return false;
   if (attestation.tag?.tree !== candidate.tree) return false;
   if (attestation.producer?.repository !== repository) return false;
+  if (attestation.producer?.workflow !== "Publish Package") return false;
   if (attestation.producer?.workflowPath !== workflowPath) return false;
+  if (!RUN_ID.test(String(attestation.producer?.workflowRunId ?? "")))
+    return false;
+  if (!RUN_ID.test(String(attestation.producer?.workflowRunAttempt ?? "")))
+    return false;
+  if (
+    !attestation.versions ||
+    typeof attestation.versions !== "object" ||
+    Array.isArray(attestation.versions) ||
+    Object.keys(attestation.versions).length !== RELEASE_PACKAGE_NAMES.length
+  ) {
+    return false;
+  }
+  const packageNames = new Set();
+  if (
+    !Array.isArray(attestation.packages) ||
+    attestation.packages.length !== RELEASE_PACKAGE_NAMES.length
+  ) {
+    return false;
+  }
+  for (const item of attestation.packages) {
+    const record = item?.package;
+    const name = record?.name;
+    const local = record?.local;
+    const registry = record?.registry;
+    const digestFieldsAreStrings = [
+      local?.integrity,
+      local?.shasum,
+      registry?.integrity,
+      registry?.shasum,
+    ].every(
+      (value) =>
+        value === null || value === undefined || typeof value === "string",
+    );
+    if (
+      !RELEASE_PACKAGE_NAMES.includes(name) ||
+      packageNames.has(name) ||
+      item.sourceSha !== candidate.parent ||
+      record.version !== candidate.version.raw ||
+      !["published", "already-published"].includes(record.status) ||
+      !local ||
+      typeof local.file !== "string" ||
+      !local.file ||
+      !Number.isInteger(local.size) ||
+      local.size < 0 ||
+      !SHA256.test(String(local.sha256 ?? "")) ||
+      !registry ||
+      registry.name !== name ||
+      registry.version !== record.version ||
+      !digestFieldsAreStrings ||
+      (!registry.integrity && !registry.shasum)
+    ) {
+      return false;
+    }
+    const sharedIntegrity = record.registry.integrity && record.local.integrity;
+    const sharedShasum = record.registry.shasum && record.local.shasum;
+    if (
+      (!sharedIntegrity && !sharedShasum) ||
+      (sharedIntegrity &&
+        record.registry.integrity !== record.local.integrity) ||
+      (sharedShasum && record.registry.shasum !== record.local.shasum)
+    ) {
+      return false;
+    }
+    packageNames.add(name);
+  }
+  if (
+    RELEASE_PACKAGE_NAMES.some((name) => !packageNames.has(name)) ||
+    Object.entries(attestation.versions).some(
+      ([name, version]) =>
+        !RELEASE_PACKAGE_NAMES.includes(name) ||
+        version !== candidate.version.raw,
+    )
+  ) {
+    return false;
+  }
+  if (
+    !Array.isArray(attestation.binaries) ||
+    attestation.binaries.length !== RELEASE_BINARY_NAMES.length
+  ) {
+    return false;
+  }
+  const binaryNames = new Set();
+  for (const binary of attestation.binaries) {
+    if (
+      !RELEASE_BINARY_NAMES.includes(binary?.file) ||
+      binaryNames.has(binary?.file) ||
+      !SHA256.test(String(binary?.sha256 ?? ""))
+    ) {
+      return false;
+    }
+    binaryNames.add(binary.file);
+  }
+  if (binaryNames.size !== RELEASE_BINARY_NAMES.length) return false;
   return true;
 }
 
@@ -515,7 +615,14 @@ export function resolveReleaseBaseline({
       ? latest.version.raw
       : current.raw;
   const resumable =
-    latest && latest.parent === sourceSha ? latest.version.raw : "";
+    latest &&
+    sameAttemptRecoveryAllowed(latest, {
+      sourceSha,
+      currentRunId,
+      currentRunAttempt,
+    })
+      ? latest.version.raw
+      : "";
   return {
     baselineVersion: baseline,
     resumableVersion: resumable,

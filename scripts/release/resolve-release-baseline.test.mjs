@@ -6,6 +6,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import {
+  RELEASE_BINARY_NAMES,
+  RELEASE_PACKAGE_NAMES,
+} from "./create-release-attestation.mjs";
+import {
   RELEASE_PACKAGE_PATHS,
   RELEASE_REPOSITORY,
   RELEASE_WORKFLOW_PATH,
@@ -14,19 +18,52 @@ import {
 } from "./resolve-release-baseline.mjs";
 
 function attestationFor(candidate, overrides = {}) {
+  const packages = RELEASE_PACKAGE_NAMES.map((name) => ({
+    sourceSha: candidate.parent,
+    package: {
+      name,
+      version: candidate.version.raw,
+      status: "already-published",
+      local: {
+        file: "package.tgz",
+        size: 1,
+        sha256: "a".repeat(64),
+        integrity: "sha512-local",
+        shasum: "sha1-local",
+      },
+      registry: {
+        name,
+        version: candidate.version.raw,
+        integrity: "sha512-local",
+        shasum: "sha1-local",
+      },
+    },
+  }));
   return {
+    schemaVersion: 1,
     kind: "relayfileRelease",
     sourceSha: candidate.parent,
     version: candidate.version.raw,
     producer: {
       repository: RELEASE_REPOSITORY,
+      workflow: "Publish Package",
       workflowPath: RELEASE_WORKFLOW_PATH,
+      workflowRunId: "123",
+      workflowRunAttempt: "1",
     },
     tag: {
       name: candidate.tag,
       commit: candidate.commit,
       tree: candidate.tree,
     },
+    versions: Object.fromEntries(
+      RELEASE_PACKAGE_NAMES.map((name) => [name, candidate.version.raw]),
+    ),
+    packages,
+    binaries: RELEASE_BINARY_NAMES.map((file) => ({
+      file,
+      sha256: "b".repeat(64),
+    })),
     ...overrides,
   };
 }
@@ -78,7 +115,7 @@ test("next dispatch advances from a trusted release tag not merged to source", (
   });
   assert.equal(result.baselineVersion, "1.2.4");
   assert.equal(result.latestTag, "v1.2.4");
-  assert.equal(result.resumableVersion, "1.2.4");
+  assert.equal(result.resumableVersion, "");
   rmSync(cwd, { recursive: true, force: true });
 });
 
@@ -165,6 +202,8 @@ test("missing, invalid, and mismatched external attestations fail closed", () =>
     ],
     ["wrong source", { sourceSha: "f".repeat(40) }],
     ["wrong tag", { tag: { name: "v9.9.9" } }],
+    ["missing packages", { packages: [] }],
+    ["missing binaries", { binaries: [] }],
   ];
   for (const [name, value] of failures) {
     const { cwd, sourceSha } = sandboxWithPriorRelease();

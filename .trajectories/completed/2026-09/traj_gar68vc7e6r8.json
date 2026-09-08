@@ -1,0 +1,25 @@
+{
+  "id": "traj_gar68vc7e6r8",
+  "version": 1,
+  "task": {
+    "title": "Repair Relayfile release snapshot safeguards: reject unsafe custom versions, ambiguous registry records, and incomplete external attestations"
+  },
+  "status": "completed",
+  "startedAt": "2026-09-08T19:22:07.834Z",
+  "completedAt": "2026-09-08T19:22:28.321Z",
+  "agents": [],
+  "chapters": [],
+  "retrospective": {
+    "summary": "Repaired release version/tag gates, strict registry normalization, and full signed attestation schema validation; Node22 suite/actionlint/Prettier/diff/secrets passed.",
+    "approach": "Standard approach",
+    "confidence": 0.96
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/private/tmp/relayfile-release-snapshot-fix-0908",
+  "tags": [],
+  "_trace": {
+    "startRef": "9f48d6e5497ade218183eca737bc80e6a3a52c33",
+    "endRef": "9f48d6e5497ade218183eca737bc80e6a3a52c33"
+  }
+}

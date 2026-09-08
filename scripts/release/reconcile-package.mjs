@@ -118,10 +118,17 @@ export function registryErrorKind(result) {
 }
 
 export function normalizeRegistryRecord(raw, { name, version }) {
+  if (Array.isArray(raw) && raw.length !== 1) return null;
   const value = Array.isArray(raw) ? raw[0] : raw;
   const record =
     value?.dist && typeof value.dist === "object" ? value.dist : value;
   if (!record || typeof record !== "object") return null;
+  if (
+    (record.name !== undefined && record.name !== name) ||
+    (record.version !== undefined && record.version !== version)
+  ) {
+    return null;
+  }
   const integrity =
     typeof record.integrity === "string" ? record.integrity : null;
   const shasum = typeof record.shasum === "string" ? record.shasum : null;
