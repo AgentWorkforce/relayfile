@@ -48,6 +48,41 @@ func writeDraft(t *testing.T, store *Store, workspaceID, path, content string) W
 	return result
 }
 
+// writeProtectedDraft writes a draft carrying a file-level ACL deny rule, so
+// tests can prove the rule survives into the delete event's ACL snapshot
+// after the draft is renamed/removed and its File record is gone from
+// ws.Files.
+func writeProtectedDraft(t *testing.T, store *Store, workspaceID, path, content string, permissions []string) WriteResult {
+	t.Helper()
+	result, err := store.WriteFile(WriteRequest{
+		WorkspaceID:   workspaceID,
+		Path:          path,
+		IfMatch:       "0",
+		ContentType:   "application/json",
+		Content:       content,
+		Semantics:     FileSemantics{Permissions: permissions},
+		CorrelationID: "corr_draft_write",
+	})
+	if err != nil {
+		t.Fatalf("protected draft write failed: %v", err)
+	}
+	return result
+}
+
+// deleteEventForPath returns the (last) file.deleted event recorded for path,
+// or nil if none was found.
+func deleteEventForPath(t *testing.T, store *Store, workspaceID, path string) *Event {
+	t.Helper()
+	var found *Event
+	for _, event := range eventsForPath(t, store, workspaceID, path) {
+		if event.Type == "file.deleted" {
+			e := event
+			found = &e
+		}
+	}
+	return found
+}
+
 func opCount(t *testing.T, store *Store, workspaceID string) int {
 	t.Helper()
 	feed, err := store.ListOperations(workspaceID, "", "", "", "", 1000)
@@ -396,6 +431,15 @@ func TestRenamedDraftConvergesWithLaterProviderSync(t *testing.T) {
 
 func seedResidueFile(t *testing.T, store *Store, workspaceID, path, content string) {
 	t.Helper()
+	seedResidueFileWithPermissions(t, store, workspaceID, path, content, nil)
+}
+
+// seedResidueFileWithPermissions seeds residue carrying a file-level ACL rule
+// directly, bypassing WriteFile/writeback bookkeeping — mirroring how real
+// residue accumulates (the op that created it is long gone by restart time)
+// while still exercising the ACL-snapshot code path under sweep.
+func seedResidueFileWithPermissions(t *testing.T, store *Store, workspaceID, path, content string, permissions []string) {
+	t.Helper()
 	store.mu.Lock()
 	ws := store.ensureWorkspaceLocked(workspaceID)
 	revision := store.nextRevisionLocked()
@@ -405,6 +449,7 @@ func seedResidueFile(t *testing.T, store *Store, workspaceID, path, content stri
 		ContentType: "application/json",
 		Content:     content,
 		Provider:    inferProviderFromPath(path),
+		Semantics:   FileSemantics{Permissions: permissions},
 	}
 	ws.Revision = revision
 	store.mu.Unlock()
@@ -668,4 +713,188 @@ func TestDraftBasenameDetection(t *testing.T) {
 	if !strings.Contains(basenameOf(cases[0].path), " ") {
 		t.Fatalf("sanity: draftFile space-form fixture lost its space")
 	}
+}
+
+// --- ACL snapshot on classification-exempt deletes (ACL-423) ---
+//
+// reconcileAckedDraftLocked and removeDraftLocked emit file.deleted directly
+// via appendWorkspaceEventLocked, bypassing recordWriteLocked/
+// recordWriteWithACLPermissionsLocked entirely (that bypass is the whole
+// point — see the file-level doc comment). Before this fix that meant they
+// never populated Event.ACLPermissions, so httpapi.eventVisibleToClaims fell
+// through to checking the CURRENT filesystem state at the (now-deleted)
+// path — which can never see a file-level deny rule that lived only on the
+// File record that was just removed from ws.Files. A file-level-denied agent
+// could therefore learn that a protected draft existed and was deleted, over
+// both the HTTP /fs/events feed and the live/catch-up websocket, despite
+// never having been able to read it. These tests pin that the ACL snapshot
+// captured before deletion (a) is present and (b) actually carries the
+// deny rule, for every producer that funnels through removeDraftLocked: the
+// ack-time rename, the ack-time "canonical already materialized" removal,
+// and the residue sweep. httpapi-level adversarial coverage (denied agent
+// really can't see the event over HTTP/WS) lives in
+// internal/httpapi/server_test.go, which cannot reach these unexported
+// producers directly.
+
+func TestAckRenameEmitsACLSnapshotForProtectedDraft(t *testing.T) {
+	store := newExternalStore(t)
+	draftPath := "/slack/channels/C0ALQ06AAUT/messages/messages " + draftUUIDA + ".json"
+	denyRule := "deny:agent:Limited"
+	result := writeProtectedDraft(t, store, "ws_1", draftPath, `{"text":"hi"}`, []string{denyRule})
+
+	if _, err := store.AcknowledgeWriteback("ws_1", result.OpID, WritebackAck{
+		Success:    true,
+		ExternalID: "1780018871.351819",
+	}, "corr_ack_1"); err != nil {
+		t.Fatalf("ack failed: %v", err)
+	}
+
+	event := deleteEventForPath(t, store, "ws_1", draftPath)
+	if event == nil {
+		t.Fatalf("expected a file.deleted event for renamed draft %s", draftPath)
+	}
+	if len(event.ACLPermissions) == 0 {
+		t.Fatalf("ack rename delete event lost the draft's ACL snapshot: %+v", event)
+	}
+	var sawDeny bool
+	for _, rule := range event.ACLPermissions {
+		if rule == denyRule {
+			sawDeny = true
+		}
+	}
+	if !sawDeny {
+		t.Fatalf("ack rename delete event snapshot missing %q, got %v", denyRule, event.ACLPermissions)
+	}
+}
+
+func TestAckRemovalWhenCanonicalAlreadyMaterializedEmitsACLSnapshotForProtectedDraft(t *testing.T) {
+	store := newExternalStore(t)
+	draftPath := "/slack/channels/C0ALQ06AAUT/messages/messages " + draftUUIDA + ".json"
+	denyRule := "deny:agent:Limited"
+	result := writeProtectedDraft(t, store, "ws_1", draftPath, `{"text":"hi"}`, []string{denyRule})
+
+	canonicalPath := "/slack/channels/C0ALQ06AAUT/messages/1780018871_351819.json"
+	store.mu.Lock()
+	ws := store.ensureWorkspaceLocked("ws_1")
+	store.applyProviderUpsertLocked(ws, "slack", ApplyAction{
+		Type:             ActionFileUpsert,
+		Path:             canonicalPath,
+		Content:          `{"text":"hi","ts":"1780018871.351819"}`,
+		ContentType:      "application/json",
+		ProviderObjectID: "1780018871.351819",
+	}, "corr_sync_1")
+	store.mu.Unlock()
+
+	resp, err := store.AcknowledgeWriteback("ws_1", result.OpID, WritebackAck{
+		Success:    true,
+		ExternalID: "1780018871.351819",
+	}, "corr_ack_1")
+	if err != nil {
+		t.Fatalf("ack failed: %v", err)
+	}
+	draft, _ := resp["draft"].(map[string]any)
+	if draft == nil || draft["action"] != "removed" {
+		t.Fatalf("expected removed disposition (this test exercises removeDraftLocked via the ack path), got %v", resp)
+	}
+
+	event := deleteEventForPath(t, store, "ws_1", draftPath)
+	if event == nil {
+		t.Fatalf("expected a file.deleted event for removed draft %s", draftPath)
+	}
+	if len(event.ACLPermissions) == 0 {
+		t.Fatalf("ack removal delete event lost the draft's ACL snapshot: %+v", event)
+	}
+	var sawDeny bool
+	for _, rule := range event.ACLPermissions {
+		if rule == denyRule {
+			sawDeny = true
+		}
+	}
+	if !sawDeny {
+		t.Fatalf("ack removal delete event snapshot missing %q, got %v", denyRule, event.ACLPermissions)
+	}
+}
+
+func TestSweepAppliedRemovalEmitsACLSnapshotForProtectedResidue(t *testing.T) {
+	store := newExternalStore(t)
+	denyRule := "deny:agent:Limited"
+	residue := "/slack/channels/C0ALQ06AAUT/messages/messages " + draftUUIDA + ".json"
+	seedResidueFileWithPermissions(t, store, "ws_1", residue, `{"text":"old"}`, []string{denyRule})
+
+	result, err := store.SweepWritebackDrafts("ws_1", SweepDraftsRequest{
+		Apply:         true,
+		CorrelationID: "corr_sweep_1",
+	})
+	if err != nil {
+		t.Fatalf("sweep failed: %v", err)
+	}
+	if len(result.Removed) != 1 || result.Removed[0].Path != residue {
+		t.Fatalf("expected the protected residue removed, got %v", result.Removed)
+	}
+
+	event := deleteEventForPath(t, store, "ws_1", residue)
+	if event == nil {
+		t.Fatalf("expected a file.deleted event for swept residue %s", residue)
+	}
+	if len(event.ACLPermissions) == 0 {
+		t.Fatalf("sweep delete event lost the residue's ACL snapshot: %+v", event)
+	}
+	var sawDeny bool
+	for _, rule := range event.ACLPermissions {
+		if rule == denyRule {
+			sawDeny = true
+		}
+	}
+	if !sawDeny {
+		t.Fatalf("sweep delete event snapshot missing %q, got %v", denyRule, event.ACLPermissions)
+	}
+}
+
+// TestUnrestrictedDraftDeletesCarryNonNilACLSnapshot guards the invariant
+// httpapi.eventVisibleToClaims now depends on for fail-closed legacy
+// handling: Event.ACLPermissions must be non-nil (even if empty) for every
+// file.deleted event this version's code computed a snapshot for, so nil
+// unambiguously means "no snapshot was ever computed" (legacy/pre-migration
+// or a producer bug) rather than "computed, and no ACL rule applied". If a
+// draft-delete producer regresses to leaving ACLPermissions nil for the
+// ordinary unrestricted case, httpapi would now wrongly treat every routine
+// draft deletion as an unverifiable legacy event and hide it from everyone.
+func TestUnrestrictedDraftDeletesCarryNonNilACLSnapshot(t *testing.T) {
+	t.Run("ack_rename", func(t *testing.T) {
+		store := newExternalStore(t)
+		draftPath := "/slack/channels/C0ALQ06AAUT/messages/messages " + draftUUIDA + ".json"
+		result := writeDraft(t, store, "ws_1", draftPath, `{"text":"hi"}`)
+		if _, err := store.AcknowledgeWriteback("ws_1", result.OpID, WritebackAck{
+			Success:    true,
+			ExternalID: "1780018871.351819",
+		}, "corr_ack_1"); err != nil {
+			t.Fatalf("ack failed: %v", err)
+		}
+		event := deleteEventForPath(t, store, "ws_1", draftPath)
+		if event == nil {
+			t.Fatalf("expected a file.deleted event for renamed draft %s", draftPath)
+		}
+		if event.ACLPermissions == nil {
+			t.Fatalf("unrestricted ack-rename delete event has nil ACLPermissions: httpapi will now wrongly treat it as an unverifiable legacy event and hide it")
+		}
+	})
+
+	t.Run("sweep", func(t *testing.T) {
+		store := newExternalStore(t)
+		residue := "/slack/channels/C0ALQ06AAUT/messages/messages " + draftUUIDA + ".json"
+		seedResidueFile(t, store, "ws_1", residue, `{"text":"old"}`)
+		if _, err := store.SweepWritebackDrafts("ws_1", SweepDraftsRequest{
+			Apply:         true,
+			CorrelationID: "corr_sweep_1",
+		}); err != nil {
+			t.Fatalf("sweep failed: %v", err)
+		}
+		event := deleteEventForPath(t, store, "ws_1", residue)
+		if event == nil {
+			t.Fatalf("expected a file.deleted event for swept residue %s", residue)
+		}
+		if event.ACLPermissions == nil {
+			t.Fatalf("unrestricted sweep delete event has nil ACLPermissions: httpapi will now wrongly treat it as an unverifiable legacy event and hide it")
+		}
+	})
 }

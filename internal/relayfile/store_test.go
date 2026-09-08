@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1318,6 +1319,34 @@ func TestListTreePaginatesBoundedEntries(t *testing.T) {
 	}
 }
 
+func TestListTreeLargeWorkspaceRetainsOnlyPageEntries(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	const workspaceID = "ws_tree_large_bounded"
+	const fileCount = 5000
+	writes := make([]BulkWriteFile, 0, fileCount)
+	for index := 0; index < fileCount; index++ {
+		writes = append(writes, BulkWriteFile{
+			Path:        fmt.Sprintf("/large/File%05d.md", index),
+			ContentType: "text/markdown",
+			Content:     "x",
+		})
+	}
+	if written, _, errs := store.BulkWrite(workspaceID, writes); written != fileCount || len(errs) != 0 {
+		t.Fatalf("seed large tree failed: written=%d errs=%+v", written, errs)
+	}
+	page, err := store.ListTree(workspaceID, "/large", 1, "")
+	if err != nil {
+		t.Fatalf("ListTree: %v", err)
+	}
+	if len(page.Entries) != maxTreeEntriesPerPage || page.TotalFiles != fileCount {
+		t.Fatalf("unexpected large tree page: entries=%d total=%d", len(page.Entries), page.TotalFiles)
+	}
+	if page.NextCursor == nil || *page.NextCursor != "/large/File00999.md" {
+		t.Fatalf("unexpected large tree cursor: %v", page.NextCursor)
+	}
+}
+
 func TestQueryFilesSupportsSemanticFilters(t *testing.T) {
 	store := NewStore()
 	t.Cleanup(store.Close)
@@ -1676,6 +1705,309 @@ func TestProviderUpsertWithoutPathUsesObjectIdentity(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("expected object-identity upsert without path to update existing projected file")
+}
+
+func TestProviderUpsertWithoutPathRejectsStaleIndexIdentity(t *testing.T) {
+	const provider = "external"
+	const objectID = "object_target"
+	const stalePath = "/external/wrong.md"
+
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	store.mu.Lock()
+	ws := store.ensureWorkspaceLocked("ws_provider_upsert_stale_index")
+	ws.Files[stalePath] = File{
+		Path:             stalePath,
+		Content:          "wrong object must survive",
+		ContentType:      "text/markdown",
+		Provider:         provider,
+		ProviderObjectID: "different_object",
+	}
+	ws.ProviderIndex[providerObjectKey(provider, objectID)] = stalePath
+	store.applyProviderUpsertLocked(ws, provider, ApplyAction{
+		Type:             ActionFileUpsert,
+		ProviderObjectID: objectID,
+		Content:          "target content",
+	}, "corr_provider_upsert_stale_index")
+	gotFiles := make(map[string]File, len(ws.Files))
+	for path, file := range ws.Files {
+		gotFiles[path] = file
+	}
+	gotPath := ws.ProviderIndex[providerObjectKey(provider, objectID)]
+	store.mu.Unlock()
+
+	wrong, ok := gotFiles[stalePath]
+	if !ok || wrong.ProviderObjectID != "different_object" || wrong.Content != "wrong object must survive" {
+		t.Fatalf("stale index target was overwritten: files=%+v", gotFiles)
+	}
+	if gotPath == "" || gotPath == stalePath {
+		t.Fatalf("pathless upsert trusted stale index: provider index=%q", gotPath)
+	}
+	target, ok := gotFiles[gotPath]
+	if !ok || target.ProviderObjectID != objectID || target.Content != "target content" {
+		t.Fatalf("target identity was not materialized safely: path=%q files=%+v", gotPath, gotFiles)
+	}
+}
+
+func TestProviderUpsertWithoutPathDisambiguatesSanitizedIDCollision(t *testing.T) {
+	const provider = "external"
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	store.mu.Lock()
+	ws := store.ensureWorkspaceLocked("ws_provider_upsert_collision")
+	for _, tc := range []struct {
+		objectID string
+		content  string
+	}{
+		{objectID: "a/b", content: "slash identity"},
+		{objectID: "a_b", content: "underscore identity"},
+	} {
+		store.applyProviderUpsertLocked(ws, provider, ApplyAction{
+			Type:             ActionFileUpsert,
+			ProviderObjectID: tc.objectID,
+			Content:          tc.content,
+		}, "corr_provider_upsert_collision")
+	}
+	firstPath := ws.ProviderIndex[providerObjectKey(provider, "a/b")]
+	secondPath := ws.ProviderIndex[providerObjectKey(provider, "a_b")]
+	first := ws.Files[firstPath]
+	second := ws.Files[secondPath]
+	store.mu.Unlock()
+
+	if firstPath != fallbackProviderPath(provider, "a/b") {
+		t.Fatalf("first legacy projection changed unexpectedly: %q", firstPath)
+	}
+	if secondPath == "" || secondPath == firstPath {
+		t.Fatalf("sanitized object IDs collided at %q", secondPath)
+	}
+	if first.ProviderObjectID != "a/b" || first.Content != "slash identity" {
+		t.Fatalf("first object was overwritten: %+v", first)
+	}
+	if second.ProviderObjectID != "a_b" || second.Content != "underscore identity" {
+		t.Fatalf("second object was not materialized: %+v", second)
+	}
+
+	// A repeated pathless update must remain on the same deterministic
+	// disambiguated projection rather than creating another collision path.
+	store.mu.Lock()
+	ws = store.ensureWorkspaceLocked("ws_provider_upsert_collision")
+	store.applyProviderUpsertLocked(ws, provider, ApplyAction{
+		Type:             ActionFileUpsert,
+		ProviderObjectID: "a_b",
+		Content:          "underscore identity updated",
+	}, "corr_provider_upsert_collision_update")
+	updatedPath := ws.ProviderIndex[providerObjectKey(provider, "a_b")]
+	updated := ws.Files[updatedPath]
+	store.mu.Unlock()
+	if updatedPath != secondPath || updated.Content != "underscore identity updated" {
+		t.Fatalf("repeated pathless update moved collision-safe projection: path=%q file=%+v", updatedPath, updated)
+	}
+}
+
+func TestProviderUpsertWithoutPathFailsClosedOnAmbiguousIdentity(t *testing.T) {
+	const provider = "external"
+	const objectID = "object_ambiguous"
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	store.mu.Lock()
+	ws := store.ensureWorkspaceLocked("ws_provider_upsert_ambiguous")
+	for _, path := range []string{"/external/first.md", "/external/second.md"} {
+		ws.Files[path] = File{
+			Path:             path,
+			Content:          "must survive " + path,
+			ContentType:      "text/markdown",
+			Provider:         provider,
+			ProviderObjectID: objectID,
+		}
+	}
+	beforeRevision := ws.Revision
+	store.applyProviderUpsertLocked(ws, provider, ApplyAction{
+		Type:             ActionFileUpsert,
+		ProviderObjectID: objectID,
+		Content:          "must not replace an arbitrary duplicate",
+	}, "corr_provider_upsert_ambiguous")
+	first := ws.Files["/external/first.md"]
+	second := ws.Files["/external/second.md"]
+	events := append([]Event(nil), ws.Events...)
+	gotRevision := ws.Revision
+	store.mu.Unlock()
+
+	if first.Content != "must survive /external/first.md" || second.Content != "must survive /external/second.md" {
+		t.Fatalf("ambiguous pathless upsert mutated a duplicate: first=%+v second=%+v", first, second)
+	}
+	if gotRevision != beforeRevision {
+		t.Fatalf("ambiguous pathless upsert advanced file revision: got %s want %s", gotRevision, beforeRevision)
+	}
+	if len(events) != 1 || events[0].Type != "sync.reconcile" || events[0].Path != "" {
+		t.Fatalf("ambiguous pathless upsert events = %+v, want one pathless sync.reconcile", events)
+	}
+}
+
+func TestProviderDeleteWithoutPathEmitsReconcileControlEvent(t *testing.T) {
+	store := NewStore()
+	t.Cleanup(store.Close)
+	const workspaceID = "ws_provider_pathless_delete"
+	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+		EnvelopeID:  "env_provider_pathless_delete",
+		WorkspaceID: workspaceID,
+		Provider:    "external",
+		DeliveryID:  "delivery_provider_pathless_delete",
+		ReceivedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+		Payload: map[string]any{
+			"event_type":       "file.deleted",
+			"providerObjectId": "object_missing_from_local_index",
+		},
+		CorrelationID: "corr_provider_pathless_delete",
+	})
+	if err != nil {
+		t.Fatalf("pathless delete ingest failed: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		feed, feedErr := store.GetEvents(workspaceID, "", "", 100)
+		if feedErr == nil {
+			for _, event := range feed.Events {
+				if event.Type != "sync.reconcile" {
+					if event.Type == "file.deleted" && strings.TrimSpace(event.Path) == "" {
+						t.Fatalf("pathless provider deletion emitted malformed file.deleted event: %+v", event)
+					}
+					continue
+				}
+				if event.Path != "" || event.Origin != "provider_sync" || event.Provider != "external" {
+					t.Fatalf("unexpected pathless reconcile event: %+v", event)
+				}
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for pathless provider deletion reconciliation event")
+}
+
+func TestProviderDeleteObjectIdentityResolution(t *testing.T) {
+	const provider = "external"
+	const objectID = "obj_delete_resolution"
+
+	tests := []struct {
+		name        string
+		files       map[string]File
+		indexPath   string
+		wantDelete  string
+		wantControl bool
+	}{
+		{
+			name: "unique metadata match repairs missing index",
+			files: map[string]File{
+				"/external/unique.md": {
+					Path:             "/external/unique.md",
+					Provider:         provider,
+					ProviderObjectID: objectID,
+					Semantics:        FileSemantics{Permissions: []string{"deny:agent:limited"}},
+				},
+			},
+			wantDelete: "/external/unique.md",
+		},
+		{
+			name:      "stale index does not delete wrong target",
+			indexPath: "/external/wrong.md",
+			files: map[string]File{
+				"/external/wrong.md": {
+					Path:             "/external/wrong.md",
+					Provider:         provider,
+					ProviderObjectID: "different-object",
+				},
+				"/external/real.md": {
+					Path:             "/external/real.md",
+					Provider:         provider,
+					ProviderObjectID: objectID,
+				},
+			},
+			wantDelete: "/external/real.md",
+		},
+		{
+			name: "ambiguous metadata matches fail closed",
+			files: map[string]File{
+				"/external/one.md": {Path: "/external/one.md", Provider: provider, ProviderObjectID: objectID},
+				"/external/two.md": {Path: "/external/two.md", Provider: provider, ProviderObjectID: objectID},
+			},
+			wantControl: true,
+		},
+		{
+			name: "zero metadata matches fail closed",
+			files: map[string]File{
+				"/external/other.md": {Path: "/external/other.md", Provider: provider, ProviderObjectID: "other-object"},
+			},
+			wantControl: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+			t.Cleanup(store.Close)
+			workspaceID := "ws_provider_delete_resolution_" + strings.ReplaceAll(tc.name, " ", "_")
+
+			store.mu.Lock()
+			ws := store.ensureWorkspaceLocked(workspaceID)
+			ws.Revision = "rev_before_delete"
+			for path, file := range tc.files {
+				ws.Files[path] = file
+			}
+			if tc.indexPath != "" {
+				ws.ProviderIndex[providerObjectKey(provider, objectID)] = tc.indexPath
+			}
+			store.applyProviderDeleteLocked(ws, provider, ApplyAction{
+				Type:             ActionFileDelete,
+				ProviderObjectID: objectID,
+			}, "corr_provider_delete_resolution")
+			gotRevision := ws.Revision
+			gotEvents := append([]Event(nil), ws.Events...)
+			gotFiles := make(map[string]File, len(ws.Files))
+			for path, file := range ws.Files {
+				gotFiles[path] = file
+			}
+			gotIndex := ws.ProviderIndex[providerObjectKey(provider, objectID)]
+			store.mu.Unlock()
+
+			if tc.wantDelete != "" {
+				if _, exists := gotFiles[tc.wantDelete]; exists {
+					t.Fatalf("resolved path %s was not deleted; files=%v", tc.wantDelete, gotFiles)
+				}
+				if gotRevision == "rev_before_delete" {
+					t.Fatal("resolved provider delete did not advance workspace revision")
+				}
+				if gotIndex != "" {
+					t.Fatalf("provider index entry survived resolved delete: %q", gotIndex)
+				}
+				if len(gotEvents) != 1 || gotEvents[0].Type != "file.deleted" || gotEvents[0].Path != tc.wantDelete {
+					t.Fatalf("resolved delete events = %+v", gotEvents)
+				}
+				if gotEvents[0].ACLPermissions == nil {
+					t.Fatal("resolved delete did not preserve a non-nil ACL snapshot")
+				}
+				if tc.name == "unique metadata match repairs missing index" && len(gotEvents[0].ACLPermissions) != 1 {
+					t.Fatalf("ACL snapshot = %v, want one permission", gotEvents[0].ACLPermissions)
+				}
+				if tc.indexPath == "/external/wrong.md" {
+					if _, exists := gotFiles[tc.indexPath]; !exists {
+						t.Fatalf("stale index target was incorrectly deleted: %s", tc.indexPath)
+					}
+				}
+				return
+			}
+
+			if !tc.wantControl {
+				t.Fatal("test case missing expected outcome")
+			}
+			if gotRevision != "rev_before_delete" {
+				t.Fatalf("ambiguous/unresolved delete advanced revision: %q", gotRevision)
+			}
+			if len(gotEvents) != 1 || gotEvents[0].Type != "sync.reconcile" || gotEvents[0].Path != "" {
+				t.Fatalf("ambiguous/unresolved delete events = %+v", gotEvents)
+			}
+		})
+	}
 }
 
 func TestPendingWritebacksRecoveredOnRestart(t *testing.T) {

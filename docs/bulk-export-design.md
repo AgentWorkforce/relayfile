@@ -336,7 +336,7 @@ To prevent missing events between subscribe and the first live event:
 }
 ```
 
-Event types: `file.created`, `file.updated`, `file.deleted`, `dir.created`, `dir.deleted`, `sync.error`, `sync.ignored`, `sync.suppressed`, `sync.stale`, `writeback.failed`, `writeback.succeeded`.
+Event types: `file.created`, `file.updated`, `file.deleted`, `dir.created`, `dir.deleted`, `sync.error`, `sync.ignored`, `sync.suppressed`, `sync.stale`, `sync.reconcile`, `writeback.failed`, `writeback.succeeded`. `sync.reconcile` is a pathless provider-sync control event; mounts must perform an authoritative reconciliation and must not infer a path from it.
 
 **Pong (response to client ping):**
 

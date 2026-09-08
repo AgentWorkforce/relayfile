@@ -184,6 +184,10 @@ type Event struct {
 	Provider      string `json:"provider,omitempty"`
 	CorrelationID string `json:"correlationId"`
 	Timestamp     string `json:"timestamp"`
+	// ACLPermissions is an internal snapshot used to keep delete and rename
+	// events subject to the permissions that governed the file revision. It is
+	// deliberately excluded from the public event payload.
+	ACLPermissions []string `json:"-"`
 }
 
 type EventFeed struct {
@@ -595,12 +599,13 @@ type Store struct {
 }
 
 type workspaceState struct {
-	Revision           string                     `json:"revision,omitempty"`
-	Files              map[string]File            `json:"files"`
-	Events             []Event                    `json:"events"`
-	Ops                map[string]OperationStatus `json:"ops"`
-	ProviderIndex      map[string]string          `json:"providerIndex,omitempty"`
-	ProviderWatermarks map[string]string          `json:"providerWatermarks,omitempty"`
+	Revision              string                     `json:"revision,omitempty"`
+	Files                 map[string]File            `json:"files"`
+	Events                []Event                    `json:"events"`
+	ACLPermissionsByEvent map[string][]string        `json:"aclPermissionsByEvent,omitempty"`
+	Ops                   map[string]OperationStatus `json:"ops"`
+	ProviderIndex         map[string]string          `json:"providerIndex,omitempty"`
+	ProviderWatermarks    map[string]string          `json:"providerWatermarks,omitempty"`
 }
 
 type WritebackQueueItem struct {
@@ -1175,67 +1180,7 @@ func (s *Store) ListTree(workspaceID, path string, depth int, cursor string) (Tr
 		return TreeResponse{Path: normalizePath(path), Entries: []TreeEntry{}, NextCursor: nil}, nil
 	}
 
-	base := normalizePath(path)
-	if depth <= 0 {
-		depth = 1
-	}
-
-	entryMap := map[string]TreeEntry{}
-	totalFiles := 0
-	for filePath, file := range ws.Files {
-		if !withinBase(base, filePath) {
-			continue
-		}
-		rest := strings.TrimPrefix(filePath, base)
-		rest = strings.TrimPrefix(rest, "/")
-		if rest == "" {
-			continue
-		}
-		totalFiles++
-		parts := strings.Split(rest, "/")
-		if len(parts) == 0 {
-			continue
-		}
-		maxLevel := depth
-		if len(parts) < maxLevel {
-			maxLevel = len(parts)
-		}
-		for level := 1; level <= maxLevel; level++ {
-			child := joinPath(base, strings.Join(parts[:level], "/"))
-			if level == len(parts) {
-				entryMap[child] = TreeEntry{
-					Path:             child,
-					Type:             "file",
-					Revision:         file.Revision,
-					ContentHash:      storedContentHashForFile(file),
-					Provider:         file.Provider,
-					ProviderObjectID: file.ProviderObjectID,
-					Size:             int64(len(file.Content)),
-					UpdatedAt:        file.LastEditedAt,
-					PropertyCount:    len(file.Semantics.Properties),
-					RelationCount:    len(file.Semantics.Relations),
-					PermissionCount:  len(file.Semantics.Permissions),
-					CommentCount:     len(file.Semantics.Comments),
-				}
-				continue
-			}
-			if _, exists := entryMap[child]; !exists {
-				entryMap[child] = TreeEntry{Path: child, Type: "dir", Revision: "dir"}
-			}
-		}
-	}
-
-	entries := make([]TreeEntry, 0, len(entryMap))
-	for _, entry := range entryMap {
-		entries = append(entries, entry)
-	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
-	entries, nextCursor, err := paginateTreeEntries(entries, cursor)
-	if err != nil {
-		return TreeResponse{}, err
-	}
-
-	return TreeResponse{Path: base, Entries: entries, NextCursor: nextCursor, TotalFiles: totalFiles}, nil
+	return listTreeFromFiles(ws.Files, path, depth, cursor)
 }
 
 func (s *Store) ReadFile(workspaceID, path string) (File, error) {
@@ -1291,23 +1236,6 @@ func (s *Store) QueryFiles(workspaceID string, req FileQueryRequest) (FileQueryR
 	if workspaceID == "" {
 		return FileQueryResponse{}, ErrInvalidInput
 	}
-	base := normalizePath(req.PathPrefix)
-	if req.PathPrefix == "" {
-		base = "/"
-	}
-	provider := normalizeProvider(req.Provider)
-	relation := strings.TrimSpace(req.Relation)
-	permission := strings.TrimSpace(req.Permission)
-	comment := strings.TrimSpace(req.Comment)
-	limit := req.Limit
-	if limit <= 0 {
-		limit = 100
-	}
-	if limit > 1000 {
-		limit = 1000
-	}
-	properties := normalizeProperties(req.Properties)
-
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -1318,77 +1246,7 @@ func (s *Store) QueryFiles(workspaceID string, req FileQueryRequest) (FileQueryR
 		}
 		return FileQueryResponse{Items: []FileQueryItem{}, NextCursor: nil}, nil
 	}
-	paths := make([]string, 0, len(ws.Files))
-	for path := range ws.Files {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-
-	start := 0
-	cursor := normalizePath(req.Cursor)
-	if strings.TrimSpace(req.Cursor) != "" {
-		found := false
-		for i := range paths {
-			if paths[i] == cursor {
-				start = i + 1
-				found = true
-				break
-			}
-		}
-		if !found {
-			return FileQueryResponse{}, ErrInvalidInput
-		}
-	}
-
-	items := make([]FileQueryItem, 0, limit)
-	var nextCursor *string
-
-	for i := start; i < len(paths); i++ {
-		path := paths[i]
-		if !withinBase(base, path) {
-			continue
-		}
-		file := ws.Files[path]
-		if provider != "" && normalizeProvider(file.Provider) != provider {
-			continue
-		}
-		semantics := normalizeSemantics(file.Semantics)
-		if relation != "" && !stringSliceContains(semantics.Relations, relation) {
-			continue
-		}
-		if permission != "" && !stringSliceContains(semantics.Permissions, permission) {
-			continue
-		}
-		if comment != "" && !stringSliceContains(semantics.Comments, comment) {
-			continue
-		}
-		if !propertiesMatch(semantics.Properties, properties) {
-			continue
-		}
-		if len(items) >= limit {
-			cursorValue := items[len(items)-1].Path
-			nextCursor = &cursorValue
-			break
-		}
-		items = append(items, FileQueryItem{
-			Path:             path,
-			Revision:         file.Revision,
-			ContentType:      file.ContentType,
-			Provider:         file.Provider,
-			ProviderObjectID: file.ProviderObjectID,
-			LastEditedAt:     file.LastEditedAt,
-			Size:             int64(len(file.Content)),
-			Properties:       copyStringMap(semantics.Properties),
-			Relations:        append([]string(nil), semantics.Relations...),
-			Permissions:      append([]string(nil), semantics.Permissions...),
-			Comments:         append([]string(nil), semantics.Comments...),
-		})
-	}
-
-	return FileQueryResponse{
-		Items:      items,
-		NextCursor: nextCursor,
-	}, nil
+	return queryFilesFromMap(ws.Files, req)
 }
 
 func (s *Store) WriteFile(req WriteRequest) (WriteResult, error) {
@@ -1675,14 +1533,23 @@ func (s *Store) ExportWorkspace(workspaceID string) ([]File, error) {
 	if !ok {
 		return []File{}, nil
 	}
-	files := make([]File, 0, len(ws.Files))
-	for _, file := range ws.Files {
-		files = append(files, file)
+	return sortedFilesFromMap(ws.Files), nil
+}
+
+// ExportForkWorkspace returns the fork's merged view, including overlay
+// writes and deletions. Callers must use this instead of exporting the live
+// workspace when a forkId is supplied.
+func (s *Store) ExportForkWorkspace(workspaceID, forkID string) ([]File, error) {
+	if strings.TrimSpace(workspaceID) == "" || strings.TrimSpace(forkID) == "" {
+		return nil, ErrInvalidInput
 	}
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].Path < files[j].Path
-	})
-	return files, nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fork, err := s.getLiveForkLocked(workspaceID, forkID, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	return sortedFilesFromMap(s.mergedForkFilesLocked(fork)), nil
 }
 
 func (s *Store) DeleteFile(req DeleteRequest) (WriteResult, error) {
@@ -1716,11 +1583,12 @@ func (s *Store) DeleteFile(req DeleteRequest) (WriteResult, error) {
 		s.mu.Unlock()
 		return WriteResult{}, err
 	}
+	aclPermissions := resolvePermissionsFromFiles(ws.Files, path, true)
 	delete(ws.Files, path)
 
 	revision := s.nextRevisionLocked()
 	ws.Revision = revision
-	result, task := s.recordWriteLocked(ws, path, revision, "file.deleted", existing.Provider, req.CorrelationID)
+	result, task := s.recordWriteWithACLPermissionsLocked(ws, path, revision, "file.deleted", existing.Provider, req.CorrelationID, aclPermissions)
 	_ = s.saveLocked()
 	s.mu.Unlock()
 	s.enqueueWriteback(task)
@@ -1915,10 +1783,11 @@ func (s *Store) CommitForkWithValidator(workspaceID, forkID, correlationID strin
 		case "delete":
 			existing, existed := ws.Files[path]
 			if existed {
+				aclPermissions := resolvePermissionsFromFiles(ws.Files, path, true)
 				delete(ws.Files, path)
 				revision = s.nextRevisionLocked()
 				ws.Revision = revision
-				_, task := s.recordWriteLocked(ws, path, revision, "file.deleted", existing.Provider, correlationID)
+				_, task := s.recordWriteWithACLPermissionsLocked(ws, path, revision, "file.deleted", existing.Provider, correlationID, aclPermissions)
 				tasks = append(tasks, task)
 			}
 			if existed {
@@ -2284,8 +2153,11 @@ func (s *Store) ListForkTree(workspaceID, forkID, path string, depth int, cursor
 	if err != nil {
 		return TreeResponse{}, err
 	}
-	files := s.mergedForkFilesLocked(fork)
-	return listTreeFromFiles(files, path, depth, cursor)
+	ws := s.workspaces[workspaceID]
+	if ws == nil {
+		return TreeResponse{Path: normalizePath(path), Entries: []TreeEntry{}, NextCursor: nil}, nil
+	}
+	return listTreeFromForkEntries(ws.Files, fork.Overlay, path, depth, cursor)
 }
 
 func (s *Store) QueryForkFiles(workspaceID, forkID string, req FileQueryRequest) (FileQueryResponse, error) {
@@ -2298,8 +2170,14 @@ func (s *Store) QueryForkFiles(workspaceID, forkID string, req FileQueryRequest)
 	if err != nil {
 		return FileQueryResponse{}, err
 	}
-	files := s.mergedForkFilesLocked(fork)
-	return queryFilesFromMap(files, req)
+	ws := s.workspaces[workspaceID]
+	if ws == nil {
+		if strings.TrimSpace(req.Cursor) != "" {
+			return FileQueryResponse{}, ErrInvalidInput
+		}
+		return FileQueryResponse{Items: []FileQueryItem{}, NextCursor: nil}, nil
+	}
+	return queryFilesFromForkEntries(ws.Files, fork.Overlay, req)
 }
 
 func (s *Store) ResolveForkFilePermissions(workspaceID, forkID, path string, includeTarget bool) []string {
@@ -2309,8 +2187,11 @@ func (s *Store) ResolveForkFilePermissions(workspaceID, forkID, path string, inc
 	if err != nil {
 		return nil
 	}
-	files := s.mergedForkFilesLocked(fork)
-	return resolvePermissionsFromFiles(files, path, includeTarget)
+	ws := s.workspaces[workspaceID]
+	if ws == nil {
+		return nil
+	}
+	return resolvePermissionsFromForkEntries(ws.Files, fork.Overlay, path, includeTarget)
 }
 
 func (s *Store) GetEvents(workspaceID, provider, cursor string, limit int) (EventFeed, error) {
@@ -3793,15 +3674,19 @@ func (s *Store) ensureWorkspaceLocked(workspaceID string) *workspaceState {
 		if ws.ProviderWatermarks == nil {
 			ws.ProviderWatermarks = map[string]string{}
 		}
+		if ws.ACLPermissionsByEvent == nil {
+			ws.ACLPermissionsByEvent = map[string][]string{}
+		}
 		return ws
 	}
 	ws = &workspaceState{
-		Revision:           "0",
-		Files:              map[string]File{},
-		Events:             []Event{},
-		Ops:                map[string]OperationStatus{},
-		ProviderIndex:      map[string]string{},
-		ProviderWatermarks: map[string]string{},
+		Revision:              "0",
+		Files:                 map[string]File{},
+		Events:                []Event{},
+		Ops:                   map[string]OperationStatus{},
+		ACLPermissionsByEvent: map[string][]string{},
+		ProviderIndex:         map[string]string{},
+		ProviderWatermarks:    map[string]string{},
 	}
 	s.workspaces[workspaceID] = ws
 	return ws
@@ -3877,6 +3762,14 @@ func (s *Store) recordWriteLocked(ws *workspaceState, path, revision, eventType,
 }
 
 func (s *Store) recordWriteWithContentIdentityLocked(ws *workspaceState, path, revision, eventType, provider, correlationID string, contentIdentity *ContentIdentity) (WriteResult, writebackTask) {
+	return s.recordWriteWithContentIdentityAndACLPermissionsLocked(ws, path, revision, eventType, provider, correlationID, contentIdentity, nil, false)
+}
+
+func (s *Store) recordWriteWithACLPermissionsLocked(ws *workspaceState, path, revision, eventType, provider, correlationID string, aclPermissions []string) (WriteResult, writebackTask) {
+	return s.recordWriteWithContentIdentityAndACLPermissionsLocked(ws, path, revision, eventType, provider, correlationID, nil, aclPermissions, true)
+}
+
+func (s *Store) recordWriteWithContentIdentityAndACLPermissionsLocked(ws *workspaceState, path, revision, eventType, provider, correlationID string, contentIdentity *ContentIdentity, aclPermissions []string, snapshotACL bool) (WriteResult, writebackTask) {
 	if provider == "" {
 	}
 	workspaceID := s.workspaceIDForStateLocked(ws)
@@ -3912,6 +3805,15 @@ func (s *Store) recordWriteWithContentIdentityLocked(ws *workspaceState, path, r
 		Provider:      provider,
 		CorrelationID: correlationID,
 		Timestamp:     nowTS,
+	}
+	if strings.HasPrefix(eventType, "file.") {
+		if !snapshotACL {
+			aclPermissions = resolvePermissionsFromFiles(ws.Files, path, eventType != "file.deleted")
+		}
+		// Always non-nil (snapshotACLPermissions), even when aclPermissions is
+		// nil/empty: a nil Event.ACLPermissions must mean "never evaluated",
+		// not "evaluated, no rules applied" — see snapshotACLPermissions.
+		event.ACLPermissions = snapshotACLPermissions(aclPermissions)
 	}
 	s.appendWorkspaceEventLocked(workspaceID, ws, event)
 
@@ -4467,11 +4369,22 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 	path := normalizePath(action.Path)
 	objectID := strings.TrimSpace(action.ProviderObjectID)
 	if path == "/" && objectID != "" {
-		if indexedPath, ok := ws.ProviderIndex[providerObjectKey(provider, objectID)]; ok {
-			path = indexedPath
-		} else {
-			path = fallbackProviderPath(provider, objectID)
+		resolvedPath, ok := resolveProviderObjectUpsertPathLocked(ws, provider, objectID)
+		if !ok {
+			// A pathless provider action must never overwrite a path whose
+			// ownership cannot be proven. Ask mounts to perform an authoritative
+			// reconciliation rather than materializing an unsafe projection.
+			s.appendWorkspaceEventLocked(workspaceID, ws, Event{
+				EventID:       s.nextEventIDLocked(),
+				Type:          "sync.reconcile",
+				Origin:        "provider_sync",
+				Provider:      provider,
+				CorrelationID: correlationID,
+				Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
+			})
+			return
 		}
+		path = resolvedPath
 	}
 	if path == "/" {
 		return
@@ -4487,19 +4400,30 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 	if objectID != "" {
 		key := providerObjectKey(provider, objectID)
 		if previousPath, ok := ws.ProviderIndex[key]; ok && previousPath != path {
-			delete(ws.Files, previousPath)
-			moveRevision := s.nextRevisionLocked()
-			ws.Revision = moveRevision
-			s.appendWorkspaceEventLocked(workspaceID, ws, Event{
-				EventID:       s.nextEventIDLocked(),
-				Type:          "file.deleted",
-				Path:          previousPath,
-				Revision:      moveRevision,
-				Origin:        "provider_sync",
-				Provider:      provider,
-				CorrelationID: correlationID,
-				Timestamp:     now,
-			})
+			previousFile, previousExists := ws.Files[previousPath]
+			if previousExists && providerObjectMatchesFile(previousFile, provider, objectID) {
+				aclPermissions := resolvePermissionsFromFiles(ws.Files, previousPath, true)
+				delete(ws.Files, previousPath)
+				moveRevision := s.nextRevisionLocked()
+				ws.Revision = moveRevision
+				event := Event{
+					EventID:       s.nextEventIDLocked(),
+					Type:          "file.deleted",
+					Path:          previousPath,
+					Revision:      moveRevision,
+					Origin:        "provider_sync",
+					Provider:      provider,
+					CorrelationID: correlationID,
+					Timestamp:     now,
+				}
+				event.ACLPermissions = snapshotACLPermissions(aclPermissions)
+				s.appendWorkspaceEventLocked(workspaceID, ws, event)
+			} else {
+				// The index was stale or pointed at a different object's file.
+				// It is not an authorization to delete that file; discard only
+				// the bad index entry before recording the new projection.
+				delete(ws.ProviderIndex, key)
+			}
 		}
 	}
 
@@ -4534,7 +4458,7 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 			// Keep update event for sync observability, but still revision-incremented.
 		}
 	}
-	s.appendWorkspaceEventLocked(workspaceID, ws, Event{
+	event := Event{
 		EventID:       s.nextEventIDLocked(),
 		Type:          fsEvent,
 		Path:          path,
@@ -4544,33 +4468,77 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 		Provider:      provider,
 		CorrelationID: correlationID,
 		Timestamp:     now,
-	})
+	}
+	event.ACLPermissions = snapshotACLPermissions(resolvePermissionsFromFiles(ws.Files, path, true))
+	s.appendWorkspaceEventLocked(workspaceID, ws, event)
 }
 
 func (s *Store) applyProviderDeleteLocked(ws *workspaceState, provider string, action ApplyAction, correlationID string) {
 	workspaceID := s.workspaceIDForStateLocked(ws)
-	objectID := action.ProviderObjectID
+	objectID := strings.TrimSpace(action.ProviderObjectID)
 	path := normalizePath(action.Path)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
-	if objectID != "" && path == "/" {
-		if indexed, ok := ws.ProviderIndex[providerObjectKey(provider, objectID)]; ok {
-			path = indexed
+	if objectID != "" {
+		if path == "/" {
+			if resolved, ok := resolveProviderObjectPathLocked(ws, provider, objectID); ok {
+				path = resolved
+			}
+		} else if file, exists := ws.Files[path]; !exists || !providerObjectMatchesFile(file, provider, objectID) {
+			// When an envelope carries both fields, never let a stale path
+			// override the provider object identity. Recover through the same
+			// verified index/unique-metadata resolver used by pathless deletes.
+			if resolved, ok := resolveProviderObjectPathLocked(ws, provider, objectID); ok {
+				path = resolved
+			} else {
+				path = "/"
+			}
 		}
 	}
 	if path == "/" {
+		if strings.TrimSpace(action.Path) == "" || objectID != "" {
+			// A provider delete without a resolvable path cannot safely name a
+			// local file. Emit only a pathless control event so mounts perform
+			// an authoritative reconciliation; never emit file.deleted with an
+			// empty path, which could be confused with malformed persisted data.
+			s.appendWorkspaceEventLocked(workspaceID, ws, Event{
+				EventID:       s.nextEventIDLocked(),
+				Type:          "sync.reconcile",
+				Origin:        "provider_sync",
+				Provider:      provider,
+				CorrelationID: correlationID,
+				Timestamp:     now,
+			})
+		}
 		return
 	}
 	if _, ok := ws.Files[path]; !ok {
+		if strings.TrimSpace(action.Path) == "" {
+			// A stale provider index is no safer than an unknown object: the
+			// server cannot produce a path-backed ACL snapshot for this delete.
+			// Ask mounts to reconcile without exposing the indexed path.
+			s.appendWorkspaceEventLocked(workspaceID, ws, Event{
+				EventID:       s.nextEventIDLocked(),
+				Type:          "sync.reconcile",
+				Origin:        "provider_sync",
+				Provider:      provider,
+				CorrelationID: correlationID,
+				Timestamp:     now,
+			})
+		}
 		return
 	}
+	// A path supplied by the provider is authoritative for path-based
+	// adapters. For object-identity deletes, however, the resolved path must
+	// have been verified by resolveProviderObjectPathLocked above.
+	aclPermissions := resolvePermissionsFromFiles(ws.Files, path, true)
 	delete(ws.Files, path)
 	if objectID != "" {
 		delete(ws.ProviderIndex, providerObjectKey(provider, objectID))
 	}
 	revision := s.nextRevisionLocked()
 	ws.Revision = revision
-	s.appendWorkspaceEventLocked(workspaceID, ws, Event{
+	event := Event{
 		EventID:       s.nextEventIDLocked(),
 		Type:          "file.deleted",
 		Path:          path,
@@ -4579,13 +4547,129 @@ func (s *Store) applyProviderDeleteLocked(ws *workspaceState, provider string, a
 		Provider:      provider,
 		CorrelationID: correlationID,
 		Timestamp:     now,
-	})
+	}
+	event.ACLPermissions = snapshotACLPermissions(aclPermissions)
+	s.appendWorkspaceEventLocked(workspaceID, ws, event)
+}
+
+// resolveProviderObjectPathLocked resolves an object-identity delete to a
+// currently materialized file. The persisted index is only a hint: legacy
+// state and interrupted writes can leave it absent or pointing at an
+// unrelated path. In those cases, a unique metadata match is safe to use and
+// repairs the index. Zero or multiple matches fail closed.
+func resolveProviderObjectPathLocked(ws *workspaceState, provider, objectID string) (string, bool) {
+	if ws == nil || strings.TrimSpace(objectID) == "" {
+		return "", false
+	}
+	normalizedProvider := normalizeProvider(provider)
+	if normalizedProvider == "" {
+		return "", false
+	}
+	objectID = strings.TrimSpace(objectID)
+	if ws.ProviderIndex != nil {
+		if indexed, ok := ws.ProviderIndex[providerObjectKey(provider, objectID)]; ok {
+			if file, exists := ws.Files[indexed]; exists &&
+				providerObjectMatchesFile(file, provider, objectID) {
+				return normalizePath(indexed), true
+			}
+		}
+	}
+
+	candidate := ""
+	matches := 0
+	for filePath, file := range ws.Files {
+		if !providerObjectMatchesFile(file, provider, objectID) {
+			continue
+		}
+		matches++
+		candidate = normalizePath(filePath)
+		if matches > 1 {
+			return "", false
+		}
+	}
+	if matches != 1 {
+		return "", false
+	}
+	if ws.ProviderIndex == nil {
+		ws.ProviderIndex = map[string]string{}
+	}
+	ws.ProviderIndex[providerObjectKey(provider, objectID)] = candidate
+	return candidate, true
+}
+
+func providerObjectMatchesFile(file File, provider, objectID string) bool {
+	return normalizeProvider(file.Provider) == normalizeProvider(provider) &&
+		normalizeProvider(provider) != "" &&
+		strings.TrimSpace(file.ProviderObjectID) == strings.TrimSpace(objectID)
+}
+
+// resolveProviderObjectUpsertPathLocked resolves the identity projection for
+// a pathless provider upsert. The persisted index is only a hint; unlike the
+// old pathless path, every indexed hit is checked against the live file's
+// provider/object identity before it can be overwritten. If no existing
+// identity can be proved, retain the legacy projection when it is free and
+// deterministically disambiguate only when that projection is occupied by a
+// different object.
+func resolveProviderObjectUpsertPathLocked(ws *workspaceState, provider, objectID string) (string, bool) {
+	if ws == nil || strings.TrimSpace(objectID) == "" || normalizeProvider(provider) == "" {
+		return "", false
+	}
+	objectID = strings.TrimSpace(objectID)
+	if resolved, ok := resolveProviderObjectPathLocked(ws, provider, objectID); ok {
+		return resolved, true
+	}
+	// A failed lookup can mean either no projection or an ambiguous corrupt
+	// state with multiple projections for the same identity. Only the former
+	// may allocate a fallback path; choosing one of several matches would make
+	// a pathless upsert mutate an arbitrary duplicate instead of failing closed.
+	for _, file := range ws.Files {
+		if providerObjectMatchesFile(file, provider, objectID) {
+			return "", false
+		}
+	}
+
+	legacyPath := fallbackProviderPath(provider, objectID)
+	if legacyPath == "/" {
+		return "", false
+	}
+	if existing, exists := ws.Files[legacyPath]; !exists || providerObjectMatchesFile(existing, provider, objectID) {
+		return legacyPath, true
+	}
+
+	// Keep the legacy path for the first object (backward compatibility), but
+	// never let sanitized IDs such as "a/b" and "a_b" overwrite one another.
+	// Include the canonical provider and raw object ID in the digest so the
+	// disambiguated projection is stable across restarts and index loss.
+	digest := sha256.Sum256([]byte(normalizeProvider(provider) + "\x00" + objectID))
+	base := strings.TrimSuffix(legacyPath, ".md")
+	for _, suffix := range []string{hex.EncodeToString(digest[:8]), hex.EncodeToString(digest[:])} {
+		candidate := normalizePath(base + "-" + suffix + ".md")
+		if existing, exists := ws.Files[candidate]; !exists || providerObjectMatchesFile(existing, provider, objectID) {
+			return candidate, true
+		}
+	}
+	// A full digest collision is extraordinarily unlikely, but do not turn
+	// that assumption into a destructive overwrite. A bounded deterministic
+	// suffix gives a corrupt/adversarial workspace a safe escape hatch.
+	for attempt := 2; attempt <= 1024; attempt++ {
+		candidate := normalizePath(fmt.Sprintf("%s-%s-%d.md", base, hex.EncodeToString(digest[:]), attempt))
+		if existing, exists := ws.Files[candidate]; !exists || providerObjectMatchesFile(existing, provider, objectID) {
+			return candidate, true
+		}
+	}
+	return "", false
 }
 
 func canonicalizeProviderActionLocked(ws *workspaceState, provider string, action ApplyAction) ApplyAction {
 	switch action.Type {
 	case ActionFileUpsert, ActionFileDelete:
 	default:
+		return action
+	}
+	if strings.TrimSpace(action.Path) == "" {
+		// Preserve object-identity actions without a path. Upserts can fall
+		// back to their provider-object projection; deletes can request a
+		// safe workspace reconciliation when identity cannot resolve locally.
 		return action
 	}
 	canonicalPath, ok := canonicalProviderEnvelopePath(provider, action.Path)
@@ -4665,6 +4749,23 @@ func (s *Store) loadFromDisk() error {
 			}
 			if ws.ProviderWatermarks == nil {
 				ws.ProviderWatermarks = map[string]string{}
+			}
+			if ws.ACLPermissionsByEvent == nil {
+				ws.ACLPermissionsByEvent = map[string][]string{}
+			}
+			for index := range ws.Events {
+				// A present map entry (even one whose value is empty/nil)
+				// means this event's ACL snapshot was actually computed —
+				// restore it as a non-nil slice so it stays distinguishable
+				// from a legacy event, which has no entry at all here and is
+				// left with ACLPermissions == nil. httpapi.eventVisibleToClaims
+				// fails closed on Type=="file.deleted" with a nil snapshot,
+				// so an absent entry (pre-dating this snapshot mechanism, or
+				// written by a version with the now-fixed nil-collapse bug)
+				// is hidden rather than assumed unrestricted.
+				if permissions, ok := ws.ACLPermissionsByEvent[ws.Events[index].EventID]; ok {
+					ws.Events[index].ACLPermissions = snapshotACLPermissions(permissions)
+				}
 			}
 		}
 	}
@@ -5003,27 +5104,71 @@ func (s *Store) mergedForkFilesLocked(fork *forkState) map[string]File {
 	return files
 }
 
+func sortedFilesFromMap(files map[string]File) []File {
+	result := make([]File, 0, len(files))
+	for _, file := range files {
+		result = append(result, file)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Path < result[j].Path })
+	return result
+}
+
 func listTreeFromFiles(files map[string]File, path string, depth int, cursor string) (TreeResponse, error) {
+	return listTreeFromEntries(func(visit func(string, File)) {
+		for filePath, file := range files {
+			visit(filePath, file)
+		}
+	}, path, depth, cursor)
+}
+
+func listTreeFromForkEntries(files map[string]File, overlay map[string]ForkOverlayEntry, path string, depth int, cursor string) (TreeResponse, error) {
+	return listTreeFromEntries(func(visit func(string, File)) {
+		for filePath, file := range files {
+			if _, touched := overlay[normalizePath(filePath)]; touched {
+				continue
+			}
+			visit(filePath, file)
+		}
+		for filePath, entry := range overlay {
+			if entry.Type != "write" || entry.File == nil {
+				continue
+			}
+			file := *entry.File
+			normalized := normalizePath(filePath)
+			file.Path = normalized
+			file.Revision = entry.Revision
+			visit(normalized, file)
+		}
+	}, path, depth, cursor)
+}
+
+func listTreeFromEntries(iterate func(func(string, File)), path string, depth int, cursor string) (TreeResponse, error) {
 	base := normalizePath(path)
 	if depth <= 0 {
 		depth = 1
 	}
 
-	entryMap := map[string]TreeEntry{}
+	// Keep one page plus a sentinel entry while walking the source map. The
+	// previous implementation retained every descendant entry before sorting;
+	// a large workspace could therefore consume memory proportional to the
+	// entire tree for a single request.
+	const retainedEntries = maxTreeEntriesPerPage + 1
+	entryMap := make(map[string]TreeEntry, retainedEntries)
 	totalFiles := 0
-	for filePath, file := range files {
+	cursorFound := cursor == ""
+	iterate(func(filePath string, file File) {
 		if !withinBase(base, filePath) {
-			continue
+			return
 		}
 		rest := strings.TrimPrefix(filePath, base)
 		rest = strings.TrimPrefix(rest, "/")
 		if rest == "" {
-			continue
+			return
 		}
 		totalFiles++
 		parts := strings.Split(rest, "/")
 		if len(parts) == 0 {
-			continue
+			return
 		}
 		maxLevel := depth
 		if len(parts) < maxLevel {
@@ -5031,6 +5176,12 @@ func listTreeFromFiles(files map[string]File, path string, depth int, cursor str
 		}
 		for level := 1; level <= maxLevel; level++ {
 			child := joinPath(base, strings.Join(parts[:level], "/"))
+			if child == cursor {
+				cursorFound = true
+			}
+			if cursor != "" && child <= cursor {
+				continue
+			}
 			if level == len(parts) {
 				entryMap[child] = TreeEntry{
 					Path:             child,
@@ -5046,12 +5197,22 @@ func listTreeFromFiles(files map[string]File, path string, depth int, cursor str
 					PermissionCount:  len(file.Semantics.Permissions),
 					CommentCount:     len(file.Semantics.Comments),
 				}
-				continue
-			}
-			if _, exists := entryMap[child]; !exists {
+			} else if _, exists := entryMap[child]; !exists {
 				entryMap[child] = TreeEntry{Path: child, Type: "dir", Revision: "dir"}
 			}
+			if len(entryMap) > retainedEntries {
+				var greatest string
+				for candidate := range entryMap {
+					if greatest == "" || candidate > greatest {
+						greatest = candidate
+					}
+				}
+				delete(entryMap, greatest)
+			}
 		}
+	})
+	if !cursorFound {
+		return TreeResponse{}, ErrInvalidInput
 	}
 
 	entries := make([]TreeEntry, 0, len(entryMap))
@@ -5059,50 +5220,48 @@ func listTreeFromFiles(files map[string]File, path string, depth int, cursor str
 		entries = append(entries, entry)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
-	entries, nextCursor, err := paginateTreeEntries(entries, cursor)
-	if err != nil {
-		return TreeResponse{}, err
+	if len(entries) > maxTreeEntriesPerPage {
+		entries = entries[:maxTreeEntriesPerPage]
+	}
+	var nextCursor *string
+	if len(entryMap) > maxTreeEntriesPerPage {
+		cursorValue := entries[len(entries)-1].Path
+		nextCursor = &cursorValue
 	}
 
 	return TreeResponse{Path: base, Entries: entries, NextCursor: nextCursor, TotalFiles: totalFiles}, nil
 }
 
-// paginateTreeEntries slices the supplied entries with the supplied cursor.
-// A non-empty cursor that doesn't match any entry returns ErrInvalidInput so
-// stale/typo cursors are rejected rather than silently restarting pagination
-// at page 1 (which previously caused duplicate-page loops for clients).
-func paginateTreeEntries(entries []TreeEntry, cursor string) ([]TreeEntry, *string, error) {
-	start := 0
-	if cursor != "" {
-		found := false
-		for index, entry := range entries {
-			if entry.Path == cursor {
-				start = index + 1
-				found = true
-				break
-			}
+func queryFilesFromMap(files map[string]File, req FileQueryRequest) (FileQueryResponse, error) {
+	return queryFilesFromEntries(func(visit func(string, File)) {
+		for path, file := range files {
+			visit(path, file)
 		}
-		if !found {
-			return nil, nil, ErrInvalidInput
-		}
-	}
-	if start >= len(entries) {
-		return []TreeEntry{}, nil, nil
-	}
-
-	end := start + maxTreeEntriesPerPage
-	if end > len(entries) {
-		end = len(entries)
-	}
-	page := append([]TreeEntry(nil), entries[start:end]...)
-	if end >= len(entries) {
-		return page, nil, nil
-	}
-	cursorValue := page[len(page)-1].Path
-	return page, &cursorValue, nil
+	}, req)
 }
 
-func queryFilesFromMap(files map[string]File, req FileQueryRequest) (FileQueryResponse, error) {
+func queryFilesFromForkEntries(files map[string]File, overlay map[string]ForkOverlayEntry, req FileQueryRequest) (FileQueryResponse, error) {
+	return queryFilesFromEntries(func(visit func(string, File)) {
+		for path, file := range files {
+			if _, touched := overlay[normalizePath(path)]; touched {
+				continue
+			}
+			visit(path, file)
+		}
+		for path, entry := range overlay {
+			if entry.Type != "write" || entry.File == nil {
+				continue
+			}
+			file := *entry.File
+			normalized := normalizePath(path)
+			file.Path = normalized
+			file.Revision = entry.Revision
+			visit(normalized, file)
+		}
+	}, req)
+}
+
+func queryFilesFromEntries(iterate func(func(string, File)), req FileQueryRequest) (FileQueryResponse, error) {
 	base := normalizePath(req.PathPrefix)
 	if req.PathPrefix == "" {
 		base = "/"
@@ -5120,58 +5279,39 @@ func queryFilesFromMap(files map[string]File, req FileQueryRequest) (FileQueryRe
 	}
 	properties := normalizeProperties(req.Properties)
 
-	paths := make([]string, 0, len(files))
-	for path := range files {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-
-	start := 0
 	cursor := normalizePath(req.Cursor)
-	if strings.TrimSpace(req.Cursor) != "" {
-		found := false
-		for i := range paths {
-			if paths[i] == cursor {
-				start = i + 1
-				found = true
-				break
-			}
+	cursorFound := strings.TrimSpace(req.Cursor) == ""
+	// Retain only one public page plus a sentinel while scanning the map. The
+	// old implementation first materialized and sorted every path in the
+	// workspace, which made each paged request proportional to workspace size.
+	candidates := make(map[string]FileQueryItem, limit+1)
+	iterate(func(path string, file File) {
+		if path == cursor {
+			cursorFound = true
 		}
-		if !found {
-			return FileQueryResponse{}, ErrInvalidInput
+		if strings.TrimSpace(req.Cursor) != "" && path <= cursor {
+			return
 		}
-	}
-
-	items := make([]FileQueryItem, 0, limit)
-	var nextCursor *string
-	for i := start; i < len(paths); i++ {
-		path := paths[i]
 		if !withinBase(base, path) {
-			continue
+			return
 		}
-		file := files[path]
 		if provider != "" && normalizeProvider(file.Provider) != provider {
-			continue
+			return
 		}
 		semantics := normalizeSemantics(file.Semantics)
 		if relation != "" && !stringSliceContains(semantics.Relations, relation) {
-			continue
+			return
 		}
 		if permission != "" && !stringSliceContains(semantics.Permissions, permission) {
-			continue
+			return
 		}
 		if comment != "" && !stringSliceContains(semantics.Comments, comment) {
-			continue
+			return
 		}
 		if !propertiesMatch(semantics.Properties, properties) {
-			continue
+			return
 		}
-		if len(items) >= limit {
-			cursorValue := items[len(items)-1].Path
-			nextCursor = &cursorValue
-			break
-		}
-		items = append(items, FileQueryItem{
+		candidates[path] = FileQueryItem{
 			Path:             path,
 			Revision:         file.Revision,
 			ContentType:      file.ContentType,
@@ -5183,10 +5323,56 @@ func queryFilesFromMap(files map[string]File, req FileQueryRequest) (FileQueryRe
 			Relations:        append([]string(nil), semantics.Relations...),
 			Permissions:      append([]string(nil), semantics.Permissions...),
 			Comments:         append([]string(nil), semantics.Comments...),
-		})
+		}
+		if len(candidates) <= limit+1 {
+			return
+		}
+		var greatest string
+		for candidate := range candidates {
+			if greatest == "" || candidate > greatest {
+				greatest = candidate
+			}
+		}
+		delete(candidates, greatest)
+	})
+	if !cursorFound {
+		return FileQueryResponse{}, ErrInvalidInput
+	}
+
+	paths := make([]string, 0, len(candidates))
+	for path := range candidates {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	items := make([]FileQueryItem, 0, len(paths))
+	for _, path := range paths {
+		items = append(items, candidates[path])
+	}
+	var nextCursor *string
+	if len(items) > limit {
+		cursorValue := items[limit-1].Path
+		nextCursor = &cursorValue
+		items = items[:limit]
 	}
 
 	return FileQueryResponse{Items: items, NextCursor: nextCursor}, nil
+}
+
+// snapshotACLPermissions returns a defensive copy of permissions that is
+// NEVER nil, even when permissions is nil/empty. Event.ACLPermissions relies
+// on the nil/non-nil distinction to tell "no ACL snapshot was ever computed
+// for this event" (nil — legacy, pre-dates the snapshot mechanism, or a
+// producer bug) apart from "ACL was evaluated and no rules applied" (non-nil
+// empty slice). Every delete-event producer must route its computed
+// permissions through this helper before assigning Event.ACLPermissions;
+// skipping it silently reintroduces the nil ambiguity that lets a legacy or
+// unsnapshotted delete fail open instead of closed. See
+// httpapi.eventVisibleToClaims, which fails closed on Type=="file.deleted"
+// with ACLPermissions == nil.
+func snapshotACLPermissions(permissions []string) []string {
+	out := make([]string, len(permissions))
+	copy(out, permissions)
+	return out
 }
 
 func resolvePermissionsFromFiles(files map[string]File, path string, includeTarget bool) []string {
@@ -5205,6 +5391,48 @@ func resolvePermissionsFromFiles(files map[string]File, path string, includeTarg
 	}
 	if includeTarget {
 		if file, exists := files[target]; exists && len(file.Semantics.Permissions) > 0 {
+			permissions = append(permissions, file.Semantics.Permissions...)
+		}
+	}
+	if len(permissions) == 0 {
+		return nil
+	}
+	out := make([]string, len(permissions))
+	copy(out, permissions)
+	return out
+}
+
+func resolvePermissionsFromForkEntries(files map[string]File, overlay map[string]ForkOverlayEntry, path string, includeTarget bool) []string {
+	lookup := func(target string) (File, bool) {
+		target = normalizePath(target)
+		if entry, touched := overlay[target]; touched {
+			if entry.Type != "write" || entry.File == nil {
+				return File{}, false
+			}
+			file := *entry.File
+			file.Path = target
+			file.Revision = entry.Revision
+			return file, true
+		}
+		file, exists := files[target]
+		return file, exists
+	}
+
+	target := normalizePath(path)
+	permissions := make([]string, 0, 8)
+	for _, dir := range ancestorDirectories(target) {
+		markerPath := joinPath(dir, DirectoryPermissionMarkerFile)
+		if markerPath == target {
+			continue
+		}
+		marker, exists := lookup(markerPath)
+		if !exists || len(marker.Semantics.Permissions) == 0 {
+			continue
+		}
+		permissions = append(permissions, marker.Semantics.Permissions...)
+	}
+	if includeTarget {
+		if file, exists := lookup(target); exists && len(file.Semantics.Permissions) > 0 {
 			permissions = append(permissions, file.Semantics.Permissions...)
 		}
 	}
@@ -5831,6 +6059,12 @@ func (s *Store) appendWorkspaceEventLocked(workspaceID string, ws *workspaceStat
 		return
 	}
 	ws.Events = append(ws.Events, event)
+	if event.ACLPermissions != nil {
+		if ws.ACLPermissionsByEvent == nil {
+			ws.ACLPermissionsByEvent = map[string][]string{}
+		}
+		ws.ACLPermissionsByEvent[event.EventID] = snapshotACLPermissions(event.ACLPermissions)
+	}
 	s.publishEvent(workspaceID, event)
 }
 

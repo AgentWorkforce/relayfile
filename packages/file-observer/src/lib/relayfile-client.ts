@@ -70,6 +70,7 @@ export type FilesystemEventType =
   | 'sync.ignored'
   | 'sync.suppressed'
   | 'sync.stale'
+  | 'sync.reconcile'
   | 'writeback.failed'
   | 'writeback.succeeded';
 
@@ -275,10 +276,10 @@ class DefaultRelayfileWebSocketConnection implements RelayfileWebSocketConnectio
         if (!raw || typeof raw !== 'object' || typeof raw.type !== 'string') {
           throw new Error("Invalid Relayfile WebSocket event: missing required 'type' field.");
         }
-        if (typeof raw.path !== 'string') {
+        if (typeof raw.path !== 'string' && raw.type !== 'sync.reconcile') {
           throw new Error("Invalid Relayfile WebSocket event: missing required 'path' field.");
         }
-        if (typeof raw.revision !== 'string') {
+        if (typeof raw.revision !== 'string' && raw.type !== 'sync.reconcile') {
           throw new Error("Invalid Relayfile WebSocket event: missing required 'revision' field.");
         }
         if (typeof raw.timestamp !== 'string') {
@@ -288,8 +289,8 @@ class DefaultRelayfileWebSocketConnection implements RelayfileWebSocketConnectio
         parsed = {
           eventId: typeof raw.eventId === 'string' ? raw.eventId : '',
           type: raw.type as FilesystemEventType,
-          path: raw.path,
-          revision: raw.revision,
+          path: typeof raw.path === 'string' ? raw.path : '',
+          revision: typeof raw.revision === 'string' ? raw.revision : '',
           origin: raw.origin,
           provider: raw.provider,
           correlationId: raw.correlationId,

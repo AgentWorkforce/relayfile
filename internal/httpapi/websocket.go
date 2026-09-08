@@ -107,7 +107,7 @@ func (s *Server) handleFileEventsWebSocket(w http.ResponseWriter, r *http.Reques
 		if !webSocketEventMatchesPaths(event, options.Paths) {
 			continue
 		}
-		if err := s.writeWebSocketEvent(ctx, conn, workspaceID, event); err != nil {
+		if err := s.writeWebSocketEvent(ctx, conn, workspaceID, claims, event); err != nil {
 			return
 		}
 	}
@@ -147,7 +147,7 @@ func (s *Server) handleFileEventsWebSocket(w http.ResponseWriter, r *http.Reques
 					continue
 				}
 			}
-			if err := s.writeWebSocketEvent(ctx, conn, workspaceID, event); err != nil {
+			if err := s.writeWebSocketEvent(ctx, conn, workspaceID, claims, event); err != nil {
 				return
 			}
 		}
@@ -211,6 +211,12 @@ func normalizeWebSocketPathFilters(values []string) []string {
 }
 
 func webSocketEventMatchesPaths(event relayfile.Event, filters []string) bool {
+	if event.Type == "sync.reconcile" {
+		// Pathless reconciliation is a control signal, not a file event. It
+		// must reach path-filtered mounts so they can refresh their local
+		// view, while it discloses no path to the subscriber.
+		return true
+	}
 	if len(filters) == 0 {
 		return true
 	}
@@ -279,7 +285,10 @@ func (s *Server) readWebSocketMessages(ctx context.Context, conn *websocket.Conn
 	}
 }
 
-func (s *Server) writeWebSocketEvent(ctx context.Context, conn *websocket.Conn, workspaceID string, event relayfile.Event) error {
+func (s *Server) writeWebSocketEvent(ctx context.Context, conn *websocket.Conn, workspaceID string, claims tokenClaims, event relayfile.Event) error {
+	if !s.eventVisibleToClaims(workspaceID, claims, event) {
+		return nil
+	}
 	message := fileEventMessage{
 		EventID:       event.EventID,
 		Type:          event.Type,
@@ -293,7 +302,8 @@ func (s *Server) writeWebSocketEvent(ctx context.Context, conn *websocket.Conn, 
 	}
 	if event.Type == "file.created" || event.Type == "file.updated" {
 		if file, err := s.store.ReadFile(workspaceID, event.Path); err == nil &&
-			file.Revision == event.Revision && len(file.Content) <= maxWebSocketInlineContentBytes {
+			file.Revision == event.Revision && len(file.Content) <= maxWebSocketInlineContentBytes &&
+			s.fileReadAllowedNow(workspaceID, claims, event.Path, true) {
 			message.ContentType = file.ContentType
 			message.Content = file.Content
 			message.Encoding = file.Encoding

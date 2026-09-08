@@ -908,7 +908,7 @@ export class RelayFileSync {
   }
 
   private emitFilesystemEvent(event: FilesystemEvent): void {
-    if (!pathMatchesAnyFilter(this.paths, event.path)) {
+    if (event.type !== "sync.reconcile" && !pathMatchesAnyFilter(this.paths, event.path)) {
       return;
     }
     this.emit("event", event);

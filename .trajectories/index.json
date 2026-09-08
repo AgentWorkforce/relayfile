@@ -238,28 +238,49 @@
       "status": "completed",
       "startedAt": "2026-09-08T18:34:14.911Z",
       "completedAt": "2026-09-08T18:35:41.168Z",
-      "path": "/private/tmp/relayfile-release-snapshot-fix-0908/.trajectories/completed/2026-09/traj_jm05ulo6q9n9.json"
+      "path": ".trajectories/completed/2026-09/traj_jm05ulo6q9n9.json"
     },
     "traj_xnlvfueuuj35": {
       "title": "Repair release attestation digest and package-set validation",
       "status": "completed",
       "startedAt": "2026-09-08T18:56:21.883Z",
       "completedAt": "2026-09-08T18:56:55.631Z",
-      "path": "/private/tmp/relayfile-release-snapshot-fix-0908/.trajectories/completed/2026-09/traj_xnlvfueuuj35.json"
+      "path": ".trajectories/completed/2026-09/traj_xnlvfueuuj35.json"
     },
     "traj_gar68vc7e6r8": {
       "title": "Repair Relayfile release snapshot safeguards: reject unsafe custom versions, ambiguous registry records, and incomplete external attestations",
       "status": "completed",
       "startedAt": "2026-09-08T19:22:07.834Z",
       "completedAt": "2026-09-08T19:22:28.321Z",
-      "path": "/private/tmp/relayfile-release-snapshot-fix-0908/.trajectories/completed/2026-09/traj_gar68vc7e6r8.json"
+      "path": ".trajectories/completed/2026-09/traj_gar68vc7e6r8.json"
     },
     "traj_thvemykn51bx": {
       "title": "Repair release attestation digest and provenance binding",
       "status": "completed",
       "startedAt": "2026-09-08T19:48:31.181Z",
       "completedAt": "2026-09-08T19:48:41.454Z",
-      "path": "/private/tmp/relayfile-release-snapshot-fix-0908/.trajectories/completed/2026-09/traj_thvemykn51bx.json"
+      "path": ".trajectories/completed/2026-09/traj_thvemykn51bx.json"
+    },
+    "traj_qtxkeaa5cphq": {
+      "title": "Repair ACL pathless provider deletion reconciliation",
+      "status": "completed",
+      "startedAt": "2026-09-08T15:41:42.556Z",
+      "completedAt": "2026-09-08T15:47:16.049Z",
+      "path": ".trajectories/completed/2026-09/traj_qtxkeaa5cphq.json"
+    },
+    "traj_l5ctfmv1nb5j": {
+      "title": "Repair ACL-safe provider upserts and healthy realtime reconciliation",
+      "status": "completed",
+      "startedAt": "2026-09-08T18:05:42.152Z",
+      "completedAt": "2026-09-08T18:12:02.896Z",
+      "path": "/private/tmp/relayfile-acl423-fix-0908/.trajectories/completed/2026-09/traj_l5ctfmv1nb5j.json"
+    },
+    "traj_f5e9ezrw8o6g": {
+      "title": "Fail closed on ambiguous provider-object pathless upserts",
+      "status": "completed",
+      "startedAt": "2026-09-08T18:17:10.022Z",
+      "completedAt": "2026-09-08T18:17:10.768Z",
+      "path": "/private/tmp/relayfile-acl423-fix-0908/.trajectories/completed/2026-09/traj_f5e9ezrw8o6g.json"
     }
   }
 }
