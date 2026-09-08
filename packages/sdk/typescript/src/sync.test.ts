@@ -103,6 +103,43 @@ describe("RelayFileSync", () => {
     await sync.stop();
   });
 
+  it("delivers pathless reconciliation controls through path filters", async () => {
+    const sockets: MockWebSocket[] = [];
+    const sync = new RelayFileSync({
+      client: makeClient(),
+      workspaceId: "ws_acme",
+      baseUrl: "https://relay.test",
+      token: "ws_token",
+      paths: ["/private/**"],
+      webSocketFactory: (url) => {
+        const socket = new MockWebSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+    const events: FilesystemEvent[] = [];
+    sync.on("event", (event) => events.push(event));
+
+    sync.start();
+    sockets[0]!.emit("open", {});
+    sockets[0]!.emit("message", {
+      data: JSON.stringify({
+        eventId: "evt_reconcile",
+        type: "sync.reconcile",
+        timestamp: "2026-03-26T00:00:00Z"
+      })
+    });
+
+    expect(events).toEqual([{
+      eventId: "evt_reconcile",
+      type: "sync.reconcile",
+      path: "",
+      revision: "",
+      timestamp: "2026-03-26T00:00:00Z"
+    }]);
+    await sync.stop();
+  });
+
   it("normalizes malformed filesystem events with stable fallbacks", () => {
     const first = normalizeFilesystemEvent(null);
     const second = normalizeFilesystemEvent({ type: "relayfile.changed", resource: { path: "/linear/issues/ENG-1.json" } });

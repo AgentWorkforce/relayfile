@@ -626,7 +626,7 @@ func (s *Server) githubTarballWritePermissionError(workspaceID, workspacePath st
 			Message: "failed to check file permissions",
 		}
 	}
-	if !filePermissionAllows(permissions, workspaceID, &claims) {
+	if !filePermissionAllows(permissions, workspaceID, &claims, "write", workspacePath) {
 		return &relayfile.BulkWriteError{
 			Code:    "forbidden",
 			Message: "file access denied by permission policy",

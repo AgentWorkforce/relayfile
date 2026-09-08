@@ -163,6 +163,1089 @@ func TestFileEventsWebSocketCatchUpAndPingPong(t *testing.T) {
 	}
 }
 
+func TestACLFiltersHTTPEventsAndWebSocketCatchUpAndLive(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	workspaceID := "ws_acl_event_filter"
+	write := func(path, content string, semantics relayfile.FileSemantics) {
+		t.Helper()
+		if _, err := store.WriteFile(relayfile.WriteRequest{
+			WorkspaceID: workspaceID,
+			Path:        path,
+			IfMatch:     "0",
+			ContentType: "text/plain",
+			Content:     content,
+			Semantics:   semantics,
+		}); err != nil {
+			t.Fatalf("seed %s failed: %v", path, err)
+		}
+	}
+	write("/public.md", "public", relayfile.FileSemantics{})
+	write("/secret/.relayfile.acl", `{"semantics":{"permissions":["deny:agent:Limited"]}}`, relayfile.FileSemantics{Permissions: []string{"deny:agent:Limited"}})
+	write("/secret/hidden.md", "secret", relayfile.FileSemantics{})
+
+	server := httptest.NewServer(NewServer(store))
+	defer server.Close()
+	limitedToken := mustTestJWT(t, "dev-secret", workspaceID, "Limited", []string{"fs:read"}, time.Now().Add(time.Hour))
+	headers := map[string]string{
+		"Authorization":    "Bearer " + limitedToken,
+		"X-Correlation-Id": "corr_acl_event_filter",
+	}
+	for _, direction := range []string{"", "desc"} {
+		path := "/v1/workspaces/" + workspaceID + "/fs/events?limit=100"
+		if direction != "" {
+			path += "&direction=" + direction
+		}
+		resp := doRequest(t, NewServer(store), request{method: http.MethodGet, path: path, headers: headers})
+		if resp.Code != http.StatusOK {
+			t.Fatalf("events %s returned %d: %s", direction, resp.Code, resp.Body.String())
+		}
+		var feed relayfile.EventFeed
+		if err := json.NewDecoder(resp.Body).Decode(&feed); err != nil {
+			t.Fatalf("decode events %s: %v", direction, err)
+		}
+		for _, event := range feed.Events {
+			if strings.Contains(event.Path, "/secret/") {
+				t.Fatalf("ACL-hidden event leaked in %s feed: %+v", direction, event)
+			}
+		}
+		if len(feed.Events) != 1 || feed.Events[0].Path != "/public.md" {
+			t.Fatalf("unexpected visible events in %s feed: %+v", direction, feed.Events)
+		}
+		if feed.NextCursor != nil {
+			t.Fatalf("hidden events leaked through cursor in %s feed: %v", direction, *feed.NextCursor)
+		}
+	}
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/workspaces/" + workspaceID + "/fs/ws?token=" + limitedToken
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("websocket dial failed: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	var catchUp map[string]any
+	if err := wsjson.Read(ctx, conn, &catchUp); err != nil {
+		t.Fatalf("read visible catch-up event: %v", err)
+	}
+	if catchUp["path"] != "/public.md" || catchUp["content"] != "public" || catchUp["inlineContent"] != true {
+		t.Fatalf("unexpected catch-up event: %+v", catchUp)
+	}
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "ping"}); err != nil {
+		t.Fatalf("write ping failed: %v", err)
+	}
+	var pong map[string]any
+	if err := wsjson.Read(ctx, conn, &pong); err != nil || pong["type"] != "pong" {
+		t.Fatalf("expected pong after filtered catch-up, got %+v (%v)", pong, err)
+	}
+	write("/secret/live-hidden.md", "secret-live", relayfile.FileSemantics{})
+	write("/public-live.md", "public-live", relayfile.FileSemantics{})
+	var live map[string]any
+	if err := wsjson.Read(ctx, conn, &live); err != nil {
+		t.Fatalf("read visible live event: %v", err)
+	}
+	if live["path"] != "/public-live.md" || live["content"] != "public-live" || live["inlineContent"] != true {
+		t.Fatalf("unexpected visible live event: %+v", live)
+	}
+}
+
+func TestACLDeleteEventSnapshotAndPathNormalization(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	workspaceID := "ws_acl_delete_snapshot"
+	created, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: workspaceID,
+		Path:        "/docs/deleted.md",
+		IfMatch:     "0",
+		Content:     "secret",
+		Semantics:   relayfile.FileSemantics{Permissions: []string{"deny:agent:Limited"}},
+	})
+	if err != nil {
+		t.Fatalf("seed protected file failed: %v", err)
+	}
+	if _, err := store.DeleteFile(relayfile.DeleteRequest{WorkspaceID: workspaceID, Path: "/docs/deleted.md", IfMatch: created.TargetRevision}); err != nil {
+		t.Fatalf("delete protected file failed: %v", err)
+	}
+	feed, err := store.GetEvents(workspaceID, "", "", 100)
+	if err != nil || len(feed.Events) != 2 {
+		t.Fatalf("unexpected event feed: %+v (%v)", feed, err)
+	}
+	server := NewServer(store)
+	claims := tokenClaims{WorkspaceID: workspaceID, AgentName: "Limited", Scopes: map[string]struct{}{"fs:read": {}}}
+	for _, event := range feed.Events {
+		if event.Type != "file.deleted" {
+			continue
+		}
+		if s := event.ACLPermissions; len(s) == 0 {
+			t.Fatalf("delete event lost ACL snapshot: %+v", event)
+		}
+		if server.eventVisibleToClaims(workspaceID, claims, event) {
+			t.Fatalf("protected delete event became visible: %+v", event)
+		}
+	}
+	deleteEvent := relayfile.Event{Type: "file.deleted", Path: "/docs/deleted.md"}
+	for _, event := range feed.Events {
+		if event.Type == "file.deleted" {
+			deleteEvent = event
+			break
+		}
+	}
+	deleteEvent.Path = "/docs/../docs/deleted.md"
+	if server.eventVisibleToClaims(workspaceID, claims, deleteEvent) {
+		t.Fatal("normalized protected path was treated as visible")
+	}
+}
+
+// TestACLAckRenameDeleteEventHiddenFromDeniedAgent is the adversarial,
+// real-code end-to-end proof for the ack-rename half of ACL-423:
+// reconcileAckedDraftLocked emits the draft's file.deleted directly via
+// appendWorkspaceEventLocked (classification-exempt, bypassing
+// recordWriteWithACLPermissionsLocked), so it must independently snapshot
+// the draft's ACL before the File record disappears from ws.Files. This
+// drives the real WriteFile -> AcknowledgeWriteback production path (not a
+// synthetic relayfile.Event) and asserts what a file-level-denied agent
+// actually receives over both the HTTP events feed and the websocket
+// catch-up feed.
+func TestACLAckRenameDeleteEventHiddenFromDeniedAgent(t *testing.T) {
+	t.Parallel()
+	const workspaceID = "ws_acl_ack_rename_delete"
+	const draftPath = "/slack/channels/C0ALQ06AAUT/messages/messages 0e89a031-65f0-480e-a823-ab1d94b324ea.json"
+	const canonicalPath = "/slack/channels/C0ALQ06AAUT/messages/1780018871.351819.json"
+	const denyRule = "deny:agent:Limited"
+
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true, ExternalWritebackMode: true})
+	t.Cleanup(store.Close)
+	created, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: workspaceID,
+		Path:        draftPath,
+		IfMatch:     "0",
+		ContentType: "application/json",
+		Content:     `{"text":"hi"}`,
+		// allow:public makes this an ordinary "everyone but Limited" ACL —
+		// filePermissionAllows fails closed for ANY agent once an
+		// enforceable rule exists with no matching allow, so a bare
+		// deny:agent:Limited alone would (correctly) also hide this from
+		// Trusted, and the test needs a genuine visible/hidden split to be
+		// adversarial.
+		Semantics:     relayfile.FileSemantics{Permissions: []string{"allow:public", denyRule}},
+		CorrelationID: "corr_draft_write",
+	})
+	if err != nil {
+		t.Fatalf("seed protected draft failed: %v", err)
+	}
+	if _, err := store.AcknowledgeWriteback(workspaceID, created.OpID, relayfile.WritebackAck{
+		Success:    true,
+		ExternalID: "1780018871.351819",
+	}, "corr_ack_1"); err != nil {
+		t.Fatalf("ack failed: %v", err)
+	}
+	if _, err := store.ReadFile(workspaceID, canonicalPath); err != nil {
+		t.Fatalf("expected the draft renamed to the canonical path: %v", err)
+	}
+
+	server := httptest.NewServer(NewServer(store))
+	// Cleanup (not defer): a parallel subtest resumes only after this
+	// function body returns, which happens immediately once t.Run hits
+	// t.Parallel() — a plain defer here would close the server out from
+	// under the still-pending subtests.
+	t.Cleanup(server.Close)
+
+	cases := []struct {
+		name        string
+		agentName   string
+		wantVisible bool
+	}{
+		{name: "file_level_denied_agent_cannot_see_draft_ever_existed", agentName: "Limited", wantVisible: false},
+		{name: "unrestricted_agent_sees_the_full_rename", agentName: "Trusted", wantVisible: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			token := mustTestJWT(t, "dev-secret", workspaceID, tc.agentName, []string{"fs:read"}, time.Now().Add(time.Hour))
+			headers := map[string]string{"Authorization": "Bearer " + token, "X-Correlation-Id": "corr_" + tc.name}
+
+			resp := doRequest(t, NewServer(store), request{method: http.MethodGet, path: "/v1/workspaces/" + workspaceID + "/fs/events?limit=100", headers: headers})
+			if resp.Code != http.StatusOK {
+				t.Fatalf("events returned %d: %s", resp.Code, resp.Body.String())
+			}
+			var feed relayfile.EventFeed
+			if err := json.NewDecoder(resp.Body).Decode(&feed); err != nil {
+				t.Fatalf("decode events: %v", err)
+			}
+			var sawDraftDelete, sawCanonicalCreate bool
+			for _, event := range feed.Events {
+				if event.Type == "file.deleted" && event.Path == draftPath {
+					sawDraftDelete = true
+				}
+				if event.Type == "file.created" && event.Path == canonicalPath {
+					sawCanonicalCreate = true
+				}
+			}
+			if sawDraftDelete != tc.wantVisible {
+				t.Fatalf("HTTP feed: draft delete visibility = %v, want %v (events=%+v)", sawDraftDelete, tc.wantVisible, feed.Events)
+			}
+			if sawCanonicalCreate != tc.wantVisible {
+				t.Fatalf("HTTP feed: canonical create visibility = %v, want %v (events=%+v)", sawCanonicalCreate, tc.wantVisible, feed.Events)
+			}
+
+			wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/workspaces/" + workspaceID + "/fs/ws?token=" + token
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			conn, _, err := websocket.Dial(ctx, wsURL, nil)
+			if err != nil {
+				t.Fatalf("websocket dial failed: %v", err)
+			}
+			defer conn.Close(websocket.StatusNormalClosure, "")
+
+			if tc.wantVisible {
+				var originalCreated map[string]any
+				if err := wsjson.Read(ctx, conn, &originalCreated); err != nil {
+					t.Fatalf("read original draft-created catch-up event: %v", err)
+				}
+				if originalCreated["type"] != "file.created" || originalCreated["path"] != draftPath {
+					t.Fatalf("unexpected first catch-up event: %+v", originalCreated)
+				}
+				var deleted map[string]any
+				if err := wsjson.Read(ctx, conn, &deleted); err != nil {
+					t.Fatalf("read draft-deleted catch-up event: %v", err)
+				}
+				if deleted["type"] != "file.deleted" || deleted["path"] != draftPath {
+					t.Fatalf("unexpected second catch-up event: %+v", deleted)
+				}
+				var createdEvt map[string]any
+				if err := wsjson.Read(ctx, conn, &createdEvt); err != nil {
+					t.Fatalf("read canonical-created catch-up event: %v", err)
+				}
+				if createdEvt["type"] != "file.created" || createdEvt["path"] != canonicalPath {
+					t.Fatalf("unexpected third catch-up event: %+v", createdEvt)
+				}
+			}
+			// Whether or not the rename was visible, no further catch-up
+			// events remain queued: for the denied agent this proves ZERO
+			// leakage (not even a truncated/garbled event — the original
+			// draft creation is denied the same way), and for the
+			// unrestricted agent it proves nothing beyond the three expected
+			// events was emitted.
+			if err := wsjson.Write(ctx, conn, map[string]any{"type": "ping"}); err != nil {
+				t.Fatalf("write ping failed: %v", err)
+			}
+			var pong map[string]any
+			if err := wsjson.Read(ctx, conn, &pong); err != nil || pong["type"] != "pong" {
+				t.Fatalf("expected pong immediately after catch-up (wantVisible=%v), got %+v (%v)", tc.wantVisible, pong, err)
+			}
+		})
+	}
+}
+
+// TestACLSweepDeleteEventHiddenFromDeniedAgent is the adversarial, real-code
+// end-to-end proof for the sweep half of ACL-423: SweepWritebackDrafts's
+// removal also goes through removeDraftLocked's classification-exempt
+// appendWorkspaceEventLocked call. This drives WriteFile -> ack (clearing the
+// pending op, mirroring how a delivered draft's op stops blocking the sweep)
+// -> the real SweepWritebackDrafts entry point, then asserts visibility over
+// the real HTTP events endpoint for a file-level-denied agent vs. an
+// unrestricted one.
+func TestACLSweepDeleteEventHiddenFromDeniedAgent(t *testing.T) {
+	t.Parallel()
+	const workspaceID = "ws_acl_sweep_delete"
+	const residuePath = "/slack/channels/C0ALQ06AAUT/messages/messages 15250fcf-de54-44b0-a808-c8e514480647.json"
+	const denyRule = "deny:agent:Limited"
+
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true, ExternalWritebackMode: true})
+	t.Cleanup(store.Close)
+	created, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: workspaceID,
+		Path:        residuePath,
+		IfMatch:     "0",
+		ContentType: "application/json",
+		Content:     `{"text":"old"}`,
+		// allow:public + deny:agent:Limited: see the comment in
+		// TestACLAckRenameDeleteEventHiddenFromDeniedAgent on why a bare
+		// deny rule alone can't produce a visible/hidden split here.
+		Semantics:     relayfile.FileSemantics{Permissions: []string{"allow:public", denyRule}},
+		CorrelationID: "corr_residue_write",
+	})
+	if err != nil {
+		t.Fatalf("seed protected residue failed: %v", err)
+	}
+	// Ack without an externalId: the op stops blocking the sweep (no longer
+	// pending/running) while the draft itself is left untouched — exactly
+	// the "delivered, but pre-dates the rename-at-ack contract" residue
+	// shape SweepWritebackDrafts exists to drain.
+	if _, err := store.AcknowledgeWriteback(workspaceID, created.OpID, relayfile.WritebackAck{Success: true}, "corr_ack_1"); err != nil {
+		t.Fatalf("ack failed: %v", err)
+	}
+	if _, err := store.ReadFile(workspaceID, residuePath); err != nil {
+		t.Fatalf("draft must remain until swept: %v", err)
+	}
+	sweepResult, err := store.SweepWritebackDrafts(workspaceID, relayfile.SweepDraftsRequest{Apply: true, CorrelationID: "corr_sweep_1"})
+	if err != nil {
+		t.Fatalf("sweep failed: %v", err)
+	}
+	if len(sweepResult.Removed) != 1 || sweepResult.Removed[0].Path != residuePath {
+		t.Fatalf("expected the protected residue swept, got %v", sweepResult.Removed)
+	}
+
+	server := NewServer(store)
+
+	cases := []struct {
+		name        string
+		agentName   string
+		wantVisible bool
+	}{
+		{name: "file_level_denied_agent_cannot_see_swept_residue", agentName: "Limited", wantVisible: false},
+		{name: "unrestricted_agent_sees_swept_residue", agentName: "Trusted", wantVisible: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			token := mustTestJWT(t, "dev-secret", workspaceID, tc.agentName, []string{"fs:read"}, time.Now().Add(time.Hour))
+			headers := map[string]string{"Authorization": "Bearer " + token, "X-Correlation-Id": "corr_" + tc.name}
+			resp := doRequest(t, server, request{method: http.MethodGet, path: "/v1/workspaces/" + workspaceID + "/fs/events?limit=100", headers: headers})
+			if resp.Code != http.StatusOK {
+				t.Fatalf("events returned %d: %s", resp.Code, resp.Body.String())
+			}
+			var feed relayfile.EventFeed
+			if err := json.NewDecoder(resp.Body).Decode(&feed); err != nil {
+				t.Fatalf("decode events: %v", err)
+			}
+			var sawResidueDelete bool
+			for _, event := range feed.Events {
+				if event.Type == "file.deleted" && event.Path == residuePath {
+					sawResidueDelete = true
+				}
+			}
+			if sawResidueDelete != tc.wantVisible {
+				t.Fatalf("residue delete visibility = %v, want %v (events=%+v)", sawResidueDelete, tc.wantVisible, feed.Events)
+			}
+		})
+	}
+}
+
+// TestLegacyFileDeletedEventWithoutACLSnapshotFailsClosedAfterUpgrade covers
+// finding (2): a state.json written before the ACL-snapshot mechanism
+// existed (or by any producer that failed to snapshot) has file.deleted
+// events with no recoverable ACL history. Since the deleted file's own File
+// record — the only place a file-level permission could have lived — is
+// gone, there is no way to tell "definitely never restricted" apart from
+// "restricted, but we can no longer prove it". This simulates that upgrade
+// by round-tripping a real on-disk snapshot through the JSON state backend
+// and surgically removing one event's recorded ACL snapshot (as if it had
+// been written by code that pre-dates ACLPermissionsByEvent), then asserts:
+//   - the reloaded legacy event comes back with ACLPermissions == nil
+//     (relayfile-side migration signal for "unknown"),
+//   - it fails closed over both the internal visibility check and the real
+//     HTTP events endpoint, even for an agent with no matching deny rule —
+//     because we cannot rule one out,
+//   - a sibling delete event whose (empty) snapshot DID survive reload
+//     stays visible, and a brand-new delete created after the reload in the
+//     same process also stays visible — the fail-closed rule must not
+//     swallow ordinary, fully-verified post-upgrade behavior.
+func TestLegacyFileDeletedEventWithoutACLSnapshotFailsClosedAfterUpgrade(t *testing.T) {
+	t.Parallel()
+	const workspaceID = "ws_legacy_acl_upgrade"
+	const protectedPath = "/legacy/protected.md"
+	const unrestrictedPath = "/legacy/public.md"
+	const denyRule = "deny:agent:Limited"
+
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{
+		StateBackend:   relayfile.NewJSONFileStateBackend(statePath),
+		DisableWorkers: true,
+	})
+
+	protected, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: workspaceID,
+		Path:        protectedPath,
+		IfMatch:     "0",
+		Content:     "secret",
+		Semantics:   relayfile.FileSemantics{Permissions: []string{denyRule}},
+	})
+	if err != nil {
+		t.Fatalf("seed protected file failed: %v", err)
+	}
+	if _, err := store.DeleteFile(relayfile.DeleteRequest{WorkspaceID: workspaceID, Path: protectedPath, IfMatch: protected.TargetRevision}); err != nil {
+		t.Fatalf("delete protected file failed: %v", err)
+	}
+	unrestricted, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: workspaceID,
+		Path:        unrestrictedPath,
+		IfMatch:     "0",
+		Content:     "public",
+	})
+	if err != nil {
+		t.Fatalf("seed unrestricted file failed: %v", err)
+	}
+	if _, err := store.DeleteFile(relayfile.DeleteRequest{WorkspaceID: workspaceID, Path: unrestrictedPath, IfMatch: unrestricted.TargetRevision}); err != nil {
+		t.Fatalf("delete unrestricted file failed: %v", err)
+	}
+
+	feed, err := store.GetEvents(workspaceID, "", "", 100)
+	if err != nil {
+		t.Fatalf("get events failed: %v", err)
+	}
+	var protectedDeleteID, unrestrictedDeleteID string
+	for _, event := range feed.Events {
+		switch {
+		case event.Type == "file.deleted" && event.Path == protectedPath:
+			protectedDeleteID = event.EventID
+		case event.Type == "file.deleted" && event.Path == unrestrictedPath:
+			unrestrictedDeleteID = event.EventID
+		}
+	}
+	if protectedDeleteID == "" || unrestrictedDeleteID == "" {
+		t.Fatalf("expected both delete events recorded, got %+v", feed.Events)
+	}
+	store.Close()
+
+	// Surgically strip the recorded ACL snapshot for the protected delete
+	// only, simulating a state.json written before ACLPermissionsByEvent
+	// existed (the unrestricted delete's entry — empty but present — is left
+	// alone, simulating an entry that DID survive from a version with this
+	// fix already applied).
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read state.json: %v", err)
+	}
+	var snapshot map[string]any
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		t.Fatalf("unmarshal state.json: %v", err)
+	}
+	workspaces, _ := snapshot["workspaces"].(map[string]any)
+	wsSnapshot, _ := workspaces[workspaceID].(map[string]any)
+	aclMap, _ := wsSnapshot["aclPermissionsByEvent"].(map[string]any)
+	if aclMap == nil {
+		t.Fatalf("expected aclPermissionsByEvent in persisted snapshot: %+v", wsSnapshot)
+	}
+	if _, ok := aclMap[protectedDeleteID]; !ok {
+		t.Fatalf("expected a persisted ACL snapshot entry for the protected delete before stripping it: %+v", aclMap)
+	}
+	delete(aclMap, protectedDeleteID)
+	patched, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("marshal patched state.json: %v", err)
+	}
+	if err := os.WriteFile(statePath, patched, 0o644); err != nil {
+		t.Fatalf("write patched state.json: %v", err)
+	}
+
+	// Reopen exactly as a fresh process would on upgrade.
+	reloaded := relayfile.NewStoreWithOptions(relayfile.StoreOptions{
+		StateBackend:   relayfile.NewJSONFileStateBackend(statePath),
+		DisableWorkers: true,
+	})
+	t.Cleanup(reloaded.Close)
+	server := NewServer(reloaded)
+	// AnyAgent carries no ACL rule targeting it anywhere: the point is that
+	// fail-closed hides the legacy event even from an agent nothing denies.
+	claims := tokenClaims{WorkspaceID: workspaceID, AgentName: "AnyAgent", Scopes: map[string]struct{}{"fs:read": {}}}
+
+	reloadedFeed, err := reloaded.GetEvents(workspaceID, "", "", 100)
+	if err != nil {
+		t.Fatalf("get reloaded events failed: %v", err)
+	}
+	var checkedProtected, checkedUnrestricted bool
+	for _, event := range reloadedFeed.Events {
+		switch event.EventID {
+		case protectedDeleteID:
+			checkedProtected = true
+			if event.ACLPermissions != nil {
+				t.Fatalf("expected the legacy delete event to reload with ACLPermissions == nil (unknown), got %v", event.ACLPermissions)
+			}
+			if server.eventVisibleToClaims(workspaceID, claims, event) {
+				t.Fatal("legacy delete event with no recoverable ACL snapshot must fail closed, even for an agent no rule names — the deleted file may have had a file-level deny we can no longer verify")
+			}
+		case unrestrictedDeleteID:
+			checkedUnrestricted = true
+			if event.ACLPermissions == nil {
+				t.Fatal("expected the sibling delete event's surviving (empty) ACL snapshot to reload as non-nil")
+			}
+			if !server.eventVisibleToClaims(workspaceID, claims, event) {
+				t.Fatal("preserving allowed behavior: a delete event whose ACL snapshot survived reload (even empty) must remain visible")
+			}
+		}
+	}
+	if !checkedProtected || !checkedUnrestricted {
+		t.Fatalf("expected to find both delete events after reload, got %+v", reloadedFeed.Events)
+	}
+
+	// A brand-new delete created after the upgrade, in the same reloaded
+	// process, must also stay visible: the fail-closed rule is scoped to
+	// genuinely unsnapshotted events, not "any file.deleted with no
+	// permissions".
+	freshPath := "/legacy/fresh.md"
+	fresh, err := reloaded.WriteFile(relayfile.WriteRequest{WorkspaceID: workspaceID, Path: freshPath, IfMatch: "0", Content: "fresh"})
+	if err != nil {
+		t.Fatalf("seed fresh file failed: %v", err)
+	}
+	if _, err := reloaded.DeleteFile(relayfile.DeleteRequest{WorkspaceID: workspaceID, Path: freshPath, IfMatch: fresh.TargetRevision}); err != nil {
+		t.Fatalf("delete fresh file failed: %v", err)
+	}
+	freshFeed, err := reloaded.GetEvents(workspaceID, "", "", 100)
+	if err != nil {
+		t.Fatalf("get fresh events failed: %v", err)
+	}
+	var freshVisible, sawFresh bool
+	for _, event := range freshFeed.Events {
+		if event.Type == "file.deleted" && event.Path == freshPath {
+			sawFresh = true
+			freshVisible = server.eventVisibleToClaims(workspaceID, claims, event)
+		}
+	}
+	if !sawFresh {
+		t.Fatalf("expected the fresh post-upgrade delete event, got %+v", freshFeed.Events)
+	}
+	if !freshVisible {
+		t.Fatal("a fresh, fully-snapshotted post-upgrade delete event must remain visible")
+	}
+
+	// And confirm the leak is actually closed over the real HTTP surface,
+	// not just the internal helper.
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	token := mustTestJWT(t, "dev-secret", workspaceID, "AnyAgent", []string{"fs:read"}, time.Now().Add(time.Hour))
+	resp := doRequest(t, server, request{
+		method:  http.MethodGet,
+		path:    "/v1/workspaces/" + workspaceID + "/fs/events?limit=100",
+		headers: map[string]string{"Authorization": "Bearer " + token, "X-Correlation-Id": "corr_legacy_http"},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("events returned %d: %s", resp.Code, resp.Body.String())
+	}
+	var httpFeed relayfile.EventFeed
+	if err := json.NewDecoder(resp.Body).Decode(&httpFeed); err != nil {
+		t.Fatalf("decode events: %v", err)
+	}
+	for _, event := range httpFeed.Events {
+		if event.Path == protectedPath && event.Type == "file.deleted" {
+			t.Fatalf("legacy unsnapshotted delete leaked over HTTP: %+v", event)
+		}
+	}
+}
+
+// waitForStoreCondition polls check until it reports true or timeout
+// elapses. Used to await state produced by the async envelope worker (real
+// production code — IngestEnvelope only enqueues, it does not process
+// synchronously), which the test cannot otherwise be notified of.
+func waitForStoreCondition(t *testing.T, timeout time.Duration, check func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if check() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("condition not met within %s", timeout)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+type wsEventExpect struct{ typ, path string }
+
+// TestACLProviderSyncDeleteEventHiddenFromDeniedAgent is the regression
+// test for finding P1 of the fresh review on commit b0df4ad4:
+// applyProviderDeleteLocked — the provider-webhook delete path, distinct
+// from DeleteFile and the draft-reconcile paths already covered by earlier
+// ACL-423 tests — still assigned
+// `event.ACLPermissions = append([]string(nil), aclPermissions...)`
+// instead of routing through snapshotACLPermissions. For an UNRESTRICTED
+// file that collapses right back to nil (append of zero elements onto a
+// nil slice returns nil), which is indistinguishable from "never
+// snapshotted" — so once eventVisibleToClaims started failing closed on
+// Type=="file.deleted" && ACLPermissions==nil (the fix for finding (2) of
+// the original review), this bug turned into an over-blocking regression:
+// an ordinary, unrestricted provider-sync delete became invisible to EVERY
+// agent, not just a denied one.
+//
+// This drives the real HTTP webhook-ingest endpoint end to end — through
+// ParseGenericEnvelope and the async envelope worker, not a direct call to
+// the unexported applyProviderDeleteLocked — for both an unrestricted file
+// (must stay visible to everyone) and a file-level-protected one (must
+// stay hidden from the denied agent only), and checks both HTTP history
+// and WebSocket catch-up AND live delivery.
+func TestACLProviderSyncDeleteEventHiddenFromDeniedAgent(t *testing.T) {
+	t.Parallel()
+	const workspaceID = "ws_acl_provider_sync_delete"
+	const provider = "acltestprovider"
+	const denyRule = "deny:agent:Limited"
+	const unrestrictedPath = "/acltestprovider/public.md"
+	const protectedPath = "/acltestprovider/protected.md"
+
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{})
+	t.Cleanup(store.Close)
+	ingestToken := mustTestJWT(t, "dev-secret", workspaceID, "Ingestor", []string{"fs:read", "fs:write", "sync:read", "sync:trigger"}, time.Now().Add(time.Hour))
+
+	deliverySeq := 0
+	ingest := func(t *testing.T, eventType, path string, data map[string]any) {
+		t.Helper()
+		deliverySeq++
+		deliveryID := fmt.Sprintf("dlv_acl_provider_delete_%d", deliverySeq)
+		body := map[string]any{
+			"provider":    provider,
+			"event_type":  eventType,
+			"path":        path,
+			"delivery_id": deliveryID,
+			"timestamp":   time.Now().UTC().Format(time.RFC3339),
+		}
+		if data != nil {
+			body["data"] = data
+		}
+		resp := doRequest(t, NewServer(store), request{
+			method:  http.MethodPost,
+			path:    "/v1/workspaces/" + workspaceID + "/webhooks/ingest",
+			headers: map[string]string{"Authorization": "Bearer " + ingestToken, "X-Correlation-Id": "corr_" + deliveryID},
+			body:    body,
+		})
+		if resp.Code != http.StatusAccepted {
+			t.Fatalf("webhook ingest %s %s returned %d: %s", eventType, path, resp.Code, resp.Body.String())
+		}
+	}
+	waitForFile := func(t *testing.T, path string) {
+		t.Helper()
+		waitForStoreCondition(t, 5*time.Second, func() bool {
+			_, err := store.ReadFile(workspaceID, path)
+			return err == nil
+		})
+	}
+	waitForDelete := func(t *testing.T, path string) {
+		t.Helper()
+		waitForStoreCondition(t, 5*time.Second, func() bool {
+			feed, err := store.GetEvents(workspaceID, "", "", 1000)
+			if err != nil {
+				return false
+			}
+			for _, event := range feed.Events {
+				if event.Type == "file.deleted" && event.Path == path {
+					return true
+				}
+			}
+			return false
+		})
+	}
+	protectedSemantics := map[string]any{"semantics": map[string]any{"permissions": []any{"allow:public", denyRule}}}
+
+	// Catch-up target: create then delete both files via the real provider
+	// webhook path (applyProviderDeleteLocked), waiting for each async step
+	// so the create->delete pairs never coalesce into a single envelope.
+	ingest(t, "file.created", unrestrictedPath, map[string]any{"content": "public", "contentType": "text/plain"})
+	waitForFile(t, unrestrictedPath)
+	ingest(t, "file.created", protectedPath, mergeMaps(map[string]any{"content": "secret", "contentType": "text/plain"}, protectedSemantics))
+	waitForFile(t, protectedPath)
+	ingest(t, "file.deleted", unrestrictedPath, nil)
+	waitForDelete(t, unrestrictedPath)
+	ingest(t, "file.deleted", protectedPath, nil)
+	waitForDelete(t, protectedPath)
+
+	// Pin the exact regression: the unrestricted delete's snapshot must be
+	// non-nil (empty), not nil — nil is what made it fail closed for
+	// everyone instead of just the denied agent.
+	feed, err := store.GetEvents(workspaceID, "", "", 1000)
+	if err != nil {
+		t.Fatalf("get events failed: %v", err)
+	}
+	for _, event := range feed.Events {
+		if event.Type != "file.deleted" {
+			continue
+		}
+		switch event.Path {
+		case unrestrictedPath:
+			if event.ACLPermissions == nil {
+				t.Fatalf("regression: applyProviderDeleteLocked left ACLPermissions nil for an unrestricted file (%+v) — this is exactly the P1 bug, and now hides the event from every agent, not just a denied one", event)
+			}
+		case protectedPath:
+			if len(event.ACLPermissions) == 0 {
+				t.Fatalf("expected the protected file's provider-sync delete to carry its deny rule, got %+v", event)
+			}
+		}
+	}
+
+	server := httptest.NewServer(NewServer(store))
+	t.Cleanup(server.Close)
+	limitedToken := mustTestJWT(t, "dev-secret", workspaceID, "Limited", []string{"fs:read"}, time.Now().Add(time.Hour))
+	trustedToken := mustTestJWT(t, "dev-secret", workspaceID, "Trusted", []string{"fs:read"}, time.Now().Add(time.Hour))
+
+	// --- HTTP history ---
+	for _, tc := range []struct {
+		agent                   string
+		token                   string
+		wantUnrestrictedVisible bool
+		wantProtectedVisible    bool
+	}{
+		{"Limited", limitedToken, true, false},
+		{"Trusted", trustedToken, true, true},
+	} {
+		resp := doRequest(t, NewServer(store), request{
+			method:  http.MethodGet,
+			path:    "/v1/workspaces/" + workspaceID + "/fs/events?limit=1000",
+			headers: map[string]string{"Authorization": "Bearer " + tc.token, "X-Correlation-Id": "corr_http_" + tc.agent},
+		})
+		if resp.Code != http.StatusOK {
+			t.Fatalf("[%s] events returned %d: %s", tc.agent, resp.Code, resp.Body.String())
+		}
+		var httpFeed relayfile.EventFeed
+		if err := json.NewDecoder(resp.Body).Decode(&httpFeed); err != nil {
+			t.Fatalf("[%s] decode events: %v", tc.agent, err)
+		}
+		var sawUnrestrictedDelete, sawProtectedDelete bool
+		for _, event := range httpFeed.Events {
+			if event.Type != "file.deleted" {
+				continue
+			}
+			if event.Path == unrestrictedPath {
+				sawUnrestrictedDelete = true
+			}
+			if event.Path == protectedPath {
+				sawProtectedDelete = true
+			}
+		}
+		if sawUnrestrictedDelete != tc.wantUnrestrictedVisible {
+			t.Fatalf("[%s] HTTP history: unrestricted provider delete visibility = %v, want %v", tc.agent, sawUnrestrictedDelete, tc.wantUnrestrictedVisible)
+		}
+		if sawProtectedDelete != tc.wantProtectedVisible {
+			t.Fatalf("[%s] HTTP history: protected provider delete visibility = %v, want %v", tc.agent, sawProtectedDelete, tc.wantProtectedVisible)
+		}
+	}
+
+	// --- WebSocket catch-up ---
+	dial := func(t *testing.T, token string) *websocket.Conn {
+		t.Helper()
+		wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/workspaces/" + workspaceID + "/fs/ws?token=" + token
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		t.Cleanup(cancel)
+		conn, _, err := websocket.Dial(ctx, wsURL, nil)
+		if err != nil {
+			t.Fatalf("websocket dial failed: %v", err)
+		}
+		return conn
+	}
+	readExact := func(t *testing.T, agent string, conn *websocket.Conn, phase string, want []wsEventExpect) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for i, w := range want {
+			var msg map[string]any
+			if err := wsjson.Read(ctx, conn, &msg); err != nil {
+				t.Fatalf("[%s/%s] read event %d: %v", agent, phase, i, err)
+			}
+			if msg["type"] != w.typ || msg["path"] != w.path {
+				t.Fatalf("[%s/%s] event %d = %+v, want type=%s path=%s", agent, phase, i, msg, w.typ, w.path)
+			}
+		}
+		if err := wsjson.Write(ctx, conn, map[string]any{"type": "ping"}); err != nil {
+			t.Fatalf("[%s/%s] write ping failed: %v", agent, phase, err)
+		}
+		var pong map[string]any
+		if err := wsjson.Read(ctx, conn, &pong); err != nil || pong["type"] != "pong" {
+			t.Fatalf("[%s/%s] expected pong immediately after drain, got %+v (%v)", agent, phase, pong, err)
+		}
+	}
+
+	limitedConn := dial(t, limitedToken)
+	defer limitedConn.Close(websocket.StatusNormalClosure, "")
+	readExact(t, "Limited", limitedConn, "catch-up", []wsEventExpect{
+		{"file.created", unrestrictedPath},
+		{"file.deleted", unrestrictedPath},
+	})
+	trustedConn := dial(t, trustedToken)
+	defer trustedConn.Close(websocket.StatusNormalClosure, "")
+	// Setup order was create(unrestricted), create(protected),
+	// delete(unrestricted), delete(protected) — all creates before either
+	// delete — so Trusted's unfiltered catch-up preserves that order.
+	readExact(t, "Trusted", trustedConn, "catch-up", []wsEventExpect{
+		{"file.created", unrestrictedPath},
+		{"file.created", protectedPath},
+		{"file.deleted", unrestrictedPath},
+		{"file.deleted", protectedPath},
+	})
+
+	// --- WebSocket live delivery: both connections stay open, one more
+	// unrestricted and one more protected create+delete pair land while
+	// connected, and each socket must independently see exactly its own
+	// authorized subset. Ingests run from this single goroutine (no
+	// parallel subtests touching the shared store) so there is no
+	// cross-connection ordering race between the two already-open sockets.
+	const liveUnrestrictedPath = "/acltestprovider/public-live.md"
+	const liveProtectedPath = "/acltestprovider/protected-live.md"
+	ingest(t, "file.created", liveUnrestrictedPath, map[string]any{"content": "public-live", "contentType": "text/plain"})
+	waitForFile(t, liveUnrestrictedPath)
+	ingest(t, "file.deleted", liveUnrestrictedPath, nil)
+	waitForDelete(t, liveUnrestrictedPath)
+	ingest(t, "file.created", liveProtectedPath, mergeMaps(map[string]any{"content": "protected-live", "contentType": "text/plain"}, protectedSemantics))
+	waitForFile(t, liveProtectedPath)
+	ingest(t, "file.deleted", liveProtectedPath, nil)
+	waitForDelete(t, liveProtectedPath)
+
+	readExact(t, "Limited", limitedConn, "live", []wsEventExpect{
+		{"file.created", liveUnrestrictedPath},
+		{"file.deleted", liveUnrestrictedPath},
+	})
+	readExact(t, "Trusted", trustedConn, "live", []wsEventExpect{
+		{"file.created", liveUnrestrictedPath},
+		{"file.deleted", liveUnrestrictedPath},
+		{"file.created", liveProtectedPath},
+		{"file.deleted", liveProtectedPath},
+	})
+}
+
+func mergeMaps(base, extra map[string]any) map[string]any {
+	out := make(map[string]any, len(base)+len(extra))
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range extra {
+		out[k] = v
+	}
+	return out
+}
+
+func TestACLPathlessReconcileControlDoesNotLeakOrLookLikeDelete(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
+	claims := tokenClaims{Scopes: map[string]struct{}{"fs:read": {}}}
+
+	if server.eventVisibleToClaims("ws_acl_pathless_control", claims, relayfile.Event{
+		Type:           "file.deleted",
+		ACLPermissions: []string{},
+	}) {
+		t.Fatal("pathless file.deleted with a present ACL snapshot must remain hidden")
+	}
+	reconcile := relayfile.Event{Type: "sync.reconcile", Origin: "provider_sync"}
+	if !server.eventVisibleToClaims("ws_acl_pathless_control", claims, reconcile) {
+		t.Fatal("pathless reconciliation control event should be visible without a file path")
+	}
+	if !webSocketEventMatchesPaths(reconcile, []string{"/secret/**"}) {
+		t.Fatal("pathless reconciliation control event must reach path-filtered mounts")
+	}
+	payload, err := json.Marshal(fileEventMessage{Type: reconcile.Type, Origin: reconcile.Origin})
+	if err != nil {
+		t.Fatalf("marshal pathless control event: %v", err)
+	}
+	if strings.Contains(string(payload), `"path"`) {
+		t.Fatalf("pathless reconciliation control event disclosed a path field: %s", payload)
+	}
+}
+
+// TestACLEmptyPathUnsnapshottedFileDeletedFailsClosed is the regression
+// test for finding P2 of the fresh review on commit b0df4ad4:
+// eventVisibleToClaims returned true for ANY event with an empty Path via
+// its unconditional fast path, evaluated BEFORE the file.deleted
+// nil-ACLPermissions fail-closed guard added for finding (2) of the
+// original ACL-423 fix. A malformed or corrupted persisted file.deleted
+// event carrying an empty Path — which no current in-process producer can
+// create; DeleteFile, CommitForkWithValidator, applyProviderDeleteLocked,
+// applyProviderUpsertLocked, reconcileAckedDraftLocked and
+// removeDraftLocked all normalize a non-"/" path before emitting — would
+// therefore slip past the fail-closed guard entirely and be treated as
+// unconditionally visible, regardless of whether it ever had an ACL
+// snapshot.
+//
+// This simulates that malformed state the only way it can actually arise
+// — hand-edited or corrupted persisted JSON, e.g. from truncation or a
+// future producer bug — by round-tripping a real on-disk snapshot and
+// injecting one such event (with no aclPermissionsByEvent entry, so it
+// reloads with ACLPermissions == nil like any other unsnapshotted delete),
+// then checks it is hidden over the internal visibility check, the real
+// HTTP events endpoint, and the real WebSocket catch-up feed — while a
+// normal sibling delete event AND a legitimate non-file empty-path
+// progress event (proving the fast path itself is preserved, not removed)
+// both remain visible.
+func TestACLEmptyPathUnsnapshottedFileDeletedFailsClosed(t *testing.T) {
+	t.Parallel()
+	const workspaceID = "ws_acl_empty_path_malformed"
+	const visiblePath = "/malformed/visible.md"
+	const malformedEventID = "evt_malformed_empty_path"
+	const nonFileEventID = "evt_nonfile_empty_path"
+
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{
+		StateBackend:   relayfile.NewJSONFileStateBackend(statePath),
+		DisableWorkers: true,
+	})
+	seeded, err := store.WriteFile(relayfile.WriteRequest{WorkspaceID: workspaceID, Path: visiblePath, IfMatch: "0", Content: "visible"})
+	if err != nil {
+		t.Fatalf("seed visible file failed: %v", err)
+	}
+	if _, err := store.DeleteFile(relayfile.DeleteRequest{WorkspaceID: workspaceID, Path: visiblePath, IfMatch: seeded.TargetRevision}); err != nil {
+		t.Fatalf("delete visible file failed: %v", err)
+	}
+	store.Close()
+
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read state.json: %v", err)
+	}
+	var snapshot map[string]any
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		t.Fatalf("unmarshal state.json: %v", err)
+	}
+	workspaces, _ := snapshot["workspaces"].(map[string]any)
+	wsSnapshot, _ := workspaces[workspaceID].(map[string]any)
+	events, _ := wsSnapshot["events"].([]any)
+	if len(events) == 0 {
+		t.Fatalf("expected seeded events in persisted snapshot, got %+v", wsSnapshot)
+	}
+	events = append(events,
+		// The malformed event under test: file.deleted, empty path, no
+		// recorded ACL snapshot.
+		map[string]any{
+			"eventId":       malformedEventID,
+			"type":          "file.deleted",
+			"path":          "",
+			"revision":      "rev_malformed",
+			"origin":        "system",
+			"correlationId": "corr_malformed",
+			"timestamp":     time.Now().UTC().Format(time.RFC3339Nano),
+		},
+		// A legitimate non-file, empty-path progress event: the fast path
+		// exists for exactly this shape and must keep working.
+		map[string]any{
+			"eventId":       nonFileEventID,
+			"type":          "sync.suppressed",
+			"path":          "",
+			"revision":      "",
+			"origin":        "provider_sync",
+			"correlationId": "corr_nonfile",
+			"timestamp":     time.Now().UTC().Format(time.RFC3339Nano),
+		},
+	)
+	wsSnapshot["events"] = events
+	workspaces[workspaceID] = wsSnapshot
+	snapshot["workspaces"] = workspaces
+	patched, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("marshal patched state.json: %v", err)
+	}
+	if err := os.WriteFile(statePath, patched, 0o644); err != nil {
+		t.Fatalf("write patched state.json: %v", err)
+	}
+
+	reloaded := relayfile.NewStoreWithOptions(relayfile.StoreOptions{
+		StateBackend:   relayfile.NewJSONFileStateBackend(statePath),
+		DisableWorkers: true,
+	})
+	t.Cleanup(reloaded.Close)
+	server := NewServer(reloaded)
+	claims := tokenClaims{WorkspaceID: workspaceID, AgentName: "AnyAgent", Scopes: map[string]struct{}{"fs:read": {}}}
+
+	reloadedFeed, err := reloaded.GetEvents(workspaceID, "", "", 100)
+	if err != nil {
+		t.Fatalf("get reloaded events failed: %v", err)
+	}
+	var checkedMalformed, checkedNonFile, checkedVisible bool
+	for _, event := range reloadedFeed.Events {
+		switch {
+		case event.EventID == malformedEventID:
+			checkedMalformed = true
+			if event.ACLPermissions != nil {
+				t.Fatalf("expected the malformed event to reload with ACLPermissions == nil, got %v", event.ACLPermissions)
+			}
+			if event.Path != "" {
+				t.Fatalf("expected the malformed event's empty path to survive reload, got %q", event.Path)
+			}
+			if server.eventVisibleToClaims(workspaceID, claims, event) {
+				t.Fatal("malformed empty-path unsnapshotted file.deleted event must fail closed, not fall through the empty-path fast path")
+			}
+		case event.EventID == nonFileEventID:
+			checkedNonFile = true
+			if !server.eventVisibleToClaims(workspaceID, claims, event) {
+				t.Fatal("a legitimate non-file empty-path event must still take the always-visible fast path — it must not have been collateral damage from the P2 fix")
+			}
+		case event.Type == "file.deleted" && event.Path == visiblePath:
+			checkedVisible = true
+			if !server.eventVisibleToClaims(workspaceID, claims, event) {
+				t.Fatal("normal sibling delete event (real ACL snapshot, empty permissions) must remain visible")
+			}
+		}
+	}
+	if !checkedMalformed || !checkedNonFile || !checkedVisible {
+		t.Fatalf("expected to find all three events after reload: malformed=%v nonfile=%v visible=%v (events=%+v)", checkedMalformed, checkedNonFile, checkedVisible, reloadedFeed.Events)
+	}
+
+	// --- Real HTTP surface ---
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	token := mustTestJWT(t, "dev-secret", workspaceID, "AnyAgent", []string{"fs:read"}, time.Now().Add(time.Hour))
+	resp := doRequest(t, server, request{
+		method:  http.MethodGet,
+		path:    "/v1/workspaces/" + workspaceID + "/fs/events?limit=100",
+		headers: map[string]string{"Authorization": "Bearer " + token, "X-Correlation-Id": "corr_malformed_http"},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("events returned %d: %s", resp.Code, resp.Body.String())
+	}
+	var httpFeed relayfile.EventFeed
+	if err := json.NewDecoder(resp.Body).Decode(&httpFeed); err != nil {
+		t.Fatalf("decode events: %v", err)
+	}
+	var sawMalformed, sawNonFile, sawVisible bool
+	for _, event := range httpFeed.Events {
+		if event.EventID == malformedEventID {
+			sawMalformed = true
+		}
+		if event.EventID == nonFileEventID {
+			sawNonFile = true
+		}
+		if event.Type == "file.deleted" && event.Path == visiblePath {
+			sawVisible = true
+		}
+	}
+	if sawMalformed {
+		t.Fatal("malformed empty-path unsnapshotted delete leaked over HTTP")
+	}
+	if !sawNonFile {
+		t.Fatal("legitimate non-file empty-path event incorrectly hidden over HTTP")
+	}
+	if !sawVisible {
+		t.Fatal("normal sibling delete incorrectly hidden over HTTP")
+	}
+
+	// --- Real WebSocket catch-up: collect until pong rather than asserting
+	// a fixed order/count, since the malformed and non-file events share
+	// the same empty Path (and fileEventMessage.Path is `omitempty`) —
+	// what matters is the malformed event never arrives and the other two
+	// do.
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/v1/workspaces/" + workspaceID + "/fs/ws?token=" + token
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("websocket dial failed: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "ping"}); err != nil {
+		t.Fatalf("write ping failed: %v", err)
+	}
+	var sawWSVisibleDelete, sawWSNonFile bool
+	for {
+		var msg map[string]any
+		if err := wsjson.Read(ctx, conn, &msg); err != nil {
+			t.Fatalf("websocket read failed: %v", err)
+		}
+		if msg["type"] == "pong" {
+			break
+		}
+		if msg["type"] == "file.deleted" {
+			if msg["path"] == visiblePath {
+				sawWSVisibleDelete = true
+			} else {
+				t.Fatalf("unexpected file.deleted over websocket catch-up: %+v (malformed empty-path event must never be delivered)", msg)
+			}
+		}
+		if msg["type"] == "sync.suppressed" {
+			sawWSNonFile = true
+		}
+	}
+	if !sawWSVisibleDelete {
+		t.Fatal("normal sibling delete incorrectly hidden over websocket catch-up")
+	}
+	if !sawWSNonFile {
+		t.Fatal("legitimate non-file empty-path event incorrectly hidden over websocket catch-up")
+	}
+}
+
 func TestFileEventsWebSocketCursorCatchUpDrainsMoreThanOnePage(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)
@@ -2254,6 +3337,51 @@ func TestExportJSONPathFilter(t *testing.T) {
 	}
 }
 
+func TestForkExportUsesOverlayDeletionAndACLMarkers(t *testing.T) {
+	server := newForkTestServer(t)
+	workspaceID := "ws_export_fork_overlay"
+	token := forkTestToken(t, workspaceID)
+	parent := writeFileForTest(t, server, token, workspaceID, "/docs/Parent.md", "0", "parent", "corr_export_fork_parent")
+	writeFileForTest(t, server, token, workspaceID, "/docs/Keep.md", "0", "keep", "corr_export_fork_keep")
+	marker := writeFileForTest(t, server, token, workspaceID, "/docs/.relayfile.acl", "0", "parent marker", "corr_export_fork_marker")
+	fork := createForkForTest(t, server, token, workspaceID, "proposal-export-fork", nil)
+
+	deleteResp := doRequest(t, server, request{
+		method: http.MethodDelete,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=/docs/Parent.md&forkId=" + fork.ForkID,
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_export_fork_delete",
+			"If-Match":         parent.TargetRevision,
+		},
+	})
+	if deleteResp.Code != http.StatusAccepted {
+		t.Fatalf("expected fork delete 202, got %d (%s)", deleteResp.Code, deleteResp.Body.String())
+	}
+	writeForkFileForTest(t, server, token, workspaceID, fork.ForkID, "/docs/.relayfile.acl", marker.TargetRevision, "fork marker", "corr_export_fork_marker_overlay")
+
+	for _, format := range []string{"json", "tar", "patch"} {
+		resp := doRequest(t, server, request{
+			method: http.MethodGet,
+			path:   "/v1/workspaces/" + workspaceID + "/fs/export?format=" + format + "&forkId=" + fork.ForkID,
+			headers: map[string]string{
+				"Authorization":    "Bearer " + token,
+				"X-Correlation-Id": "corr_export_fork_" + format,
+			},
+		})
+		if resp.Code != http.StatusOK {
+			t.Fatalf("expected fork %s export 200, got %d (%s)", format, resp.Code, resp.Body.String())
+		}
+		body := resp.Body.String()
+		if strings.Contains(body, "parent") || strings.Contains(body, "Parent.md") {
+			t.Fatalf("fork %s export leaked deleted parent file: %s", format, body)
+		}
+		if !strings.Contains(body, "Keep.md") && format != "tar" {
+			t.Fatalf("fork %s export omitted retained overlay view: %s", format, body)
+		}
+	}
+}
+
 func TestExportEnforcesPathScopedMountGrant(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)
@@ -2714,6 +3842,206 @@ func TestTreeEndpointPaginatesBoundedEntries(t *testing.T) {
 	}
 }
 
+func TestCollectionEndpointsDoNotExpandExactPathScopes(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
+	workspaceID := "ws_collection_exact_scope"
+	for index, seed := range []struct {
+		path        string
+		content     string
+		permissions []string
+	}{
+		{path: "/private/Plain.md", content: "plain secret"},
+		{path: "/private/Public.md", content: "public secret", permissions: []string{"public"}},
+		{path: "/private/Tagged.md", content: "tagged secret", permissions: []string{"role:finance"}},
+	} {
+		if _, err := store.WriteFile(relayfile.WriteRequest{
+			WorkspaceID: workspaceID, Path: seed.path, IfMatch: "0", ContentType: "text/markdown",
+			Content: seed.content, Semantics: relayfile.FileSemantics{Permissions: seed.permissions},
+			CorrelationID: fmt.Sprintf("corr_collection_exact_seed_%d", index),
+		}); err != nil {
+			t.Fatalf("seed write failed for %s: %v", seed.path, err)
+		}
+	}
+	fork, err := store.CreateFork(workspaceID, "proposal-collection-exact-scope", 3600)
+	if err != nil {
+		t.Fatalf("create fork: %v", err)
+	}
+
+	for _, scopePath := range []string{"/", "/private"} {
+		scopePath := scopePath
+		t.Run(scopePath, func(t *testing.T) {
+			token := mustTestJWT(t, "dev-secret", workspaceID, "ExactScope", []string{"relayfile:fs:read:" + scopePath}, time.Now().Add(time.Hour))
+			requestPath := url.QueryEscape(scopePath)
+			for _, forkQuery := range []string{"", "&forkId=" + url.QueryEscape(fork.ForkID)} {
+				for _, endpoint := range []string{"tree", "query"} {
+					resp := doRequest(t, server, request{
+						method: http.MethodGet,
+						path:   "/v1/workspaces/" + workspaceID + "/fs/" + endpoint + "?path=" + requestPath + forkQuery,
+						headers: map[string]string{
+							"Authorization":    "Bearer " + token,
+							"X-Correlation-Id": "corr_collection_exact_" + endpoint,
+						},
+					})
+					if resp.Code != http.StatusOK {
+						t.Fatalf("expected %s%s 200, got %d (%s)", endpoint, forkQuery, resp.Code, resp.Body.String())
+					}
+					if endpoint == "tree" {
+						var payload relayfile.TreeResponse
+						if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+							t.Fatalf("decode tree response: %v", err)
+						}
+						if len(payload.Entries) != 0 || payload.TotalFiles != 0 || payload.NextCursor != nil {
+							t.Fatalf("exact scope exposed descendant tree state: %+v", payload)
+						}
+						continue
+					}
+					var payload relayfile.FileQueryResponse
+					if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+						t.Fatalf("decode query response: %v", err)
+					}
+					if len(payload.Items) != 0 || payload.NextCursor != nil {
+						t.Fatalf("exact scope exposed descendant query state: %+v", payload)
+					}
+				}
+			}
+
+			for _, format := range []string{"json", "tar"} {
+				resp := doRequest(t, server, request{
+					method: http.MethodGet,
+					path:   "/v1/workspaces/" + workspaceID + "/fs/export?format=" + format + "&path=" + requestPath,
+					headers: map[string]string{
+						"Authorization":    "Bearer " + token,
+						"X-Correlation-Id": "corr_collection_exact_export_" + format,
+					},
+				})
+				if resp.Code != http.StatusOK {
+					t.Fatalf("expected %s export 200, got %d (%s)", format, resp.Code, resp.Body.String())
+				}
+				if strings.Contains(resp.Body.String(), "secret") || strings.Contains(resp.Body.String(), "/private/") {
+					t.Fatalf("exact scope exposed descendant %s export bytes", format)
+				}
+			}
+		})
+	}
+}
+
+func TestTreePaginationUsesOnlyACLVisibleCursors(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
+	workspaceID := "ws_tree_acl_cursor"
+	token := mustTestJWT(t, "dev-secret", workspaceID, "Limited", []string{"fs:read"}, time.Now().Add(time.Hour))
+
+	for index := 0; index < 1002; index++ {
+		permissions := []string{"scope:finance"}
+		if index == 1001 {
+			permissions = nil
+		}
+		path := fmt.Sprintf("/private/File%04d.md", index)
+		if _, err := store.WriteFile(relayfile.WriteRequest{
+			WorkspaceID: workspaceID, Path: path, IfMatch: "0", ContentType: "text/markdown",
+			Content: "classified", Semantics: relayfile.FileSemantics{Permissions: permissions},
+			CorrelationID: fmt.Sprintf("corr_tree_acl_cursor_%04d", index),
+		}); err != nil {
+			t.Fatalf("write failed for %s: %v", path, err)
+		}
+	}
+	fork, err := store.CreateFork(workspaceID, "proposal-tree-acl-cursor", 3600)
+	if err != nil {
+		t.Fatalf("create fork: %v", err)
+	}
+
+	for _, forkQuery := range []string{"", "&forkId=" + url.QueryEscape(fork.ForkID)} {
+		resp := doRequest(t, server, request{
+			method: http.MethodGet,
+			path:   "/v1/workspaces/" + workspaceID + "/fs/tree?path=/private&depth=1" + forkQuery,
+			headers: map[string]string{
+				"Authorization":    "Bearer " + token,
+				"X-Correlation-Id": "corr_tree_acl_cursor_read",
+			},
+		})
+		if resp.Code != http.StatusOK {
+			t.Fatalf("expected tree%s 200, got %d (%s)", forkQuery, resp.Code, resp.Body.String())
+		}
+		var payload relayfile.TreeResponse
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode tree response: %v", err)
+		}
+		if len(payload.Entries) != 1 || payload.Entries[0].Path != "/private/File1001.md" {
+			t.Fatalf("expected only the visible tail entry, got %+v", payload.Entries)
+		}
+		if payload.TotalFiles != 1 || payload.NextCursor != nil {
+			t.Fatalf("hidden tree page boundary leaked through totals/cursor: %+v", payload)
+		}
+	}
+}
+
+func TestTreePaginationFillsPagesAcrossHiddenBoundaries(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
+	workspaceID := "ws_tree_acl_mixed_cursor"
+	token := mustTestJWT(t, "dev-secret", workspaceID, "Limited", []string{"fs:read"}, time.Now().Add(time.Hour))
+
+	for index := 0; index < 1002; index++ {
+		var permissions []string
+		if index == 999 {
+			permissions = []string{"scope:finance"}
+		}
+		path := fmt.Sprintf("/mixed/File%04d.md", index)
+		if _, err := store.WriteFile(relayfile.WriteRequest{
+			WorkspaceID: workspaceID, Path: path, IfMatch: "0", ContentType: "text/markdown",
+			Content: "mixed", Semantics: relayfile.FileSemantics{Permissions: permissions},
+			CorrelationID: fmt.Sprintf("corr_tree_acl_mixed_%04d", index),
+		}); err != nil {
+			t.Fatalf("write failed for %s: %v", path, err)
+		}
+	}
+
+	readPage := func(cursor string) relayfile.TreeResponse {
+		t.Helper()
+		requestPath := "/v1/workspaces/" + workspaceID + "/fs/tree?path=/mixed&depth=1"
+		if cursor != "" {
+			requestPath += "&cursor=" + url.QueryEscape(cursor)
+		}
+		resp := doRequest(t, server, request{
+			method: http.MethodGet,
+			path:   requestPath,
+			headers: map[string]string{
+				"Authorization":    "Bearer " + token,
+				"X-Correlation-Id": "corr_tree_acl_mixed_read",
+			},
+		})
+		if resp.Code != http.StatusOK {
+			t.Fatalf("expected tree 200, got %d (%s)", resp.Code, resp.Body.String())
+		}
+		var payload relayfile.TreeResponse
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode tree response: %v", err)
+		}
+		return payload
+	}
+
+	pageOne := readPage("")
+	if len(pageOne.Entries) != 1000 || pageOne.TotalFiles != 1001 || pageOne.NextCursor == nil {
+		t.Fatalf("unexpected mixed page one: entries=%d total=%d cursor=%v", len(pageOne.Entries), pageOne.TotalFiles, pageOne.NextCursor)
+	}
+	if *pageOne.NextCursor != "/mixed/File1000.md" {
+		t.Fatalf("nextCursor must name the last visible entry, got %q", *pageOne.NextCursor)
+	}
+	for _, entry := range pageOne.Entries {
+		if entry.Path == "/mixed/File0999.md" {
+			t.Fatalf("hidden page-boundary entry was returned")
+		}
+	}
+	pageTwo := readPage(*pageOne.NextCursor)
+	if len(pageTwo.Entries) != 1 || pageTwo.Entries[0].Path != "/mixed/File1001.md" || pageTwo.NextCursor != nil {
+		t.Fatalf("unexpected mixed page two: %+v", pageTwo)
+	}
+}
+
 func TestQueryFilesEndpoint(t *testing.T) {
 	server := NewServer(relayfile.NewStore())
 	token := mustTestJWT(t, "dev-secret", "ws_query_api", "Worker1", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
@@ -3133,6 +4461,142 @@ func TestTreeEndpointFiltersUnauthorizedFiles(t *testing.T) {
 	}
 }
 
+func TestQueryRejectsExistingACLHiddenCursor(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
+	workspaceID := "ws_query_acl_cursor"
+	if _, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: workspaceID, Path: "/docs/Hidden.md", IfMatch: "0", ContentType: "text/markdown",
+		Content: "hidden", Semantics: relayfile.FileSemantics{Permissions: []string{"allow:agent:Finance"}}, CorrelationID: "corr_query_acl_hidden",
+	}); err != nil {
+		t.Fatalf("write hidden file: %v", err)
+	}
+	if _, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: workspaceID, Path: "/docs/Visible.md", IfMatch: "0", ContentType: "text/markdown",
+		Content: "visible", CorrelationID: "corr_query_acl_visible",
+	}); err != nil {
+		t.Fatalf("write visible file: %v", err)
+	}
+	token := mustTestJWT(t, "dev-secret", workspaceID, "Limited", []string{"fs:read"}, time.Now().Add(time.Hour))
+	resp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/query?path=/docs&cursor=" + url.QueryEscape("/docs/Hidden.md"),
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_query_acl_hidden_cursor",
+		},
+	})
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for ACL-hidden query cursor, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	fork, err := store.CreateFork(workspaceID, "proposal-query-acl-cursor", 3600)
+	if err != nil {
+		t.Fatalf("create query ACL cursor fork: %v", err)
+	}
+	forkResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/query?path=/docs&forkId=" + url.QueryEscape(fork.ForkID) + "&cursor=" + url.QueryEscape("/docs/Hidden.md"),
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_query_acl_hidden_cursor_fork",
+		},
+	})
+	if forkResp.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for ACL-hidden fork query cursor, got %d (%s)", forkResp.Code, forkResp.Body.String())
+	}
+}
+
+func TestTreeEndpointAllowsDescendantScopedACL(t *testing.T) {
+	server := NewServer(relayfile.NewStore())
+	workspaceID := "ws_tree_descendant"
+	ownerToken := mustTestJWT(t, "dev-secret", workspaceID, "Owner", []string{"relayfile:fs:read:*", "relayfile:fs:write:*"}, time.Now().Add(time.Hour))
+	limitedToken := mustTestJWT(t, "dev-secret", workspaceID, "Limited", []string{"relayfile:fs:read:/allowed/**"}, time.Now().Add(time.Hour))
+
+	writeFileForTest(t, server, ownerToken, workspaceID, "/allowed/document.md", "0", "descendant", "corr_tree_descendant_file")
+	writeFileForTest(t, server, ownerToken, workspaceID, "/allowed/sibling-secret.md", "0", "secret", "corr_tree_descendant_sibling")
+
+	aclWrite := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=/allowed/.relayfile.acl",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + ownerToken,
+			"X-Correlation-Id": "corr_tree_descendant_acl",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "text/plain",
+			"content":     "marker",
+			"semantics": map[string]any{
+				"permissions": []string{"allow:scope:relayfile:fs:read:/allowed/document.md"},
+			},
+		},
+	})
+	if aclWrite.Code != http.StatusAccepted {
+		t.Fatalf("expected ACL marker write 202, got %d (%s)", aclWrite.Code, aclWrite.Body.String())
+	}
+
+	rootACLWrite := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=/.relayfile.acl",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + ownerToken,
+			"X-Correlation-Id": "corr_tree_descendant_root_acl",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "text/plain",
+			"content":     "unrelated root policy",
+			"semantics": map[string]any{
+				"permissions": []string{"allow:agent:Unrelated"},
+			},
+		},
+	})
+	if rootACLWrite.Code != http.StatusAccepted {
+		t.Fatalf("expected root ACL marker write 202, got %d (%s)", rootACLWrite.Code, rootACLWrite.Body.String())
+	}
+
+	treeResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/tree?path=/allowed",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + limitedToken,
+			"X-Correlation-Id": "corr_tree_descendant",
+		},
+	})
+	if treeResp.Code != http.StatusOK {
+		t.Fatalf("expected tree 200 for descendant ACL, got %d (%s)", treeResp.Code, treeResp.Body.String())
+	}
+	var tree relayfile.TreeResponse
+	if err := json.NewDecoder(treeResp.Body).Decode(&tree); err != nil {
+		t.Fatalf("decode tree response: %v", err)
+	}
+	found := false
+	for _, entry := range tree.Entries {
+		if entry.Path == "/allowed/document.md" {
+			found = true
+		}
+		if entry.Path == "/allowed/sibling-secret.md" {
+			t.Fatalf("expected sibling denied by descendant ACL to be hidden, got %+v", tree.Entries)
+		}
+	}
+	if !found {
+		t.Fatalf("expected descendant file in tree entries, got %+v", tree.Entries)
+	}
+
+	siblingRead := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=/allowed/sibling-secret.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + limitedToken,
+			"X-Correlation-Id": "corr_tree_descendant_sibling_read",
+		},
+	})
+	if siblingRead.Code != http.StatusForbidden {
+		t.Fatalf("expected direct sibling read 403, got %d (%s)", siblingRead.Code, siblingRead.Body.String())
+	}
+}
+
 func TestFilePermissionPolicyDenyOverridesAllowAndPublic(t *testing.T) {
 	server := NewServer(relayfile.NewStore())
 	ownerToken := mustTestJWT(t, "dev-secret", "ws_perm_deny", "Owner", []string{"fs:read", "fs:write", "finance"}, time.Now().Add(time.Hour))
@@ -3285,6 +4749,205 @@ func TestFilePermissionPolicyInheritanceFromAclMarker(t *testing.T) {
 	}
 	if len(financePayload.Items) != 2 {
 		t.Fatalf("expected marker + child for finance query, got %d", len(financePayload.Items))
+	}
+}
+
+func TestFilePermissionPolicyPathOverridesWithRelayAuthScopes(t *testing.T) {
+	server := NewServer(relayfile.NewStore())
+	workspaceID := "ws_perm_path_overrides"
+	token := mustTestJWT(
+		t,
+		"dev-secret",
+		workspaceID,
+		"relayfile-local",
+		[]string{"relayfile:fs:read:*", "relayfile:fs:write:*"},
+		time.Now().Add(time.Hour),
+	)
+
+	allowed := writeFileForTest(t, server, token, workspaceID, "/allowed/document.md", "0", "allowed", "corr_perm_path_1")
+	protected := writeFileForTest(t, server, token, workspaceID, "/protected/document.md", "0", "protected", "corr_perm_path_2")
+	ignored := writeFileForTest(t, server, token, workspaceID, "/ignored/document.md", "0", "ignored", "corr_perm_path_3")
+
+	aclWrite := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=/.relayfile.acl",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_perm_path_4",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "text/plain",
+			"content":     "# Managed by workspace API\n",
+			"semantics": map[string]any{
+				"permissions": []string{
+					"allow:scope:fs:read",
+					"allow:scope:fs:write",
+					"deny:scope:relayfile:fs:write:/protected/*",
+					"deny:scope:relayfile:fs:read:/ignored/*",
+					"deny:scope:relayfile:fs:write:/ignored/*",
+				},
+			},
+		},
+	})
+	if aclWrite.Code != http.StatusAccepted {
+		t.Fatalf("expected ACL marker write 202, got %d (%s)", aclWrite.Code, aclWrite.Body.String())
+	}
+
+	protectedRead := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=/protected/document.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_perm_path_5",
+		},
+	})
+	if protectedRead.Code != http.StatusOK {
+		t.Fatalf("expected readonly path read 200, got %d (%s)", protectedRead.Code, protectedRead.Body.String())
+	}
+
+	protectedWrite := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=/protected/document.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_perm_path_6",
+			"If-Match":         protected.TargetRevision,
+		},
+		body: map[string]any{
+			"contentType": "text/markdown",
+			"content":     "must stay protected",
+		},
+	})
+	if protectedWrite.Code != http.StatusForbidden {
+		t.Fatalf("expected readonly path write 403, got %d (%s)", protectedWrite.Code, protectedWrite.Body.String())
+	}
+
+	relativeProtectedWrite := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=protected/document.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_perm_relative_2",
+			"If-Match":         protected.TargetRevision,
+		},
+		body: map[string]any{
+			"contentType": "text/markdown",
+			"content":     "still protected",
+		},
+	})
+	if relativeProtectedWrite.Code != http.StatusForbidden {
+		t.Fatalf("expected normalized relative write 403, got %d (%s)", relativeProtectedWrite.Code, relativeProtectedWrite.Body.String())
+	}
+
+	ignoredRead := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=/ignored/document.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_perm_path_7",
+		},
+	})
+	if ignoredRead.Code != http.StatusForbidden {
+		t.Fatalf("expected ignored path read 403, got %d (%s)", ignoredRead.Code, ignoredRead.Body.String())
+	}
+
+	ignoredWrite := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=/ignored/document.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_perm_path_8",
+			"If-Match":         ignored.TargetRevision,
+		},
+		body: map[string]any{
+			"contentType": "text/markdown",
+			"content":     "must stay ignored",
+		},
+	})
+	if ignoredWrite.Code != http.StatusForbidden {
+		t.Fatalf("expected ignored path write 403, got %d (%s)", ignoredWrite.Code, ignoredWrite.Body.String())
+	}
+
+	updated := writeFileForTest(
+		t,
+		server,
+		token,
+		workspaceID,
+		"/allowed/document.md",
+		allowed.TargetRevision,
+		"updated",
+		"corr_perm_path_9",
+	)
+	if updated.TargetRevision == allowed.TargetRevision {
+		t.Fatalf("expected allowed path write to advance revision")
+	}
+}
+
+func TestCloudProducerScopeShape(t *testing.T) {
+	server := NewServer(relayfile.NewStore())
+	workspaceID := "ws_cloud_scope_shape"
+	ownerToken := mustTestJWT(t, "dev-secret", workspaceID, "Owner", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+	workerToken := mustTestJWT(t, "dev-secret", workspaceID, "Worker", []string{"relayfile:fs:read:*", "relayfile:fs:write:*"}, time.Now().Add(time.Hour))
+
+	writeFileForTest(t, server, ownerToken, workspaceID, "/protected/Document.md", "0", "protected", "corr_cloud_scope_protected")
+	writeFileForTest(t, server, ownerToken, workspaceID, "/secret/Doc.md", "0", "secret", "corr_cloud_scope_secret")
+	writeFileForTest(t, server, ownerToken, workspaceID, "/public/Doc.md", "0", "public", "corr_cloud_scope_public")
+
+	markerResp := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=/.relayfile.acl",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + ownerToken,
+			"X-Correlation-Id": "corr_cloud_scope_acl",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "text/plain",
+			"content":     "cloud marker",
+			"semantics": map[string]any{
+				"permissions": []string{
+					"allow:scope:workspace:relayfile-local:read:*",
+					"allow:scope:workspace:relayfile-local:write:*",
+					"deny:scope:relayfile:fs:write:/protected/*",
+					"deny:scope:relayfile:fs:read:/secret/*",
+					"deny:scope:relayfile:fs:write:/secret/*",
+				},
+			},
+		},
+	})
+	if markerResp.Code != http.StatusAccepted {
+		t.Fatalf("expected ACL marker 202, got %d (%s)", markerResp.Code, markerResp.Body.String())
+	}
+
+	for _, tt := range []struct {
+		name       string
+		path       string
+		method     string
+		wantStatus int
+	}{
+		{"protected read", "/protected/Document.md", http.MethodGet, http.StatusOK},
+		{"protected write", "/protected/Document.md", http.MethodPut, http.StatusForbidden},
+		{"secret read", "/secret/Doc.md", http.MethodGet, http.StatusForbidden},
+		{"secret write", "/secret/Doc.md", http.MethodPut, http.StatusForbidden},
+		{"public read", "/public/Doc.md", http.MethodGet, http.StatusOK},
+	} {
+		req := request{
+			method: tt.method,
+			path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=" + tt.path,
+			headers: map[string]string{
+				"Authorization":    "Bearer " + workerToken,
+				"X-Correlation-Id": "corr_cloud_scope_" + tt.name,
+			},
+		}
+		if tt.method == http.MethodPut {
+			req.headers["If-Match"] = "0"
+			req.body = map[string]any{"contentType": "text/markdown", "content": "test"}
+		}
+		resp := doRequest(t, server, req)
+		if resp.Code != tt.wantStatus {
+			t.Fatalf("%s: expected %d, got %d (%s)", tt.name, tt.wantStatus, resp.Code, resp.Body.String())
+		}
 	}
 }
 

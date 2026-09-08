@@ -23,12 +23,13 @@ import (
 )
 
 const (
-	maxBulkReadPaths         = 32
-	maxBulkReadRequestBytes  = 64 << 10
-	maxBulkReadPathBytes     = 4096
-	maxBulkReadPathsBytes    = 32 << 10
-	maxBulkReadContentBytes  = 32 << 20
-	maxBulkReadResponseBytes = 64 << 20
+	maxBulkReadPaths          = 32
+	maxBulkReadRequestBytes   = 64 << 10
+	maxBulkReadPathBytes      = 4096
+	maxBulkReadPathsBytes     = 32 << 10
+	maxBulkReadContentBytes   = 32 << 20
+	maxBulkReadResponseBytes  = 64 << 20
+	maxTreeEntriesPerHTTPPage = 1000
 )
 
 type ServerConfig struct {
@@ -320,15 +321,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, authErr.status, authErr.code, authErr.message, getCorrelationID(r))
 		return
 	}
-	if aclPath, includeTarget, ok := aclCheckPath(route, r); ok {
-		aclReader := s.aclGetFile(workspaceID)
-		if forkID := strings.TrimSpace(r.URL.Query().Get("forkId")); forkID != "" {
-			aclReader = s.aclGetForkFile(workspaceID, forkID)
-		}
-		permissions := resolveFilePermissionsWithTarget(aclReader, aclPath, includeTarget)
-		if !filePermissionAllows(permissions, workspaceID, &claims) {
-			writeError(w, http.StatusForbidden, "forbidden", "access denied by ACL", getCorrelationID(r))
-			return
+	action, actionOK := fileActionFromScope(requiredScope)
+	if actionOK {
+		if aclPath, includeTarget, ok := aclCheckPath(route, r); ok {
+			aclReader := s.aclGetFile(workspaceID)
+			if forkID := strings.TrimSpace(r.URL.Query().Get("forkId")); forkID != "" {
+				aclReader = s.aclGetForkFile(workspaceID, forkID)
+			}
+			permissions := resolveFilePermissionsWithTarget(aclReader, aclPath, includeTarget)
+			if !filePermissionAllows(permissions, workspaceID, &claims, action, aclPath) {
+				writeError(w, http.StatusForbidden, "forbidden", "access denied by ACL", getCorrelationID(r))
+				return
+			}
 		}
 	}
 	correlationID := getCorrelationID(r)
@@ -381,7 +385,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "delete_file":
 		s.handleDeleteFile(w, r, workspaceID, correlationID, claims)
 	case "events":
-		s.handleEvents(w, r, workspaceID, correlationID)
+		s.handleEvents(w, r, workspaceID, correlationID, claims)
 	case "query_files":
 		s.handleQueryFiles(w, r, workspaceID, correlationID, claims)
 	case "sync_status":
@@ -1368,15 +1372,26 @@ func aclCheckPath(route string, r *http.Request) (string, bool, bool) {
 		return path, aclTargetExists(r), true
 	case "merge_file":
 		return path, true, true
-	case "tree", "query_files":
-		// Directory-level operations: check ACL for the path prefix.
-		// Handlers also do per-file ACL filtering as a second layer of defense.
-		return path, false, true
+	// tree and query_files deliberately skip a coarse path-prefix preflight.
+	// Their handlers enforce ACLs on every returned file so mixed-policy
+	// directories produce a filtered 200 response rather than leaking entries
+	// or rejecting the whole directory because one child carries a tag ACL.
 	// bulk_write: ACL is checked per-file inside handleBulkWrite.
 	// fs_ws: auth is handled in handleFileEventsWebSocket.
 	// export: per-file ACL filtering in handleExport.
 	default:
 		return "", false, false
+	}
+}
+
+func fileActionFromScope(requiredScope string) (string, bool) {
+	switch requiredScope {
+	case "fs:read":
+		return "read", true
+	case "fs:write":
+		return "write", true
+	default:
+		return "", false
 	}
 }
 
@@ -1483,7 +1498,7 @@ func validateForkCommitEntries(workspaceID string, claims tokenClaims, entries [
 		if !scopeMatchesPath(claims.Scopes, "fs:write", entry.Path) {
 			return &forkCommitAuthorizationError{message: "fork commit denied by path scope"}
 		}
-		if !filePermissionAllows(entry.Permissions, workspaceID, &claims) {
+		if !filePermissionAllows(entry.Permissions, workspaceID, &claims, "write", entry.Path) {
 			return &forkCommitAuthorizationError{message: "fork commit denied by permission policy"}
 		}
 	}
@@ -1606,94 +1621,155 @@ func (s *Server) handleTree(w http.ResponseWriter, r *http.Request, workspaceID,
 	}
 	depth := parseBoundedInt(r.URL.Query().Get("depth"), 10, 1, 100)
 	forkID := strings.TrimSpace(r.URL.Query().Get("forkId"))
-	var resp relayfile.TreeResponse
-	var err error
-	if forkID != "" {
-		resp, err = s.store.ListForkTree(workspaceID, forkID, path, depth, r.URL.Query().Get("cursor"))
-	} else {
-		resp, err = s.store.ListTree(workspaceID, path, depth, r.URL.Query().Get("cursor"))
+	requestedCursor := r.URL.Query().Get("cursor")
+	listPage := func(cursor string) (relayfile.TreeResponse, error) {
+		if forkID != "" {
+			return s.store.ListForkTree(workspaceID, forkID, path, depth, cursor)
+		}
+		return s.store.ListTree(workspaceID, path, depth, cursor)
 	}
+	firstPage, err := listPage("")
 	if err != nil {
 		writeForkAwareError(w, err, correlationID)
 		return
 	}
-	if len(resp.Entries) > 0 || resp.TotalFiles > 0 {
-		base := normalizeRoutePath(resp.Path)
-		visibleFiles := map[string]struct{}{}
-		visibleDirs := map[string]struct{}{}
-		cursor := ""
-		for {
-			queryReq := relayfile.FileQueryRequest{
-				PathPrefix: base,
-				Cursor:     cursor,
-				Limit:      200,
-			}
-			var batch relayfile.FileQueryResponse
-			var queryErr error
-			if forkID != "" {
-				batch, queryErr = s.store.QueryForkFiles(workspaceID, forkID, queryReq)
-			} else {
-				batch, queryErr = s.store.QueryFiles(workspaceID, queryReq)
-			}
-			if queryErr != nil {
-				writeError(w, http.StatusInternalServerError, "internal_error", queryErr.Error(), correlationID)
-				return
-			}
-			for _, item := range batch.Items {
-				effectivePermissions := s.resolveFilePermissions(workspaceID, forkID, item.Path, true)
-				if !filePermissionAllows(effectivePermissions, workspaceID, &claims) {
-					continue
-				}
-				visibleFiles[item.Path] = struct{}{}
-				dirPath := item.Path
-				for {
-					lastSlash := strings.LastIndex(dirPath, "/")
-					if lastSlash <= 0 {
-						break
-					}
-					dirPath = dirPath[:lastSlash]
-					if dirPath == "" {
-						dirPath = "/"
-					}
-					if !withinBasePath(base, dirPath) {
-						break
-					}
-					if dirPath != "/" {
-						visibleDirs[dirPath] = struct{}{}
-					}
-					if dirPath == base || dirPath == "/" {
-						break
-					}
-				}
-			}
-			if batch.NextCursor == nil || *batch.NextCursor == "" {
-				break
-			}
-			nextCursor := *batch.NextCursor
-			if nextCursor == cursor {
-				break
-			}
-			cursor = nextCursor
-		}
-		filtered := make([]relayfile.TreeEntry, 0, len(resp.Entries))
-		for _, entry := range resp.Entries {
+	base := normalizeRoutePath(firstPage.Path)
+	totalFiles, err := s.countVisibleTreeFiles(workspaceID, forkID, base, claims)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
+		return
+	}
+
+	cursorFound := requestedCursor == ""
+	visibleEntries := make([]relayfile.TreeEntry, 0, maxTreeEntriesPerHTTPPage)
+	resp := relayfile.TreeResponse{Path: base, TotalFiles: totalFiles}
+	rawPage := firstPage
+	rawCursor := ""
+	seenCursors := map[string]struct{}{}
+	for {
+		for _, entry := range rawPage.Entries {
+			visible := false
 			if entry.Type == "file" {
-				if _, ok := visibleFiles[entry.Path]; ok {
-					filtered = append(filtered, entry)
+				visible = s.treeFileVisible(workspaceID, forkID, entry.Path, claims)
+			} else {
+				visible, err = s.treeDirectoryVisible(workspaceID, forkID, entry.Path, claims)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
+					return
+				}
+			}
+			if !visible {
+				continue
+			}
+			if !cursorFound {
+				if entry.Path == requestedCursor {
+					cursorFound = true
 				}
 				continue
 			}
-			if _, ok := visibleDirs[entry.Path]; ok {
-				filtered = append(filtered, entry)
+			visibleEntries = append(visibleEntries, entry)
+			if len(visibleEntries) > maxTreeEntriesPerHTTPPage {
+				visibleEntries = visibleEntries[:maxTreeEntriesPerHTTPPage]
+				nextCursor := visibleEntries[len(visibleEntries)-1].Path
+				resp.NextCursor = &nextCursor
+				resp.Entries = visibleEntries
+				writeJSON(w, http.StatusOK, resp)
+				return
 			}
 		}
-		resp.Entries = filtered
-		// Store-level totals include every file below the requested path. The
-		// HTTP contract must expose only files this caller can see, while still
-		// keeping the total stable across pagination pages.
-		resp.TotalFiles = len(visibleFiles)
+		if rawPage.NextCursor == nil || *rawPage.NextCursor == "" {
+			break
+		}
+		nextCursor := *rawPage.NextCursor
+		if nextCursor == rawCursor {
+			writeError(w, http.StatusInternalServerError, "internal_error", "tree pagination did not advance", correlationID)
+			return
+		}
+		if _, duplicate := seenCursors[nextCursor]; duplicate {
+			writeError(w, http.StatusInternalServerError, "internal_error", "tree pagination repeated a cursor", correlationID)
+			return
+		}
+		seenCursors[nextCursor] = struct{}{}
+		rawCursor = nextCursor
+		rawPage, err = listPage(rawCursor)
+		if err != nil {
+			writeForkAwareError(w, err, correlationID)
+			return
+		}
 	}
+	if !cursorFound {
+		writeError(w, http.StatusBadRequest, "bad_request", relayfile.ErrInvalidInput.Error(), correlationID)
+		return
+	}
+	resp.Entries = visibleEntries
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) treeFileVisible(workspaceID, forkID, filePath string, claims tokenClaims) bool {
+	effectivePermissions := s.resolveFilePermissions(workspaceID, forkID, filePath, true)
+	return scopeMatchesPath(claims.Scopes, "fs:read", filePath) &&
+		filePermissionAllows(effectivePermissions, workspaceID, &claims, "read", filePath)
+}
+
+func (s *Server) countVisibleTreeFiles(workspaceID, forkID, base string, claims tokenClaims) (int, error) {
+	cursor := ""
+	count := 0
+	for {
+		queryReq := relayfile.FileQueryRequest{PathPrefix: base, Cursor: cursor, Limit: maxTreeEntriesPerHTTPPage}
+		var batch relayfile.FileQueryResponse
+		var err error
+		if forkID != "" {
+			batch, err = s.store.QueryForkFiles(workspaceID, forkID, queryReq)
+		} else {
+			batch, err = s.store.QueryFiles(workspaceID, queryReq)
+		}
+		if err != nil {
+			return 0, err
+		}
+		for _, item := range batch.Items {
+			if s.treeFileVisible(workspaceID, forkID, item.Path, claims) {
+				count++
+			}
+		}
+		if batch.NextCursor == nil || *batch.NextCursor == "" {
+			return count, nil
+		}
+		next := *batch.NextCursor
+		if next == cursor {
+			return 0, fmt.Errorf("tree file pagination did not advance")
+		}
+		cursor = next
+	}
+}
+
+func (s *Server) treeDirectoryVisible(workspaceID, forkID, directoryPath string, claims tokenClaims) (bool, error) {
+	cursor := ""
+	for {
+		queryReq := relayfile.FileQueryRequest{PathPrefix: directoryPath, Cursor: cursor, Limit: maxTreeEntriesPerHTTPPage}
+		var batch relayfile.FileQueryResponse
+		var err error
+		if forkID != "" {
+			batch, err = s.store.QueryForkFiles(workspaceID, forkID, queryReq)
+		} else {
+			batch, err = s.store.QueryFiles(workspaceID, queryReq)
+		}
+		if err != nil {
+			return false, err
+		}
+		for _, item := range batch.Items {
+			if s.treeFileVisible(workspaceID, forkID, item.Path, claims) {
+				return true, nil
+			}
+		}
+		if batch.NextCursor == nil || *batch.NextCursor == "" {
+			return false, nil
+		}
+		next := *batch.NextCursor
+		if next == cursor {
+			return false, fmt.Errorf("tree directory pagination did not advance")
+		}
+		cursor = next
+	}
 }
 
 func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
@@ -1709,7 +1785,7 @@ func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request, workspac
 		return
 	}
 	effectivePermissions := s.resolveFilePermissions(workspaceID, forkID, path, true)
-	if !filePermissionAllows(effectivePermissions, workspaceID, &claims) {
+	if !filePermissionAllows(effectivePermissions, workspaceID, &claims, "read", path) {
 		writeError(w, http.StatusForbidden, "forbidden", "file access denied by permission policy", correlationID)
 		return
 	}
@@ -1836,7 +1912,7 @@ func (s *Server) handleBulkRead(w http.ResponseWriter, r *http.Request, workspac
 		// prevents an ACL-denied caller from distinguishing an existing file
 		// from a missing one through the per-file status.
 		permissions := resolveFilePermissionsWithTarget(cachedACLReader, path, true)
-		if !filePermissionAllows(permissions, workspaceID, &claims) {
+		if !filePermissionAllows(permissions, workspaceID, &claims, "read", path) {
 			results = append(results, bulkReadError(path, http.StatusForbidden, "forbidden", "file access denied by permission policy"))
 			continue
 		}
@@ -1857,7 +1933,7 @@ func (s *Server) handleBulkRead(w http.ResponseWriter, r *http.Request, workspac
 		// snapshot before returning content so a concurrent target permission
 		// tightening cannot authorize the old snapshot and expose the new file.
 		freshPermissions := resolveBulkReadPermissionsForReturnedFile(aclReader, path, file)
-		if !filePermissionAllows(freshPermissions, workspaceID, &claims) {
+		if !filePermissionAllows(freshPermissions, workspaceID, &claims, "read", path) {
 			results = append(results, bulkReadError(path, http.StatusForbidden, "forbidden", "file access denied by permission policy"))
 			continue
 		}
@@ -1941,7 +2017,7 @@ func (s *Server) handleBulkWrite(w http.ResponseWriter, r *http.Request, workspa
 		_, readErr := s.readFile(workspaceID, forkID, path)
 		if readErr == nil {
 			existingPermissions := s.resolveFilePermissions(workspaceID, forkID, path, true)
-			if !filePermissionAllows(existingPermissions, workspaceID, &claims) {
+			if !filePermissionAllows(existingPermissions, workspaceID, &claims, "write", path) {
 				errorsOut = append(errorsOut, relayfile.BulkWriteError{
 					Path:    path,
 					Code:    "forbidden",
@@ -1951,7 +2027,7 @@ func (s *Server) handleBulkWrite(w http.ResponseWriter, r *http.Request, workspa
 			}
 		} else if readErr == relayfile.ErrNotFound || readErr == relayfile.ErrForkExpired {
 			inheritedPermissions := s.resolveFilePermissions(workspaceID, forkID, path, false)
-			if !filePermissionAllows(inheritedPermissions, workspaceID, &claims) {
+			if !filePermissionAllows(inheritedPermissions, workspaceID, &claims, "write", path) {
 				errorsOut = append(errorsOut, relayfile.BulkWriteError{
 					Path:    path,
 					Code:    "forbidden",
@@ -1999,14 +2075,17 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request, workspaceI
 	if exportRoot == "" {
 		exportRoot = "/"
 	}
+	forkID := strings.TrimSpace(r.URL.Query().Get("forkId"))
 
-	files, err := s.store.ExportWorkspace(workspaceID)
+	var files []relayfile.File
+	var err error
+	if forkID != "" {
+		files, err = s.store.ExportForkWorkspace(workspaceID, forkID)
+	} else {
+		files, err = s.store.ExportWorkspace(workspaceID)
+	}
 	if err != nil {
-		if err == relayfile.ErrInvalidInput {
-			writeError(w, http.StatusBadRequest, "bad_request", err.Error(), correlationID)
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
+		writeForkAwareError(w, err, correlationID)
 		return
 	}
 
@@ -2015,8 +2094,9 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request, workspaceI
 		if !withinBasePath(exportRoot, file.Path) {
 			continue
 		}
-		effectivePermissions := s.store.ResolveFilePermissions(workspaceID, file.Path, true)
-		if !filePermissionAllows(effectivePermissions, workspaceID, &claims) {
+		effectivePermissions := s.resolveFilePermissions(workspaceID, forkID, file.Path, true)
+		if !scopeMatchesPath(claims.Scopes, "fs:read", file.Path) ||
+			!filePermissionAllows(effectivePermissions, workspaceID, &claims, "read", file.Path) {
 			continue
 		}
 		visible = append(visible, file)
@@ -2058,13 +2138,13 @@ func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request, workspa
 	_, readErr := s.readFile(workspaceID, forkID, path)
 	if readErr == nil {
 		existingPermissions := s.resolveFilePermissions(workspaceID, forkID, path, true)
-		if !filePermissionAllows(existingPermissions, workspaceID, &claims) {
+		if !filePermissionAllows(existingPermissions, workspaceID, &claims, "write", path) {
 			writeError(w, http.StatusForbidden, "forbidden", "file access denied by permission policy", correlationID)
 			return
 		}
 	} else if readErr == relayfile.ErrNotFound || readErr == relayfile.ErrForkExpired {
 		inheritedPermissions := s.resolveFilePermissions(workspaceID, forkID, path, false)
-		if !filePermissionAllows(inheritedPermissions, workspaceID, &claims) {
+		if !filePermissionAllows(inheritedPermissions, workspaceID, &claims, "write", path) {
 			writeError(w, http.StatusForbidden, "forbidden", "file access denied by permission policy", correlationID)
 			return
 		}
@@ -2143,13 +2223,13 @@ func (s *Server) handleMergeFile(w http.ResponseWriter, r *http.Request, workspa
 	_, readErr := s.store.ReadFile(workspaceID, path)
 	if readErr == nil {
 		existingPermissions := s.store.ResolveFilePermissions(workspaceID, path, true)
-		if !filePermissionAllows(existingPermissions, workspaceID, &claims) {
+		if !filePermissionAllows(existingPermissions, workspaceID, &claims, "write", path) {
 			writeError(w, http.StatusForbidden, "forbidden", "file access denied by permission policy", correlationID)
 			return
 		}
 	} else if readErr == relayfile.ErrNotFound {
 		inheritedPermissions := s.store.ResolveFilePermissions(workspaceID, path, false)
-		if !filePermissionAllows(inheritedPermissions, workspaceID, &claims) {
+		if !filePermissionAllows(inheritedPermissions, workspaceID, &claims, "write", path) {
 			writeError(w, http.StatusForbidden, "forbidden", "file access denied by permission policy", correlationID)
 			return
 		}
@@ -2232,7 +2312,7 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request, worksp
 	_, readErr := s.readFile(workspaceID, forkID, path)
 	if readErr == nil {
 		existingPermissions := s.resolveFilePermissions(workspaceID, forkID, path, true)
-		if !filePermissionAllows(existingPermissions, workspaceID, &claims) {
+		if !filePermissionAllows(existingPermissions, workspaceID, &claims, "write", path) {
 			writeError(w, http.StatusForbidden, "forbidden", "file access denied by permission policy", correlationID)
 			return
 		}
@@ -2285,20 +2365,107 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request, worksp
 	writeJSON(w, http.StatusAccepted, result)
 }
 
-func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string) {
+func (s *Server) eventVisibleToClaims(workspaceID string, claims tokenClaims, event relayfile.Event) bool {
+	if event.Type == "file.deleted" && (event.ACLPermissions == nil || strings.TrimSpace(event.Path) == "") {
+		// Fail closed: relayfile.snapshotACLPermissions guarantees every
+		// delete event produced by ACL-snapshot-aware code carries a non-nil
+		// ACLPermissions slice (empty when no rule applied). A nil slice here
+		// means either a state.json written before the snapshot mechanism
+		// existed, or a producer that forgot to snapshot — in both cases the
+		// deleted file's own permissions can no longer be resolved (the file
+		// is gone from ws.Files), so we cannot rule out a file-level deny
+		// that would have hidden this path. Denying visibility is the only
+		// choice that cannot leak a hidden file's prior existence/deletion.
+		//
+		// This check MUST run before the empty-path fast path below: a
+		// malformed or legacy file.deleted event can carry an empty Path
+		// (e.g. truncated/corrupted persisted data), and that fast path is
+		// an unconditional "visible to everyone" — routing any pathless
+		// delete through it would silently defeat this whole guard. Every
+		// other event type (sync.* progress events with Path "/" or "",
+		// etc.) is unaffected and keeps the fast path.
+		return false
+	}
+	path := strings.TrimSpace(event.Path)
+	if path == "" {
+		return true
+	}
+	path = normalizeACLPath(path)
+	if !scopeMatchesPath(claims.Scopes, "fs:read", path) {
+		return false
+	}
+	if event.ACLPermissions != nil && !filePermissionAllows(event.ACLPermissions, workspaceID, &claims, "read", path) {
+		return false
+	}
+	includeTarget := event.Type != "file.deleted"
+	return filePermissionAllows(s.resolveFilePermissions(workspaceID, "", path, includeTarget), workspaceID, &claims, "read", path)
+}
+
+func (s *Server) fileReadAllowedNow(workspaceID string, claims tokenClaims, path string, includeTarget bool) bool {
+	path = normalizeACLPath(path)
+	return scopeMatchesPath(claims.Scopes, "fs:read", path) &&
+		filePermissionAllows(s.resolveFilePermissions(workspaceID, "", path, includeTarget), workspaceID, &claims, "read", path)
+}
+
+const eventFilterPageSize = 1000
+
+func (s *Server) visibleEvents(workspaceID string, claims tokenClaims, provider, direction, cursor string, limit int) (relayfile.EventFeed, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	visible := make([]relayfile.Event, 0, limit)
+	seenCursors := map[string]struct{}{}
+	for {
+		var page relayfile.EventFeed
+		var err error
+		if direction == "desc" {
+			page, err = s.store.GetEventsTail(workspaceID, provider, cursor, eventFilterPageSize)
+		} else {
+			page, err = s.store.GetEvents(workspaceID, provider, cursor, eventFilterPageSize)
+		}
+		if err != nil {
+			return relayfile.EventFeed{}, err
+		}
+		for _, event := range page.Events {
+			if !s.eventVisibleToClaims(workspaceID, claims, event) {
+				continue
+			}
+			if len(visible) < limit {
+				visible = append(visible, event)
+				continue
+			}
+			next := visible[len(visible)-1].EventID
+			return relayfile.EventFeed{Events: visible, NextCursor: &next}, nil
+		}
+		if page.NextCursor == nil || strings.TrimSpace(*page.NextCursor) == "" {
+			return relayfile.EventFeed{Events: visible, NextCursor: nil}, nil
+		}
+		next := strings.TrimSpace(*page.NextCursor)
+		if next == cursor {
+			return relayfile.EventFeed{Events: visible, NextCursor: nil}, nil
+		}
+		if _, ok := seenCursors[next]; ok {
+			return relayfile.EventFeed{Events: visible, NextCursor: nil}, nil
+		}
+		seenCursors[next] = struct{}{}
+		cursor = next
+	}
+}
+
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
 	limit := parseBoundedInt(r.URL.Query().Get("limit"), 200, 1, 1000)
 	provider := r.URL.Query().Get("provider")
 	direction := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("direction")))
 	switch direction {
 	case "", "asc":
-		feed, err := s.store.GetEvents(workspaceID, provider, r.URL.Query().Get("cursor"), limit)
+		feed, err := s.visibleEvents(workspaceID, claims, provider, "asc", r.URL.Query().Get("cursor"), limit)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
 			return
 		}
 		writeJSON(w, http.StatusOK, feed)
 	case "desc":
-		feed, err := s.store.GetEventsTail(workspaceID, provider, r.URL.Query().Get("cursor"), limit)
+		feed, err := s.visibleEvents(workspaceID, claims, provider, "desc", r.URL.Query().Get("cursor"), limit)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
 			return
@@ -2330,6 +2497,20 @@ func (s *Server) handleQueryFiles(w http.ResponseWriter, r *http.Request, worksp
 	permission := strings.TrimSpace(r.URL.Query().Get("permission"))
 	comment := r.URL.Query().Get("comment")
 	cursor := r.URL.Query().Get("cursor")
+	if strings.TrimSpace(cursor) != "" {
+		// Store pagination validates that the cursor names an existing file,
+		// but it cannot see the caller's ACL. Reject a real cursor that is
+		// hidden by ACL instead of silently treating it as a valid page edge.
+		cursorPath := normalizeRoutePath(cursor)
+		if _, readErr := s.readFile(workspaceID, forkID, cursorPath); readErr == nil {
+			effectivePermissions := s.resolveFilePermissions(workspaceID, forkID, cursorPath, true)
+			if !scopeMatchesPath(claims.Scopes, "fs:read", cursorPath) ||
+				!filePermissionAllows(effectivePermissions, workspaceID, &claims, "read", cursorPath) {
+				writeError(w, http.StatusBadRequest, "bad_request", relayfile.ErrInvalidInput.Error(), correlationID)
+				return
+			}
+		}
+	}
 
 	items := make([]relayfile.FileQueryItem, 0, limit)
 	var nextCursor *string
@@ -2368,7 +2549,8 @@ func (s *Server) handleQueryFiles(w http.ResponseWriter, r *http.Request, worksp
 			if permission != "" && !stringSliceContainsExact(effectivePermissions, permission) {
 				continue
 			}
-			if !filePermissionAllows(effectivePermissions, workspaceID, &claims) {
+			if !scopeMatchesPath(claims.Scopes, "fs:read", item.Path) ||
+				!filePermissionAllows(effectivePermissions, workspaceID, &claims, "read", item.Path) {
 				continue
 			}
 			items = append(items, item)

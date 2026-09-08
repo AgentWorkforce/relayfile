@@ -70,6 +70,40 @@ func TestParseGenericEnvelopeFileDeleted(t *testing.T) {
 	}
 }
 
+func TestParseGenericEnvelopeFileDeletedWithoutPathPreservesMissingPath(t *testing.T) {
+	actions, err := ParseGenericEnvelope(WebhookEnvelopeRequest{
+		Provider: "salesforce",
+		Payload: map[string]any{
+			"event_type":       "file.deleted",
+			"providerObjectId": "sf_acc_pathless",
+		},
+	})
+	if err != nil {
+		t.Fatalf("parse envelope failed: %v", err)
+	}
+	if len(actions) != 1 || actions[0].Type != ActionFileDelete {
+		t.Fatalf("expected one pathless delete action, got %+v", actions)
+	}
+	if actions[0].Path != "" {
+		t.Fatalf("pathless delete was normalized into a guessed path %q", actions[0].Path)
+	}
+}
+
+func TestParseGenericEnvelopeMalformedPathlessDeleteWithoutIdentityIsIgnored(t *testing.T) {
+	actions, err := ParseGenericEnvelope(WebhookEnvelopeRequest{
+		Provider: "salesforce",
+		Payload: map[string]any{
+			"event_type": "file.deleted",
+		},
+	})
+	if err != nil {
+		t.Fatalf("parse malformed envelope failed: %v", err)
+	}
+	if len(actions) != 1 || actions[0].Type != ActionIgnored {
+		t.Fatalf("malformed pathless delete was not ignored: %+v", actions)
+	}
+}
+
 func TestParseGenericEnvelopeFileCreated(t *testing.T) {
 	actions, err := ParseGenericEnvelope(WebhookEnvelopeRequest{
 		Provider: "custom",

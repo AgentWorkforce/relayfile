@@ -224,6 +224,43 @@ func TestProviderUpsertPopulatesContentHash(t *testing.T) {
 	t.Fatalf("provider upsert did not materialize file with expected hash")
 }
 
+func TestProviderRenameEventCapturesACLPermissions(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	store.mu.Lock()
+	ws := store.ensureWorkspaceLocked("ws_provider_acl_rename")
+	store.applyProviderUpsertLocked(ws, "custom", ApplyAction{
+		Type:             ActionFileUpsert,
+		Path:             "/custom/old.md",
+		Content:          "secret",
+		ContentType:      "text/plain",
+		ProviderObjectID: "obj_acl_rename",
+		Semantics:        FileSemantics{Permissions: []string{"deny:agent:Limited"}},
+	}, "corr_acl_rename_1")
+	store.applyProviderUpsertLocked(ws, "custom", ApplyAction{
+		Type:             ActionFileUpsert,
+		Path:             "/custom/new.md",
+		Content:          "secret",
+		ContentType:      "text/plain",
+		ProviderObjectID: "obj_acl_rename",
+	}, "corr_acl_rename_2")
+	store.mu.Unlock()
+
+	feed, err := store.GetEvents("ws_provider_acl_rename", "", "", 100)
+	if err != nil {
+		t.Fatalf("get events failed: %v", err)
+	}
+	for _, event := range feed.Events {
+		if event.Type == "file.deleted" && event.Path == "/custom/old.md" {
+			if len(event.ACLPermissions) == 0 {
+				t.Fatalf("provider rename delete lost ACL snapshot: %+v", event)
+			}
+			return
+		}
+	}
+	t.Fatal("provider rename did not emit old-path delete event")
+}
+
 // TestContentHashSurvivesSaveLoadCycle writes a file via WriteFile, marshals
 // the in-memory persistedState through Save/Load (round-trip via JSON), and
 // asserts the ContentHash is preserved on reload.
