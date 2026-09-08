@@ -2366,7 +2366,7 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request, worksp
 }
 
 func (s *Server) eventVisibleToClaims(workspaceID string, claims tokenClaims, event relayfile.Event) bool {
-	if event.Type == "file.deleted" && event.ACLPermissions == nil {
+	if event.Type == "file.deleted" && (event.ACLPermissions == nil || strings.TrimSpace(event.Path) == "") {
 		// Fail closed: relayfile.snapshotACLPermissions guarantees every
 		// delete event produced by ACL-snapshot-aware code carries a non-nil
 		// ACLPermissions slice (empty when no rule applied). A nil slice here
@@ -2380,7 +2380,7 @@ func (s *Server) eventVisibleToClaims(workspaceID string, claims tokenClaims, ev
 		// This check MUST run before the empty-path fast path below: a
 		// malformed or legacy file.deleted event can carry an empty Path
 		// (e.g. truncated/corrupted persisted data), and that fast path is
-		// an unconditional "visible to everyone" — routing an unsnapshotted
+		// an unconditional "visible to everyone" — routing any pathless
 		// delete through it would silently defeat this whole guard. Every
 		// other event type (sync.* progress events with Path "/" or "",
 		// etc.) is unaffected and keeps the fast path.

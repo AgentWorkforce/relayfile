@@ -11816,6 +11816,90 @@ func TestApplyWebSocketEventClearsReadNotReadyMarker(t *testing.T) {
 	assertLocalFileContent(t, filepath.Join(localDir, "Docs", "ws.md"), "# websocket")
 }
 
+func TestPathlessReconcileEventRequestsPromptAuthoritativePull(t *testing.T) {
+	const remotePath = "/notion/Docs/revoked.md"
+	const allowedPath = "/notion/Docs/allowed.md"
+	localDir := t.TempDir()
+	localPath := filepath.Join(localDir, "Docs", "revoked.md")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("mkdir local doc dir: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte("revoked content"), 0o644); err != nil {
+		t.Fatalf("write stale local doc: %v", err)
+	}
+	client := &fakeClient{files: map[string]RemoteFile{
+		allowedPath: {
+			Path:        allowedPath,
+			Revision:    "rev_allowed",
+			ContentType: "text/markdown",
+			Content:     "allowed content",
+		},
+	}}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_pathless_reconcile",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+	syncer.state.BootstrapComplete = true
+	syncer.state.EventsCursor = "evt_before_reconcile"
+	syncer.state.Files[remotePath] = trackedFile{Revision: "rev_secret", Hash: hashString("revoked content")}
+	syncer.state.Files[allowedPath] = trackedFile{Revision: "rev_allowed", Hash: hashString("allowed content")}
+
+	if err := syncer.applyWebSocketEvent(context.Background(), websocketEvent{
+		EventID: "evt_pathless_reconcile",
+		Type:    "sync.reconcile",
+	}); err != nil {
+		t.Fatalf("apply pathless reconcile event: %v", err)
+	}
+	if !syncer.forceFullReconcile {
+		t.Fatal("pathless reconcile event did not arm an authoritative pull")
+	}
+	restarted, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_pathless_reconcile",
+		RemoteRoot:  "/notion",
+		LocalRoot:   localDir,
+		StateFile:   syncer.stateFile,
+	})
+	if err != nil {
+		t.Fatalf("new restarted syncer failed: %v", err)
+	}
+	if err := restarted.loadState(); err != nil {
+		t.Fatalf("load restarted syncer state: %v", err)
+	}
+	if !restarted.forceFullReconcile {
+		t.Fatal("pathless reconcile request was not durable across restart")
+	}
+	if _, err := os.Stat(localPath); err != nil {
+		t.Fatalf("pathless control event should not guess/delete a local path before reconciliation: %v", err)
+	}
+
+	if err := syncer.pullRemote(context.Background(), nil); err != nil {
+		t.Fatalf("prompt authoritative pull failed: %v", err)
+	}
+	if syncer.forceFullReconcile {
+		t.Fatal("authoritative pull did not clear the reconciliation request")
+	}
+	if _, err := os.Stat(localPath); err != nil {
+		t.Fatalf("first authoritative observation should retain content pending delete confirmation: %v", err)
+	}
+	client.files[allowedPath] = RemoteFile{
+		Path:        allowedPath,
+		Revision:    "rev_allowed_2",
+		ContentType: "text/markdown",
+		Content:     "allowed content",
+	}
+	syncer.forceFullReconcile = true
+	if err := syncer.pullRemote(context.Background(), nil); err != nil {
+		t.Fatalf("confirmed authoritative pull failed: %v", err)
+	}
+	if _, err := os.Stat(localPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("authoritative reconciliation did not remove revoked content, stat err=%v", err)
+	}
+}
+
 func TestApplyRemoteSnapshotDeletesRevClearsReadNotReadyMarkerAfterConfirmedDelete(t *testing.T) {
 	const remotePath = "/notion/Docs/deleted.md"
 	localDir := t.TempDir()
@@ -12026,6 +12110,31 @@ func TestPullRemoteIncrementalDeleteEventStillDeletes(t *testing.T) {
 	}
 	if got := syncer.state.EventsCursor; got != "evt_001" {
 		t.Fatalf("EventsCursor = %q, want evt_001", got)
+	}
+}
+
+func TestPullRemoteIncrementalPathlessReconcileArmsFullPull(t *testing.T) {
+	client := &fakeClient{events: []FilesystemEvent{
+		{EventID: "evt_reconcile", Type: "sync.reconcile"},
+	}}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_incremental_reconcile",
+		RemoteRoot:  "/notion",
+		LocalRoot:   t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("new syncer failed: %v", err)
+	}
+
+	cursor, err := syncer.pullRemoteIncremental(context.Background(), nil, "evt_before")
+	if err != nil {
+		t.Fatalf("pullRemoteIncremental failed: %v", err)
+	}
+	if cursor != "evt_reconcile" {
+		t.Fatalf("cursor = %q, want evt_reconcile", cursor)
+	}
+	if !syncer.forceFullReconcile {
+		t.Fatal("pathless reconciliation event did not request an authoritative pull")
 	}
 }
 

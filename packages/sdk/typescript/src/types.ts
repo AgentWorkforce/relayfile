@@ -328,6 +328,7 @@ export type FilesystemEventType =
   | "sync.ignored"
   | "sync.suppressed"
   | "sync.stale"
+  | "sync.reconcile"
   | "writeback.failed"
   | "writeback.succeeded";
 

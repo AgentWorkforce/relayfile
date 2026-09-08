@@ -3166,10 +3166,12 @@ components:
             - sync.ignored
             - sync.suppressed
             - sync.stale
+            - sync.reconcile
             - writeback.failed
             - writeback.succeeded
         path:
           type: string
+          description: Empty for pathless control events such as sync.reconcile; clients must not infer a file path.
         revision:
           type: string
         contentHash:

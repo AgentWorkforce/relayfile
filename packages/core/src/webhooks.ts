@@ -515,6 +515,7 @@ const VALID_EVENT_TYPES = new Set([
   "sync.ignored",
   "sync.suppressed",
   "sync.stale",
+  "sync.reconcile",
   "writeback.failed",
   "writeback.succeeded",
 ]);

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1704,6 +1705,48 @@ func TestProviderUpsertWithoutPathUsesObjectIdentity(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("expected object-identity upsert without path to update existing projected file")
+}
+
+func TestProviderDeleteWithoutPathEmitsReconcileControlEvent(t *testing.T) {
+	store := NewStore()
+	t.Cleanup(store.Close)
+	const workspaceID = "ws_provider_pathless_delete"
+	_, err := store.IngestEnvelope(WebhookEnvelopeRequest{
+		EnvelopeID:  "env_provider_pathless_delete",
+		WorkspaceID: workspaceID,
+		Provider:    "external",
+		DeliveryID:  "delivery_provider_pathless_delete",
+		ReceivedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+		Payload: map[string]any{
+			"event_type":       "file.deleted",
+			"providerObjectId": "object_missing_from_local_index",
+		},
+		CorrelationID: "corr_provider_pathless_delete",
+	})
+	if err != nil {
+		t.Fatalf("pathless delete ingest failed: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		feed, feedErr := store.GetEvents(workspaceID, "", "", 100)
+		if feedErr == nil {
+			for _, event := range feed.Events {
+				if event.Type != "sync.reconcile" {
+					if event.Type == "file.deleted" && strings.TrimSpace(event.Path) == "" {
+						t.Fatalf("pathless provider deletion emitted malformed file.deleted event: %+v", event)
+					}
+					continue
+				}
+				if event.Path != "" || event.Origin != "provider_sync" || event.Provider != "external" {
+					t.Fatalf("unexpected pathless reconcile event: %+v", event)
+				}
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for pathless provider deletion reconciliation event")
 }
 
 func TestPendingWritebacksRecoveredOnRestart(t *testing.T) {

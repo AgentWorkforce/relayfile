@@ -1000,6 +1000,34 @@ func mergeMaps(base, extra map[string]any) map[string]any {
 	return out
 }
 
+func TestACLPathlessReconcileControlDoesNotLeakOrLookLikeDelete(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
+	claims := tokenClaims{Scopes: map[string]struct{}{"fs:read": {}}}
+
+	if server.eventVisibleToClaims("ws_acl_pathless_control", claims, relayfile.Event{
+		Type:           "file.deleted",
+		ACLPermissions: []string{},
+	}) {
+		t.Fatal("pathless file.deleted with a present ACL snapshot must remain hidden")
+	}
+	reconcile := relayfile.Event{Type: "sync.reconcile", Origin: "provider_sync"}
+	if !server.eventVisibleToClaims("ws_acl_pathless_control", claims, reconcile) {
+		t.Fatal("pathless reconciliation control event should be visible without a file path")
+	}
+	if !webSocketEventMatchesPaths(reconcile, []string{"/secret/**"}) {
+		t.Fatal("pathless reconciliation control event must reach path-filtered mounts")
+	}
+	payload, err := json.Marshal(fileEventMessage{Type: reconcile.Type, Origin: reconcile.Origin})
+	if err != nil {
+		t.Fatalf("marshal pathless control event: %v", err)
+	}
+	if strings.Contains(string(payload), `"path"`) {
+		t.Fatalf("pathless reconciliation control event disclosed a path field: %s", payload)
+	}
+}
+
 // TestACLEmptyPathUnsnapshottedFileDeletedFailsClosed is the regression
 // test for finding P2 of the fresh review on commit b0df4ad4:
 // eventVisibleToClaims returned true for ANY event with an empty Path via

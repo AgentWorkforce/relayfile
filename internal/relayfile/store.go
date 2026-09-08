@@ -4466,9 +4466,36 @@ func (s *Store) applyProviderDeleteLocked(ws *workspaceState, provider string, a
 		}
 	}
 	if path == "/" {
+		if strings.TrimSpace(action.Path) == "" {
+			// A provider delete without a resolvable path cannot safely name a
+			// local file. Emit only a pathless control event so mounts perform
+			// an authoritative reconciliation; never emit file.deleted with an
+			// empty path, which could be confused with malformed persisted data.
+			s.appendWorkspaceEventLocked(workspaceID, ws, Event{
+				EventID:       s.nextEventIDLocked(),
+				Type:          "sync.reconcile",
+				Origin:        "provider_sync",
+				Provider:      provider,
+				CorrelationID: correlationID,
+				Timestamp:     now,
+			})
+		}
 		return
 	}
 	if _, ok := ws.Files[path]; !ok {
+		if strings.TrimSpace(action.Path) == "" {
+			// A stale provider index is no safer than an unknown object: the
+			// server cannot produce a path-backed ACL snapshot for this delete.
+			// Ask mounts to reconcile without exposing the indexed path.
+			s.appendWorkspaceEventLocked(workspaceID, ws, Event{
+				EventID:       s.nextEventIDLocked(),
+				Type:          "sync.reconcile",
+				Origin:        "provider_sync",
+				Provider:      provider,
+				CorrelationID: correlationID,
+				Timestamp:     now,
+			})
+		}
 		return
 	}
 	aclPermissions := resolvePermissionsFromFiles(ws.Files, path, true)
@@ -4496,6 +4523,12 @@ func canonicalizeProviderActionLocked(ws *workspaceState, provider string, actio
 	switch action.Type {
 	case ActionFileUpsert, ActionFileDelete:
 	default:
+		return action
+	}
+	if strings.TrimSpace(action.Path) == "" {
+		// Preserve object-identity actions without a path. Upserts can fall
+		// back to their provider-object projection; deletes can request a
+		// safe workspace reconciliation when identity cannot resolve locally.
 		return action
 	}
 	canonicalPath, ok := canonicalProviderEnvelopePath(provider, action.Path)

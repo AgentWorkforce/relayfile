@@ -1820,11 +1820,16 @@ func (s *Syncer) readLocalSnapshot(path string, includeContent bool) (localSnaps
 }
 
 type mountState struct {
-	WorkspaceID                string                 `json:"workspaceId,omitempty"`
-	RemoteRoot                 string                 `json:"remoteRoot,omitempty"`
-	LocalRoot                  string                 `json:"localRoot,omitempty"`
-	Files                      map[string]trackedFile `json:"files"`
-	EventsCursor               string                 `json:"eventsCursor,omitempty"`
+	WorkspaceID  string                 `json:"workspaceId,omitempty"`
+	RemoteRoot   string                 `json:"remoteRoot,omitempty"`
+	LocalRoot    string                 `json:"localRoot,omitempty"`
+	Files        map[string]trackedFile `json:"files"`
+	EventsCursor string                 `json:"eventsCursor,omitempty"`
+	// PendingFullReconcile is durable recovery state for pathless control
+	// events. The cursor may advance before the authoritative pull runs; keep
+	// the request across a process restart so acknowledging the control event
+	// cannot strand revoked content until the periodic audit.
+	PendingFullReconcile       bool                   `json:"pendingFullReconcile,omitempty"`
 	IncrementalCheckpoint      *incrementalCheckpoint `json:"incrementalCheckpoint,omitempty"`
 	IncrementalBacklogDraining bool                   `json:"incrementalBacklogDraining,omitempty"`
 	LastReconcileAt            string                 `json:"lastReconcileAt,omitempty"`
@@ -5379,6 +5384,16 @@ func (s *Syncer) applyWebSocketEventWithPersistence(ctx context.Context, event w
 	switch eventType := strings.TrimSpace(event.Type); eventType {
 	case "", "pong":
 		return nil
+	case "sync.reconcile":
+		// The server intentionally omits paths from this control event. It
+		// requests a full authoritative pull without disclosing or guessing
+		// which hidden file changed.
+		s.mu.Lock()
+		s.forceFullReconcile = true
+		s.markWebSocketEventAppliedLocked(event, eventAt)
+		err := s.persistWebSocketStateLocked(persist)
+		s.mu.Unlock()
+		return err
 	case "file.created", "file.updated":
 		remotePath := normalizeRemotePath(event.Path)
 		if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
@@ -6026,6 +6041,13 @@ func (s *Syncer) pullRemote(ctx context.Context, conflicted map[string]struct{})
 		nextCursor, err := s.pullRemoteIncremental(ctx, conflicted, s.state.EventsCursor)
 		if err == nil {
 			s.state.EventsCursor = advanceEventCursor(s.state.EventsCursor, nextCursor)
+			if s.forceFullReconcile {
+				// A pathless reconciliation control event is intentionally
+				// handled without naming any hidden path. Run the authoritative
+				// pull in this same cycle so a revoked/deleted local copy is not
+				// left until the periodic audit.
+				return s.pullRemote(ctx, conflicted)
+			}
 			return nil
 		}
 		if strings.TrimSpace(nextCursor) != "" && nextCursor != s.state.EventsCursor {
@@ -7777,6 +7799,7 @@ func (s *Syncer) markBootstrapComplete() {
 	// Clear persisted quarantine so a fixed adapter gets a clean slate.
 	s.state.QuarantinedPaths = nil
 	s.clearAllIncrementalReadNotReady()
+	s.state.PendingFullReconcile = false
 	// One-shot escape hatch / clobber-remnant recovery: after a single
 	// successful full reconcile, clear the in-memory force flag so
 	// subsequent cycles can use the fast-path again.
@@ -8413,6 +8436,10 @@ func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[strin
 			}
 			if ts := strings.TrimSpace(event.Timestamp); ts != "" {
 				pageLastEventAt = ts
+			}
+			if event.Type == "sync.reconcile" {
+				s.forceFullReconcile = true
+				continue
 			}
 			remotePath := normalizeRemotePath(event.Path)
 			if remotePath == "/" || !isUnderRemoteRoot(s.remoteRoot, remotePath) {
@@ -10105,6 +10132,9 @@ func (s *Syncer) loadState() error {
 	s.state.WorkspaceID = s.workspace
 	s.state.RemoteRoot = s.remoteRoot
 	s.state.LocalRoot = s.localRoot
+	if s.state.PendingFullReconcile {
+		s.forceFullReconcile = true
+	}
 	if err := s.enforceSyncModePermissionsOnTransition(); err != nil {
 		// loadState marks the state loaded optimistically. Re-arm it here so a
 		// transient chmod/stat failure cannot let the next cycle bypass an
@@ -10151,6 +10181,7 @@ func (s *Syncer) currentSyncMode() string {
 
 func (s *Syncer) savePrivateState() error {
 	s.state.SyncMode = s.currentSyncMode()
+	s.state.PendingFullReconcile = s.forceFullReconcile
 	data, err := json.Marshal(s.state)
 	if err != nil {
 		return err

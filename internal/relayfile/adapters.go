@@ -63,7 +63,9 @@ func ParseGenericEnvelope(req WebhookEnvelopeRequest) ([]ApplyAction, error) {
 		switch eventType {
 		case "file.created", "file.updated", "file.deleted":
 			if providerObjectID != "" {
-				path = "/"
+				// Preserve the absent path. The store can resolve an object ID
+				// through its provider index; an unresolved delete emits a
+				// pathless reconciliation control event instead of file.deleted.
 				break
 			}
 			return []ApplyAction{{Type: ActionIgnored}}, nil
@@ -71,7 +73,11 @@ func ParseGenericEnvelope(req WebhookEnvelopeRequest) ([]ApplyAction, error) {
 			return []ApplyAction{{Type: ActionIgnored}}, nil
 		}
 	}
-	canonicalPath, pathAllowed := canonicalProviderEnvelopePath(req.Provider, path)
+	canonicalPath := ""
+	pathAllowed := true
+	if strings.TrimSpace(path) != "" {
+		canonicalPath, pathAllowed = canonicalProviderEnvelopePath(req.Provider, path)
+	}
 	if !pathAllowed {
 		return []ApplyAction{{Type: ActionIgnored}}, nil
 	}

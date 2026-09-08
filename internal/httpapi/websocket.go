@@ -211,6 +211,12 @@ func normalizeWebSocketPathFilters(values []string) []string {
 }
 
 func webSocketEventMatchesPaths(event relayfile.Event, filters []string) bool {
+	if event.Type == "sync.reconcile" {
+		// Pathless reconciliation is a control signal, not a file event. It
+		// must reach path-filtered mounts so they can refresh their local
+		// view, while it discloses no path to the subscriber.
+		return true
+	}
 	if len(filters) == 0 {
 		return true
 	}
