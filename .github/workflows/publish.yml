@@ -168,6 +168,10 @@ jobs:
           PREID: ${{ github.event.inputs.preid }}
           NPM_TAG: ${{ github.event.inputs.tag }}
           SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_RUN_ID: ${{ github.run_id }}
+          RELEASE_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
           case "$VERSION_TYPE" in
@@ -233,7 +237,11 @@ jobs:
             BASELINE_INFO=$(node "${GITHUB_WORKSPACE:-.}/scripts/release/resolve-release-baseline.mjs" \
               --source-sha "$SOURCE_SHA" \
               --cwd "$PWD" \
-              --current-version "$CURRENT_VERSION")
+              --current-version "$CURRENT_VERSION" \
+              --repository "$RELEASE_REPOSITORY" \
+              --workflow-path ".github/workflows/publish.yml" \
+              --run-id "$RELEASE_RUN_ID" \
+              --run-attempt "$RELEASE_RUN_ATTEMPT")
             BASELINE_VERSION=$(printf '%s\n' "$BASELINE_INFO" | awk -F= '$1 == "baseline_version" { print $2 }')
             RESUMABLE_VERSION=$(printf '%s\n' "$BASELINE_INFO" | awk -F= '$1 == "resumable_version" { print $2 }')
             test -n "$BASELINE_VERSION"
@@ -833,10 +841,20 @@ jobs:
 
   create-release:
     name: Create Release
-    needs: [build, preflight-packages, publish-packages, publish-single, build-mount-binaries]
+    needs:
+      [
+        build,
+        preflight-packages,
+        publish-packages,
+        publish-single,
+        build-mount-binaries,
+      ]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     if: |
       always() &&
       needs.build.outputs.release_dry_run != 'true' &&
@@ -944,6 +962,8 @@ jobs:
         env:
           NEW_VERSION: ${{ needs.build.outputs.new_version }}
           SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
+          RELEASE_RUN_ID: ${{ github.run_id }}
+          RELEASE_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
           git config user.name "GitHub Actions"
@@ -984,8 +1004,12 @@ jobs:
             test "$(printf '%s\n' "$TAG_PARENTS" | awk '{print NF}')" -eq 2
             test "$(printf '%s\n' "$TAG_PARENTS" | cut -d' ' -f2)" = "$SOURCE_SHA"
           fi
-          echo "TAG_COMMIT=$TAG_COMMIT" >> "$GITHUB_ENV"
-          echo "TAG_EXISTS=$TAG_EXISTS" >> "$GITHUB_ENV"
+          TAG_TREE=$(git rev-parse "${TAG_COMMIT}^{tree}")
+          {
+            echo "TAG_COMMIT=$TAG_COMMIT"
+            echo "TAG_EXISTS=$TAG_EXISTS"
+            echo "TAG_TREE=$TAG_TREE"
+          } >> "$GITHUB_ENV"
 
       - name: Generate release attestation
         env:
@@ -1004,19 +1028,43 @@ jobs:
             --version "$RELEASE_VERSION" \
             --tag "v$RELEASE_VERSION" \
             --tag-commit "$TAG_COMMIT" \
+            --tag-tree "$TAG_TREE" \
             --repository "$GITHUB_REPOSITORY" \
             --output release-attestation.json
+
+      - name: Generate cryptographic release attestation
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: release-attestation.json
+
+      # Keep a copy available for a same-workflow rerun even if the GitHub
+      # Release asset has not been created yet. The tag message records the
+      # exact run/attempt used to select this artifact below.
+      - name: Upload release metadata for resumable reruns
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-attestation-${{ github.run_attempt }}
+          path: release-attestation.json
+          retention-days: 30
 
       - name: Create and push release tag
         env:
           NEW_VERSION: ${{ needs.build.outputs.new_version }}
+          SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
+          RELEASE_RUN_ID: ${{ github.run_id }}
+          RELEASE_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
           if [ "${TAG_EXISTS:-false}" = "true" ]; then
             test "$(git rev-list -n 1 "refs/tags/v${NEW_VERSION}")" = "$TAG_COMMIT"
             exit 0
           fi
-          git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}"
+          git tag -a "v${NEW_VERSION}" \
+            -m "Release v${NEW_VERSION}" \
+            -m "source-sha=${SOURCE_SHA}" \
+            -m "tag-tree=${TAG_TREE}" \
+            -m "workflow-run-id=${RELEASE_RUN_ID}" \
+            -m "workflow-run-attempt=${RELEASE_RUN_ATTEMPT}"
           git push origin "refs/tags/v${NEW_VERSION}:refs/tags/v${NEW_VERSION}"
           test "$(git rev-list -n 1 "refs/tags/v${NEW_VERSION}")" = "$TAG_COMMIT"
 

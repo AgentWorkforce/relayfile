@@ -25,7 +25,7 @@ function packageRecords(sourceSha, version = "1.2.3") {
   }));
 }
 
-test("attestation binds source, run, package digests, binaries and tag commit", () => {
+test("attestation binds source, run, package digests, binaries and tag commit/tree", () => {
   const sourceSha = "a".repeat(40);
   const result = buildReleaseAttestation({
     sourceSha,
@@ -34,6 +34,7 @@ test("attestation binds source, run, package digests, binaries and tag commit", 
     version: "1.2.3",
     tag: "v1.2.3",
     tagCommit: "b".repeat(40),
+    tagTree: "d".repeat(40),
     repository: "AgentWorkforce/relayfile",
     packages: packageRecords(sourceSha),
     binaries: RELEASE_BINARY_NAMES.map((file) => ({
@@ -45,6 +46,7 @@ test("attestation binds source, run, package digests, binaries and tag commit", 
   assert.equal(result.producer.workflowRunAttempt, "2");
   assert.equal(result.versions["@relayfile/core"], "1.2.3");
   assert.equal(result.tag.commit, "b".repeat(40));
+  assert.equal(result.tag.tree, "d".repeat(40));
 });
 
 test("attestation rejects a package from a different source or missing package", () => {
@@ -58,6 +60,7 @@ test("attestation rejects a package from a different source or missing package",
         version: "1.2.3",
         tag: "v1.2.3",
         tagCommit: "b".repeat(40),
+        tagTree: "d".repeat(40),
         repository: "AgentWorkforce/relayfile",
         packages: packageRecords("d".repeat(40)).slice(0, -1),
         binaries: RELEASE_BINARY_NAMES.map((file) => ({
@@ -82,6 +85,7 @@ test("attestation rejects registry content that differs from the local tarball",
         version: "1.2.3",
         tag: "v1.2.3",
         tagCommit: "b".repeat(40),
+        tagTree: "d".repeat(40),
         repository: "AgentWorkforce/relayfile",
         packages,
         binaries: RELEASE_BINARY_NAMES.map((file) => ({
@@ -124,6 +128,7 @@ test("attestation rejects missing, duplicate, or unexpected binaries", () => {
           version: "1.2.3",
           tag: "v1.2.3",
           tagCommit: "b".repeat(40),
+          tagTree: "d".repeat(40),
           repository: "AgentWorkforce/relayfile",
           packages: packageRecords(sourceSha),
           binaries,

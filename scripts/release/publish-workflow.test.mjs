@@ -137,7 +137,10 @@ function runVersionStepAfterTaggedRelease() {
   for (const path of new Set(packagePaths)) {
     const file = join(dir, path);
     mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file, JSON.stringify({ name: path, version: "1.2.3" }) + "\n");
+    writeFileSync(
+      file,
+      JSON.stringify({ name: path, version: "1.2.3" }) + "\n",
+    );
   }
   git(dir, "add", ".");
   git(dir, "commit", "-qm", "source");
@@ -150,7 +153,47 @@ function runVersionStepAfterTaggedRelease() {
   }
   git(dir, "commit", "-qam", "chore(release): v1.2.4");
   const releaseCommit = git(dir, "rev-parse", "HEAD");
+  const releaseTree = git(dir, "rev-parse", "HEAD^{tree}");
   git(dir, "tag", "-a", "v1.2.4", releaseCommit, "-m", "Release v1.2.4");
+  const releaseAttestation = join(dir, "release-attestation.json");
+  writeFileSync(
+    releaseAttestation,
+    JSON.stringify({
+      kind: "relayfileRelease",
+      sourceSha,
+      version: "1.2.4",
+      producer: {
+        repository: "AgentWorkforce/relayfile",
+        workflowPath: ".github/workflows/publish.yml",
+      },
+      tag: { name: "v1.2.4", commit: releaseCommit, tree: releaseTree },
+    }) + "\n",
+  );
+  const fakeGhDir = join(dir, "fake-gh");
+  mkdirSync(fakeGhDir);
+  const fakeGh = join(fakeGhDir, "gh");
+  writeFileSync(
+    fakeGh,
+    `#!/bin/sh
+set -eu
+if [ "\${1:-}" = release ] && [ "\${2:-}" = download ]; then
+  target=.
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = --dir ]; then target=$2; shift 2; continue; fi
+    shift
+  done
+  mkdir -p "$target"
+  cp "$FAKE_RELEASE_ATTESTATION" "$target/release-attestation.json"
+  exit 0
+fi
+if [ "\${1:-}" = attestation ] && [ "\${2:-}" = verify ]; then
+  echo '[{"verificationResult":{"signature":{"certificate":{}}}}]'
+  exit 0
+fi
+exit 1
+`,
+  );
+  chmodSync(fakeGh, 0o755);
   git(dir, "checkout", "-q", sourceSha);
   const result = runBash(extractStepRun("Version all packages"), {
     cwd: dir,
@@ -163,6 +206,12 @@ function runVersionStepAfterTaggedRelease() {
       GITHUB_WORKSPACE: REPO,
       SOURCE_SHA: sourceSha,
       GITHUB_RUN_ATTEMPT: "1",
+      GITHUB_RUN_ID: "12345",
+      RELEASE_RUN_ATTEMPT: "1",
+      RELEASE_RUN_ID: "12345",
+      RELEASE_REPOSITORY: "AgentWorkforce/relayfile",
+      FAKE_RELEASE_ATTESTATION: releaseAttestation,
+      PATH: `${fakeGhDir}:${process.env.PATH}`,
     },
   });
   const packageJson = readFileSync(join(dir, "package.json"), "utf8");
@@ -269,16 +318,10 @@ function extractTagPreparation() {
     "          INTENDED_TREE=$(git rev-parse 'HEAD^{tree}')",
   );
   assert.notEqual(start, -1, "tag preparation body not found");
-  const end = WORKFLOW.indexOf(
-    '\n          echo "TAG_EXISTS=$TAG_EXISTS" >> "$GITHUB_ENV"',
-    start,
-  );
+  const end = WORKFLOW.indexOf('\n          } >> "$GITHUB_ENV"', start);
   assert.notEqual(end, -1, "tag preparation body is unterminated");
   return dedent(
-    WORKFLOW.slice(
-      start,
-      end + '\n          echo "TAG_EXISTS=$TAG_EXISTS" >> "$GITHUB_ENV"'.length,
-    ),
+    WORKFLOW.slice(start, end + '\n          } >> "$GITHUB_ENV"'.length),
   );
 }
 
@@ -300,7 +343,11 @@ function makeTagSandbox() {
   return { dir, sourceSha };
 }
 
-function runTagPreparation({ existingTag = false, mismatch = false, lightweight = false } = {}) {
+function runTagPreparation({
+  existingTag = false,
+  mismatch = false,
+  lightweight = false,
+} = {}) {
   const { dir, sourceSha } = makeTagSandbox();
   const envFile = join(dir, "github-env");
   if (existingTag) {
@@ -415,7 +462,10 @@ test("tag preparation shell harness proves new and existing tag invariants", () 
   const mismatch = runTagPreparation({ existingTag: true, mismatch: true });
   assert.notEqual(mismatch.status, 0);
 
-  const lightweight = runTagPreparation({ existingTag: true, lightweight: true });
+  const lightweight = runTagPreparation({
+    existingTag: true,
+    lightweight: true,
+  });
   assert.notEqual(lightweight.status, 0);
 });
 
@@ -587,6 +637,23 @@ test("tagging verifies the generated tag commit and never pushes a moving branch
   assert.doesNotMatch(WORKFLOW, /git push\s*\n/);
 });
 
+test("release baseline uses a cryptographically verified external attestation", () => {
+  assert.match(WORKFLOW, /--repository "\$RELEASE_REPOSITORY"/);
+  assert.match(WORKFLOW, /--run-id "\$RELEASE_RUN_ID"/);
+  assert.match(WORKFLOW, /--run-attempt "\$RELEASE_RUN_ATTEMPT"/);
+  assert.match(WORKFLOW, /--workflow-path "\.github\/workflows\/publish\.yml"/);
+  assert.match(
+    WORKFLOW,
+    /actions\/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d/,
+  );
+  assert.match(WORKFLOW, /subject-path: release-attestation\.json/);
+  assert.match(
+    WORKFLOW,
+    /name: release-attestation-\$\{\{ github\.run_attempt \}\}/,
+  );
+  assert.match(WORKFLOW, /tag-tree=\$\{TAG_TREE\}/);
+});
+
 test("release permissions are scoped by job", () => {
   assert.doesNotMatch(
     WORKFLOW,
@@ -600,6 +667,10 @@ test("release permissions are scoped by job", () => {
   assert.match(
     WORKFLOW,
     /create-release:[\s\S]*?permissions:\n\s+contents: write/,
+  );
+  assert.match(
+    WORKFLOW,
+    /create-release:[\s\S]*?permissions:[\s\S]*?attestations: write[\s\S]*?artifact-metadata: write/,
   );
   assert.match(WORKFLOW, /persist-credentials: false/);
 });

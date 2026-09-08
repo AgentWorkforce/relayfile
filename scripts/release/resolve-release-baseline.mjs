@@ -6,11 +6,25 @@
  * source branch.  Therefore package.json on the next dispatch can lag behind
  * the latest release.  Only annotated v<strict-semver> tags whose single
  * release parent is on the dispatch source's first-parent lineage, whose
- * commit has the exact release-only shape produced by publish.yml, and whose
- * complete package tree carries the tag version are trusted as a baseline.
+ * commit has the exact release-only shape produced by publish.yml, whose
+ * complete package tree carries the tag version, and whose release metadata
+ * is backed by a GitHub Actions artifact attestation are trusted as a
+ * baseline. Git shape is only a candidate filter, never provenance.
  */
 
 import { execFileSync } from "node:child_process";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+} from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
+export const RELEASE_REPOSITORY = "AgentWorkforce/relayfile";
+export const RELEASE_WORKFLOW_PATH = ".github/workflows/publish.yml";
 
 export const RELEASE_PACKAGE_PATHS = [
   "package.json",
@@ -48,6 +62,7 @@ export const RELEASE_COMMIT_PATHS = new Set([
 const VERSION =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
 const SHA = /^[0-9a-f]{40}$/;
+const RUN_ID = /^\d+$/;
 
 export function parseStrictVersion(value) {
   const match = String(value ?? "").match(VERSION);
@@ -77,7 +92,8 @@ function compareIdentifiers(a, b) {
 export function compareVersions(a, b) {
   const left = typeof a === "string" ? parseStrictVersion(a) : a;
   const right = typeof b === "string" ? parseStrictVersion(b) : b;
-  if (!left || !right) throw new Error("cannot compare invalid release versions");
+  if (!left || !right)
+    throw new Error("cannot compare invalid release versions");
   for (const key of ["major", "minor", "patch"]) {
     if (left[key] !== right[key]) return left[key] - right[key];
   }
@@ -103,7 +119,9 @@ function git(cwd, args, { allowFailure = false } = {}) {
   } catch (error) {
     if (allowFailure) return null;
     const detail = String(error.stderr ?? "").trim();
-    throw new Error(`git ${args.join(" ")} failed${detail ? `: ${detail}` : ""}`);
+    throw new Error(
+      `git ${args.join(" ")} failed${detail ? `: ${detail}` : ""}`,
+    );
   }
 }
 
@@ -118,14 +136,38 @@ function packageVersionAt(cwd, commit, path) {
 }
 
 function commitSubjectAt(cwd, commit) {
-  return git(cwd, ["show", "-s", "--format=%s", commit], { allowFailure: true });
+  return git(cwd, ["show", "-s", "--format=%s", commit], {
+    allowFailure: true,
+  });
 }
 
 function changedPathsAt(cwd, parent, commit) {
-  const output = git(cwd, ["diff-tree", "--no-commit-id", "--name-only", "-r", parent, commit], {
-    allowFailure: true,
-  });
+  const output = git(
+    cwd,
+    ["diff-tree", "--no-commit-id", "--name-only", "-r", parent, commit],
+    {
+      allowFailure: true,
+    },
+  );
   return output ? output.split(/\s+/).filter(Boolean) : [];
+}
+
+function releaseTagMetadata(cwd, ref) {
+  const raw = git(cwd, ["cat-file", "-p", ref], { allowFailure: true });
+  if (!raw) return null;
+  const separator = raw.indexOf("\n\n");
+  if (separator < 0) return null;
+  const fields = {};
+  for (const line of raw.slice(separator + 2).split(/\r?\n/)) {
+    const match = line.match(/^([a-z][a-z-]+)=(.+)$/);
+    if (match) fields[match[1]] = match[2].trim();
+  }
+  return {
+    sourceSha: fields["source-sha"] ?? "",
+    tree: fields["tag-tree"] ?? "",
+    workflowRunId: fields["workflow-run-id"] ?? "",
+    workflowRunAttempt: fields["workflow-run-attempt"] ?? "",
+  };
 }
 
 function trustedTag(cwd, tag, sourceSha) {
@@ -135,7 +177,9 @@ function trustedTag(cwd, tag, sourceSha) {
   if (git(cwd, ["cat-file", "-t", ref], { allowFailure: true }) !== "tag") {
     return null;
   }
-  const commit = git(cwd, ["rev-parse", `${ref}^{commit}`], { allowFailure: true });
+  const commit = git(cwd, ["rev-parse", `${ref}^{commit}`], {
+    allowFailure: true,
+  });
   if (!commit || !SHA.test(commit)) return null;
   const parents = git(cwd, ["rev-list", "--parents", "-n", "1", commit], {
     allowFailure: true,
@@ -170,7 +214,8 @@ function trustedTag(cwd, tag, sourceSha) {
   ) {
     return null;
   }
-  if (commitSubjectAt(cwd, commit) !== `chore(release): v${version.raw}`) return null;
+  if (commitSubjectAt(cwd, commit) !== `chore(release): v${version.raw}`)
+    return null;
   const changedPaths = changedPathsAt(cwd, parent, commit);
   if (
     changedPaths.length === 0 ||
@@ -181,12 +226,27 @@ function trustedTag(cwd, tag, sourceSha) {
   for (const path of RELEASE_PACKAGE_PATHS) {
     if (packageVersionAt(cwd, commit, path) !== version.raw) return null;
   }
-  return { tag, version, commit, parent };
+  const tree = git(cwd, ["rev-parse", `${commit}^{tree}`], {
+    allowFailure: true,
+  });
+  if (!tree || !SHA.test(tree)) return null;
+  return {
+    tag,
+    version,
+    commit,
+    parent,
+    tree,
+    metadata: releaseTagMetadata(cwd, ref),
+  };
 }
 
 export function findTrustedReleaseTags({ cwd = process.cwd(), sourceSha }) {
   if (!SHA.test(sourceSha ?? "")) return [];
-  const tags = git(cwd, ["for-each-ref", "--format=%(refname:strip=2)", "refs/tags/v*"])
+  const tags = git(cwd, [
+    "for-each-ref",
+    "--format=%(refname:strip=2)",
+    "refs/tags/v*",
+  ])
     .split(/\s+/)
     .filter(Boolean);
   return tags
@@ -198,19 +258,264 @@ export function findTrustedReleaseTags({ cwd = process.cwd(), sourceSha }) {
     });
 }
 
+function parseJson(text, description) {
+  try {
+    return JSON.parse(String(text ?? ""));
+  } catch {
+    throw new Error(`could not parse ${description}`);
+  }
+}
+
+function runGh(args, { cwd, env }) {
+  return execFileSync("gh", args, {
+    cwd,
+    encoding: "utf8",
+    env: { ...process.env, ...env },
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+}
+
+function findDownloadedAttestation(directory) {
+  const direct = join(directory, "release-attestation.json");
+  if (existsSync(direct)) return direct;
+  const files = readdirSync(directory, { recursive: true });
+  const match = files.find(
+    (file) =>
+      typeof file === "string" && file.endsWith("/release-attestation.json"),
+  );
+  return match ? join(directory, match) : null;
+}
+
+function downloadReleaseAttestation({ cwd, repository, tag, directory, env }) {
+  try {
+    runGh(
+      [
+        "release",
+        "download",
+        tag,
+        "--repo",
+        repository,
+        "--pattern",
+        "release-attestation.json",
+        "--dir",
+        directory,
+        "--clobber",
+      ],
+      { cwd, env },
+    );
+    return findDownloadedAttestation(directory);
+  } catch {
+    return null;
+  }
+}
+
+function downloadRunAttestation({
+  cwd,
+  repository,
+  runId,
+  runAttempt,
+  directory,
+  env,
+}) {
+  try {
+    runGh(
+      [
+        "run",
+        "download",
+        runId,
+        "--repo",
+        repository,
+        "--name",
+        `release-attestation-${runAttempt}`,
+        "--dir",
+        directory,
+      ],
+      { cwd, env },
+    );
+    return findDownloadedAttestation(directory);
+  } catch {
+    return null;
+  }
+}
+
+export function validateReleaseAttestation(
+  attestation,
+  candidate,
+  {
+    repository = RELEASE_REPOSITORY,
+    workflowPath = RELEASE_WORKFLOW_PATH,
+  } = {},
+) {
+  if (!attestation || attestation.kind !== "relayfileRelease") return false;
+  if (attestation.sourceSha !== candidate.parent) return false;
+  if (attestation.version !== candidate.version.raw) return false;
+  if (attestation.tag?.name !== candidate.tag) return false;
+  if (attestation.tag?.commit !== candidate.commit) return false;
+  if (attestation.tag?.tree !== candidate.tree) return false;
+  if (attestation.producer?.repository !== repository) return false;
+  if (attestation.producer?.workflowPath !== workflowPath) return false;
+  return true;
+}
+
+export function sameAttemptRecoveryAllowed(
+  candidate,
+  { sourceSha, currentRunId = "", currentRunAttempt = "" } = {},
+) {
+  const metadata = candidate.metadata;
+  if (!metadata || candidate.parent !== sourceSha) return false;
+  if (metadata.sourceSha !== sourceSha || metadata.tree !== candidate.tree)
+    return false;
+  if (!RUN_ID.test(currentRunId) || metadata.workflowRunId !== currentRunId)
+    return false;
+  if (
+    !RUN_ID.test(metadata.workflowRunAttempt) ||
+    !RUN_ID.test(currentRunAttempt)
+  ) {
+    return false;
+  }
+  // A tag is immutable, so repeated retries retain the attempt that first
+  // created it; any earlier attempt of this exact run is valid only with the
+  // same source/tree/parent constraints above.
+  return Number(metadata.workflowRunAttempt) < Number(currentRunAttempt);
+}
+
+export function verifyReleaseTagAttestation({
+  cwd,
+  candidate,
+  repository = RELEASE_REPOSITORY,
+  workflowPath = RELEASE_WORKFLOW_PATH,
+  sourceSha,
+  currentRunId = "",
+  currentRunAttempt = "",
+  env = {},
+}) {
+  if (!repository || !candidate) return null;
+  const directory = mkdtempSync(
+    join(tmpdir(), "relayfile-release-attestation-"),
+  );
+  try {
+    let artifact = downloadReleaseAttestation({
+      cwd,
+      repository,
+      tag: candidate.tag,
+      directory,
+      env,
+    });
+    if (
+      !artifact &&
+      sameAttemptRecoveryAllowed(candidate, {
+        sourceSha,
+        currentRunId,
+        currentRunAttempt,
+      })
+    ) {
+      artifact = downloadRunAttestation({
+        cwd,
+        repository,
+        runId: candidate.metadata.workflowRunId,
+        runAttempt: candidate.metadata.workflowRunAttempt,
+        directory,
+        env,
+      });
+    }
+    if (!artifact) return null;
+    const verification = parseJson(
+      runGh(
+        [
+          "attestation",
+          "verify",
+          artifact,
+          "--repo",
+          repository,
+          "--signer-repo",
+          repository,
+          "--signer-workflow",
+          `${repository}/${workflowPath}`,
+          "--source-digest",
+          candidate.parent,
+          "--format",
+          "json",
+        ],
+        { cwd, env },
+      ),
+      "GitHub artifact attestation verification",
+    );
+    if (
+      !Array.isArray(verification) ||
+      !verification.some(
+        (entry) => entry?.verificationResult?.signature?.certificate,
+      )
+    ) {
+      return null;
+    }
+    const attestation = parseJson(
+      readFileSync(artifact, "utf8"),
+      "release attestation",
+    );
+    return validateReleaseAttestation(attestation, candidate, {
+      repository,
+      workflowPath,
+    })
+      ? attestation
+      : null;
+  } catch {
+    return null;
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 export function resolveReleaseBaseline({
   cwd = process.cwd(),
   sourceSha,
   currentVersion,
+  repository = RELEASE_REPOSITORY,
+  workflowPath = RELEASE_WORKFLOW_PATH,
+  currentRunId = "",
+  currentRunAttempt = "",
+  releaseAttestationVerifier = verifyReleaseTagAttestation,
+  verifierEnv = {},
 }) {
   const current = parseStrictVersion(currentVersion);
   if (!current) throw new Error("current package version is not strict SemVer");
   const tags = findTrustedReleaseTags({ cwd, sourceSha });
-  const latest = tags.at(-1) ?? null;
-  const baseline = latest && compareVersions(latest.version, current) > 0
-    ? latest.version.raw
-    : current.raw;
-  const resumable = latest && latest.parent === sourceSha ? latest.version.raw : "";
+  let latest = null;
+  // Check newest candidates first so a normal dispatch performs one external
+  // verification. If an untrusted high tag is present, continue downward to
+  // the newest lower release whose signed attestation is valid.
+  for (const candidate of [...tags].reverse()) {
+    let attestation = null;
+    try {
+      attestation = releaseAttestationVerifier({
+        cwd,
+        candidate,
+        repository,
+        workflowPath,
+        sourceSha,
+        currentRunId,
+        currentRunAttempt,
+        env: verifierEnv,
+      });
+    } catch {
+      attestation = null;
+    }
+    if (
+      attestation &&
+      validateReleaseAttestation(attestation, candidate, {
+        repository,
+        workflowPath,
+      })
+    ) {
+      latest = candidate;
+      break;
+    }
+  }
+  const baseline =
+    latest && compareVersions(latest.version, current) > 0
+      ? latest.version.raw
+      : current.raw;
+  const resumable =
+    latest && latest.parent === sourceSha ? latest.version.raw : "";
   return {
     baselineVersion: baseline,
     resumableVersion: resumable,
@@ -235,12 +540,24 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       cwd: args.cwd ?? process.cwd(),
       sourceSha: args.source_sha,
       currentVersion: args.current_version,
+      repository: args.repository,
+      workflowPath: args.workflow_path ?? RELEASE_WORKFLOW_PATH,
+      currentRunId: args.run_id ?? process.env.GITHUB_RUN_ID ?? "",
+      currentRunAttempt:
+        args.run_attempt ?? process.env.GITHUB_RUN_ATTEMPT ?? "",
+      verifierEnv: {
+        GH_TOKEN: process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN ?? "",
+      },
     });
     console.log(`baseline_version=${result.baselineVersion}`);
     console.log(`resumable_version=${result.resumableVersion}`);
     console.log(`latest_tag=${result.latestTag}`);
   } catch (error) {
-    console.error(error instanceof Error ? error.message : "release baseline resolution failed");
+    console.error(
+      error instanceof Error
+        ? error.message
+        : "release baseline resolution failed",
+    );
     process.exitCode = 1;
   }
 }

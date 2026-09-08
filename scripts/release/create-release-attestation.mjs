@@ -60,6 +60,7 @@ export function buildReleaseAttestation({
   version,
   tag,
   tagCommit,
+  tagTree,
   packages,
   binaries,
   repository,
@@ -68,6 +69,8 @@ export function buildReleaseAttestation({
     throw new Error("attestation source SHA is invalid");
   if (!GIT_SHA.test(tagCommit ?? ""))
     throw new Error("attestation tag commit is invalid");
+  if (!GIT_SHA.test(tagTree ?? ""))
+    throw new Error("attestation tag tree is invalid");
   if (!String(version ?? "").trim())
     throw new Error("attestation version is missing");
   if (tag !== `v${version}`)
@@ -166,7 +169,7 @@ export function buildReleaseAttestation({
     versions: versionMap,
     packages,
     binaries: binaries ?? [],
-    tag: { name: tag, commit: tagCommit },
+    tag: { name: tag, commit: tagCommit, tree: tagTree },
   };
 }
 
@@ -191,6 +194,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       version: args.version,
       tag: args.tag,
       tagCommit: args.tag_commit,
+      tagTree: args.tag_tree,
       packages,
       binaries,
       repository: args.repository,
