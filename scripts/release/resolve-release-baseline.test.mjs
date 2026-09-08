@@ -410,6 +410,26 @@ test("external attestations accept one matching canonical npm digest", () => {
   rmSync(cwd, { recursive: true, force: true });
 });
 
+test("external attestations reject SHA-1-only package identity", () => {
+  const { cwd, sourceSha } = sandboxWithPriorRelease();
+  const result = resolveReleaseBaseline({
+    cwd,
+    sourceSha,
+    currentVersion: "1.2.3",
+    releaseAttestationVerifier: ({ candidate }) => {
+      const attestation = attestationFor(candidate);
+      for (const item of attestation.packages) {
+        item.package.local.integrity = null;
+        item.package.registry.integrity = null;
+      }
+      return attestation;
+    },
+  });
+  assert.equal(result.baselineVersion, "1.2.3");
+  assert.equal(result.latestTag, "");
+  rmSync(cwd, { recursive: true, force: true });
+});
+
 test("a rerun attestation with a new attempt cannot replace immutable tag metadata", () => {
   const { cwd, sourceSha } = sandboxWithPriorRelease();
   const result = resolveReleaseBaseline({

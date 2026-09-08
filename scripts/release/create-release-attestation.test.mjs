@@ -91,31 +91,57 @@ test("attestation binds source, run, package digests, binaries and tag commit/tr
   assert.equal(result.tag.tree, "d".repeat(40));
 });
 
-test("attestation accepts matching optional npm digest fields", () => {
+test("attestation accepts integrity-only npm identity", () => {
   const sourceSha = "a".repeat(40);
-  for (const omittedField of ["integrity", "shasum"]) {
-    const packages = packageRecords(sourceSha);
-    for (const item of packages) {
-      item.package.local[omittedField] = null;
-      item.package.registry[omittedField] = null;
-    }
-    const result = buildReleaseAttestation({
-      sourceSha,
-      runId: 123,
-      runAttempt: 1,
-      version: "1.2.3",
-      tag: "v1.2.3",
-      tagCommit: "b".repeat(40),
-      tagTree: "d".repeat(40),
-      repository: "AgentWorkforce/relayfile",
-      packages,
-      binaries: RELEASE_BINARY_NAMES.map((file) => ({
-        file,
-        sha256: "c".repeat(64),
-      })),
-    });
-    assert.equal(result.packages[0].package.local[omittedField], null);
+  const packages = packageRecords(sourceSha);
+  for (const item of packages) {
+    item.package.local.shasum = null;
+    item.package.registry.shasum = null;
   }
+  const result = buildReleaseAttestation({
+    sourceSha,
+    runId: 123,
+    runAttempt: 1,
+    version: "1.2.3",
+    tag: "v1.2.3",
+    tagCommit: "b".repeat(40),
+    tagTree: "d".repeat(40),
+    repository: "AgentWorkforce/relayfile",
+    packages,
+    binaries: RELEASE_BINARY_NAMES.map((file) => ({
+      file,
+      sha256: "c".repeat(64),
+    })),
+  });
+  assert.equal(result.packages[0].package.local.shasum, null);
+});
+
+test("attestation rejects SHA-1-only npm identity", () => {
+  const sourceSha = "a".repeat(40);
+  const packages = packageRecords(sourceSha);
+  for (const item of packages) {
+    item.package.local.integrity = null;
+    item.package.registry.integrity = null;
+  }
+  assert.throws(
+    () =>
+      buildReleaseAttestation({
+        sourceSha,
+        runId: 123,
+        runAttempt: 1,
+        version: "1.2.3",
+        tag: "v1.2.3",
+        tagCommit: "b".repeat(40),
+        tagTree: "d".repeat(40),
+        repository: "AgentWorkforce/relayfile",
+        packages,
+        binaries: RELEASE_BINARY_NAMES.map((file) => ({
+          file,
+          sha256: "c".repeat(64),
+        })),
+      }),
+    /no common SHA-512 integrity|incomplete package attestation/,
+  );
 });
 
 test("attestation CLI executes when its entrypoint path contains spaces", () => {
@@ -222,7 +248,7 @@ test("attestation rejects incomparable mixed digest types", () => {
           sha256: "c".repeat(64),
         })),
       }),
-    /no common digest/,
+    /no common SHA-512 integrity/,
   );
 });
 

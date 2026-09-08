@@ -10,7 +10,7 @@
 
 ## Summary
 
-Pinned all publish workflow actions to immutable commit SHAs, validated and mapped package/dry_run inputs before shell use, added regression tests, and passed release/actionlint/Node22 validation.
+Pinned all publish workflow actions to immutable commit SHAs, validated and mapped package/dry_run inputs before shell use, and added regression tests. Any validation statement in this record is self-reported and non-gating: it captured no command output or test/actionlint/Node22 evidence; its commit and file metadata support implementation statements only.
 
 **Approach:** Standard approach
 
@@ -35,7 +35,7 @@ Pinned all publish workflow actions to immutable commit SHAs, validated and mapp
 
 - Pinned every publish-workflow action to a full commit SHA and retained major-version comments
 - Validated package and dry_run inputs once, exported safe outputs, and consumed only mapped values downstream
-- Release hardening is implemented; action refs and dispatch input paths are immutable or validated, and automated validation is green.
+- Release hardening is implemented; action refs and dispatch input paths are immutable or validated. This record does not establish test, actionlint, or Node 22 validation results.
 
 ---
 

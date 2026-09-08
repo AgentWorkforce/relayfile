@@ -53,7 +53,7 @@
         {
           "ts": 1788885563241,
           "type": "reflection",
-          "content": "Release hardening is implemented; action refs and dispatch input paths are immutable or validated, and automated validation is green.",
+          "content": "Release hardening is implemented; action refs and dispatch input paths are immutable or validated. This record does not establish test, actionlint, or Node 22 validation results.",
           "raw": {
             "focalPoints": [
               "action-pinning",
@@ -74,7 +74,7 @@
     }
   ],
   "retrospective": {
-    "summary": "Pinned all publish workflow actions to immutable commit SHAs, validated and mapped package/dry_run inputs before shell use, added regression tests, and passed release/actionlint/Node22 validation.",
+    "summary": "Pinned all publish workflow actions to immutable commit SHAs, validated and mapped package/dry_run inputs before shell use, and added regression tests. Any validation statement in this record is self-reported and non-gating: it captured no command output or test/actionlint/Node22 evidence; its commit and file metadata support implementation statements only.",
     "approach": "Standard approach",
     "confidence": 0.95
   },

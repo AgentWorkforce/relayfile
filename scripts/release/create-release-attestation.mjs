@@ -27,10 +27,9 @@ export function isSha1Shasum(value) {
   return typeof value === "string" && /^[0-9a-f]{40}$/.test(value);
 }
 
-// npm can provide either its modern SHA-512 SRI field or its legacy SHA-1
-// shasum.  Reconciliation accepts either only when the local tarball and
-// registry response share the same digest, so the release record must preserve
-// that contract instead of requiring a second, optional representation.
+// npm may omit its legacy SHA-1 shasum, but package identity must always be
+// established by a canonical SHA-512 SRI value shared by the local tarball and
+// registry response.  A shared shasum is retained as an auxiliary check only.
 function hasValidPackageDigest(record) {
   return (
     !!record &&
@@ -44,8 +43,10 @@ function hasMatchingPackageDigest(local, registry) {
   return (
     (!!local.integrity &&
       !!registry.integrity &&
-      local.integrity === registry.integrity) ||
-    (!!local.shasum && !!registry.shasum && local.shasum === registry.shasum)
+      local.integrity === registry.integrity) &&
+    (!local.shasum ||
+      !registry.shasum ||
+      local.shasum === registry.shasum)
   );
 }
 
@@ -209,9 +210,9 @@ export function buildReleaseAttestation({
     }
     const sharedIntegrity = record.registry.integrity && record.local.integrity;
     const sharedShasum = record.registry.shasum && record.local.shasum;
-    if (!sharedIntegrity && !sharedShasum) {
+    if (!sharedIntegrity) {
       throw new Error(
-        `${record.name} registry and local records have no common digest`,
+        `${record.name} registry and local records have no common SHA-512 integrity`,
       );
     }
     if (

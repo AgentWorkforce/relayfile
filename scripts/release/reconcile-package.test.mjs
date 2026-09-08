@@ -17,6 +17,11 @@ import {
   reconcilePackage,
 } from "./reconcile-package.mjs";
 
+const VALID_INTEGRITY = `sha512-${"A".repeat(86)}==`;
+const OTHER_INTEGRITY = `sha512-${"A".repeat(85)}Q==`;
+const VALID_SHASUM = "a".repeat(40);
+const OTHER_SHASUM = "b".repeat(40);
+
 function sandbox() {
   const dir = mkdtempSync(join(tmpdir(), "relayfile-reconcile-"));
   writeFileSync(
@@ -41,8 +46,8 @@ function fakeNpm({ state, registry, viewError, onView }) {
             name: "@relayfile/test",
             version: "1.2.3",
             size: 25,
-            integrity: "sha512-local",
-            shasum: "sha1-local",
+            integrity: VALID_INTEGRITY,
+            shasum: VALID_SHASUM,
           },
         ]),
         stderr: "",
@@ -74,7 +79,7 @@ test("reconciliation publishes an absent version and verifies it afterwards", as
     }
     return fakeNpm({
       state,
-      registry: { integrity: "sha512-local", shasum: "sha1-local" },
+      registry: { integrity: VALID_INTEGRITY, shasum: VALID_SHASUM },
     })(command, args, options);
   };
   const result = await reconcilePackage({
@@ -110,8 +115,8 @@ test("post-publish propagation retries an absent registry response", async () =>
             filename: "relayfile-test-1.2.3.tgz",
             name: "@relayfile/test",
             version: "1.2.3",
-            integrity: "sha512-local",
-            shasum: "sha1-local",
+            integrity: VALID_INTEGRITY,
+            shasum: VALID_SHASUM,
           },
         ]),
         stderr: "",
@@ -124,8 +129,8 @@ test("post-publish propagation retries an absent registry response", async () =>
       return {
         code: 0,
         stdout: JSON.stringify({
-          integrity: "sha512-local",
-          shasum: "sha1-local",
+          integrity: VALID_INTEGRITY,
+          shasum: VALID_SHASUM,
         }),
         stderr: "",
       };
@@ -165,7 +170,7 @@ test("post-publish propagation retry delays are capped per wait and in total", a
       runAttempt: 1,
       npm: fakeNpm({
         state,
-        registry: { integrity: "sha512-local", shasum: "sha1-local" },
+        registry: { integrity: VALID_INTEGRITY, shasum: VALID_SHASUM },
         viewError: "npm error code E404",
       }),
       attempts: 99,
@@ -195,7 +200,7 @@ test("registry commands and their retry time share the total retry budget", asyn
   let clock = 0;
   const npm = fakeNpm({
     state,
-    registry: { integrity: "sha512-local", shasum: "sha1-local" },
+    registry: { integrity: VALID_INTEGRITY, shasum: VALID_SHASUM },
     viewError: "npm error code E404",
     onView: (args, options) => {
       argsSeen.push(args);
@@ -261,8 +266,8 @@ test("post-publish digest conflict fails closed without retrying", async () => {
             filename: "relayfile-test-1.2.3.tgz",
             name: "@relayfile/test",
             version: "1.2.3",
-            integrity: "sha512-local",
-            shasum: "sha1-local",
+            integrity: VALID_INTEGRITY,
+            shasum: VALID_SHASUM,
           },
         ]),
         stderr: "",
@@ -277,8 +282,8 @@ test("post-publish digest conflict fails closed without retrying", async () => {
       return {
         code: 0,
         stdout: JSON.stringify({
-          integrity: "sha512-other",
-          shasum: "sha1-other",
+          integrity: OTHER_INTEGRITY,
+          shasum: OTHER_SHASUM,
         }),
         stderr: "",
       };
@@ -317,8 +322,8 @@ test("read-only preflight blocks every publish under mixed absent/conflict state
       state,
       registry:
         mode === "conflict"
-          ? { integrity: "sha512-other", shasum: "sha1-other" }
-          : { integrity: "sha512-local", shasum: "sha1-local" },
+          ? { integrity: OTHER_INTEGRITY, shasum: OTHER_SHASUM }
+          : { integrity: VALID_INTEGRITY, shasum: VALID_SHASUM },
       viewError: mode === "absent" ? "npm error code E404" : undefined,
     });
 
@@ -357,7 +362,7 @@ test("reconciliation skips an identical already-published tarball", async () => 
   const state = { views: 0, publishes: 0 };
   const npm = fakeNpm({
     state,
-    registry: { integrity: "sha512-local", shasum: "sha1-local" },
+    registry: { integrity: VALID_INTEGRITY, shasum: null },
   });
   const result = await reconcilePackage({
     packageDir: dir,
@@ -372,12 +377,31 @@ test("reconciliation skips an identical already-published tarball", async () => 
   rmSync(dir, { recursive: true, force: true });
 });
 
+test("reconciliation rejects SHA-1-only registry identity", async () => {
+  const dir = sandbox();
+  const state = { views: 0, publishes: 0 };
+  await assert.rejects(
+    reconcilePackage({
+      packageDir: dir,
+      tag: "next",
+      sourceSha: "b".repeat(40),
+      npm: fakeNpm({
+        state,
+        registry: { integrity: null, shasum: VALID_SHASUM },
+      }),
+    }),
+    /no usable digest|comparable SHA-512 integrity/,
+  );
+  assert.equal(state.publishes, 0);
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("conflicting content fails closed without publishing", async () => {
   const dir = sandbox();
   const state = { views: 0, publishes: 0 };
   const npm = fakeNpm({
     state,
-    registry: { integrity: "sha512-other", shasum: "sha1-local" },
+    registry: { integrity: OTHER_INTEGRITY, shasum: VALID_SHASUM },
   });
   await assert.rejects(
     reconcilePackage({
@@ -441,15 +465,33 @@ test("content comparison requires at least one comparable digest", () => {
     ),
     {
       kind: "ambiguous",
-      reason: "registry and local content do not share a comparable digest",
+      reason:
+        "registry and local content do not share a comparable SHA-512 integrity",
     },
   );
   assert.equal(
     comparePackageContent(
-      { integrity: "sha512-local", shasum: null },
-      { integrity: null, shasum: "sha1-local" },
+      { integrity: VALID_INTEGRITY, shasum: null },
+      { integrity: null, shasum: VALID_SHASUM },
     ).kind,
     "ambiguous",
+  );
+});
+
+test("content comparison rejects SHA-1-only identity and accepts integrity-only identity", () => {
+  assert.equal(
+    comparePackageContent(
+      { integrity: null, shasum: VALID_SHASUM },
+      { integrity: null, shasum: VALID_SHASUM },
+    ).kind,
+    "ambiguous",
+  );
+  assert.equal(
+    comparePackageContent(
+      { integrity: VALID_INTEGRITY, shasum: null },
+      { integrity: VALID_INTEGRITY, shasum: null },
+    ).kind,
+    "identical",
   );
 });
 
@@ -465,7 +507,7 @@ test("normalizes npm 11 pack JSON object output", () => {
         name: "@relayfile/test",
         version: "1.2.3",
         filename: "relayfile-test-1.2.3.tgz",
-        integrity: "sha512-local",
+        integrity: VALID_INTEGRITY,
       },
     },
     dir,
@@ -480,7 +522,7 @@ test("normalizes npm view dist JSON array output", async () => {
   const state = { views: 0, publishes: 0 };
   const npm = fakeNpm({
     state,
-    registry: [{ integrity: "sha512-local", shasum: "sha1-local" }],
+    registry: [{ integrity: VALID_INTEGRITY, shasum: VALID_SHASUM }],
   });
   const result = await reconcilePackage({
     packageDir: dir,
@@ -495,7 +537,7 @@ test("normalizes npm view dist JSON array output", async () => {
 test("rejects ambiguous or wrong-version registry records", () => {
   assert.equal(
     normalizeRegistryRecord(
-      [{ integrity: "sha512-local" }, { integrity: "sha512-other" }],
+      [{ integrity: VALID_INTEGRITY }, { integrity: OTHER_INTEGRITY }],
       { name: "@relayfile/test", version: "1.2.3" },
     ),
     null,
@@ -505,7 +547,7 @@ test("rejects ambiguous or wrong-version registry records", () => {
       {
         name: "@relayfile/test",
         version: "1.2.4",
-        integrity: "sha512-local",
+        integrity: VALID_INTEGRITY,
       },
       { name: "@relayfile/test", version: "1.2.3" },
     ),

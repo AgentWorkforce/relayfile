@@ -446,7 +446,7 @@ export function validateReleaseAttestation(
     const sharedIntegrity = record.registry.integrity && record.local.integrity;
     const sharedShasum = record.registry.shasum && record.local.shasum;
     if (
-      (!sharedIntegrity && !sharedShasum) ||
+      !sharedIntegrity ||
       (sharedIntegrity &&
         record.registry.integrity !== record.local.integrity) ||
       (sharedShasum && record.registry.shasum !== record.local.shasum)

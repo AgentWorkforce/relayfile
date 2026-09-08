@@ -41,6 +41,20 @@ export const REGISTRY_FETCH_RETRY_MAX_TIMEOUT_MS = 5000;
 // Keep post-publish registry verification bounded when npm stays unavailable.
 export const MAX_TOTAL_RETRY_DELAY_MS = 5 * 60 * 1000;
 
+/** npm's integrity field must contain the complete SHA-512 SRI digest. */
+export function isSha512Integrity(value) {
+  if (typeof value !== "string") return false;
+  const match = /^sha512-([A-Za-z0-9+/]{86}==)$/.exec(value);
+  if (!match) return false;
+  const digest = Buffer.from(match[1], "base64");
+  return digest.length === 64 && digest.toString("base64") === match[1];
+}
+
+/** npm's legacy shasum field is the lowercase hexadecimal SHA-1 digest. */
+export function isSha1Shasum(value) {
+  return typeof value === "string" && /^[0-9a-f]{40}$/.test(value);
+}
+
 export function backoffDelay({
   attempt,
   baseDelayMs = DEFAULT_DELAY_MS,
@@ -120,6 +134,16 @@ export function normalizePackRecord(raw, packageDir) {
       "npm pack returned no integrity or shasum; refusing to release",
     );
   }
+  if (integrity && !isSha512Integrity(integrity)) {
+    throw new Error(
+      "npm pack returned malformed SHA-512 integrity; refusing to release",
+    );
+  }
+  if (shasum && !isSha1Shasum(shasum)) {
+    throw new Error(
+      "npm pack returned malformed SHA-1 shasum; refusing to release",
+    );
+  }
   return {
     filename,
     name: record.name,
@@ -159,6 +183,12 @@ export function normalizeRegistryRecord(raw, { name, version }) {
   const shasum = typeof record.shasum === "string" ? record.shasum : null;
   const tarball = typeof record.tarball === "string" ? record.tarball : null;
   if (!integrity && !shasum) return null;
+  if (
+    (integrity && !isSha512Integrity(integrity)) ||
+    (shasum && !isSha1Shasum(shasum))
+  ) {
+    return null;
+  }
   return { name, version, integrity, shasum, tarball };
 }
 
@@ -168,6 +198,16 @@ export function comparePackageContent(local, registry) {
       kind: "ambiguous",
       reason: "registry returned no package digests",
     };
+  if (
+    (registry.integrity && !isSha512Integrity(registry.integrity)) ||
+    (local.integrity && !isSha512Integrity(local.integrity))
+  ) {
+    return {
+      kind: "ambiguous",
+      reason:
+        "registry and local content do not share a canonical SHA-512 integrity",
+    };
+  }
   if (
     registry.integrity &&
     local.integrity &&
@@ -184,13 +224,11 @@ export function comparePackageContent(local, registry) {
       reason: "registry shasum differs from the local tarball",
     };
   }
-  if (
-    (!registry.integrity || !local.integrity) &&
-    (!registry.shasum || !local.shasum)
-  ) {
+  if (!registry.integrity || !local.integrity) {
     return {
       kind: "ambiguous",
-      reason: "registry and local content do not share a comparable digest",
+      reason:
+        "registry and local content do not share a comparable SHA-512 integrity",
     };
   }
   return { kind: "identical" };
