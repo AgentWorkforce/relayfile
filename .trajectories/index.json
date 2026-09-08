@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-09-08T16:39:23.241Z",
+  "lastUpdated": "2026-09-08T16:39:47.074Z",
   "trajectories": {
     "traj_4pvrlmqfnzng": {
       "title": "Review PR #278 in AgentWorkforce/relayfile",
@@ -214,9 +214,10 @@
     },
     "traj_rfzd9eqgrwev": {
       "title": "Harden release workflow action pinning and dispatch input handling",
-      "status": "active",
+      "status": "completed",
       "startedAt": "2026-09-08T16:39:17.422Z",
-      "path": "/private/tmp/relayfile-release-snapshot-fix-0908/.trajectories/active/traj_rfzd9eqgrwev.json"
+      "completedAt": "2026-09-08T16:39:46.883Z",
+      "path": "/private/tmp/relayfile-release-snapshot-fix-0908/.trajectories/completed/2026-09/traj_rfzd9eqgrwev.json"
     }
   }
 }
