@@ -41,7 +41,7 @@
         {
           "ts": 1788888616252,
           "type": "reflection",
-          "content": "Current reviewer races are fixed with deterministic stop-vs-probe and stop-vs-backoff regressions; focused 25/25 and full Node 22 SDK 293/293 pass.",
+          "content": "Current reviewer races are fixed with deterministic stop-vs-probe and stop-vs-backoff regressions. Focused tests pass 25/25; one full Node 22 SDK run passed 293/293, while an independent repeat reproduced the known environment-only ErrorEvent baseline failure at 292/293.",
           "raw": {
             "confidence": 0.93
           },

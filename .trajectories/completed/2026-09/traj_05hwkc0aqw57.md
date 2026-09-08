@@ -30,4 +30,4 @@ Prevented foreground --once readiness and retry from racing shutdown; corrected 
 *Agent: default*
 
 - Gate both foreground readiness acceptance and resumable restart on shutdown state: Gate both foreground readiness acceptance and resumable restart on shutdown state
-- Current reviewer races are fixed with deterministic stop-vs-probe and stop-vs-backoff regressions; focused 25/25 and full Node 22 SDK 293/293 pass.
+- Current reviewer races are fixed with deterministic stop-vs-probe and stop-vs-backoff regressions. Focused tests pass 25/25; one full Node 22 SDK run passed 293/293, while an independent repeat reproduced the known environment-only ErrorEvent baseline failure at 292/293.
