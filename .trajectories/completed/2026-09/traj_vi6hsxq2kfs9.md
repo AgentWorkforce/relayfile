@@ -2,7 +2,7 @@
 
 > **Status:** ✅ Completed
 > **Task:** relayfile#477
-> **Confidence:** 97%
+> **Confidence:** 75%
 > **Started:** September 8, 2026 at 09:13 PM
 > **Completed:** September 8, 2026 at 09:14 PM
 
@@ -10,7 +10,7 @@
 
 ## Summary
 
-Made PR 477 once shutdown/retry regression deterministic with scoped fake timers and local readiness state; runtime unchanged. Focused test passed 50 repetitions, SDK 293/293, typecheck/build, Go tests, diff/secret checks passed.
+Made PR 477 once shutdown/retry regression deterministic with scoped fake timers and local readiness state; runtime unchanged. Self-reported and non-gating: focused repetitions, SDK checks, Go checks, diff review, and secret scans were reported to pass; this trajectory contains no captured command/output evidence.
 
 **Approach:** Standard approach
 

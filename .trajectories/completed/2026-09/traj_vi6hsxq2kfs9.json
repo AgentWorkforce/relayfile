@@ -42,9 +42,9 @@
     }
   ],
   "retrospective": {
-    "summary": "Made PR 477 once shutdown/retry regression deterministic with scoped fake timers and local readiness state; runtime unchanged. Focused test passed 50 repetitions, SDK 293/293, typecheck/build, Go tests, diff/secret checks passed.",
+    "summary": "Made PR 477 once shutdown/retry regression deterministic with scoped fake timers and local readiness state; runtime unchanged. Self-reported and non-gating: focused repetitions, SDK checks, Go checks, diff review, and secret scans were reported to pass; this trajectory contains no captured command/output evidence.",
     "approach": "Standard approach",
-    "confidence": 0.97
+    "confidence": 0.75
   },
   "commits": ["bcb1e652"],
   "filesChanged": [
