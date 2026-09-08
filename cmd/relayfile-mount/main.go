@@ -442,14 +442,32 @@ func runScopedPollingMountsWithRunner(
 		wg.Wait()
 		close(errCh)
 	}()
-	var firstErr error
+	// Every sibling's own run() call is independently bounded (rootCtx,
+	// maxOnceBootstrapResumeCycles, onceBootstrapStableCycleLimit), so this
+	// loop always terminates once every goroutine above returns.
+	//
+	// Only a terminal bootstrap error (mountsync.IsBootstrapTerminalError --
+	// an operator-actionable hard stop such as BootstrapStalledError) cancels
+	// the shared ctx: retrying that persisted checkpoint forever would be
+	// pointless, and every sibling scope shares the same wedge risk. A merely
+	// incomplete bootstrap in one scope (a resume-cycle ceiling, a stall
+	// bound, or that scope's own rootCtx cancellation) is not terminal and
+	// must not cut short a healthy sibling that is still making progress
+	// within its own bound -- it runs to its own bounded --once completion
+	// exactly as it would standalone. Every non-nil error, terminal or not,
+	// is still collected and joined into the aggregate result so `--once`
+	// exits nonzero and reports every scope that failed, not just the first.
+	var errs []error
 	for err := range errCh {
-		if err != nil && firstErr == nil {
-			firstErr = err
+		if err == nil {
+			continue
+		}
+		errs = append(errs, err)
+		if mountsync.IsBootstrapTerminalError(err) {
 			cancel()
 		}
 	}
-	return firstErr
+	return errors.Join(errs...)
 }
 
 func logStandaloneMountContentPolicy(scopes []mountscope.Scope) error {
@@ -899,6 +917,12 @@ const onceBootstrapStableCycleLimit = 3
 // cycle must not be reported as incomplete. A checkpoint that is still
 // in-progress after that first cycle runs the cancellation/failure checks
 // and the resume loop below exactly as before.
+//
+// Within the resume loop, a terminal cycleErr is in turn checked before
+// rootCtx.Err(): a genuinely terminal, operator-actionable failure
+// (mountsync.IsBootstrapTerminalError) must not be demoted to a generic
+// "context cancelled" message just because a SIGTERM/idle-watchdog
+// cancellation happened to land in the same cycle.
 func finishInitialBootstrap(rootCtx context.Context, cfg mountConfig, run func(reconcile bool) error, lastCycleErr func() error, alreadyBootstrapped bool) error {
 	state := readBootstrapResumeState(cfg.localDir)
 	if !state.inProgress {
@@ -942,12 +966,19 @@ func finishInitialBootstrap(rootCtx context.Context, cfg mountConfig, run func(r
 			log.Printf("initial sync: bootstrap complete")
 			return nil
 		}
+		// A terminal cycleErr (mountsync.IsBootstrapTerminalError, e.g.
+		// BootstrapStalledError) is checked before rootCtx.Err(): it is the
+		// more specific, operator-actionable fact about this cycle, and a
+		// rootCtx cancellation that happens to land in the same cycle (a
+		// SIGTERM/idle-watchdog racing an independently-detected stall) must
+		// not demote that typed error to a generic "context cancelled"
+		// message and cost callers their errors.As match on the real cause.
+		if cycleErr != nil {
+			return cycleErr
+		}
 		if err := rootCtx.Err(); err != nil {
 			log.Printf("initial sync: stopping before bootstrap completed: %v", err)
 			return newInitialBootstrapIncompleteError(next, "context cancelled before bootstrap completed", err)
-		}
-		if cycleErr != nil {
-			return cycleErr
 		}
 		if err := lastCycleErr(); err != nil && !cycleYielded(err) {
 			log.Printf("initial sync: stopping after a failed resume cycle: %v", err)

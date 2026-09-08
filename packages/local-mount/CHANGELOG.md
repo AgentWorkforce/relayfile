@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `relayfile-mount --once` now exits nonzero when the initial pull has not completed, preventing a timed-out large bootstrap from being reported as a successful mount.
 - Fixed a false-failure regression from the change above: `--once` against a mount whose bootstrap had already completed in a prior run no longer reports "initial bootstrap incomplete" when that invocation's cycle hits an unrelated transient error or is cancelled.
 - `--once` now resumes a persisted bootstrap checkpoint after a cycle yields on a non-traversal timeout (e.g. outbox or digest work) with the checkpoint still in progress, instead of reporting that cycle's swallowed deadline as a bootstrap failure.
+- `--local-layout=scoped --once` with multiple `--remote-path` values no longer cancels a healthy scope's still-in-progress bootstrap just because a sibling scope reported a non-terminal incomplete outcome (a resume-cycle ceiling, a stall bound, or that sibling's own context cancellation). Every scope now runs to its own bounded `--once` completion; the aggregate exit is still nonzero if any scope failed. An operator-actionable terminal bootstrap error (e.g. a wedged checkpoint) still cancels siblings immediately, unchanged.
+- Fixed a precedence bug where a terminal bootstrap error (e.g. a wedged checkpoint) racing a concurrent cancellation in the same `--once` resume cycle could be reported as a generic "context cancelled" failure instead of the specific, operator-actionable terminal error, breaking `errors.As` for callers inspecting the cause.
 
 ## [0.10.56] - 2026-09-08
 

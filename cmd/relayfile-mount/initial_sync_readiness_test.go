@@ -404,6 +404,47 @@ func TestFinishInitialBootstrapPrefersMidCycleCancellation(t *testing.T) {
 	}
 }
 
+// TestFinishInitialBootstrapPrefersTerminalCycleErrorOverConcurrentCancellation
+// pins the other half of the mid-cycle race pinned above: when a resume
+// cycle returns a terminal cycleErr (mountsync.IsBootstrapTerminalError,
+// e.g. BootstrapStalledError) in the same cycle that also races a rootCtx
+// cancellation, the terminal error is authoritative. It must propagate
+// unwrapped -- not get demoted to a generic *initialBootstrapIncompleteError
+// "context cancelled" message -- so a caller's errors.As match on the real,
+// operator-actionable cause still succeeds.
+func TestFinishInitialBootstrapPrefersTerminalCycleErrorOverConcurrentCancellation(t *testing.T) {
+	localDir := bootstrapInProgressDir(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	terminalErr := &mountsync.BootstrapStalledError{Cycles: 3, Limit: 3, Path: "/"}
+
+	cycles := 0
+	err := finishInitialBootstrap(ctx, mountConfig{localDir: localDir},
+		func(bool) error {
+			cycles++
+			cancel()
+			return terminalErr
+		},
+		func() error { return nil },
+		false,
+	)
+	if err == nil {
+		t.Fatalf("expected the terminal cycle error to propagate")
+	}
+	var incomplete *initialBootstrapIncompleteError
+	if errors.As(err, &incomplete) {
+		t.Fatalf("terminal cycle error must propagate unwrapped, not as *initialBootstrapIncompleteError: %v", err)
+	}
+	if !errors.Is(err, terminalErr) {
+		t.Fatalf("expected terminal error %v, got %v", terminalErr, err)
+	}
+	if !mountsync.IsBootstrapTerminalError(err) {
+		t.Fatalf("expected err to still classify as a terminal bootstrap error: %v", err)
+	}
+	if cycles != 1 {
+		t.Fatalf("ran %d resume cycles, want exactly 1", cycles)
+	}
+}
+
 // bootstrapInProgressDir writes a public state with a non-null bootstrap block
 // so finishInitialBootstrap enters its resume loop instead of returning early.
 func bootstrapInProgressDir(t *testing.T) string {

@@ -1,0 +1,96 @@
+{
+  "id": "traj_5io1464ycrjc",
+  "version": 1,
+  "task": {
+    "title": "Fix relayfile once timeout semantics"
+  },
+  "status": "completed",
+  "startedAt": "2026-09-08T08:30:39.855Z",
+  "completedAt": "2026-09-08T13:44:35.312Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-09-08T08:51:44.474Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_02wz3nmcfzgq",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-09-08T08:51:44.474Z",
+      "endedAt": "2026-09-08T13:44:35.312Z",
+      "events": [
+        {
+          "ts": 1788857504475,
+          "type": "decision",
+          "content": "Treat --once bootstrap failures as fatal: Treat --once bootstrap failures as fatal",
+          "raw": {
+            "question": "Treat --once bootstrap failures as fatal",
+            "chosen": "Treat --once bootstrap failures as fatal",
+            "alternatives": [],
+            "reasoning": "False-success bug meant --once exited 0 even when bootstrapping timed out; explicit error preserves resumable checkpoint while signaling the incomplete state"
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1788874615527,
+          "type": "decision",
+          "content": "Represent deadline bootstrap yields with a typed cycle outcome marker: Represent deadline bootstrap yields with a typed cycle outcome marker",
+          "raw": {
+            "question": "Represent deadline bootstrap yields with a typed cycle outcome marker",
+            "chosen": "Represent deadline bootstrap yields with a typed cycle outcome marker",
+            "alternatives": [],
+            "reasoning": "The once resume gate must distinguish an in-progress timeout yield from a fatal cycle error while preserving errors.Is/errors.As through the underlying cause."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1788875054836,
+          "type": "reflection",
+          "content": "The once bootstrap path now carries an explicit typed distinction between fatal cycle failures and DeadlineExceeded yields with a persisted in-progress checkpoint; focused regression coverage confirms resume, fatal chains, cancellation precedence, prior completion, and bounds.",
+          "raw": {
+            "focalPoints": [
+              "timeout-yield semantics",
+              "error-chain preservation",
+              "once completion"
+            ],
+            "confidence": 0.93
+          },
+          "significance": "high",
+          "tags": [
+            "focal:timeout-yield semantics",
+            "focal:error-chain preservation",
+            "focal:once completion",
+            "confidence:0.93"
+          ]
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Fixed --once bootstrap timeout-yield handling with typed fatal/yield outcomes and deterministic regression coverage.",
+    "approach": "Standard approach",
+    "confidence": 0.93
+  },
+  "commits": [
+    "856ed95a",
+    "43c8bb96",
+    "24846ae5"
+  ],
+  "filesChanged": [
+    ".trajectories/index.json",
+    "cmd/relayfile-mount/initial_sync_readiness_test.go",
+    "cmd/relayfile-mount/main.go",
+    "cmd/relayfile-mount/main_test.go",
+    "packages/local-mount/CHANGELOG.md"
+  ],
+  "projectId": "/private/tmp/relayfile-once-timeout-fix-0908",
+  "tags": [],
+  "_trace": {
+    "startRef": "4fac90331db830906238c3b23813fba9778af38c",
+    "endRef": "856ed95a10048be56481fa8430b600a2aedde89f",
+    "traceId": "15d9b942-7a7c-448f-8c51-6f4334825e5e"
+  }
+}

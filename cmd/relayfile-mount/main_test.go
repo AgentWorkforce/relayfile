@@ -1102,8 +1102,12 @@ func TestRunScopedPollingMountsRejectsSharedExactStateFileOverride(t *testing.T)
 	}
 }
 
-func TestRunScopedPollingMountsCancelsSiblingsOnFirstError(t *testing.T) {
-	wantErr := errors.New("boom")
+// TestRunScopedPollingMountsCancelsSiblingsOnTerminalError pins the
+// fail-fast half of the contract: an operator-actionable terminal bootstrap
+// error (mountsync.IsBootstrapTerminalError) in one scope still cancels its
+// siblings rather than letting them retry a wedged checkpoint forever.
+func TestRunScopedPollingMountsCancelsSiblingsOnTerminalError(t *testing.T) {
+	wantErr := &mountsync.BootstrapStalledError{Cycles: 3, Limit: 3, Path: "/github"}
 	var canceled atomic.Bool
 	started := make(chan string, 2)
 	releaseFailingMount := make(chan struct{})
@@ -1126,7 +1130,7 @@ func TestRunScopedPollingMountsCancelsSiblingsOnFirstError(t *testing.T) {
 		},
 	)
 	if !errors.Is(err, wantErr) {
-		t.Fatalf("expected first error %v, got %v", wantErr, err)
+		t.Fatalf("expected aggregate error to include %v, got %v", wantErr, err)
 	}
 	if !canceled.Load() {
 		t.Fatal("expected sibling mount to observe context cancellation")
@@ -1138,6 +1142,77 @@ func TestRunScopedPollingMountsCancelsSiblingsOnFirstError(t *testing.T) {
 	}
 	if !seen["/github"] || !seen["/slack"] {
 		t.Fatalf("expected both scoped mounts to start, saw %v", seen)
+	}
+}
+
+// TestRunScopedPollingMountsLetsHealthySiblingFinishOnNonTerminalError pins
+// the counterpart: a failed or stalled scope reporting a non-terminal
+// incomplete-bootstrap outcome (the *initialBootstrapIncompleteError typed
+// error finishInitialBootstrap now returns for a resume-cycle ceiling, a
+// stall bound, or a cancelled rootCtx) must not cancel a healthy sibling
+// still making progress within its own bound. The healthy sibling runs to
+// its own bounded completion -- proven here by an explicit delay it must
+// survive uncancelled -- and the aggregate result is still a nonzero error
+// once every sibling has finished, so a real `--once` operator still sees
+// the failure and exits nonzero.
+func TestRunScopedPollingMountsLetsHealthySiblingFinishOnNonTerminalError(t *testing.T) {
+	nonTerminalErr := newInitialBootstrapIncompleteError(
+		bootstrapResumeState{inProgress: true, synced: 1, total: 10},
+		"bootstrap checkpoint stopped advancing",
+		nil,
+	)
+	const healthySiblingBoundedWork = 150 * time.Millisecond
+	healthyFinished := make(chan struct{})
+	var healthyCtxCancelledBeforeFinish atomic.Bool
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runScopedPollingMountsWithRunner(
+			context.Background(),
+			mountConfig{localDir: t.TempDir(), stateDir: t.TempDir()},
+			[]string{"/github", "/slack"},
+			func(ctx context.Context, cfg mountConfig) error {
+				if strings.HasSuffix(cfg.remotePath, "/github") {
+					// Simulates a stalled/incomplete scope returning
+					// immediately with a non-terminal outcome.
+					return nonTerminalErr
+				}
+				// Healthy sibling: simulates its own bounded --once work.
+				// If the unrelated scope's failure cancelled the shared
+				// ctx, this select returns early via ctx.Done() instead of
+				// running its full bounded duration.
+				select {
+				case <-time.After(healthySiblingBoundedWork):
+				case <-ctx.Done():
+				}
+				if ctx.Err() != nil {
+					healthyCtxCancelledBeforeFinish.Store(true)
+				}
+				close(healthyFinished)
+				return nil
+			},
+		)
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected a nonzero aggregate error once every sibling finished")
+		}
+		if !errors.Is(err, nonTerminalErr) {
+			t.Fatalf("expected aggregate error to include the stalled scope's error, got %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("runScopedPollingMountsWithRunner did not return after every sibling's own bounded completion")
+	}
+
+	select {
+	case <-healthyFinished:
+	default:
+		t.Fatal("healthy sibling never reached its own bounded completion")
+	}
+	if healthyCtxCancelledBeforeFinish.Load() {
+		t.Fatal("healthy sibling's context was cancelled before its own bounded --once work completed, due to an unrelated non-terminal sibling failure")
 	}
 }
 

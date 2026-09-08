@@ -210,14 +210,14 @@
       "status": "completed",
       "startedAt": "2026-09-08T08:30:39.855Z",
       "completedAt": "2026-09-08T13:44:35.312Z",
-      "path": "/private/tmp/relayfile-once-timeout-fix-0908/.trajectories/completed/2026-09/traj_5io1464ycrjc.json"
+      "path": ".trajectories/completed/2026-09/traj_5io1464ycrjc.json"
     },
     "traj_q7vefcyaluc5": {
       "title": "Fix pre-loop cancellation-vs-completion race in --once bootstrap resume; add CHANGELOG entry",
       "status": "completed",
       "startedAt": "2026-09-08T14:20:44.670Z",
       "completedAt": "2026-09-08T14:21:03.470Z",
-      "path": "/private/tmp/relayfile-once-timeout-fix-0908/.trajectories/completed/2026-09/traj_q7vefcyaluc5.json"
+      "path": ".trajectories/completed/2026-09/traj_q7vefcyaluc5.json"
     }
   }
 }

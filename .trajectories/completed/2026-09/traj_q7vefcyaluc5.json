@@ -1,0 +1,53 @@
+{
+  "id": "traj_q7vefcyaluc5",
+  "version": 1,
+  "task": {
+    "title": "Fix pre-loop cancellation-vs-completion race in --once bootstrap resume; add CHANGELOG entry"
+  },
+  "status": "completed",
+  "startedAt": "2026-09-08T14:20:44.670Z",
+  "completedAt": "2026-09-08T14:21:03.470Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-09-08T14:20:51.301Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_dx1rpbu3sao2",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-09-08T14:20:51.301Z",
+      "endedAt": "2026-09-08T14:21:03.470Z",
+      "events": [
+        {
+          "ts": 1788877251355,
+          "type": "decision",
+          "content": "Reordered finishInitialBootstrap's pre-loop checks to check the on-disk checkpoint (!state.inProgress) before rootCtx.Err()/lastCycleErr, mirroring the resume loop's existing checkpoint-first precedence: Reordered finishInitialBootstrap's pre-loop checks to check the on-disk checkpoint (!state.inProgress) before rootCtx.Err()/lastCycleErr, mirroring the resume loop's existing checkpoint-first precedence",
+          "raw": {
+            "question": "Reordered finishInitialBootstrap's pre-loop checks to check the on-disk checkpoint (!state.inProgress) before rootCtx.Err()/lastCycleErr, mirroring the resume loop's existing checkpoint-first precedence",
+            "chosen": "Reordered finishInitialBootstrap's pre-loop checks to check the on-disk checkpoint (!state.inProgress) before rootCtx.Err()/lastCycleErr, mirroring the resume loop's existing checkpoint-first precedence",
+            "alternatives": [],
+            "reasoning": "A SIGTERM/cancellation landing exactly as a fresh (not alreadyBootstrapped) bootstrap finished in its own first cycle was reported as an incomplete bootstrap even though the persisted checkpoint was genuinely complete, because rootCtx.Err() was checked before the checkpoint state. A real (non-yielded) cycle failure is still reported when the checkpoint reads not-in-progress, since that can mean the cycle failed before any bootstrap started"
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Fixed the pre-loop cancellation-vs-completion race in finishInitialBootstrap by checking the on-disk checkpoint before rootCtx.Err()/lastCycleErr, matching the resume loop's existing precedence; added an adversarial test and a CHANGELOG entry for --once resuming after a timeout yield",
+    "approach": "Standard approach",
+    "confidence": 0.85
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/private/tmp/relayfile-once-timeout-fix-0908",
+  "tags": [],
+  "_trace": {
+    "startRef": "5144685664705e36d32dc1c86dae088c147b716d",
+    "endRef": "5144685664705e36d32dc1c86dae088c147b716d"
+  }
+}
