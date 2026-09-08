@@ -41,14 +41,14 @@
         {
           "ts": 1788885713349,
           "type": "reflection",
-          "content": "Focused race tests, full Go, SDK launcher, typecheck/build, contract, release, and secrets checks pass. One full Node 22 SDK run passed 291/291; an independent repeat later reproduced the known environment-only ErrorEvent baseline failure.",
+          "content": "Self-reported and non-gating: focused race tests, Go, SDK launcher, typecheck/build, contract, release, and secrets checks were reported to pass; one Node 22 SDK run was reported at 291/291 and an independent repeat reproduced a known environment-only ErrorEvent baseline failure. This trajectory contains no captured command/output evidence.",
           "raw": {
             "focalPoints": [
               "exit classification",
               "sibling cancellation",
               "validation"
             ],
-            "confidence": 0.92
+            "confidence": 0.75
           },
           "significance": "high",
           "tags": [
@@ -62,13 +62,11 @@
     }
   ],
   "retrospective": {
-    "summary": "Repaired PR #477 once-mode classification: explicit resumable bootstrap markers now yield EX_TEMPFAIL only for all-resumable error trees; provider/cycle/config failures and mixed joins remain exit 1, and scoped siblings cancel on mixed fatal outcomes. Added regressions and completed focused/full validation.",
+    "summary": "Repaired PR #477 once-mode classification: explicit resumable bootstrap markers now yield EX_TEMPFAIL only for all-resumable error trees; provider/cycle/config failures and mixed joins remain exit 1, and scoped siblings cancel on mixed fatal outcomes. Self-reported and non-gating: regressions and focused/full validation were reported complete, but this trajectory contains no captured command/output evidence.",
     "approach": "Standard approach",
-    "confidence": 0.92
+    "confidence": 0.75
   },
-  "commits": [
-    "7eac3b82"
-  ],
+  "commits": ["7eac3b82"],
   "filesChanged": [
     "cmd/relayfile-mount/main.go",
     "cmd/relayfile-mount/main_test.go"

@@ -41,14 +41,12 @@
         {
           "ts": 1788888616252,
           "type": "reflection",
-          "content": "Current reviewer races are fixed with deterministic stop-vs-probe and stop-vs-backoff regressions. Focused tests pass 25/25; one full Node 22 SDK run passed 293/293, while an independent repeat reproduced the known environment-only ErrorEvent baseline failure at 292/293.",
+          "content": "Self-reported and non-gating: deterministic stop-vs-probe and stop-vs-backoff regressions were reported fixed; focused tests were reported at 25/25, with one Node 22 SDK run at 293/293 and an independent repeat at 292/293 due to a known environment-only ErrorEvent baseline failure. This trajectory contains no captured command/output evidence.",
           "raw": {
-            "confidence": 0.93
+            "confidence": 0.75
           },
           "significance": "high",
-          "tags": [
-            "confidence:0.93"
-          ]
+          "tags": ["confidence:0.93"]
         }
       ]
     }
@@ -56,11 +54,9 @@
   "retrospective": {
     "summary": "Prevented foreground --once readiness and retry from racing shutdown; corrected stale validation trajectory wording.",
     "approach": "Standard approach",
-    "confidence": 0.93
+    "confidence": 0.75
   },
-  "commits": [
-    "ab6d2e30"
-  ],
+  "commits": ["ab6d2e30"],
   "filesChanged": [
     ".trajectories/completed/2026-09/traj_7745k45nt2wr.json",
     ".trajectories/completed/2026-09/traj_7745k45nt2wr.md",

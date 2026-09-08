@@ -2,7 +2,7 @@
 
 > **Status:** ✅ Completed
 > **Task:** relayfile#477
-> **Confidence:** 93%
+> **Confidence:** 75%
 > **Started:** September 8, 2026 at 07:26 PM
 > **Completed:** September 8, 2026 at 07:30 PM
 
@@ -30,4 +30,4 @@ Prevented foreground --once readiness and retry from racing shutdown; corrected 
 *Agent: default*
 
 - Gate both foreground readiness acceptance and resumable restart on shutdown state: Gate both foreground readiness acceptance and resumable restart on shutdown state
-- Current reviewer races are fixed with deterministic stop-vs-probe and stop-vs-backoff regressions. Focused tests pass 25/25; one full Node 22 SDK run passed 293/293, while an independent repeat reproduced the known environment-only ErrorEvent baseline failure at 292/293.
+- Self-reported and non-gating: deterministic stop-vs-probe and stop-vs-backoff regressions were reported fixed; focused tests were reported at 25/25, with one Node 22 SDK run at 293/293 and an independent repeat at 292/293 due to a known environment-only ErrorEvent baseline failure. This trajectory contains no captured command/output evidence.
