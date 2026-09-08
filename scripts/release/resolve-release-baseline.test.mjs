@@ -340,6 +340,26 @@ test("external attestations reject malformed digest strings even when equal", ()
   }
 });
 
+test("external attestations accept one matching canonical npm digest", () => {
+  const { cwd, sourceSha } = sandboxWithPriorRelease();
+  const result = resolveReleaseBaseline({
+    cwd,
+    sourceSha,
+    currentVersion: "1.2.3",
+    releaseAttestationVerifier: ({ candidate }) => {
+      const attestation = attestationFor(candidate);
+      for (const item of attestation.packages) {
+        item.package.local.shasum = null;
+        item.package.registry.shasum = null;
+      }
+      return attestation;
+    },
+  });
+  assert.equal(result.baselineVersion, "1.2.4");
+  assert.equal(result.latestTag, "v1.2.4");
+  rmSync(cwd, { recursive: true, force: true });
+});
+
 test("a rerun attestation with a new attempt cannot replace immutable tag metadata", () => {
   const { cwd, sourceSha } = sandboxWithPriorRelease();
   const result = resolveReleaseBaseline({

@@ -1,0 +1,65 @@
+{
+  "id": "traj_3r6zk2fhua5h",
+  "version": 1,
+  "task": {
+    "title": "Align release attestation digest validation with optional npm digest contract"
+  },
+  "status": "completed",
+  "startedAt": "2026-09-08T20:37:56.999Z",
+  "completedAt": "2026-09-08T20:39:34.044Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-09-08T20:39:33.362Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_twvf76f1jrkb",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-09-08T20:39:33.362Z",
+      "endedAt": "2026-09-08T20:39:34.044Z",
+      "events": [
+        {
+          "ts": 1788899973362,
+          "type": "decision",
+          "content": "Accepted optional digest validation repair: Accepted optional digest validation repair",
+          "raw": {
+            "question": "Accepted optional digest validation repair",
+            "chosen": "Accepted optional digest validation repair",
+            "alternatives": [],
+            "reasoning": "Reconciliation safely accepts either canonical SHA-512 SRI or SHA-1 when local and registry share one; the later attestation gate incorrectly demanded both after publication."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1788899973707,
+          "type": "reflection",
+          "content": "Aligned release attestation and baseline validation with the reconciliation contract; added integrity-only, shasum-only, and baseline regressions. Release suite is green.",
+          "raw": {
+            "confidence": 0.92
+          },
+          "significance": "high",
+          "tags": [
+            "confidence:0.92"
+          ]
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Allowed canonical optional npm digests only when the local tarball and registry share one matching value; preserved malformed and incomparable digest refusal.",
+    "approach": "Standard approach",
+    "confidence": 0.92
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "f811fd488e8fad09299abdca789d522af821185e",
+    "endRef": "f811fd488e8fad09299abdca789d522af821185e"
+  }
+}

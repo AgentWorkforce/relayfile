@@ -21,6 +21,28 @@ export function isSha1Shasum(value) {
   return typeof value === "string" && /^[0-9a-f]{40}$/.test(value);
 }
 
+// npm can provide either its modern SHA-512 SRI field or its legacy SHA-1
+// shasum.  Reconciliation accepts either only when the local tarball and
+// registry response share the same digest, so the release record must preserve
+// that contract instead of requiring a second, optional representation.
+function hasValidPackageDigest(record) {
+  return (
+    !!record &&
+    (record.integrity == null || isSha512Integrity(record.integrity)) &&
+    (record.shasum == null || isSha1Shasum(record.shasum)) &&
+    !!(record.integrity || record.shasum)
+  );
+}
+
+function hasMatchingPackageDigest(local, registry) {
+  return (
+    (!!local.integrity &&
+      !!registry.integrity &&
+      local.integrity === registry.integrity) ||
+    (!!local.shasum && !!registry.shasum && local.shasum === registry.shasum)
+  );
+}
+
 export const RELEASE_PACKAGE_NAMES = [
   "@relayfile/core",
   "@relayfile/sdk",
@@ -77,19 +99,15 @@ export function isCompletePackageAttestation(
     !Number.isInteger(local.size) ||
     local.size < 0 ||
     !SHA256.test(String(local.sha256 ?? "")) ||
-    !isSha512Integrity(local.integrity) ||
-    !isSha1Shasum(local.shasum) ||
+    !hasValidPackageDigest(local) ||
     !registry ||
     registry.name !== record.name ||
     registry.version !== record.version ||
-    !isSha512Integrity(registry.integrity) ||
-    !isSha1Shasum(registry.shasum)
+    !hasValidPackageDigest(registry)
   ) {
     return false;
   }
-  return (
-    registry.integrity === local.integrity && registry.shasum === local.shasum
-  );
+  return hasMatchingPackageDigest(local, registry);
 }
 
 export function readPackageAttestations(directory) {

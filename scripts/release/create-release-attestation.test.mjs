@@ -70,6 +70,33 @@ test("attestation binds source, run, package digests, binaries and tag commit/tr
   assert.equal(result.tag.tree, "d".repeat(40));
 });
 
+test("attestation accepts matching optional npm digest fields", () => {
+  const sourceSha = "a".repeat(40);
+  for (const omittedField of ["integrity", "shasum"]) {
+    const packages = packageRecords(sourceSha);
+    for (const item of packages) {
+      item.package.local[omittedField] = null;
+      item.package.registry[omittedField] = null;
+    }
+    const result = buildReleaseAttestation({
+      sourceSha,
+      runId: 123,
+      runAttempt: 1,
+      version: "1.2.3",
+      tag: "v1.2.3",
+      tagCommit: "b".repeat(40),
+      tagTree: "d".repeat(40),
+      repository: "AgentWorkforce/relayfile",
+      packages,
+      binaries: RELEASE_BINARY_NAMES.map((file) => ({
+        file,
+        sha256: "c".repeat(64),
+      })),
+    });
+    assert.equal(result.packages[0].package.local[omittedField], null);
+  }
+});
+
 test("attestation rejects a package from a different source", () => {
   const sourceSha = "a".repeat(40);
   assert.throws(
