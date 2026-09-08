@@ -1175,67 +1175,7 @@ func (s *Store) ListTree(workspaceID, path string, depth int, cursor string) (Tr
 		return TreeResponse{Path: normalizePath(path), Entries: []TreeEntry{}, NextCursor: nil}, nil
 	}
 
-	base := normalizePath(path)
-	if depth <= 0 {
-		depth = 1
-	}
-
-	entryMap := map[string]TreeEntry{}
-	totalFiles := 0
-	for filePath, file := range ws.Files {
-		if !withinBase(base, filePath) {
-			continue
-		}
-		rest := strings.TrimPrefix(filePath, base)
-		rest = strings.TrimPrefix(rest, "/")
-		if rest == "" {
-			continue
-		}
-		totalFiles++
-		parts := strings.Split(rest, "/")
-		if len(parts) == 0 {
-			continue
-		}
-		maxLevel := depth
-		if len(parts) < maxLevel {
-			maxLevel = len(parts)
-		}
-		for level := 1; level <= maxLevel; level++ {
-			child := joinPath(base, strings.Join(parts[:level], "/"))
-			if level == len(parts) {
-				entryMap[child] = TreeEntry{
-					Path:             child,
-					Type:             "file",
-					Revision:         file.Revision,
-					ContentHash:      storedContentHashForFile(file),
-					Provider:         file.Provider,
-					ProviderObjectID: file.ProviderObjectID,
-					Size:             int64(len(file.Content)),
-					UpdatedAt:        file.LastEditedAt,
-					PropertyCount:    len(file.Semantics.Properties),
-					RelationCount:    len(file.Semantics.Relations),
-					PermissionCount:  len(file.Semantics.Permissions),
-					CommentCount:     len(file.Semantics.Comments),
-				}
-				continue
-			}
-			if _, exists := entryMap[child]; !exists {
-				entryMap[child] = TreeEntry{Path: child, Type: "dir", Revision: "dir"}
-			}
-		}
-	}
-
-	entries := make([]TreeEntry, 0, len(entryMap))
-	for _, entry := range entryMap {
-		entries = append(entries, entry)
-	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
-	entries, nextCursor, err := paginateTreeEntries(entries, cursor)
-	if err != nil {
-		return TreeResponse{}, err
-	}
-
-	return TreeResponse{Path: base, Entries: entries, NextCursor: nextCursor, TotalFiles: totalFiles}, nil
+	return listTreeFromFiles(ws.Files, path, depth, cursor)
 }
 
 func (s *Store) ReadFile(workspaceID, path string) (File, error) {
@@ -1291,23 +1231,6 @@ func (s *Store) QueryFiles(workspaceID string, req FileQueryRequest) (FileQueryR
 	if workspaceID == "" {
 		return FileQueryResponse{}, ErrInvalidInput
 	}
-	base := normalizePath(req.PathPrefix)
-	if req.PathPrefix == "" {
-		base = "/"
-	}
-	provider := normalizeProvider(req.Provider)
-	relation := strings.TrimSpace(req.Relation)
-	permission := strings.TrimSpace(req.Permission)
-	comment := strings.TrimSpace(req.Comment)
-	limit := req.Limit
-	if limit <= 0 {
-		limit = 100
-	}
-	if limit > 1000 {
-		limit = 1000
-	}
-	properties := normalizeProperties(req.Properties)
-
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -1318,77 +1241,7 @@ func (s *Store) QueryFiles(workspaceID string, req FileQueryRequest) (FileQueryR
 		}
 		return FileQueryResponse{Items: []FileQueryItem{}, NextCursor: nil}, nil
 	}
-	paths := make([]string, 0, len(ws.Files))
-	for path := range ws.Files {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-
-	start := 0
-	cursor := normalizePath(req.Cursor)
-	if strings.TrimSpace(req.Cursor) != "" {
-		found := false
-		for i := range paths {
-			if paths[i] == cursor {
-				start = i + 1
-				found = true
-				break
-			}
-		}
-		if !found {
-			return FileQueryResponse{}, ErrInvalidInput
-		}
-	}
-
-	items := make([]FileQueryItem, 0, limit)
-	var nextCursor *string
-
-	for i := start; i < len(paths); i++ {
-		path := paths[i]
-		if !withinBase(base, path) {
-			continue
-		}
-		file := ws.Files[path]
-		if provider != "" && normalizeProvider(file.Provider) != provider {
-			continue
-		}
-		semantics := normalizeSemantics(file.Semantics)
-		if relation != "" && !stringSliceContains(semantics.Relations, relation) {
-			continue
-		}
-		if permission != "" && !stringSliceContains(semantics.Permissions, permission) {
-			continue
-		}
-		if comment != "" && !stringSliceContains(semantics.Comments, comment) {
-			continue
-		}
-		if !propertiesMatch(semantics.Properties, properties) {
-			continue
-		}
-		if len(items) >= limit {
-			cursorValue := items[len(items)-1].Path
-			nextCursor = &cursorValue
-			break
-		}
-		items = append(items, FileQueryItem{
-			Path:             path,
-			Revision:         file.Revision,
-			ContentType:      file.ContentType,
-			Provider:         file.Provider,
-			ProviderObjectID: file.ProviderObjectID,
-			LastEditedAt:     file.LastEditedAt,
-			Size:             int64(len(file.Content)),
-			Properties:       copyStringMap(semantics.Properties),
-			Relations:        append([]string(nil), semantics.Relations...),
-			Permissions:      append([]string(nil), semantics.Permissions...),
-			Comments:         append([]string(nil), semantics.Comments...),
-		})
-	}
-
-	return FileQueryResponse{
-		Items:      items,
-		NextCursor: nextCursor,
-	}, nil
+	return queryFilesFromMap(ws.Files, req)
 }
 
 func (s *Store) WriteFile(req WriteRequest) (WriteResult, error) {
@@ -1675,14 +1528,23 @@ func (s *Store) ExportWorkspace(workspaceID string) ([]File, error) {
 	if !ok {
 		return []File{}, nil
 	}
-	files := make([]File, 0, len(ws.Files))
-	for _, file := range ws.Files {
-		files = append(files, file)
+	return sortedFilesFromMap(ws.Files), nil
+}
+
+// ExportForkWorkspace returns the fork's merged view, including overlay
+// writes and deletions. Callers must use this instead of exporting the live
+// workspace when a forkId is supplied.
+func (s *Store) ExportForkWorkspace(workspaceID, forkID string) ([]File, error) {
+	if strings.TrimSpace(workspaceID) == "" || strings.TrimSpace(forkID) == "" {
+		return nil, ErrInvalidInput
 	}
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].Path < files[j].Path
-	})
-	return files, nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fork, err := s.getLiveForkLocked(workspaceID, forkID, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	return sortedFilesFromMap(s.mergedForkFilesLocked(fork)), nil
 }
 
 func (s *Store) DeleteFile(req DeleteRequest) (WriteResult, error) {
@@ -2284,8 +2146,11 @@ func (s *Store) ListForkTree(workspaceID, forkID, path string, depth int, cursor
 	if err != nil {
 		return TreeResponse{}, err
 	}
-	files := s.mergedForkFilesLocked(fork)
-	return listTreeFromFiles(files, path, depth, cursor)
+	ws := s.workspaces[workspaceID]
+	if ws == nil {
+		return TreeResponse{Path: normalizePath(path), Entries: []TreeEntry{}, NextCursor: nil}, nil
+	}
+	return listTreeFromForkEntries(ws.Files, fork.Overlay, path, depth, cursor)
 }
 
 func (s *Store) QueryForkFiles(workspaceID, forkID string, req FileQueryRequest) (FileQueryResponse, error) {
@@ -2298,8 +2163,14 @@ func (s *Store) QueryForkFiles(workspaceID, forkID string, req FileQueryRequest)
 	if err != nil {
 		return FileQueryResponse{}, err
 	}
-	files := s.mergedForkFilesLocked(fork)
-	return queryFilesFromMap(files, req)
+	ws := s.workspaces[workspaceID]
+	if ws == nil {
+		if strings.TrimSpace(req.Cursor) != "" {
+			return FileQueryResponse{}, ErrInvalidInput
+		}
+		return FileQueryResponse{Items: []FileQueryItem{}, NextCursor: nil}, nil
+	}
+	return queryFilesFromForkEntries(ws.Files, fork.Overlay, req)
 }
 
 func (s *Store) ResolveForkFilePermissions(workspaceID, forkID, path string, includeTarget bool) []string {
@@ -2309,8 +2180,11 @@ func (s *Store) ResolveForkFilePermissions(workspaceID, forkID, path string, inc
 	if err != nil {
 		return nil
 	}
-	files := s.mergedForkFilesLocked(fork)
-	return resolvePermissionsFromFiles(files, path, includeTarget)
+	ws := s.workspaces[workspaceID]
+	if ws == nil {
+		return nil
+	}
+	return resolvePermissionsFromForkEntries(ws.Files, fork.Overlay, path, includeTarget)
 }
 
 func (s *Store) GetEvents(workspaceID, provider, cursor string, limit int) (EventFeed, error) {
@@ -5003,27 +4877,71 @@ func (s *Store) mergedForkFilesLocked(fork *forkState) map[string]File {
 	return files
 }
 
+func sortedFilesFromMap(files map[string]File) []File {
+	result := make([]File, 0, len(files))
+	for _, file := range files {
+		result = append(result, file)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Path < result[j].Path })
+	return result
+}
+
 func listTreeFromFiles(files map[string]File, path string, depth int, cursor string) (TreeResponse, error) {
+	return listTreeFromEntries(func(visit func(string, File)) {
+		for filePath, file := range files {
+			visit(filePath, file)
+		}
+	}, path, depth, cursor)
+}
+
+func listTreeFromForkEntries(files map[string]File, overlay map[string]ForkOverlayEntry, path string, depth int, cursor string) (TreeResponse, error) {
+	return listTreeFromEntries(func(visit func(string, File)) {
+		for filePath, file := range files {
+			if _, touched := overlay[normalizePath(filePath)]; touched {
+				continue
+			}
+			visit(filePath, file)
+		}
+		for filePath, entry := range overlay {
+			if entry.Type != "write" || entry.File == nil {
+				continue
+			}
+			file := *entry.File
+			normalized := normalizePath(filePath)
+			file.Path = normalized
+			file.Revision = entry.Revision
+			visit(normalized, file)
+		}
+	}, path, depth, cursor)
+}
+
+func listTreeFromEntries(iterate func(func(string, File)), path string, depth int, cursor string) (TreeResponse, error) {
 	base := normalizePath(path)
 	if depth <= 0 {
 		depth = 1
 	}
 
-	entryMap := map[string]TreeEntry{}
+	// Keep one page plus a sentinel entry while walking the source map. The
+	// previous implementation retained every descendant entry before sorting;
+	// a large workspace could therefore consume memory proportional to the
+	// entire tree for a single request.
+	const retainedEntries = maxTreeEntriesPerPage + 1
+	entryMap := make(map[string]TreeEntry, retainedEntries)
 	totalFiles := 0
-	for filePath, file := range files {
+	cursorFound := cursor == ""
+	iterate(func(filePath string, file File) {
 		if !withinBase(base, filePath) {
-			continue
+			return
 		}
 		rest := strings.TrimPrefix(filePath, base)
 		rest = strings.TrimPrefix(rest, "/")
 		if rest == "" {
-			continue
+			return
 		}
 		totalFiles++
 		parts := strings.Split(rest, "/")
 		if len(parts) == 0 {
-			continue
+			return
 		}
 		maxLevel := depth
 		if len(parts) < maxLevel {
@@ -5031,6 +4949,12 @@ func listTreeFromFiles(files map[string]File, path string, depth int, cursor str
 		}
 		for level := 1; level <= maxLevel; level++ {
 			child := joinPath(base, strings.Join(parts[:level], "/"))
+			if child == cursor {
+				cursorFound = true
+			}
+			if cursor != "" && child <= cursor {
+				continue
+			}
 			if level == len(parts) {
 				entryMap[child] = TreeEntry{
 					Path:             child,
@@ -5046,12 +4970,22 @@ func listTreeFromFiles(files map[string]File, path string, depth int, cursor str
 					PermissionCount:  len(file.Semantics.Permissions),
 					CommentCount:     len(file.Semantics.Comments),
 				}
-				continue
-			}
-			if _, exists := entryMap[child]; !exists {
+			} else if _, exists := entryMap[child]; !exists {
 				entryMap[child] = TreeEntry{Path: child, Type: "dir", Revision: "dir"}
 			}
+			if len(entryMap) > retainedEntries {
+				var greatest string
+				for candidate := range entryMap {
+					if greatest == "" || candidate > greatest {
+						greatest = candidate
+					}
+				}
+				delete(entryMap, greatest)
+			}
 		}
+	})
+	if !cursorFound {
+		return TreeResponse{}, ErrInvalidInput
 	}
 
 	entries := make([]TreeEntry, 0, len(entryMap))
@@ -5059,50 +4993,48 @@ func listTreeFromFiles(files map[string]File, path string, depth int, cursor str
 		entries = append(entries, entry)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
-	entries, nextCursor, err := paginateTreeEntries(entries, cursor)
-	if err != nil {
-		return TreeResponse{}, err
+	if len(entries) > maxTreeEntriesPerPage {
+		entries = entries[:maxTreeEntriesPerPage]
+	}
+	var nextCursor *string
+	if len(entryMap) > maxTreeEntriesPerPage {
+		cursorValue := entries[len(entries)-1].Path
+		nextCursor = &cursorValue
 	}
 
 	return TreeResponse{Path: base, Entries: entries, NextCursor: nextCursor, TotalFiles: totalFiles}, nil
 }
 
-// paginateTreeEntries slices the supplied entries with the supplied cursor.
-// A non-empty cursor that doesn't match any entry returns ErrInvalidInput so
-// stale/typo cursors are rejected rather than silently restarting pagination
-// at page 1 (which previously caused duplicate-page loops for clients).
-func paginateTreeEntries(entries []TreeEntry, cursor string) ([]TreeEntry, *string, error) {
-	start := 0
-	if cursor != "" {
-		found := false
-		for index, entry := range entries {
-			if entry.Path == cursor {
-				start = index + 1
-				found = true
-				break
-			}
+func queryFilesFromMap(files map[string]File, req FileQueryRequest) (FileQueryResponse, error) {
+	return queryFilesFromEntries(func(visit func(string, File)) {
+		for path, file := range files {
+			visit(path, file)
 		}
-		if !found {
-			return nil, nil, ErrInvalidInput
-		}
-	}
-	if start >= len(entries) {
-		return []TreeEntry{}, nil, nil
-	}
-
-	end := start + maxTreeEntriesPerPage
-	if end > len(entries) {
-		end = len(entries)
-	}
-	page := append([]TreeEntry(nil), entries[start:end]...)
-	if end >= len(entries) {
-		return page, nil, nil
-	}
-	cursorValue := page[len(page)-1].Path
-	return page, &cursorValue, nil
+	}, req)
 }
 
-func queryFilesFromMap(files map[string]File, req FileQueryRequest) (FileQueryResponse, error) {
+func queryFilesFromForkEntries(files map[string]File, overlay map[string]ForkOverlayEntry, req FileQueryRequest) (FileQueryResponse, error) {
+	return queryFilesFromEntries(func(visit func(string, File)) {
+		for path, file := range files {
+			if _, touched := overlay[normalizePath(path)]; touched {
+				continue
+			}
+			visit(path, file)
+		}
+		for path, entry := range overlay {
+			if entry.Type != "write" || entry.File == nil {
+				continue
+			}
+			file := *entry.File
+			normalized := normalizePath(path)
+			file.Path = normalized
+			file.Revision = entry.Revision
+			visit(normalized, file)
+		}
+	}, req)
+}
+
+func queryFilesFromEntries(iterate func(func(string, File)), req FileQueryRequest) (FileQueryResponse, error) {
 	base := normalizePath(req.PathPrefix)
 	if req.PathPrefix == "" {
 		base = "/"
@@ -5120,58 +5052,39 @@ func queryFilesFromMap(files map[string]File, req FileQueryRequest) (FileQueryRe
 	}
 	properties := normalizeProperties(req.Properties)
 
-	paths := make([]string, 0, len(files))
-	for path := range files {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-
-	start := 0
 	cursor := normalizePath(req.Cursor)
-	if strings.TrimSpace(req.Cursor) != "" {
-		found := false
-		for i := range paths {
-			if paths[i] == cursor {
-				start = i + 1
-				found = true
-				break
-			}
+	cursorFound := strings.TrimSpace(req.Cursor) == ""
+	// Retain only one public page plus a sentinel while scanning the map. The
+	// old implementation first materialized and sorted every path in the
+	// workspace, which made each paged request proportional to workspace size.
+	candidates := make(map[string]FileQueryItem, limit+1)
+	iterate(func(path string, file File) {
+		if path == cursor {
+			cursorFound = true
 		}
-		if !found {
-			return FileQueryResponse{}, ErrInvalidInput
+		if strings.TrimSpace(req.Cursor) != "" && path <= cursor {
+			return
 		}
-	}
-
-	items := make([]FileQueryItem, 0, limit)
-	var nextCursor *string
-	for i := start; i < len(paths); i++ {
-		path := paths[i]
 		if !withinBase(base, path) {
-			continue
+			return
 		}
-		file := files[path]
 		if provider != "" && normalizeProvider(file.Provider) != provider {
-			continue
+			return
 		}
 		semantics := normalizeSemantics(file.Semantics)
 		if relation != "" && !stringSliceContains(semantics.Relations, relation) {
-			continue
+			return
 		}
 		if permission != "" && !stringSliceContains(semantics.Permissions, permission) {
-			continue
+			return
 		}
 		if comment != "" && !stringSliceContains(semantics.Comments, comment) {
-			continue
+			return
 		}
 		if !propertiesMatch(semantics.Properties, properties) {
-			continue
+			return
 		}
-		if len(items) >= limit {
-			cursorValue := items[len(items)-1].Path
-			nextCursor = &cursorValue
-			break
-		}
-		items = append(items, FileQueryItem{
+		candidates[path] = FileQueryItem{
 			Path:             path,
 			Revision:         file.Revision,
 			ContentType:      file.ContentType,
@@ -5183,7 +5096,36 @@ func queryFilesFromMap(files map[string]File, req FileQueryRequest) (FileQueryRe
 			Relations:        append([]string(nil), semantics.Relations...),
 			Permissions:      append([]string(nil), semantics.Permissions...),
 			Comments:         append([]string(nil), semantics.Comments...),
-		})
+		}
+		if len(candidates) <= limit+1 {
+			return
+		}
+		var greatest string
+		for candidate := range candidates {
+			if greatest == "" || candidate > greatest {
+				greatest = candidate
+			}
+		}
+		delete(candidates, greatest)
+	})
+	if !cursorFound {
+		return FileQueryResponse{}, ErrInvalidInput
+	}
+
+	paths := make([]string, 0, len(candidates))
+	for path := range candidates {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	items := make([]FileQueryItem, 0, len(paths))
+	for _, path := range paths {
+		items = append(items, candidates[path])
+	}
+	var nextCursor *string
+	if len(items) > limit {
+		cursorValue := items[limit-1].Path
+		nextCursor = &cursorValue
+		items = items[:limit]
 	}
 
 	return FileQueryResponse{Items: items, NextCursor: nextCursor}, nil
@@ -5205,6 +5147,48 @@ func resolvePermissionsFromFiles(files map[string]File, path string, includeTarg
 	}
 	if includeTarget {
 		if file, exists := files[target]; exists && len(file.Semantics.Permissions) > 0 {
+			permissions = append(permissions, file.Semantics.Permissions...)
+		}
+	}
+	if len(permissions) == 0 {
+		return nil
+	}
+	out := make([]string, len(permissions))
+	copy(out, permissions)
+	return out
+}
+
+func resolvePermissionsFromForkEntries(files map[string]File, overlay map[string]ForkOverlayEntry, path string, includeTarget bool) []string {
+	lookup := func(target string) (File, bool) {
+		target = normalizePath(target)
+		if entry, touched := overlay[target]; touched {
+			if entry.Type != "write" || entry.File == nil {
+				return File{}, false
+			}
+			file := *entry.File
+			file.Path = target
+			file.Revision = entry.Revision
+			return file, true
+		}
+		file, exists := files[target]
+		return file, exists
+	}
+
+	target := normalizePath(path)
+	permissions := make([]string, 0, 8)
+	for _, dir := range ancestorDirectories(target) {
+		markerPath := joinPath(dir, DirectoryPermissionMarkerFile)
+		if markerPath == target {
+			continue
+		}
+		marker, exists := lookup(markerPath)
+		if !exists || len(marker.Semantics.Permissions) == 0 {
+			continue
+		}
+		permissions = append(permissions, marker.Semantics.Permissions...)
+	}
+	if includeTarget {
+		if file, exists := lookup(target); exists && len(file.Semantics.Permissions) > 0 {
 			permissions = append(permissions, file.Semantics.Permissions...)
 		}
 	}

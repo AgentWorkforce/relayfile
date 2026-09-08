@@ -155,12 +155,9 @@ func isValidACLFilesystemScope(scope string) bool {
 // filesystem action and path. Scope rules are semantic: a durable rule such
 // as relayfile:fs:write:/protected/* matches a delegated token carrying the
 // broader relayfile:fs:write:* grant without requiring the rule itself to be
-// copied into the token. When allowDescendants is true the function also
-// considers allow rules whose scoped path sits beneath the requested path if
-// the agent holds a matching scope for the descendant detail (used by tree/query
-// preflight checks).
+// copied into the token.
 // Returns true if access is allowed.
-func filePermissionAllows(permissions []string, workspaceID string, claims *tokenClaims, requiredAction, requestedPath string, allowDescendants bool) bool {
+func filePermissionAllows(permissions []string, workspaceID string, claims *tokenClaims, requiredAction, requestedPath string) bool {
 	if len(permissions) == 0 {
 		// No ACL policy in effect — allow access.
 		return true
@@ -187,9 +184,6 @@ func filePermissionAllows(permissions []string, workspaceID string, claims *toke
 			match = true
 		case "scope":
 			match = aclScopeRuleMatches(rule.Value, claims, requiredAction, requestedPath)
-			if !match && allowDescendants && rule.Effect == "allow" {
-				match = aclScopeRuleMatchesDescendant(rule.Value, claims, requiredAction, requestedPath)
-			}
 		case "agent":
 			match = claims != nil && claims.AgentName == rule.Value
 		case "workspace":
@@ -232,44 +226,6 @@ func aclScopeRuleMatches(scope string, claims *tokenClaims, requiredAction, requ
 	}
 
 	return scopeMatchesPath(claims.Scopes, "fs:"+requiredAction, requestedPath)
-}
-
-func aclScopeRuleMatchesDescendant(scope string, claims *tokenClaims, requiredAction, requestedPath string) bool {
-	if claims == nil || requestedPath == "" {
-		return false
-	}
-
-	parsed, filesystemScope := parseACLFilesystemScope(scope)
-	if !filesystemScope || parsed.path == "*" {
-		return false
-	}
-	if !scopeActionMatches(parsed.action, requiredAction) {
-		return false
-	}
-
-	normalizedRulePath := normalizeScopePath(parsed.path)
-	normalizedRequestPath := normalizeACLPath(requestedPath)
-	for claimScope := range claims.Scopes {
-		claimPath, ok := pathScopeForRequired(claimScope, "fs", requiredAction)
-		if !ok {
-			continue
-		}
-		normalizedClaimPath := normalizeScopePath(claimPath)
-		if normalizedClaimPath != "*" && !withinBasePath(normalizedRequestPath, normalizedClaimPath) {
-			continue
-		}
-		if scopePathMatches(normalizedRulePath, normalizedClaimPath) || scopePathMatches(normalizedClaimPath, normalizedRulePath) {
-			return true
-		}
-	}
-	return false
-}
-
-func normalizeScopePath(path string) string {
-	if path == "*" {
-		return "*"
-	}
-	return normalizeACLPath(path)
 }
 
 // resolveFilePermissions walks ancestor dirs to collect ACL rules.

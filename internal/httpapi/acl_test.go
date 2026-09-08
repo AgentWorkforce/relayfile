@@ -69,14 +69,13 @@ func TestFilePermissionAllows(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name             string
-		permissions      []string
-		workspaceID      string
-		claims           tokenClaims
-		action           string
-		path             string
-		allowDescendants bool
-		want             bool
+		name        string
+		permissions []string
+		workspaceID string
+		claims      tokenClaims
+		action      string
+		path        string
+		want        bool
 	}{
 		{
 			name:        "no rules allows access (no ACL policy)",
@@ -213,39 +212,6 @@ func TestFilePermissionAllows(t *testing.T) {
 			claims:      tokenClaims{},
 			want:        true,
 		},
-		{
-			name:        "tree allow matches descendant-specific rule",
-			permissions: []string{"allow:scope:relayfile:fs:read:/allowed/document.md"},
-			workspaceID: "ws_123",
-			claims: tokenClaims{
-				Scopes: map[string]struct{}{"relayfile:fs:read:/allowed/document.md": {}},
-			},
-			path:             "/allowed",
-			allowDescendants: true,
-			want:             true,
-		},
-		{
-			name:        "tree allow when wildcard claim spans descendant",
-			permissions: []string{"allow:scope:relayfile:fs:read:/allowed/document.md"},
-			workspaceID: "ws_123",
-			claims: tokenClaims{
-				Scopes: map[string]struct{}{"relayfile:fs:read:*": {}},
-			},
-			path:             "/allowed",
-			allowDescendants: true,
-			want:             true,
-		},
-		{
-			name:        "tree allow when rule is wildcard but claim specific",
-			permissions: []string{"allow:scope:relayfile:fs:read:/allowed/*"},
-			workspaceID: "ws_123",
-			claims: tokenClaims{
-				Scopes: map[string]struct{}{"relayfile:fs:read:/allowed/document.md": {}},
-			},
-			path:             "/allowed",
-			allowDescendants: true,
-			want:             true,
-		},
 	}
 
 	for _, tt := range tests {
@@ -261,7 +227,7 @@ func TestFilePermissionAllows(t *testing.T) {
 			if path == "" {
 				path = "/document.md"
 			}
-			got := filePermissionAllows(tt.permissions, tt.workspaceID, &tt.claims, action, path, tt.allowDescendants)
+			got := filePermissionAllows(tt.permissions, tt.workspaceID, &tt.claims, action, path)
 			if got != tt.want {
 				t.Fatalf("expected %v, got %v", tt.want, got)
 			}

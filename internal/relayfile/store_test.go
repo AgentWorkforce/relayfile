@@ -1318,6 +1318,34 @@ func TestListTreePaginatesBoundedEntries(t *testing.T) {
 	}
 }
 
+func TestListTreeLargeWorkspaceRetainsOnlyPageEntries(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	const workspaceID = "ws_tree_large_bounded"
+	const fileCount = 5000
+	writes := make([]BulkWriteFile, 0, fileCount)
+	for index := 0; index < fileCount; index++ {
+		writes = append(writes, BulkWriteFile{
+			Path:        fmt.Sprintf("/large/File%05d.md", index),
+			ContentType: "text/markdown",
+			Content:     "x",
+		})
+	}
+	if written, _, errs := store.BulkWrite(workspaceID, writes); written != fileCount || len(errs) != 0 {
+		t.Fatalf("seed large tree failed: written=%d errs=%+v", written, errs)
+	}
+	page, err := store.ListTree(workspaceID, "/large", 1, "")
+	if err != nil {
+		t.Fatalf("ListTree: %v", err)
+	}
+	if len(page.Entries) != maxTreeEntriesPerPage || page.TotalFiles != fileCount {
+		t.Fatalf("unexpected large tree page: entries=%d total=%d", len(page.Entries), page.TotalFiles)
+	}
+	if page.NextCursor == nil || *page.NextCursor != "/large/File00999.md" {
+		t.Fatalf("unexpected large tree cursor: %v", page.NextCursor)
+	}
+}
+
 func TestQueryFilesSupportsSemanticFilters(t *testing.T) {
 	store := NewStore()
 	t.Cleanup(store.Close)

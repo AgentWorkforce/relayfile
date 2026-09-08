@@ -2254,6 +2254,51 @@ func TestExportJSONPathFilter(t *testing.T) {
 	}
 }
 
+func TestForkExportUsesOverlayDeletionAndACLMarkers(t *testing.T) {
+	server := newForkTestServer(t)
+	workspaceID := "ws_export_fork_overlay"
+	token := forkTestToken(t, workspaceID)
+	parent := writeFileForTest(t, server, token, workspaceID, "/docs/Parent.md", "0", "parent", "corr_export_fork_parent")
+	writeFileForTest(t, server, token, workspaceID, "/docs/Keep.md", "0", "keep", "corr_export_fork_keep")
+	marker := writeFileForTest(t, server, token, workspaceID, "/docs/.relayfile.acl", "0", "parent marker", "corr_export_fork_marker")
+	fork := createForkForTest(t, server, token, workspaceID, "proposal-export-fork", nil)
+
+	deleteResp := doRequest(t, server, request{
+		method: http.MethodDelete,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=/docs/Parent.md&forkId=" + fork.ForkID,
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_export_fork_delete",
+			"If-Match":         parent.TargetRevision,
+		},
+	})
+	if deleteResp.Code != http.StatusAccepted {
+		t.Fatalf("expected fork delete 202, got %d (%s)", deleteResp.Code, deleteResp.Body.String())
+	}
+	writeForkFileForTest(t, server, token, workspaceID, fork.ForkID, "/docs/.relayfile.acl", marker.TargetRevision, "fork marker", "corr_export_fork_marker_overlay")
+
+	for _, format := range []string{"json", "tar", "patch"} {
+		resp := doRequest(t, server, request{
+			method: http.MethodGet,
+			path:   "/v1/workspaces/" + workspaceID + "/fs/export?format=" + format + "&forkId=" + fork.ForkID,
+			headers: map[string]string{
+				"Authorization":    "Bearer " + token,
+				"X-Correlation-Id": "corr_export_fork_" + format,
+			},
+		})
+		if resp.Code != http.StatusOK {
+			t.Fatalf("expected fork %s export 200, got %d (%s)", format, resp.Code, resp.Body.String())
+		}
+		body := resp.Body.String()
+		if strings.Contains(body, "parent") || strings.Contains(body, "Parent.md") {
+			t.Fatalf("fork %s export leaked deleted parent file: %s", format, body)
+		}
+		if !strings.Contains(body, "Keep.md") && format != "tar" {
+			t.Fatalf("fork %s export omitted retained overlay view: %s", format, body)
+		}
+	}
+}
+
 func TestExportEnforcesPathScopedMountGrant(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)
@@ -2714,6 +2759,206 @@ func TestTreeEndpointPaginatesBoundedEntries(t *testing.T) {
 	}
 }
 
+func TestCollectionEndpointsDoNotExpandExactPathScopes(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
+	workspaceID := "ws_collection_exact_scope"
+	for index, seed := range []struct {
+		path        string
+		content     string
+		permissions []string
+	}{
+		{path: "/private/Plain.md", content: "plain secret"},
+		{path: "/private/Public.md", content: "public secret", permissions: []string{"public"}},
+		{path: "/private/Tagged.md", content: "tagged secret", permissions: []string{"role:finance"}},
+	} {
+		if _, err := store.WriteFile(relayfile.WriteRequest{
+			WorkspaceID: workspaceID, Path: seed.path, IfMatch: "0", ContentType: "text/markdown",
+			Content: seed.content, Semantics: relayfile.FileSemantics{Permissions: seed.permissions},
+			CorrelationID: fmt.Sprintf("corr_collection_exact_seed_%d", index),
+		}); err != nil {
+			t.Fatalf("seed write failed for %s: %v", seed.path, err)
+		}
+	}
+	fork, err := store.CreateFork(workspaceID, "proposal-collection-exact-scope", 3600)
+	if err != nil {
+		t.Fatalf("create fork: %v", err)
+	}
+
+	for _, scopePath := range []string{"/", "/private"} {
+		scopePath := scopePath
+		t.Run(scopePath, func(t *testing.T) {
+			token := mustTestJWT(t, "dev-secret", workspaceID, "ExactScope", []string{"relayfile:fs:read:" + scopePath}, time.Now().Add(time.Hour))
+			requestPath := url.QueryEscape(scopePath)
+			for _, forkQuery := range []string{"", "&forkId=" + url.QueryEscape(fork.ForkID)} {
+				for _, endpoint := range []string{"tree", "query"} {
+					resp := doRequest(t, server, request{
+						method: http.MethodGet,
+						path:   "/v1/workspaces/" + workspaceID + "/fs/" + endpoint + "?path=" + requestPath + forkQuery,
+						headers: map[string]string{
+							"Authorization":    "Bearer " + token,
+							"X-Correlation-Id": "corr_collection_exact_" + endpoint,
+						},
+					})
+					if resp.Code != http.StatusOK {
+						t.Fatalf("expected %s%s 200, got %d (%s)", endpoint, forkQuery, resp.Code, resp.Body.String())
+					}
+					if endpoint == "tree" {
+						var payload relayfile.TreeResponse
+						if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+							t.Fatalf("decode tree response: %v", err)
+						}
+						if len(payload.Entries) != 0 || payload.TotalFiles != 0 || payload.NextCursor != nil {
+							t.Fatalf("exact scope exposed descendant tree state: %+v", payload)
+						}
+						continue
+					}
+					var payload relayfile.FileQueryResponse
+					if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+						t.Fatalf("decode query response: %v", err)
+					}
+					if len(payload.Items) != 0 || payload.NextCursor != nil {
+						t.Fatalf("exact scope exposed descendant query state: %+v", payload)
+					}
+				}
+			}
+
+			for _, format := range []string{"json", "tar"} {
+				resp := doRequest(t, server, request{
+					method: http.MethodGet,
+					path:   "/v1/workspaces/" + workspaceID + "/fs/export?format=" + format + "&path=" + requestPath,
+					headers: map[string]string{
+						"Authorization":    "Bearer " + token,
+						"X-Correlation-Id": "corr_collection_exact_export_" + format,
+					},
+				})
+				if resp.Code != http.StatusOK {
+					t.Fatalf("expected %s export 200, got %d (%s)", format, resp.Code, resp.Body.String())
+				}
+				if strings.Contains(resp.Body.String(), "secret") || strings.Contains(resp.Body.String(), "/private/") {
+					t.Fatalf("exact scope exposed descendant %s export bytes", format)
+				}
+			}
+		})
+	}
+}
+
+func TestTreePaginationUsesOnlyACLVisibleCursors(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
+	workspaceID := "ws_tree_acl_cursor"
+	token := mustTestJWT(t, "dev-secret", workspaceID, "Limited", []string{"fs:read"}, time.Now().Add(time.Hour))
+
+	for index := 0; index < 1002; index++ {
+		permissions := []string{"scope:finance"}
+		if index == 1001 {
+			permissions = nil
+		}
+		path := fmt.Sprintf("/private/File%04d.md", index)
+		if _, err := store.WriteFile(relayfile.WriteRequest{
+			WorkspaceID: workspaceID, Path: path, IfMatch: "0", ContentType: "text/markdown",
+			Content: "classified", Semantics: relayfile.FileSemantics{Permissions: permissions},
+			CorrelationID: fmt.Sprintf("corr_tree_acl_cursor_%04d", index),
+		}); err != nil {
+			t.Fatalf("write failed for %s: %v", path, err)
+		}
+	}
+	fork, err := store.CreateFork(workspaceID, "proposal-tree-acl-cursor", 3600)
+	if err != nil {
+		t.Fatalf("create fork: %v", err)
+	}
+
+	for _, forkQuery := range []string{"", "&forkId=" + url.QueryEscape(fork.ForkID)} {
+		resp := doRequest(t, server, request{
+			method: http.MethodGet,
+			path:   "/v1/workspaces/" + workspaceID + "/fs/tree?path=/private&depth=1" + forkQuery,
+			headers: map[string]string{
+				"Authorization":    "Bearer " + token,
+				"X-Correlation-Id": "corr_tree_acl_cursor_read",
+			},
+		})
+		if resp.Code != http.StatusOK {
+			t.Fatalf("expected tree%s 200, got %d (%s)", forkQuery, resp.Code, resp.Body.String())
+		}
+		var payload relayfile.TreeResponse
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode tree response: %v", err)
+		}
+		if len(payload.Entries) != 1 || payload.Entries[0].Path != "/private/File1001.md" {
+			t.Fatalf("expected only the visible tail entry, got %+v", payload.Entries)
+		}
+		if payload.TotalFiles != 1 || payload.NextCursor != nil {
+			t.Fatalf("hidden tree page boundary leaked through totals/cursor: %+v", payload)
+		}
+	}
+}
+
+func TestTreePaginationFillsPagesAcrossHiddenBoundaries(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
+	workspaceID := "ws_tree_acl_mixed_cursor"
+	token := mustTestJWT(t, "dev-secret", workspaceID, "Limited", []string{"fs:read"}, time.Now().Add(time.Hour))
+
+	for index := 0; index < 1002; index++ {
+		var permissions []string
+		if index == 999 {
+			permissions = []string{"scope:finance"}
+		}
+		path := fmt.Sprintf("/mixed/File%04d.md", index)
+		if _, err := store.WriteFile(relayfile.WriteRequest{
+			WorkspaceID: workspaceID, Path: path, IfMatch: "0", ContentType: "text/markdown",
+			Content: "mixed", Semantics: relayfile.FileSemantics{Permissions: permissions},
+			CorrelationID: fmt.Sprintf("corr_tree_acl_mixed_%04d", index),
+		}); err != nil {
+			t.Fatalf("write failed for %s: %v", path, err)
+		}
+	}
+
+	readPage := func(cursor string) relayfile.TreeResponse {
+		t.Helper()
+		requestPath := "/v1/workspaces/" + workspaceID + "/fs/tree?path=/mixed&depth=1"
+		if cursor != "" {
+			requestPath += "&cursor=" + url.QueryEscape(cursor)
+		}
+		resp := doRequest(t, server, request{
+			method: http.MethodGet,
+			path:   requestPath,
+			headers: map[string]string{
+				"Authorization":    "Bearer " + token,
+				"X-Correlation-Id": "corr_tree_acl_mixed_read",
+			},
+		})
+		if resp.Code != http.StatusOK {
+			t.Fatalf("expected tree 200, got %d (%s)", resp.Code, resp.Body.String())
+		}
+		var payload relayfile.TreeResponse
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode tree response: %v", err)
+		}
+		return payload
+	}
+
+	pageOne := readPage("")
+	if len(pageOne.Entries) != 1000 || pageOne.TotalFiles != 1001 || pageOne.NextCursor == nil {
+		t.Fatalf("unexpected mixed page one: entries=%d total=%d cursor=%v", len(pageOne.Entries), pageOne.TotalFiles, pageOne.NextCursor)
+	}
+	if *pageOne.NextCursor != "/mixed/File1000.md" {
+		t.Fatalf("nextCursor must name the last visible entry, got %q", *pageOne.NextCursor)
+	}
+	for _, entry := range pageOne.Entries {
+		if entry.Path == "/mixed/File0999.md" {
+			t.Fatalf("hidden page-boundary entry was returned")
+		}
+	}
+	pageTwo := readPage(*pageOne.NextCursor)
+	if len(pageTwo.Entries) != 1 || pageTwo.Entries[0].Path != "/mixed/File1001.md" || pageTwo.NextCursor != nil {
+		t.Fatalf("unexpected mixed page two: %+v", pageTwo)
+	}
+}
+
 func TestQueryFilesEndpoint(t *testing.T) {
 	server := NewServer(relayfile.NewStore())
 	token := mustTestJWT(t, "dev-secret", "ws_query_api", "Worker1", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
@@ -3133,6 +3378,52 @@ func TestTreeEndpointFiltersUnauthorizedFiles(t *testing.T) {
 	}
 }
 
+func TestQueryRejectsExistingACLHiddenCursor(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
+	workspaceID := "ws_query_acl_cursor"
+	if _, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: workspaceID, Path: "/docs/Hidden.md", IfMatch: "0", ContentType: "text/markdown",
+		Content: "hidden", Semantics: relayfile.FileSemantics{Permissions: []string{"allow:agent:Finance"}}, CorrelationID: "corr_query_acl_hidden",
+	}); err != nil {
+		t.Fatalf("write hidden file: %v", err)
+	}
+	if _, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: workspaceID, Path: "/docs/Visible.md", IfMatch: "0", ContentType: "text/markdown",
+		Content: "visible", CorrelationID: "corr_query_acl_visible",
+	}); err != nil {
+		t.Fatalf("write visible file: %v", err)
+	}
+	token := mustTestJWT(t, "dev-secret", workspaceID, "Limited", []string{"fs:read"}, time.Now().Add(time.Hour))
+	resp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/query?path=/docs&cursor=" + url.QueryEscape("/docs/Hidden.md"),
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_query_acl_hidden_cursor",
+		},
+	})
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for ACL-hidden query cursor, got %d (%s)", resp.Code, resp.Body.String())
+	}
+	fork, err := store.CreateFork(workspaceID, "proposal-query-acl-cursor", 3600)
+	if err != nil {
+		t.Fatalf("create query ACL cursor fork: %v", err)
+	}
+	forkResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/query?path=/docs&forkId=" + url.QueryEscape(fork.ForkID) + "&cursor=" + url.QueryEscape("/docs/Hidden.md"),
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_query_acl_hidden_cursor_fork",
+		},
+	})
+	if forkResp.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for ACL-hidden fork query cursor, got %d (%s)", forkResp.Code, forkResp.Body.String())
+	}
+}
+
 func TestTreeEndpointAllowsDescendantScopedACL(t *testing.T) {
 	server := NewServer(relayfile.NewStore())
 	workspaceID := "ws_tree_descendant"
@@ -3140,6 +3431,7 @@ func TestTreeEndpointAllowsDescendantScopedACL(t *testing.T) {
 	limitedToken := mustTestJWT(t, "dev-secret", workspaceID, "Limited", []string{"relayfile:fs:read:/allowed/**"}, time.Now().Add(time.Hour))
 
 	writeFileForTest(t, server, ownerToken, workspaceID, "/allowed/document.md", "0", "descendant", "corr_tree_descendant_file")
+	writeFileForTest(t, server, ownerToken, workspaceID, "/allowed/sibling-secret.md", "0", "secret", "corr_tree_descendant_sibling")
 
 	aclWrite := doRequest(t, server, request{
 		method: http.MethodPut,
@@ -3161,6 +3453,26 @@ func TestTreeEndpointAllowsDescendantScopedACL(t *testing.T) {
 		t.Fatalf("expected ACL marker write 202, got %d (%s)", aclWrite.Code, aclWrite.Body.String())
 	}
 
+	rootACLWrite := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=/.relayfile.acl",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + ownerToken,
+			"X-Correlation-Id": "corr_tree_descendant_root_acl",
+			"If-Match":         "0",
+		},
+		body: map[string]any{
+			"contentType": "text/plain",
+			"content":     "unrelated root policy",
+			"semantics": map[string]any{
+				"permissions": []string{"allow:agent:Unrelated"},
+			},
+		},
+	})
+	if rootACLWrite.Code != http.StatusAccepted {
+		t.Fatalf("expected root ACL marker write 202, got %d (%s)", rootACLWrite.Code, rootACLWrite.Body.String())
+	}
+
 	treeResp := doRequest(t, server, request{
 		method: http.MethodGet,
 		path:   "/v1/workspaces/" + workspaceID + "/fs/tree?path=/allowed",
@@ -3180,11 +3492,25 @@ func TestTreeEndpointAllowsDescendantScopedACL(t *testing.T) {
 	for _, entry := range tree.Entries {
 		if entry.Path == "/allowed/document.md" {
 			found = true
-			break
+		}
+		if entry.Path == "/allowed/sibling-secret.md" {
+			t.Fatalf("expected sibling denied by descendant ACL to be hidden, got %+v", tree.Entries)
 		}
 	}
 	if !found {
 		t.Fatalf("expected descendant file in tree entries, got %+v", tree.Entries)
+	}
+
+	siblingRead := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=/allowed/sibling-secret.md",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + limitedToken,
+			"X-Correlation-Id": "corr_tree_descendant_sibling_read",
+		},
+	})
+	if siblingRead.Code != http.StatusForbidden {
+		t.Fatalf("expected direct sibling read 403, got %d (%s)", siblingRead.Code, siblingRead.Body.String())
 	}
 }
 
