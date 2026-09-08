@@ -446,24 +446,32 @@ func runScopedPollingMountsWithRunner(
 	// maxOnceBootstrapResumeCycles, onceBootstrapStableCycleLimit), so this
 	// loop always terminates once every goroutine above returns.
 	//
-	// Only a terminal bootstrap error (mountsync.IsBootstrapTerminalError --
-	// an operator-actionable hard stop such as BootstrapStalledError) cancels
-	// the shared ctx: retrying that persisted checkpoint forever would be
-	// pointless, and every sibling scope shares the same wedge risk. A merely
-	// incomplete bootstrap in one scope (a resume-cycle ceiling, a stall
-	// bound, or that scope's own rootCtx cancellation) is not terminal and
-	// must not cut short a healthy sibling that is still making progress
-	// within its own bound -- it runs to its own bounded --once completion
-	// exactly as it would standalone. Every non-nil error, terminal or not,
-	// is still collected and joined into the aggregate result so `--once`
-	// exits nonzero and reports every scope that failed, not just the first.
+	// Cancellation is fail-fast by default: any non-nil error cancels the
+	// shared ctx, including a generic initialization/runtime error and every
+	// error observed in daemon mode (--once is not set). The ONLY narrow
+	// exception is cfg.once with a *initialBootstrapIncompleteError -- the
+	// typed, bounded outcome finishInitialBootstrap returns when a scope
+	// merely ran out of its own --once resume-cycle ceiling, hit its stall
+	// bound, or observed its own rootCtx cancellation while still in
+	// progress. That specific outcome must not cut short a healthy sibling
+	// still making progress within its own bound; it runs to its own bounded
+	// --once completion exactly as it would standalone. A generic error, a
+	// terminal bootstrap error (mountsync.IsBootstrapTerminalError, e.g.
+	// BootstrapStalledError -- retrying that persisted checkpoint forever
+	// would be pointless, and every sibling scope shares the same wedge
+	// risk), or any error at all outside --once still cancels every sibling.
+	// Every non-nil error, cancelling or not, is still collected and joined
+	// into the aggregate result so `--once` exits nonzero and reports every
+	// scope that failed, not just the first.
 	var errs []error
 	for err := range errCh {
 		if err == nil {
 			continue
 		}
 		errs = append(errs, err)
-		if mountsync.IsBootstrapTerminalError(err) {
+		var incomplete *initialBootstrapIncompleteError
+		suppressSiblingCancellation := cfg.once && errors.As(err, &incomplete)
+		if !suppressSiblingCancellation {
 			cancel()
 		}
 	}
@@ -903,7 +911,13 @@ const onceBootstrapStableCycleLimit = 3
 //
 // alreadyBootstrapped reports whether the checkpoint already showed a
 // complete bootstrap (with at least one prior successful reconcile) before
-// the caller's own first cycle ran — see bootstrapAlreadyComplete.
+// the caller's own first cycle ran — see bootstrapAlreadyComplete. It only
+// exempts that first cycle from the lastCycleErr check below when
+// cfg.forceFullRecon is unset: --full-reconcile is an explicit request for a
+// real full-tree reconcile to run and succeed on THIS invocation, and an
+// on-disk checkpoint from some earlier, unrelated completion must not let
+// that cycle's own failure (e.g. a tree/provider request error) go
+// unreported just because bootstrap itself finished at some prior point.
 //
 // When the checkpoint reads as not-in-progress right after that first cycle,
 // the on-disk checkpoint is checked, and takes precedence, before rootCtx or
@@ -926,7 +940,15 @@ const onceBootstrapStableCycleLimit = 3
 func finishInitialBootstrap(rootCtx context.Context, cfg mountConfig, run func(reconcile bool) error, lastCycleErr func() error, alreadyBootstrapped bool) error {
 	state := readBootstrapResumeState(cfg.localDir)
 	if !state.inProgress {
-		if alreadyBootstrapped {
+		// alreadyBootstrapped exempts this run's own first cycle from the
+		// lastCycleErr check below -- but ONLY when that cycle was allowed
+		// to be a no-op incremental poll. cfg.forceFullRecon is an explicit
+		// operator request for a real full-tree reconcile to run and
+		// succeed; a checkpoint that merely predates this process must not
+		// let --full-reconcile's own cycle failure go unreported just
+		// because bootstrap itself finished at some earlier, unrelated
+		// point in time.
+		if alreadyBootstrapped && !cfg.forceFullRecon {
 			return nil
 		}
 		// Not already complete before this process started, and not in

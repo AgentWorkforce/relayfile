@@ -552,6 +552,33 @@ func TestFinishInitialBootstrapKeepsSuccessAfterPriorCompletion(t *testing.T) {
 			t.Fatalf("expected cause %v, got %v", cause, err)
 		}
 	})
+
+	t.Run("forceFullRecon still fails despite prior completion", func(t *testing.T) {
+		// Control: cfg.forceFullRecon disables the alreadyBootstrapped
+		// shortcut -- --full-reconcile is an explicit request for THIS
+		// cycle to succeed, and a checkpoint that merely predates this
+		// process must not exempt it from a real cycle failure.
+		localDir := bootstrapAlreadyCompleteDir(t)
+		cause := errors.New("provider tree request failed")
+		cycles := 0
+		err := finishInitialBootstrap(context.Background(), mountConfig{localDir: localDir, forceFullRecon: true},
+			func(bool) error { cycles++; return nil },
+			func() error { return cause },
+			true,
+		)
+		if err == nil {
+			t.Fatalf("expected error when cfg.forceFullRecon is set despite an already-complete checkpoint, got nil")
+		}
+		if !errors.Is(err, cause) {
+			t.Fatalf("expected cause %v, got %v", cause, err)
+		}
+		// This is finishInitialBootstrap's own first-cycle check, not a
+		// resume cycle: run itself is called by the caller (runSinglePollingMount)
+		// before finishInitialBootstrap, so no additional resume cycles run here.
+		if cycles != 0 {
+			t.Errorf("ran %d resume cycles for a checkpoint that read as already complete, want 0", cycles)
+		}
+	})
 }
 
 // TestFinishInitialBootstrapPrefersFreshCompletionOverPreLoopCancellation pins
