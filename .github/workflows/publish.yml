@@ -167,6 +167,7 @@ jobs:
           VERSION_TYPE: ${{ github.event.inputs.version }}
           PREID: ${{ github.event.inputs.preid }}
           NPM_TAG: ${{ github.event.inputs.tag }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
         run: |
           set -euo pipefail
           case "$VERSION_TYPE" in
@@ -219,6 +220,26 @@ jobs:
           CURRENT_VERSION=$(node -p "require('./package.json').version")
           echo "Current version: $CURRENT_VERSION"
 
+          # Release commits are tagged in Create Release but intentionally are
+          # not pushed back to the source branch.  Resolve the highest
+          # strictly-attested release tag reachable from this dispatch before
+          # applying a bump, otherwise the next dispatch would repeat the
+          # previous version.  A rerun of the same workflow attempt reuses an
+          # already-created tag instead of advancing past its target.
+          SOURCE_SHA="${SOURCE_SHA:-}"
+          BASELINE_VERSION="$CURRENT_VERSION"
+          RESUMABLE_VERSION=""
+          if [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            BASELINE_INFO=$(node "${GITHUB_WORKSPACE:-.}/scripts/release/resolve-release-baseline.mjs" \
+              --source-sha "$SOURCE_SHA" \
+              --cwd "$PWD" \
+              --current-version "$CURRENT_VERSION")
+            BASELINE_VERSION=$(printf '%s\n' "$BASELINE_INFO" | awk -F= '$1 == "baseline_version" { print $2 }')
+            RESUMABLE_VERSION=$(printf '%s\n' "$BASELINE_INFO" | awk -F= '$1 == "resumable_version" { print $2 }')
+            test -n "$BASELINE_VERSION"
+            echo "Trusted release baseline: $BASELINE_VERSION"
+          fi
+
           # Every workspace package this release publishes. Used both by the
           # collision guard below and by the version-sync script, so the two can
           # never disagree about what a release covers.
@@ -242,8 +263,20 @@ jobs:
             # validation above rejects option-shaped values before this call.
             npm version "$CUSTOM_VERSION" --no-git-tag-version --allow-same-version
           else
+            BASELINE_VERSION="$BASELINE_VERSION" node -e '
+              const fs = require("fs");
+              const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+              pkg.version = process.env.BASELINE_VERSION;
+              fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+            '
+            RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
+            if [ "$RUN_ATTEMPT" -gt 1 ] && [ -n "$RESUMABLE_VERSION" ]; then
+              echo "Reusing resumable release tag version: $RESUMABLE_VERSION"
+              npm version "$RESUMABLE_VERSION" --no-git-tag-version --allow-same-version
+            else
             echo "Bumping version: $VERSION_TYPE (preid=$PREID)"
             npm version "$VERSION_TYPE" --no-git-tag-version --preid="$PREID"
+            fi
           fi
 
           NEW_VERSION=$(node -p "require('./package.json').version")
@@ -441,10 +474,126 @@ jobs:
           path: relayfile-mount-${{ matrix.suffix }}
           retention-days: 1
 
-  # Publish all packages in parallel
+  # Read-only barrier: every package must reconcile before any package can
+  # publish.  This prevents an absent package from publishing while another
+  # package in the matrix is still about to fail on a conflicting tarball.
+  preflight-packages:
+    name: Preflight ${{ matrix.package }}
+    needs: [build, build-mount-binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    if: |
+      always() &&
+      needs.build.result == 'success' &&
+      (needs.build.outputs.release_dry_run == 'true' || needs.build-mount-binaries.result == 'success')
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        include:
+          - package: core
+            path: packages/core
+            mount_binary: ""
+          - package: sdk
+            path: packages/sdk/typescript
+            mount_binary: ""
+          - package: client
+            path: packages/client
+            mount_binary: ""
+          - package: agents
+            path: packages/agents
+            mount_binary: ""
+          - package: cli
+            path: packages/cli
+            mount_binary: ""
+          - package: file-observer
+            path: packages/file-observer
+            mount_binary: ""
+          - package: local-mount
+            path: packages/local-mount
+            mount_binary: ""
+          - package: mount-darwin-arm64
+            path: packages/mount-darwin-arm64
+            mount_binary: relayfile-mount-darwin-arm64
+          - package: mount-darwin-x64
+            path: packages/mount-darwin-x64
+            mount_binary: relayfile-mount-darwin-amd64
+          - package: mount-linux-arm64
+            path: packages/mount-linux-arm64
+            mount_binary: relayfile-mount-linux-arm64
+          - package: mount-linux-x64
+            path: packages/mount-linux-x64
+            mount_binary: relayfile-mount-linux-amd64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.build.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify immutable source snapshot
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ needs.build.outputs.source_sha }}"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: build-output
+          path: .
+
+      - name: Restore CLI binary permissions
+        if: matrix.package == 'cli'
+        run: chmod 755 packages/cli/bin/relayfile-cli-*
+
+      - name: Download relayfile-mount binary
+        if: matrix.mount_binary != '' && needs.build.outputs.release_dry_run != 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ matrix.mount_binary }}
+          path: /tmp/relayfile-mount-binary
+
+      - name: Prepare mount platform package
+        if: matrix.mount_binary != '' && needs.build.outputs.release_dry_run != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ matrix.path }}/bin"
+          cp "/tmp/relayfile-mount-binary/${{ matrix.mount_binary }}" "${{ matrix.path }}/bin/relayfile-mount"
+          chmod 755 "${{ matrix.path }}/bin/relayfile-mount"
+
+      - name: Update npm for OIDC support
+        run: npm install -g npm@11
+
+      - name: Reconcile package read-only
+        env:
+          NPM_TAG: ${{ github.event.inputs.tag }}
+          RELEASE_DRY_RUN: ${{ needs.build.outputs.release_dry_run }}
+          SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
+          RELEASE_VERSION: ${{ needs.build.outputs.new_version }}
+        run: |
+          set -euo pipefail
+          node "$GITHUB_WORKSPACE/scripts/release/reconcile-package.mjs" \
+            --package-dir "$GITHUB_WORKSPACE/${{ matrix.path }}" \
+            --tag "$NPM_TAG" \
+            --dry-run "$RELEASE_DRY_RUN" \
+            --preflight true \
+            --source-sha "$SOURCE_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT"
+
+  # Publish all packages in parallel after the read-only barrier.
   publish-packages:
     name: Publish ${{ matrix.package }}
-    needs: [build, build-mount-binaries]
+    needs: [build, build-mount-binaries, preflight-packages]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -453,6 +602,7 @@ jobs:
       always() &&
       needs.build.outputs.release_package == 'all' &&
       needs.build.result == 'success' &&
+      needs.preflight-packages.result == 'success' &&
       (needs.build.outputs.release_dry_run == 'true' || needs.build-mount-binaries.result == 'success')
     strategy:
       fail-fast: false
@@ -571,7 +721,7 @@ jobs:
   # Publish single package (when not 'all')
   publish-single:
     name: Publish single package
-    needs: [build, build-mount-binaries]
+    needs: [build, build-mount-binaries, preflight-packages]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -580,6 +730,7 @@ jobs:
       always() &&
       needs.build.outputs.release_package != 'all' &&
       needs.build.result == 'success' &&
+      needs.preflight-packages.result == 'success' &&
       (needs.build.outputs.release_dry_run == 'true' || needs.build-mount-binaries.result == 'success')
 
     steps:
@@ -682,7 +833,7 @@ jobs:
 
   create-release:
     name: Create Release
-    needs: [build, publish-packages, publish-single, build-mount-binaries]
+    needs: [build, preflight-packages, publish-packages, publish-single, build-mount-binaries]
     runs-on: ubuntu-latest
     permissions:
       contents: write

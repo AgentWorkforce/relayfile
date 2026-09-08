@@ -229,6 +229,7 @@ export async function reconcilePackage({
   packageDir,
   tag,
   dryRun = false,
+  preflight = false,
   sourceSha,
   runId,
   runAttempt,
@@ -277,6 +278,13 @@ export async function reconcilePackage({
       }
       status = "already-published";
       registry = current.record;
+    } else if (preflight) {
+      // A preflight is deliberately read-only.  The workflow runs every
+      // package through this branch before it permits any publish job to
+      // start, so one conflict cannot race an absent package into a partial
+      // release.  The normal invocation re-queries immediately before its
+      // publish, retaining the race-safe check after the barrier.
+      status = "absent";
     } else {
       const published = await npm(
         "npm",
@@ -371,6 +379,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       sourceSha: args.source_sha,
       runId: args.run_id,
       runAttempt: args.run_attempt,
+      preflight: args.preflight === "true",
       output: args.output,
     });
   } catch (error) {

@@ -85,6 +85,48 @@ test("reconciliation publishes an absent version and verifies it afterwards", as
   rmSync(dir, { recursive: true, force: true });
 });
 
+test("read-only preflight blocks every publish under mixed absent/conflict state", async () => {
+  const absentDir = sandbox();
+  const conflictDir = sandbox();
+  const absentState = { views: 0, publishes: 0 };
+  const conflictState = { views: 0, publishes: 0 };
+  const npmFor = (state, mode) =>
+    fakeNpm({
+      state,
+      registry:
+        mode === "conflict"
+          ? { integrity: "sha512-other", shasum: "sha1-other" }
+          : { integrity: "sha512-local", shasum: "sha1-local" },
+      viewError: mode === "absent" ? "npm error code E404" : undefined,
+    });
+
+  const results = await Promise.allSettled([
+    reconcilePackage({
+      packageDir: absentDir,
+      tag: "next",
+      sourceSha: "a".repeat(40),
+      preflight: true,
+      npm: npmFor(absentState, "absent"),
+    }),
+    reconcilePackage({
+      packageDir: conflictDir,
+      tag: "next",
+      sourceSha: "b".repeat(40),
+      preflight: true,
+      npm: npmFor(conflictState, "conflict"),
+    }),
+  ]);
+
+  assert.equal(results[0].status, "fulfilled");
+  assert.equal(results[0].value.package.status, "absent");
+  assert.equal(results[1].status, "rejected");
+  assert.match(results[1].reason.message, /conflicts with the local release tarball/);
+  assert.equal(absentState.publishes, 0);
+  assert.equal(conflictState.publishes, 0);
+  rmSync(absentDir, { recursive: true, force: true });
+  rmSync(conflictDir, { recursive: true, force: true });
+});
+
 test("reconciliation skips an identical already-published tarball", async () => {
   const dir = sandbox();
   const state = { views: 0, publishes: 0 };

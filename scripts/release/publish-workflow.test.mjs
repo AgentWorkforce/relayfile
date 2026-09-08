@@ -114,6 +114,7 @@ function runVersionStep({ customVersion = "", versionType = "patch" }) {
         PREID: "beta",
         NPM_TAG: "next",
         GITHUB_OUTPUT: output,
+        GITHUB_WORKSPACE: REPO,
       },
     });
     return {
@@ -124,6 +125,49 @@ function runVersionStep({ customVersion = "", versionType = "patch" }) {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+function runVersionStepAfterTaggedRelease() {
+  const dir = mkdtempSync(join(tmpdir(), "relayfile-version-tag-"));
+  const output = join(dir, "output");
+  git(dir, "init", "-q");
+  git(dir, "config", "user.name", "Release Test");
+  git(dir, "config", "user.email", "release-test@example.invalid");
+  const packagePaths = ["package.json", ...EXPECTED_PACKAGE_PATHS];
+  for (const path of new Set(packagePaths)) {
+    const file = join(dir, path);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify({ name: path, version: "1.2.3" }) + "\n");
+  }
+  git(dir, "add", ".");
+  git(dir, "commit", "-qm", "source");
+  const sourceSha = git(dir, "rev-parse", "HEAD");
+  for (const path of new Set(packagePaths)) {
+    writeFileSync(
+      join(dir, path),
+      JSON.stringify({ name: path, version: "1.2.4" }) + "\n",
+    );
+  }
+  git(dir, "commit", "-qam", "release");
+  const releaseCommit = git(dir, "rev-parse", "HEAD");
+  git(dir, "tag", "-a", "v1.2.4", releaseCommit, "-m", "Release v1.2.4");
+  git(dir, "checkout", "-q", sourceSha);
+  const result = runBash(extractStepRun("Version all packages"), {
+    cwd: dir,
+    env: {
+      CUSTOM_VERSION: "",
+      VERSION_TYPE: "patch",
+      PREID: "beta",
+      NPM_TAG: "next",
+      GITHUB_OUTPUT: output,
+      GITHUB_WORKSPACE: REPO,
+      SOURCE_SHA: sourceSha,
+      GITHUB_RUN_ATTEMPT: "1",
+    },
+  });
+  const packageJson = readFileSync(join(dir, "package.json"), "utf8");
+  rmSync(dir, { recursive: true, force: true });
+  return { ...result, packageJson };
 }
 
 function writeNpmStub(dir, mode) {
@@ -328,6 +372,12 @@ test("version step executes strict custom and bump validation", () => {
   assert.match(invalidBump.packageJson, /"version"\s*:\s*"1\.2\.3"/);
 });
 
+test("next dispatch bumps beyond a prior trusted release tag", () => {
+  const result = runVersionStepAfterTaggedRelease();
+  assert.equal(result.status, 0, result.stdout);
+  assert.match(result.packageJson, /"version"\s*:\s*"1\.2\.5"/);
+});
+
 test("reconciliation CLI shell harness covers canonical E404, collision, and outage", () => {
   const absent = runReconcileCli("absent");
   assert.equal(absent.status, 0, absent.output);
@@ -406,8 +456,8 @@ test("every checkout is pinned to the immutable dispatch/build source SHA", () =
   ];
   assert.equal(
     checkouts.length,
-    5,
-    "release workflow should have five checked-out jobs",
+    6,
+    "release workflow should have six checked-out jobs",
   );
   for (const [, block] of checkouts) {
     assert.match(
@@ -488,6 +538,26 @@ test("package publication goes through reconciliation and post-publish attestati
     /if \[ -z "\$CUSTOM_VERSION" \]; then[\s\S]*?npm view/,
     "a preflight collision guard would prevent resumable reconciliation",
   );
+});
+
+test("all package publication is behind a successful read-only reconciliation barrier", () => {
+  assert.match(WORKFLOW, /preflight-packages:/);
+  assert.match(WORKFLOW, /--preflight true/);
+  assert.match(
+    WORKFLOW,
+    /publish-packages:[\s\S]*?needs: \[build, build-mount-binaries, preflight-packages\][\s\S]*?needs\.preflight-packages\.result == 'success'/,
+  );
+  assert.match(
+    WORKFLOW,
+    /publish-single:[\s\S]*?needs: \[build, build-mount-binaries, preflight-packages\][\s\S]*?needs\.preflight-packages\.result == 'success'/,
+  );
+});
+
+test("versioning resolves a trusted tag baseline and preserves rerun targets", () => {
+  assert.match(WORKFLOW, /resolve-release-baseline\.mjs/);
+  assert.match(WORKFLOW, /BASELINE_VERSION=/);
+  assert.match(WORKFLOW, /RUN_ATTEMPT=.*GITHUB_RUN_ATTEMPT/);
+  assert.match(WORKFLOW, /npm version "\$RESUMABLE_VERSION"/);
 });
 
 test("tagging verifies the generated tag commit and never pushes a moving branch", () => {
