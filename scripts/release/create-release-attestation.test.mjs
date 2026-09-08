@@ -340,10 +340,34 @@ test("attestation rejects package children from another workflow attempt", () =>
   );
 });
 
-test("attestation rejects incomplete local and registry package fields", () => {
+test("attestation rejects a missing local package file", () => {
   const sourceSha = "a".repeat(40);
   const packages = packageRecords(sourceSha, "1.2.3", 123, 1);
   delete packages[0].package.local.file;
+  assert.throws(
+    () =>
+      buildReleaseAttestation({
+        sourceSha,
+        runId: 123,
+        runAttempt: 1,
+        version: "1.2.3",
+        tag: "v1.2.3",
+        tagCommit: "b".repeat(40),
+        tagTree: "d".repeat(40),
+        repository: "AgentWorkforce/relayfile",
+        packages,
+        binaries: RELEASE_BINARY_NAMES.map((file) => ({
+          file,
+          sha256: "c".repeat(64),
+        })),
+      }),
+    /incomplete package attestation/,
+  );
+});
+
+test("attestation rejects a missing registry package name", () => {
+  const sourceSha = "a".repeat(40);
+  const packages = packageRecords(sourceSha, "1.2.3", 123, 1);
   delete packages[0].package.registry.name;
   assert.throws(
     () =>
