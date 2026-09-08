@@ -82,7 +82,7 @@ test("Create Release still runs the propagation-tolerant lockfile step", () => {
 test("every checkout is pinned to the immutable dispatch/build source SHA", () => {
   const checkouts = [
     ...WORKFLOW.matchAll(
-      /- name: Checkout code\n\s+uses: actions\/checkout@v4([\s\S]*?)(?=\n\s+- name:|\n\s+\w[\w-]*:\s*$)/g,
+      /- name: Checkout code\n\s+uses: actions\/checkout@[0-9a-f]{40}(?:\s+# v4)?([\s\S]*?)(?=\n\s+- name:|\n\s+\w[\w-]*:\s*$)/g,
     ),
   ];
   assert.equal(
@@ -123,6 +123,35 @@ test("release input values are passed through env, not interpolated into shell s
     WORKFLOW,
     /CUSTOM_VERSION="\$\{\{ github\.event\.inputs\.custom_version \}\}"/,
   );
+  assert.match(
+    WORKFLOW,
+    /PACKAGE_INPUT: \$\{\{ github\.event\.inputs\.package \}\}/,
+  );
+  assert.match(
+    WORKFLOW,
+    /DRY_RUN_INPUT: \$\{\{ github\.event\.inputs\.dry_run \}\}/,
+  );
+  const packageInputs =
+    WORKFLOW.match(/\$\{\{ github\.event\.inputs\.package \}\}/g) ?? [];
+  const dryRunInputs =
+    WORKFLOW.match(/\$\{\{ github\.event\.inputs\.dry_run \}\}/g) ?? [];
+  assert.equal(packageInputs.length, 1, "package input must only enter via env");
+  assert.equal(dryRunInputs.length, 1, "dry_run input must only enter via env");
+  assert.match(WORKFLOW, /case "\$PACKAGE_INPUT" in[\s\S]*RELEASE_PACKAGE=/);
+  assert.match(WORKFLOW, /case "\$DRY_RUN_INPUT" in[\s\S]*RELEASE_DRY_RUN=/);
+});
+
+test("all credential-bearing workflow actions are pinned to full commit SHAs", () => {
+  const refs = [...WORKFLOW.matchAll(/^\s+uses:\s+([^\s#]+)/gm)].map(
+    ([, ref]) => ref,
+  );
+  assert.ok(refs.length > 0, "workflow should use actions");
+  for (const ref of refs) {
+    assert.match(ref, /@[0-9a-f]{40}$/, `mutable action ref: ${ref}`);
+  }
+  assert.match(WORKFLOW, /# v4/);
+  assert.match(WORKFLOW, /# v5/);
+  assert.match(WORKFLOW, /# v2/);
 });
 
 test("package publication goes through reconciliation and post-publish attestation", () => {

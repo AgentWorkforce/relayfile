@@ -80,12 +80,39 @@ jobs:
       new_version: ${{ steps.bump.outputs.new_version }}
       is_prerelease: ${{ steps.bump.outputs.is_prerelease }}
       source_sha: ${{ steps.source.outputs.source_sha }}
+      release_package: ${{ steps.inputs.outputs.package }}
+      release_dry_run: ${{ steps.inputs.outputs.dry_run }}
 
     steps:
+      - name: Validate and map dispatch inputs
+        id: inputs
+        env:
+          PACKAGE_INPUT: ${{ github.event.inputs.package }}
+          DRY_RUN_INPUT: ${{ github.event.inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          case "$PACKAGE_INPUT" in
+            all|core|sdk|client|agents|cli|file-observer|local-mount|mount-darwin-arm64|mount-darwin-x64|mount-linux-arm64|mount-linux-x64)
+              RELEASE_PACKAGE="$PACKAGE_INPUT"
+              ;;
+            *)
+              echo "Unsupported package input" >&2
+              exit 1
+              ;;
+          esac
+          case "$DRY_RUN_INPUT" in
+            true|false) RELEASE_DRY_RUN="$DRY_RUN_INPUT" ;;
+            *) echo "Invalid dry_run input" >&2; exit 1 ;;
+          esac
+          echo "package=$RELEASE_PACKAGE" >> "$GITHUB_OUTPUT"
+          echo "dry_run=$RELEASE_DRY_RUN" >> "$GITHUB_OUTPUT"
+          echo "RELEASE_PACKAGE=$RELEASE_PACKAGE" >> "$GITHUB_ENV"
+          echo "RELEASE_DRY_RUN=$RELEASE_DRY_RUN" >> "$GITHUB_ENV"
+
       - name: Validate release mode
         run: |
           set -euo pipefail
-          if [ "${{ github.event.inputs.package }}" != "all" ] && [ "${{ github.event.inputs.dry_run }}" != "true" ]; then
+          if [ "$RELEASE_PACKAGE" != "all" ] && [ "$RELEASE_DRY_RUN" != "true" ]; then
             cat >&2 <<'EOF'
           ERROR: the publish workflow version-bumps every @relayfile package, and
           release lockfile regeneration needs every @relayfile/mount-* package at
@@ -98,7 +125,7 @@ jobs:
           fi
 
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           ref: ${{ github.sha }}
@@ -115,14 +142,14 @@ jobs:
           echo "Building immutable source snapshot $SOURCE_SHA"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           cache: "npm"
           registry-url: "https://registry.npmjs.org"
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
           cache: true
@@ -223,7 +250,7 @@ jobs:
       - name: Finalize CHANGELOGs
         if: |
           steps.bump.outputs.is_prerelease == 'false' &&
-          github.event.inputs.dry_run != 'true'
+          steps.inputs.outputs.dry_run != 'true'
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: node scripts/finalize-changelogs.mjs "${{ steps.bump.outputs.new_version }}"
@@ -240,7 +267,7 @@ jobs:
           npm run pages:build --prefix packages/file-observer
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: build-output
           path: |
@@ -290,7 +317,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
-    if: github.event.inputs.dry_run != 'true'
+    if: needs.build.outputs.release_dry_run != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -314,7 +341,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.build.outputs.source_sha }}
           fetch-depth: 0
@@ -326,7 +353,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "${{ needs.build.outputs.source_sha }}"
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
           cache: true
@@ -358,7 +385,7 @@ jobs:
         run: ./relayfile-mount-${{ matrix.suffix }} --help | head -20
 
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: relayfile-mount-${{ matrix.suffix }}
           path: relayfile-mount-${{ matrix.suffix }}
@@ -374,9 +401,9 @@ jobs:
       id-token: write
     if: |
       always() &&
-      github.event.inputs.package == 'all' &&
+      needs.build.outputs.release_package == 'all' &&
       needs.build.result == 'success' &&
-      (github.event.inputs.dry_run == 'true' || needs.build-mount-binaries.result == 'success')
+      (needs.build.outputs.release_dry_run == 'true' || needs.build-mount-binaries.result == 'success')
     strategy:
       fail-fast: false
       max-parallel: 10
@@ -418,7 +445,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.build.outputs.source_sha }}
           fetch-depth: 0
@@ -430,13 +457,13 @@ jobs:
           test "$(git rev-parse HEAD)" = "${{ needs.build.outputs.source_sha }}"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: build-output
           path: .
@@ -446,14 +473,14 @@ jobs:
         run: chmod 755 packages/cli/bin/relayfile-cli-*
 
       - name: Download relayfile-mount binary
-        if: matrix.mount_binary != '' && github.event.inputs.dry_run != 'true'
-        uses: actions/download-artifact@v4
+        if: matrix.mount_binary != '' && needs.build.outputs.release_dry_run != 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ${{ matrix.mount_binary }}
           path: /tmp/relayfile-mount-binary
 
       - name: Prepare mount platform package
-        if: matrix.mount_binary != '' && github.event.inputs.dry_run != 'true'
+        if: matrix.mount_binary != '' && needs.build.outputs.release_dry_run != 'true'
         run: |
           set -euo pipefail
           mkdir -p "${{ matrix.path }}/bin"
@@ -468,7 +495,7 @@ jobs:
       - name: Reconcile package with NPM
         env:
           NPM_TAG: ${{ github.event.inputs.tag }}
-          RELEASE_DRY_RUN: ${{ github.event.inputs.dry_run }}
+          RELEASE_DRY_RUN: ${{ needs.build.outputs.release_dry_run }}
           SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
           RELEASE_VERSION: ${{ needs.build.outputs.new_version }}
         run: |
@@ -484,7 +511,7 @@ jobs:
             --output "$GITHUB_WORKSPACE/package-attestations/${{ matrix.package }}.json"
 
       - name: Upload package attestation
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: package-attestation-${{ matrix.package }}
           path: package-attestations/${{ matrix.package }}.json
@@ -501,13 +528,13 @@ jobs:
       id-token: write
     if: |
       always() &&
-      github.event.inputs.package != 'all' &&
+      needs.build.outputs.release_package != 'all' &&
       needs.build.result == 'success' &&
-      (github.event.inputs.dry_run == 'true' || needs.build-mount-binaries.result == 'success')
+      (needs.build.outputs.release_dry_run == 'true' || needs.build-mount-binaries.result == 'success')
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.build.outputs.source_sha }}
           fetch-depth: 0
@@ -519,25 +546,27 @@ jobs:
           test "$(git rev-parse HEAD)" = "${{ needs.build.outputs.source_sha }}"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: build-output
           path: .
 
       - name: Restore CLI binary permissions
-        if: github.event.inputs.package == 'cli'
+        if: needs.build.outputs.release_package == 'cli'
         run: chmod 755 packages/cli/bin/relayfile-cli-*
 
       - name: Resolve package path
         id: resolve-package
+        env:
+          RELEASE_PACKAGE: ${{ needs.build.outputs.release_package }}
         run: |
-          case "${{ github.event.inputs.package }}" in
+          case "$RELEASE_PACKAGE" in
             core) echo "path=packages/core" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
             sdk) echo "path=packages/sdk/typescript" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
             client) echo "path=packages/client" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
@@ -550,20 +579,20 @@ jobs:
             mount-linux-arm64) echo "path=packages/mount-linux-arm64" >> "$GITHUB_OUTPUT"; echo "mount_binary=relayfile-mount-linux-arm64" >> "$GITHUB_OUTPUT" ;;
             mount-linux-x64) echo "path=packages/mount-linux-x64" >> "$GITHUB_OUTPUT"; echo "mount_binary=relayfile-mount-linux-amd64" >> "$GITHUB_OUTPUT" ;;
             *)
-              echo "Unsupported package: ${{ github.event.inputs.package }}" >&2
+              echo "Unsupported package: $RELEASE_PACKAGE" >&2
               exit 1
               ;;
           esac
 
       - name: Download relayfile-mount binary
-        if: steps.resolve-package.outputs.mount_binary != '' && github.event.inputs.dry_run != 'true'
-        uses: actions/download-artifact@v4
+        if: steps.resolve-package.outputs.mount_binary != '' && needs.build.outputs.release_dry_run != 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ${{ steps.resolve-package.outputs.mount_binary }}
           path: /tmp/relayfile-mount-binary
 
       - name: Prepare mount platform package
-        if: steps.resolve-package.outputs.mount_binary != '' && github.event.inputs.dry_run != 'true'
+        if: steps.resolve-package.outputs.mount_binary != '' && needs.build.outputs.release_dry_run != 'true'
         run: |
           set -euo pipefail
           mkdir -p "${{ steps.resolve-package.outputs.path }}/bin"
@@ -578,7 +607,7 @@ jobs:
       - name: Reconcile package with NPM
         env:
           NPM_TAG: ${{ github.event.inputs.tag }}
-          RELEASE_DRY_RUN: ${{ github.event.inputs.dry_run }}
+          RELEASE_DRY_RUN: ${{ needs.build.outputs.release_dry_run }}
           SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
           RELEASE_VERSION: ${{ needs.build.outputs.new_version }}
         run: |
@@ -591,13 +620,13 @@ jobs:
             --source-sha "$SOURCE_SHA" \
             --run-id "$GITHUB_RUN_ID" \
             --run-attempt "$GITHUB_RUN_ATTEMPT" \
-            --output "$GITHUB_WORKSPACE/package-attestations/${{ github.event.inputs.package }}.json"
+            --output "$GITHUB_WORKSPACE/package-attestations/${{ needs.build.outputs.release_package }}.json"
 
       - name: Upload package attestation
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: package-attestation-${{ github.event.inputs.package }}
-          path: package-attestations/${{ github.event.inputs.package }}.json
+          name: package-attestation-${{ needs.build.outputs.release_package }}
+          path: package-attestations/${{ needs.build.outputs.release_package }}.json
           if-no-files-found: error
           retention-days: 1
 
@@ -609,13 +638,13 @@ jobs:
       contents: write
     if: |
       always() &&
-      github.event.inputs.dry_run != 'true' &&
+      needs.build.outputs.release_dry_run != 'true' &&
       needs.build-mount-binaries.result == 'success' &&
       (needs.publish-packages.result == 'success' || needs.publish-single.result == 'success')
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -628,26 +657,26 @@ jobs:
           test "$(git rev-parse HEAD)" = "${{ needs.build.outputs.source_sha }}"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: build-output
           path: .
 
       - name: Download relayfile-mount binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: relayfile-mount-*
           path: mount-binaries
           merge-multiple: true
 
       - name: Download package attestations
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: package-attestation-*
           path: package-attestations
@@ -790,7 +819,7 @@ jobs:
           test "$(git rev-list -n 1 "refs/tags/v${NEW_VERSION}")" = "$TAG_COMMIT"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: v${{ needs.build.outputs.new_version }}
           name: v${{ needs.build.outputs.new_version }}
@@ -865,15 +894,19 @@ jobs:
 
     steps:
       - name: Summary
+        env:
+          RELEASE_PACKAGE: ${{ needs.build.outputs.release_package }}
+          RELEASE_TAG: ${{ github.event.inputs.tag }}
+          RELEASE_DRY_RUN: ${{ needs.build.outputs.release_dry_run }}
         run: |
           {
             echo "## Publish Summary"
             echo ""
-            echo "**Package**: \`${{ github.event.inputs.package }}\`"
+            echo "**Package**: \`$RELEASE_PACKAGE\`"
             echo "**Version**: \`${{ needs.build.outputs.new_version }}\`"
-            echo "**NPM Tag**: \`${{ github.event.inputs.tag }}\`"
+            echo "**NPM Tag**: \`$RELEASE_TAG\`"
             echo "**Prerelease**: \`${{ needs.build.outputs.is_prerelease }}\`"
-            echo "**Dry Run**: \`${{ github.event.inputs.dry_run }}\`"
+            echo "**Dry Run**: \`$RELEASE_DRY_RUN\`"
             echo "**Provenance**: \`enabled\`"
             echo ""
             echo "### Results"
