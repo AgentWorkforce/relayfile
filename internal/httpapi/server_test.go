@@ -724,6 +724,500 @@ func TestLegacyFileDeletedEventWithoutACLSnapshotFailsClosedAfterUpgrade(t *test
 	}
 }
 
+// waitForStoreCondition polls check until it reports true or timeout
+// elapses. Used to await state produced by the async envelope worker (real
+// production code — IngestEnvelope only enqueues, it does not process
+// synchronously), which the test cannot otherwise be notified of.
+func waitForStoreCondition(t *testing.T, timeout time.Duration, check func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if check() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("condition not met within %s", timeout)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+type wsEventExpect struct{ typ, path string }
+
+// TestACLProviderSyncDeleteEventHiddenFromDeniedAgent is the regression
+// test for finding P1 of the fresh review on commit b0df4ad4:
+// applyProviderDeleteLocked — the provider-webhook delete path, distinct
+// from DeleteFile and the draft-reconcile paths already covered by earlier
+// ACL-423 tests — still assigned
+// `event.ACLPermissions = append([]string(nil), aclPermissions...)`
+// instead of routing through snapshotACLPermissions. For an UNRESTRICTED
+// file that collapses right back to nil (append of zero elements onto a
+// nil slice returns nil), which is indistinguishable from "never
+// snapshotted" — so once eventVisibleToClaims started failing closed on
+// Type=="file.deleted" && ACLPermissions==nil (the fix for finding (2) of
+// the original review), this bug turned into an over-blocking regression:
+// an ordinary, unrestricted provider-sync delete became invisible to EVERY
+// agent, not just a denied one.
+//
+// This drives the real HTTP webhook-ingest endpoint end to end — through
+// ParseGenericEnvelope and the async envelope worker, not a direct call to
+// the unexported applyProviderDeleteLocked — for both an unrestricted file
+// (must stay visible to everyone) and a file-level-protected one (must
+// stay hidden from the denied agent only), and checks both HTTP history
+// and WebSocket catch-up AND live delivery.
+func TestACLProviderSyncDeleteEventHiddenFromDeniedAgent(t *testing.T) {
+	t.Parallel()
+	const workspaceID = "ws_acl_provider_sync_delete"
+	const provider = "acltestprovider"
+	const denyRule = "deny:agent:Limited"
+	const unrestrictedPath = "/acltestprovider/public.md"
+	const protectedPath = "/acltestprovider/protected.md"
+
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{})
+	t.Cleanup(store.Close)
+	ingestToken := mustTestJWT(t, "dev-secret", workspaceID, "Ingestor", []string{"fs:read", "fs:write", "sync:read", "sync:trigger"}, time.Now().Add(time.Hour))
+
+	deliverySeq := 0
+	ingest := func(t *testing.T, eventType, path string, data map[string]any) {
+		t.Helper()
+		deliverySeq++
+		deliveryID := fmt.Sprintf("dlv_acl_provider_delete_%d", deliverySeq)
+		body := map[string]any{
+			"provider":    provider,
+			"event_type":  eventType,
+			"path":        path,
+			"delivery_id": deliveryID,
+			"timestamp":   time.Now().UTC().Format(time.RFC3339),
+		}
+		if data != nil {
+			body["data"] = data
+		}
+		resp := doRequest(t, NewServer(store), request{
+			method:  http.MethodPost,
+			path:    "/v1/workspaces/" + workspaceID + "/webhooks/ingest",
+			headers: map[string]string{"Authorization": "Bearer " + ingestToken, "X-Correlation-Id": "corr_" + deliveryID},
+			body:    body,
+		})
+		if resp.Code != http.StatusAccepted {
+			t.Fatalf("webhook ingest %s %s returned %d: %s", eventType, path, resp.Code, resp.Body.String())
+		}
+	}
+	waitForFile := func(t *testing.T, path string) {
+		t.Helper()
+		waitForStoreCondition(t, 5*time.Second, func() bool {
+			_, err := store.ReadFile(workspaceID, path)
+			return err == nil
+		})
+	}
+	waitForDelete := func(t *testing.T, path string) {
+		t.Helper()
+		waitForStoreCondition(t, 5*time.Second, func() bool {
+			feed, err := store.GetEvents(workspaceID, "", "", 1000)
+			if err != nil {
+				return false
+			}
+			for _, event := range feed.Events {
+				if event.Type == "file.deleted" && event.Path == path {
+					return true
+				}
+			}
+			return false
+		})
+	}
+	protectedSemantics := map[string]any{"semantics": map[string]any{"permissions": []any{"allow:public", denyRule}}}
+
+	// Catch-up target: create then delete both files via the real provider
+	// webhook path (applyProviderDeleteLocked), waiting for each async step
+	// so the create->delete pairs never coalesce into a single envelope.
+	ingest(t, "file.created", unrestrictedPath, map[string]any{"content": "public", "contentType": "text/plain"})
+	waitForFile(t, unrestrictedPath)
+	ingest(t, "file.created", protectedPath, mergeMaps(map[string]any{"content": "secret", "contentType": "text/plain"}, protectedSemantics))
+	waitForFile(t, protectedPath)
+	ingest(t, "file.deleted", unrestrictedPath, nil)
+	waitForDelete(t, unrestrictedPath)
+	ingest(t, "file.deleted", protectedPath, nil)
+	waitForDelete(t, protectedPath)
+
+	// Pin the exact regression: the unrestricted delete's snapshot must be
+	// non-nil (empty), not nil — nil is what made it fail closed for
+	// everyone instead of just the denied agent.
+	feed, err := store.GetEvents(workspaceID, "", "", 1000)
+	if err != nil {
+		t.Fatalf("get events failed: %v", err)
+	}
+	for _, event := range feed.Events {
+		if event.Type != "file.deleted" {
+			continue
+		}
+		switch event.Path {
+		case unrestrictedPath:
+			if event.ACLPermissions == nil {
+				t.Fatalf("regression: applyProviderDeleteLocked left ACLPermissions nil for an unrestricted file (%+v) — this is exactly the P1 bug, and now hides the event from every agent, not just a denied one", event)
+			}
+		case protectedPath:
+			if len(event.ACLPermissions) == 0 {
+				t.Fatalf("expected the protected file's provider-sync delete to carry its deny rule, got %+v", event)
+			}
+		}
+	}
+
+	server := httptest.NewServer(NewServer(store))
+	t.Cleanup(server.Close)
+	limitedToken := mustTestJWT(t, "dev-secret", workspaceID, "Limited", []string{"fs:read"}, time.Now().Add(time.Hour))
+	trustedToken := mustTestJWT(t, "dev-secret", workspaceID, "Trusted", []string{"fs:read"}, time.Now().Add(time.Hour))
+
+	// --- HTTP history ---
+	for _, tc := range []struct {
+		agent                   string
+		token                   string
+		wantUnrestrictedVisible bool
+		wantProtectedVisible    bool
+	}{
+		{"Limited", limitedToken, true, false},
+		{"Trusted", trustedToken, true, true},
+	} {
+		resp := doRequest(t, NewServer(store), request{
+			method:  http.MethodGet,
+			path:    "/v1/workspaces/" + workspaceID + "/fs/events?limit=1000",
+			headers: map[string]string{"Authorization": "Bearer " + tc.token, "X-Correlation-Id": "corr_http_" + tc.agent},
+		})
+		if resp.Code != http.StatusOK {
+			t.Fatalf("[%s] events returned %d: %s", tc.agent, resp.Code, resp.Body.String())
+		}
+		var httpFeed relayfile.EventFeed
+		if err := json.NewDecoder(resp.Body).Decode(&httpFeed); err != nil {
+			t.Fatalf("[%s] decode events: %v", tc.agent, err)
+		}
+		var sawUnrestrictedDelete, sawProtectedDelete bool
+		for _, event := range httpFeed.Events {
+			if event.Type != "file.deleted" {
+				continue
+			}
+			if event.Path == unrestrictedPath {
+				sawUnrestrictedDelete = true
+			}
+			if event.Path == protectedPath {
+				sawProtectedDelete = true
+			}
+		}
+		if sawUnrestrictedDelete != tc.wantUnrestrictedVisible {
+			t.Fatalf("[%s] HTTP history: unrestricted provider delete visibility = %v, want %v", tc.agent, sawUnrestrictedDelete, tc.wantUnrestrictedVisible)
+		}
+		if sawProtectedDelete != tc.wantProtectedVisible {
+			t.Fatalf("[%s] HTTP history: protected provider delete visibility = %v, want %v", tc.agent, sawProtectedDelete, tc.wantProtectedVisible)
+		}
+	}
+
+	// --- WebSocket catch-up ---
+	dial := func(t *testing.T, token string) *websocket.Conn {
+		t.Helper()
+		wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/workspaces/" + workspaceID + "/fs/ws?token=" + token
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		t.Cleanup(cancel)
+		conn, _, err := websocket.Dial(ctx, wsURL, nil)
+		if err != nil {
+			t.Fatalf("websocket dial failed: %v", err)
+		}
+		return conn
+	}
+	readExact := func(t *testing.T, agent string, conn *websocket.Conn, phase string, want []wsEventExpect) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for i, w := range want {
+			var msg map[string]any
+			if err := wsjson.Read(ctx, conn, &msg); err != nil {
+				t.Fatalf("[%s/%s] read event %d: %v", agent, phase, i, err)
+			}
+			if msg["type"] != w.typ || msg["path"] != w.path {
+				t.Fatalf("[%s/%s] event %d = %+v, want type=%s path=%s", agent, phase, i, msg, w.typ, w.path)
+			}
+		}
+		if err := wsjson.Write(ctx, conn, map[string]any{"type": "ping"}); err != nil {
+			t.Fatalf("[%s/%s] write ping failed: %v", agent, phase, err)
+		}
+		var pong map[string]any
+		if err := wsjson.Read(ctx, conn, &pong); err != nil || pong["type"] != "pong" {
+			t.Fatalf("[%s/%s] expected pong immediately after drain, got %+v (%v)", agent, phase, pong, err)
+		}
+	}
+
+	limitedConn := dial(t, limitedToken)
+	defer limitedConn.Close(websocket.StatusNormalClosure, "")
+	readExact(t, "Limited", limitedConn, "catch-up", []wsEventExpect{
+		{"file.created", unrestrictedPath},
+		{"file.deleted", unrestrictedPath},
+	})
+	trustedConn := dial(t, trustedToken)
+	defer trustedConn.Close(websocket.StatusNormalClosure, "")
+	// Setup order was create(unrestricted), create(protected),
+	// delete(unrestricted), delete(protected) — all creates before either
+	// delete — so Trusted's unfiltered catch-up preserves that order.
+	readExact(t, "Trusted", trustedConn, "catch-up", []wsEventExpect{
+		{"file.created", unrestrictedPath},
+		{"file.created", protectedPath},
+		{"file.deleted", unrestrictedPath},
+		{"file.deleted", protectedPath},
+	})
+
+	// --- WebSocket live delivery: both connections stay open, one more
+	// unrestricted and one more protected create+delete pair land while
+	// connected, and each socket must independently see exactly its own
+	// authorized subset. Ingests run from this single goroutine (no
+	// parallel subtests touching the shared store) so there is no
+	// cross-connection ordering race between the two already-open sockets.
+	const liveUnrestrictedPath = "/acltestprovider/public-live.md"
+	const liveProtectedPath = "/acltestprovider/protected-live.md"
+	ingest(t, "file.created", liveUnrestrictedPath, map[string]any{"content": "public-live", "contentType": "text/plain"})
+	waitForFile(t, liveUnrestrictedPath)
+	ingest(t, "file.deleted", liveUnrestrictedPath, nil)
+	waitForDelete(t, liveUnrestrictedPath)
+	ingest(t, "file.created", liveProtectedPath, mergeMaps(map[string]any{"content": "protected-live", "contentType": "text/plain"}, protectedSemantics))
+	waitForFile(t, liveProtectedPath)
+	ingest(t, "file.deleted", liveProtectedPath, nil)
+	waitForDelete(t, liveProtectedPath)
+
+	readExact(t, "Limited", limitedConn, "live", []wsEventExpect{
+		{"file.created", liveUnrestrictedPath},
+		{"file.deleted", liveUnrestrictedPath},
+	})
+	readExact(t, "Trusted", trustedConn, "live", []wsEventExpect{
+		{"file.created", liveUnrestrictedPath},
+		{"file.deleted", liveUnrestrictedPath},
+		{"file.created", liveProtectedPath},
+		{"file.deleted", liveProtectedPath},
+	})
+}
+
+func mergeMaps(base, extra map[string]any) map[string]any {
+	out := make(map[string]any, len(base)+len(extra))
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range extra {
+		out[k] = v
+	}
+	return out
+}
+
+// TestACLEmptyPathUnsnapshottedFileDeletedFailsClosed is the regression
+// test for finding P2 of the fresh review on commit b0df4ad4:
+// eventVisibleToClaims returned true for ANY event with an empty Path via
+// its unconditional fast path, evaluated BEFORE the file.deleted
+// nil-ACLPermissions fail-closed guard added for finding (2) of the
+// original ACL-423 fix. A malformed or corrupted persisted file.deleted
+// event carrying an empty Path — which no current in-process producer can
+// create; DeleteFile, CommitForkWithValidator, applyProviderDeleteLocked,
+// applyProviderUpsertLocked, reconcileAckedDraftLocked and
+// removeDraftLocked all normalize a non-"/" path before emitting — would
+// therefore slip past the fail-closed guard entirely and be treated as
+// unconditionally visible, regardless of whether it ever had an ACL
+// snapshot.
+//
+// This simulates that malformed state the only way it can actually arise
+// — hand-edited or corrupted persisted JSON, e.g. from truncation or a
+// future producer bug — by round-tripping a real on-disk snapshot and
+// injecting one such event (with no aclPermissionsByEvent entry, so it
+// reloads with ACLPermissions == nil like any other unsnapshotted delete),
+// then checks it is hidden over the internal visibility check, the real
+// HTTP events endpoint, and the real WebSocket catch-up feed — while a
+// normal sibling delete event AND a legitimate non-file empty-path
+// progress event (proving the fast path itself is preserved, not removed)
+// both remain visible.
+func TestACLEmptyPathUnsnapshottedFileDeletedFailsClosed(t *testing.T) {
+	t.Parallel()
+	const workspaceID = "ws_acl_empty_path_malformed"
+	const visiblePath = "/malformed/visible.md"
+	const malformedEventID = "evt_malformed_empty_path"
+	const nonFileEventID = "evt_nonfile_empty_path"
+
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{
+		StateBackend:   relayfile.NewJSONFileStateBackend(statePath),
+		DisableWorkers: true,
+	})
+	seeded, err := store.WriteFile(relayfile.WriteRequest{WorkspaceID: workspaceID, Path: visiblePath, IfMatch: "0", Content: "visible"})
+	if err != nil {
+		t.Fatalf("seed visible file failed: %v", err)
+	}
+	if _, err := store.DeleteFile(relayfile.DeleteRequest{WorkspaceID: workspaceID, Path: visiblePath, IfMatch: seeded.TargetRevision}); err != nil {
+		t.Fatalf("delete visible file failed: %v", err)
+	}
+	store.Close()
+
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read state.json: %v", err)
+	}
+	var snapshot map[string]any
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		t.Fatalf("unmarshal state.json: %v", err)
+	}
+	workspaces, _ := snapshot["workspaces"].(map[string]any)
+	wsSnapshot, _ := workspaces[workspaceID].(map[string]any)
+	events, _ := wsSnapshot["events"].([]any)
+	if len(events) == 0 {
+		t.Fatalf("expected seeded events in persisted snapshot, got %+v", wsSnapshot)
+	}
+	events = append(events,
+		// The malformed event under test: file.deleted, empty path, no
+		// recorded ACL snapshot.
+		map[string]any{
+			"eventId":       malformedEventID,
+			"type":          "file.deleted",
+			"path":          "",
+			"revision":      "rev_malformed",
+			"origin":        "system",
+			"correlationId": "corr_malformed",
+			"timestamp":     time.Now().UTC().Format(time.RFC3339Nano),
+		},
+		// A legitimate non-file, empty-path progress event: the fast path
+		// exists for exactly this shape and must keep working.
+		map[string]any{
+			"eventId":       nonFileEventID,
+			"type":          "sync.suppressed",
+			"path":          "",
+			"revision":      "",
+			"origin":        "provider_sync",
+			"correlationId": "corr_nonfile",
+			"timestamp":     time.Now().UTC().Format(time.RFC3339Nano),
+		},
+	)
+	wsSnapshot["events"] = events
+	workspaces[workspaceID] = wsSnapshot
+	snapshot["workspaces"] = workspaces
+	patched, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("marshal patched state.json: %v", err)
+	}
+	if err := os.WriteFile(statePath, patched, 0o644); err != nil {
+		t.Fatalf("write patched state.json: %v", err)
+	}
+
+	reloaded := relayfile.NewStoreWithOptions(relayfile.StoreOptions{
+		StateBackend:   relayfile.NewJSONFileStateBackend(statePath),
+		DisableWorkers: true,
+	})
+	t.Cleanup(reloaded.Close)
+	server := NewServer(reloaded)
+	claims := tokenClaims{WorkspaceID: workspaceID, AgentName: "AnyAgent", Scopes: map[string]struct{}{"fs:read": {}}}
+
+	reloadedFeed, err := reloaded.GetEvents(workspaceID, "", "", 100)
+	if err != nil {
+		t.Fatalf("get reloaded events failed: %v", err)
+	}
+	var checkedMalformed, checkedNonFile, checkedVisible bool
+	for _, event := range reloadedFeed.Events {
+		switch {
+		case event.EventID == malformedEventID:
+			checkedMalformed = true
+			if event.ACLPermissions != nil {
+				t.Fatalf("expected the malformed event to reload with ACLPermissions == nil, got %v", event.ACLPermissions)
+			}
+			if event.Path != "" {
+				t.Fatalf("expected the malformed event's empty path to survive reload, got %q", event.Path)
+			}
+			if server.eventVisibleToClaims(workspaceID, claims, event) {
+				t.Fatal("malformed empty-path unsnapshotted file.deleted event must fail closed, not fall through the empty-path fast path")
+			}
+		case event.EventID == nonFileEventID:
+			checkedNonFile = true
+			if !server.eventVisibleToClaims(workspaceID, claims, event) {
+				t.Fatal("a legitimate non-file empty-path event must still take the always-visible fast path — it must not have been collateral damage from the P2 fix")
+			}
+		case event.Type == "file.deleted" && event.Path == visiblePath:
+			checkedVisible = true
+			if !server.eventVisibleToClaims(workspaceID, claims, event) {
+				t.Fatal("normal sibling delete event (real ACL snapshot, empty permissions) must remain visible")
+			}
+		}
+	}
+	if !checkedMalformed || !checkedNonFile || !checkedVisible {
+		t.Fatalf("expected to find all three events after reload: malformed=%v nonfile=%v visible=%v (events=%+v)", checkedMalformed, checkedNonFile, checkedVisible, reloadedFeed.Events)
+	}
+
+	// --- Real HTTP surface ---
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	token := mustTestJWT(t, "dev-secret", workspaceID, "AnyAgent", []string{"fs:read"}, time.Now().Add(time.Hour))
+	resp := doRequest(t, server, request{
+		method:  http.MethodGet,
+		path:    "/v1/workspaces/" + workspaceID + "/fs/events?limit=100",
+		headers: map[string]string{"Authorization": "Bearer " + token, "X-Correlation-Id": "corr_malformed_http"},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("events returned %d: %s", resp.Code, resp.Body.String())
+	}
+	var httpFeed relayfile.EventFeed
+	if err := json.NewDecoder(resp.Body).Decode(&httpFeed); err != nil {
+		t.Fatalf("decode events: %v", err)
+	}
+	var sawMalformed, sawNonFile, sawVisible bool
+	for _, event := range httpFeed.Events {
+		if event.EventID == malformedEventID {
+			sawMalformed = true
+		}
+		if event.EventID == nonFileEventID {
+			sawNonFile = true
+		}
+		if event.Type == "file.deleted" && event.Path == visiblePath {
+			sawVisible = true
+		}
+	}
+	if sawMalformed {
+		t.Fatal("malformed empty-path unsnapshotted delete leaked over HTTP")
+	}
+	if !sawNonFile {
+		t.Fatal("legitimate non-file empty-path event incorrectly hidden over HTTP")
+	}
+	if !sawVisible {
+		t.Fatal("normal sibling delete incorrectly hidden over HTTP")
+	}
+
+	// --- Real WebSocket catch-up: collect until pong rather than asserting
+	// a fixed order/count, since the malformed and non-file events share
+	// the same empty Path (and fileEventMessage.Path is `omitempty`) —
+	// what matters is the malformed event never arrives and the other two
+	// do.
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/v1/workspaces/" + workspaceID + "/fs/ws?token=" + token
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("websocket dial failed: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "ping"}); err != nil {
+		t.Fatalf("write ping failed: %v", err)
+	}
+	var sawWSVisibleDelete, sawWSNonFile bool
+	for {
+		var msg map[string]any
+		if err := wsjson.Read(ctx, conn, &msg); err != nil {
+			t.Fatalf("websocket read failed: %v", err)
+		}
+		if msg["type"] == "pong" {
+			break
+		}
+		if msg["type"] == "file.deleted" {
+			if msg["path"] == visiblePath {
+				sawWSVisibleDelete = true
+			} else {
+				t.Fatalf("unexpected file.deleted over websocket catch-up: %+v (malformed empty-path event must never be delivered)", msg)
+			}
+		}
+		if msg["type"] == "sync.suppressed" {
+			sawWSNonFile = true
+		}
+	}
+	if !sawWSVisibleDelete {
+		t.Fatal("normal sibling delete incorrectly hidden over websocket catch-up")
+	}
+	if !sawWSNonFile {
+		t.Fatal("legitimate non-file empty-path event incorrectly hidden over websocket catch-up")
+	}
+}
+
 func TestFileEventsWebSocketCursorCatchUpDrainsMoreThanOnePage(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)

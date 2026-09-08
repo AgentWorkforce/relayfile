@@ -4488,7 +4488,7 @@ func (s *Store) applyProviderDeleteLocked(ws *workspaceState, provider string, a
 		CorrelationID: correlationID,
 		Timestamp:     now,
 	}
-	event.ACLPermissions = append([]string(nil), aclPermissions...)
+	event.ACLPermissions = snapshotACLPermissions(aclPermissions)
 	s.appendWorkspaceEventLocked(workspaceID, ws, event)
 }
 

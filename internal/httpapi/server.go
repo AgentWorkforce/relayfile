@@ -2366,14 +2366,6 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request, worksp
 }
 
 func (s *Server) eventVisibleToClaims(workspaceID string, claims tokenClaims, event relayfile.Event) bool {
-	path := strings.TrimSpace(event.Path)
-	if path == "" {
-		return true
-	}
-	path = normalizeACLPath(path)
-	if !scopeMatchesPath(claims.Scopes, "fs:read", path) {
-		return false
-	}
 	if event.Type == "file.deleted" && event.ACLPermissions == nil {
 		// Fail closed: relayfile.snapshotACLPermissions guarantees every
 		// delete event produced by ACL-snapshot-aware code carries a non-nil
@@ -2384,6 +2376,22 @@ func (s *Server) eventVisibleToClaims(workspaceID string, claims tokenClaims, ev
 		// is gone from ws.Files), so we cannot rule out a file-level deny
 		// that would have hidden this path. Denying visibility is the only
 		// choice that cannot leak a hidden file's prior existence/deletion.
+		//
+		// This check MUST run before the empty-path fast path below: a
+		// malformed or legacy file.deleted event can carry an empty Path
+		// (e.g. truncated/corrupted persisted data), and that fast path is
+		// an unconditional "visible to everyone" — routing an unsnapshotted
+		// delete through it would silently defeat this whole guard. Every
+		// other event type (sync.* progress events with Path "/" or "",
+		// etc.) is unaffected and keeps the fast path.
+		return false
+	}
+	path := strings.TrimSpace(event.Path)
+	if path == "" {
+		return true
+	}
+	path = normalizeACLPath(path)
+	if !scopeMatchesPath(claims.Scopes, "fs:read", path) {
 		return false
 	}
 	if event.ACLPermissions != nil && !filePermissionAllows(event.ACLPermissions, workspaceID, &claims, "read", path) {
