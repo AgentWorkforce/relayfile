@@ -4369,11 +4369,22 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 	path := normalizePath(action.Path)
 	objectID := strings.TrimSpace(action.ProviderObjectID)
 	if path == "/" && objectID != "" {
-		if indexedPath, ok := ws.ProviderIndex[providerObjectKey(provider, objectID)]; ok {
-			path = indexedPath
-		} else {
-			path = fallbackProviderPath(provider, objectID)
+		resolvedPath, ok := resolveProviderObjectUpsertPathLocked(ws, provider, objectID)
+		if !ok {
+			// A pathless provider action must never overwrite a path whose
+			// ownership cannot be proven. Ask mounts to perform an authoritative
+			// reconciliation rather than materializing an unsafe projection.
+			s.appendWorkspaceEventLocked(workspaceID, ws, Event{
+				EventID:       s.nextEventIDLocked(),
+				Type:          "sync.reconcile",
+				Origin:        "provider_sync",
+				Provider:      provider,
+				CorrelationID: correlationID,
+				Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
+			})
+			return
 		}
+		path = resolvedPath
 	}
 	if path == "/" {
 		return
@@ -4389,22 +4400,30 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 	if objectID != "" {
 		key := providerObjectKey(provider, objectID)
 		if previousPath, ok := ws.ProviderIndex[key]; ok && previousPath != path {
-			aclPermissions := resolvePermissionsFromFiles(ws.Files, previousPath, true)
-			delete(ws.Files, previousPath)
-			moveRevision := s.nextRevisionLocked()
-			ws.Revision = moveRevision
-			event := Event{
-				EventID:       s.nextEventIDLocked(),
-				Type:          "file.deleted",
-				Path:          previousPath,
-				Revision:      moveRevision,
-				Origin:        "provider_sync",
-				Provider:      provider,
-				CorrelationID: correlationID,
-				Timestamp:     now,
+			previousFile, previousExists := ws.Files[previousPath]
+			if previousExists && providerObjectMatchesFile(previousFile, provider, objectID) {
+				aclPermissions := resolvePermissionsFromFiles(ws.Files, previousPath, true)
+				delete(ws.Files, previousPath)
+				moveRevision := s.nextRevisionLocked()
+				ws.Revision = moveRevision
+				event := Event{
+					EventID:       s.nextEventIDLocked(),
+					Type:          "file.deleted",
+					Path:          previousPath,
+					Revision:      moveRevision,
+					Origin:        "provider_sync",
+					Provider:      provider,
+					CorrelationID: correlationID,
+					Timestamp:     now,
+				}
+				event.ACLPermissions = snapshotACLPermissions(aclPermissions)
+				s.appendWorkspaceEventLocked(workspaceID, ws, event)
+			} else {
+				// The index was stale or pointed at a different object's file.
+				// It is not an authorization to delete that file; discard only
+				// the bad index entry before recording the new projection.
+				delete(ws.ProviderIndex, key)
 			}
-			event.ACLPermissions = snapshotACLPermissions(aclPermissions)
-			s.appendWorkspaceEventLocked(workspaceID, ws, event)
 		}
 	}
 
@@ -4582,6 +4601,54 @@ func providerObjectMatchesFile(file File, provider, objectID string) bool {
 	return normalizeProvider(file.Provider) == normalizeProvider(provider) &&
 		normalizeProvider(provider) != "" &&
 		strings.TrimSpace(file.ProviderObjectID) == strings.TrimSpace(objectID)
+}
+
+// resolveProviderObjectUpsertPathLocked resolves the identity projection for
+// a pathless provider upsert. The persisted index is only a hint; unlike the
+// old pathless path, every indexed hit is checked against the live file's
+// provider/object identity before it can be overwritten. If no existing
+// identity can be proved, retain the legacy projection when it is free and
+// deterministically disambiguate only when that projection is occupied by a
+// different object.
+func resolveProviderObjectUpsertPathLocked(ws *workspaceState, provider, objectID string) (string, bool) {
+	if ws == nil || strings.TrimSpace(objectID) == "" || normalizeProvider(provider) == "" {
+		return "", false
+	}
+	objectID = strings.TrimSpace(objectID)
+	if resolved, ok := resolveProviderObjectPathLocked(ws, provider, objectID); ok {
+		return resolved, true
+	}
+
+	legacyPath := fallbackProviderPath(provider, objectID)
+	if legacyPath == "/" {
+		return "", false
+	}
+	if existing, exists := ws.Files[legacyPath]; !exists || providerObjectMatchesFile(existing, provider, objectID) {
+		return legacyPath, true
+	}
+
+	// Keep the legacy path for the first object (backward compatibility), but
+	// never let sanitized IDs such as "a/b" and "a_b" overwrite one another.
+	// Include the canonical provider and raw object ID in the digest so the
+	// disambiguated projection is stable across restarts and index loss.
+	digest := sha256.Sum256([]byte(normalizeProvider(provider) + "\x00" + objectID))
+	base := strings.TrimSuffix(legacyPath, ".md")
+	for _, suffix := range []string{hex.EncodeToString(digest[:8]), hex.EncodeToString(digest[:])} {
+		candidate := normalizePath(base + "-" + suffix + ".md")
+		if existing, exists := ws.Files[candidate]; !exists || providerObjectMatchesFile(existing, provider, objectID) {
+			return candidate, true
+		}
+	}
+	// A full digest collision is extraordinarily unlikely, but do not turn
+	// that assumption into a destructive overwrite. A bounded deterministic
+	// suffix gives a corrupt/adversarial workspace a safe escape hatch.
+	for attempt := 2; attempt <= 1024; attempt++ {
+		candidate := normalizePath(fmt.Sprintf("%s-%s-%d.md", base, hex.EncodeToString(digest[:]), attempt))
+		if existing, exists := ws.Files[candidate]; !exists || providerObjectMatchesFile(existing, provider, objectID) {
+			return candidate, true
+		}
+	}
+	return "", false
 }
 
 func canonicalizeProviderActionLocked(ws *workspaceState, provider string, action ApplyAction) ApplyAction {

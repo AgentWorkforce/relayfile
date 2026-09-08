@@ -5644,6 +5644,19 @@ func (s *Syncer) RefreshRealtimeStateWithContext(ctx context.Context) error {
 			return err
 		}
 	}
+	if !s.writeOnly && s.forceFullReconcile {
+		// A pathless sync.reconcile websocket event cannot identify the
+		// hidden path that changed. Healthy realtime mounts still need to
+		// consume the durable request here; otherwise the normal heartbeat
+		// would keep skipping O(tree) reconciliation until the websocket
+		// failed or an operator manually pulled. pullRemote clears the flag
+		// only after the authoritative pull completes successfully.
+		if err := s.pullRemote(ctx, nil); err != nil {
+			s.markSyncError(err)
+			_ = s.saveStateWithoutLocalScan()
+			return err
+		}
+	}
 	s.markSyncSuccess()
 	return s.saveStateWithoutLocalScan()
 }

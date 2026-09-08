@@ -1707,6 +1707,103 @@ func TestProviderUpsertWithoutPathUsesObjectIdentity(t *testing.T) {
 	t.Fatalf("expected object-identity upsert without path to update existing projected file")
 }
 
+func TestProviderUpsertWithoutPathRejectsStaleIndexIdentity(t *testing.T) {
+	const provider = "external"
+	const objectID = "object_target"
+	const stalePath = "/external/wrong.md"
+
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	store.mu.Lock()
+	ws := store.ensureWorkspaceLocked("ws_provider_upsert_stale_index")
+	ws.Files[stalePath] = File{
+		Path:             stalePath,
+		Content:          "wrong object must survive",
+		ContentType:      "text/markdown",
+		Provider:         provider,
+		ProviderObjectID: "different_object",
+	}
+	ws.ProviderIndex[providerObjectKey(provider, objectID)] = stalePath
+	store.applyProviderUpsertLocked(ws, provider, ApplyAction{
+		Type:             ActionFileUpsert,
+		ProviderObjectID: objectID,
+		Content:          "target content",
+	}, "corr_provider_upsert_stale_index")
+	gotFiles := make(map[string]File, len(ws.Files))
+	for path, file := range ws.Files {
+		gotFiles[path] = file
+	}
+	gotPath := ws.ProviderIndex[providerObjectKey(provider, objectID)]
+	store.mu.Unlock()
+
+	wrong, ok := gotFiles[stalePath]
+	if !ok || wrong.ProviderObjectID != "different_object" || wrong.Content != "wrong object must survive" {
+		t.Fatalf("stale index target was overwritten: files=%+v", gotFiles)
+	}
+	if gotPath == "" || gotPath == stalePath {
+		t.Fatalf("pathless upsert trusted stale index: provider index=%q", gotPath)
+	}
+	target, ok := gotFiles[gotPath]
+	if !ok || target.ProviderObjectID != objectID || target.Content != "target content" {
+		t.Fatalf("target identity was not materialized safely: path=%q files=%+v", gotPath, gotFiles)
+	}
+}
+
+func TestProviderUpsertWithoutPathDisambiguatesSanitizedIDCollision(t *testing.T) {
+	const provider = "external"
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	store.mu.Lock()
+	ws := store.ensureWorkspaceLocked("ws_provider_upsert_collision")
+	for _, tc := range []struct {
+		objectID string
+		content  string
+	}{
+		{objectID: "a/b", content: "slash identity"},
+		{objectID: "a_b", content: "underscore identity"},
+	} {
+		store.applyProviderUpsertLocked(ws, provider, ApplyAction{
+			Type:             ActionFileUpsert,
+			ProviderObjectID: tc.objectID,
+			Content:          tc.content,
+		}, "corr_provider_upsert_collision")
+	}
+	firstPath := ws.ProviderIndex[providerObjectKey(provider, "a/b")]
+	secondPath := ws.ProviderIndex[providerObjectKey(provider, "a_b")]
+	first := ws.Files[firstPath]
+	second := ws.Files[secondPath]
+	store.mu.Unlock()
+
+	if firstPath != fallbackProviderPath(provider, "a/b") {
+		t.Fatalf("first legacy projection changed unexpectedly: %q", firstPath)
+	}
+	if secondPath == "" || secondPath == firstPath {
+		t.Fatalf("sanitized object IDs collided at %q", secondPath)
+	}
+	if first.ProviderObjectID != "a/b" || first.Content != "slash identity" {
+		t.Fatalf("first object was overwritten: %+v", first)
+	}
+	if second.ProviderObjectID != "a_b" || second.Content != "underscore identity" {
+		t.Fatalf("second object was not materialized: %+v", second)
+	}
+
+	// A repeated pathless update must remain on the same deterministic
+	// disambiguated projection rather than creating another collision path.
+	store.mu.Lock()
+	ws = store.ensureWorkspaceLocked("ws_provider_upsert_collision")
+	store.applyProviderUpsertLocked(ws, provider, ApplyAction{
+		Type:             ActionFileUpsert,
+		ProviderObjectID: "a_b",
+		Content:          "underscore identity updated",
+	}, "corr_provider_upsert_collision_update")
+	updatedPath := ws.ProviderIndex[providerObjectKey(provider, "a_b")]
+	updated := ws.Files[updatedPath]
+	store.mu.Unlock()
+	if updatedPath != secondPath || updated.Content != "underscore identity updated" {
+		t.Fatalf("repeated pathless update moved collision-safe projection: path=%q file=%+v", updatedPath, updated)
+	}
+}
+
 func TestProviderDeleteWithoutPathEmitsReconcileControlEvent(t *testing.T) {
 	store := NewStore()
 	t.Cleanup(store.Close)
