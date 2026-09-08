@@ -49,7 +49,7 @@ test("attestation binds source, run, package digests, binaries and tag commit/tr
   assert.equal(result.tag.tree, "d".repeat(40));
 });
 
-test("attestation rejects a package from a different source or missing package", () => {
+test("attestation rejects a package from a different source", () => {
   const sourceSha = "a".repeat(40);
   assert.throws(
     () =>
@@ -62,13 +62,36 @@ test("attestation rejects a package from a different source or missing package",
         tagCommit: "b".repeat(40),
         tagTree: "d".repeat(40),
         repository: "AgentWorkforce/relayfile",
-        packages: packageRecords("d".repeat(40)).slice(0, -1),
+        packages: packageRecords("d".repeat(40)),
         binaries: RELEASE_BINARY_NAMES.map((file) => ({
           file,
           sha256: "c".repeat(64),
         })),
       }),
     /different source SHA|missing packages/,
+  );
+});
+
+test("attestation rejects a missing package after validating the remaining set", () => {
+  const sourceSha = "a".repeat(40);
+  assert.throws(
+    () =>
+      buildReleaseAttestation({
+        sourceSha,
+        runId: 123,
+        runAttempt: 1,
+        version: "1.2.3",
+        tag: "v1.2.3",
+        tagCommit: "b".repeat(40),
+        tagTree: "d".repeat(40),
+        repository: "AgentWorkforce/relayfile",
+        packages: packageRecords(sourceSha).slice(0, -1),
+        binaries: RELEASE_BINARY_NAMES.map((file) => ({
+          file,
+          sha256: "c".repeat(64),
+        })),
+      }),
+    /missing packages/,
   );
 });
 
@@ -94,6 +117,70 @@ test("attestation rejects registry content that differs from the local tarball",
         })),
       }),
     /registry integrity does not match/,
+  );
+});
+
+test("attestation rejects incomparable mixed digest types", () => {
+  const sourceSha = "a".repeat(40);
+  const packages = packageRecords(sourceSha);
+  packages[0].package.local.shasum = null;
+  packages[0].package.registry = { shasum: "sha1-other" };
+  assert.throws(
+    () =>
+      buildReleaseAttestation({
+        sourceSha,
+        runId: 123,
+        runAttempt: 1,
+        version: "1.2.3",
+        tag: "v1.2.3",
+        tagCommit: "b".repeat(40),
+        tagTree: "d".repeat(40),
+        repository: "AgentWorkforce/relayfile",
+        packages,
+        binaries: RELEASE_BINARY_NAMES.map((file) => ({
+          file,
+          sha256: "c".repeat(64),
+        })),
+      }),
+    /no common digest/,
+  );
+});
+
+test("attestation rejects unexpected package names", () => {
+  const sourceSha = "a".repeat(40);
+  const packages = packageRecords(sourceSha);
+  packages.push({
+    sourceSha,
+    package: {
+      name: "@relayfile/unexpected",
+      version: "1.2.3",
+      status: "already-published",
+      local: {
+        sha256: "a".repeat(64),
+        integrity: "sha512-local",
+        shasum: "sha1-local",
+      },
+      registry: { integrity: "sha512-local", shasum: "sha1-local" },
+    },
+  });
+  assert.throws(
+    () =>
+      buildReleaseAttestation({
+        sourceSha,
+        runId: 123,
+        runAttempt: 1,
+        version: "1.2.3",
+        tag: "v1.2.3",
+        tagCommit: "b".repeat(40),
+        tagTree: "d".repeat(40),
+        repository: "AgentWorkforce/relayfile",
+        packages,
+        binaries: RELEASE_BINARY_NAMES.map((file) => ({
+          file,
+          sha256: "c".repeat(64),
+        })),
+      }),
+    /not a release package/,
   );
 });
 

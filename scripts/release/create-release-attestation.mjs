@@ -83,6 +83,9 @@ export function buildReleaseAttestation({
     if (!record?.name || !record.version || names.has(record.name)) {
       throw new Error("attestation package records are missing or duplicated");
     }
+    if (!RELEASE_PACKAGE_NAMES.includes(record.name)) {
+      throw new Error(`${record.name} is not a release package`);
+    }
     if (record.version !== version)
       throw new Error(`${record.name} has the wrong release version`);
     if (!["published", "already-published"].includes(record.status)) {
@@ -104,20 +107,22 @@ export function buildReleaseAttestation({
         `${record.name} registry version does not match the package`,
       );
     }
+    const sharedIntegrity = record.registry.integrity && record.local.integrity;
+    const sharedShasum = record.registry.shasum && record.local.shasum;
+    if (!sharedIntegrity && !sharedShasum) {
+      throw new Error(
+        `${record.name} registry and local records have no common digest`,
+      );
+    }
     if (
-      record.registry.integrity &&
-      record.local.integrity &&
+      sharedIntegrity &&
       record.registry.integrity !== record.local.integrity
     ) {
       throw new Error(
         `${record.name} registry integrity does not match the local tarball`,
       );
     }
-    if (
-      record.registry.shasum &&
-      record.local.shasum &&
-      record.registry.shasum !== record.local.shasum
-    ) {
+    if (sharedShasum && record.registry.shasum !== record.local.shasum) {
       throw new Error(
         `${record.name} registry shasum does not match the local tarball`,
       );

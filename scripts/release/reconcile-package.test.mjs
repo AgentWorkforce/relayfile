@@ -85,6 +85,129 @@ test("reconciliation publishes an absent version and verifies it afterwards", as
   rmSync(dir, { recursive: true, force: true });
 });
 
+test("post-publish propagation retries an absent registry response", async () => {
+  const dir = sandbox();
+  const state = { views: 0, publishes: 0 };
+  const npm = async (command, args, { cwd }) => {
+    assert.equal(command, "npm");
+    if (args[0] === "pack") {
+      writeFileSync(
+        join(cwd, "relayfile-test-1.2.3.tgz"),
+        "immutable package content",
+      );
+      return {
+        code: 0,
+        stdout: JSON.stringify([
+          {
+            filename: "relayfile-test-1.2.3.tgz",
+            name: "@relayfile/test",
+            version: "1.2.3",
+            integrity: "sha512-local",
+            shasum: "sha1-local",
+          },
+        ]),
+        stderr: "",
+      };
+    }
+    if (args[0] === "view") {
+      state.views += 1;
+      if (state.views <= 2)
+        return { code: 1, stdout: "", stderr: "npm error code E404" };
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          integrity: "sha512-local",
+          shasum: "sha1-local",
+        }),
+        stderr: "",
+      };
+    }
+    if (args[0] === "publish") {
+      state.publishes += 1;
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    throw new Error(`unexpected npm command: ${args.join(" ")}`);
+  };
+  const result = await reconcilePackage({
+    packageDir: dir,
+    tag: "next",
+    sourceSha: "a".repeat(40),
+    runId: 1,
+    runAttempt: 1,
+    npm,
+    attempts: 2,
+    sleep: async () => {},
+  });
+  assert.equal(result.package.status, "published");
+  assert.equal(state.publishes, 1);
+  assert.equal(state.views, 3);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("post-publish digest conflict fails closed without retrying", async () => {
+  const dir = sandbox();
+  const state = { views: 0, publishes: 0 };
+  let firstView = true;
+  const npm = async (command, args, { cwd }) => {
+    assert.equal(command, "npm");
+    if (args[0] === "pack") {
+      writeFileSync(
+        join(cwd, "relayfile-test-1.2.3.tgz"),
+        "immutable package content",
+      );
+      return {
+        code: 0,
+        stdout: JSON.stringify([
+          {
+            filename: "relayfile-test-1.2.3.tgz",
+            name: "@relayfile/test",
+            version: "1.2.3",
+            integrity: "sha512-local",
+            shasum: "sha1-local",
+          },
+        ]),
+        stderr: "",
+      };
+    }
+    if (args[0] === "view") {
+      state.views += 1;
+      if (firstView) {
+        firstView = false;
+        return { code: 1, stdout: "", stderr: "npm error code E404" };
+      }
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          integrity: "sha512-other",
+          shasum: "sha1-other",
+        }),
+        stderr: "",
+      };
+    }
+    if (args[0] === "publish") {
+      state.publishes += 1;
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    throw new Error(`unexpected npm command: ${args.join(" ")}`);
+  };
+  await assert.rejects(
+    reconcilePackage({
+      packageDir: dir,
+      tag: "next",
+      sourceSha: "a".repeat(40),
+      runId: 1,
+      runAttempt: 1,
+      npm,
+      attempts: 5,
+      sleep: async () => {},
+    }),
+    /post-publish verification failed/,
+  );
+  assert.equal(state.publishes, 1);
+  assert.equal(state.views, 2);
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("read-only preflight blocks every publish under mixed absent/conflict state", async () => {
   const absentDir = sandbox();
   const conflictDir = sandbox();
