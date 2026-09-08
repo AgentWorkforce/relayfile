@@ -1,0 +1,81 @@
+{
+  "id": "traj_9i36a7py61ph",
+  "version": 1,
+  "task": {
+    "title": "Repair release snapshot review findings: tag collision, rerun attestation metadata, package attestation schema binding",
+    "source": {
+      "system": "plain",
+      "id": "PR-479"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-09-08T20:03:36.554Z",
+  "completedAt": "2026-09-08T20:13:37.765Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-09-08T20:11:48.610Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_lk2edp0quhfl",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-09-08T20:11:48.610Z",
+      "endedAt": "2026-09-08T20:13:37.765Z",
+      "events": [
+        {
+          "ts": 1788898308613,
+          "type": "decision",
+          "content": "Preserve immutable tag producer metadata across exact same-workflow reruns: Preserve immutable tag producer metadata across exact same-workflow reruns",
+          "raw": {
+            "question": "Preserve immutable tag producer metadata across exact same-workflow reruns",
+            "chosen": "Preserve immutable tag producer metadata across exact same-workflow reruns",
+            "alternatives": [],
+            "reasoning": "The tag records the original run and attempt; regenerated package and release attestations must use that identity so future baseline validation remains valid."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1788898309888,
+          "type": "decision",
+          "content": "Reject automatic version targets that already have an untrusted tag: Reject automatic version targets that already have an untrusted tag",
+          "raw": {
+            "question": "Reject automatic version targets that already have an untrusted tag",
+            "chosen": "Reject automatic version targets that already have an untrusted tag",
+            "alternatives": [],
+            "reasoning": "Tag preparation occurs after publication, so collision rejection must happen in the build/version step before any package job."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1788898310523,
+          "type": "decision",
+          "content": "Validate complete package child attestations before composition: Validate complete package child attestations before composition",
+          "raw": {
+            "question": "Validate complete package child attestations before composition",
+            "chosen": "Validate complete package child attestations before composition",
+            "alternatives": [],
+            "reasoning": "Top-level release provenance is only trustworthy when every package child has canonical digests, complete fields, and exact source/run identity."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Repaired release snapshot provenance: automatic tag collisions fail before package jobs, exact reruns preserve immutable tag run metadata through child/top-level attestations, and package attestations require complete canonical fields and exact source/run identity. Added adversarial regressions; 68 release tests and static gates pass.",
+    "approach": "Standard approach",
+    "confidence": 0.94
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/private/tmp/relayfile-release-snapshot-fix-0908",
+  "tags": [],
+  "_trace": {
+    "startRef": "8afcd036e8cd29a4ea8d4de33453a4897f954be9",
+    "endRef": "8afcd036e8cd29a4ea8d4de33453a4897f954be9"
+  }
+}

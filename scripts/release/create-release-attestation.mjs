@@ -48,6 +48,50 @@ export const RELEASE_BINARY_NAMES = [
   "relayfile-cli-windows-arm64.exe",
 ];
 
+/**
+ * Validate one package-level release attestation, including its provenance
+ * identity. Package records are composed into a top-level attestation, so a
+ * valid digest alone is not enough: the child must describe this exact
+ * release source and workflow attempt.
+ */
+export function isCompletePackageAttestation(
+  item,
+  { sourceSha, version, workflowRunId, workflowRunAttempt } = {},
+) {
+  const record = item?.package;
+  const local = record?.local;
+  const registry = record?.registry;
+  if (
+    item?.schemaVersion !== 1 ||
+    item.kind !== "relayfileReleasePackage" ||
+    item.sourceSha !== sourceSha ||
+    item.workflowRunId !== String(workflowRunId) ||
+    item.workflowRunAttempt !== String(workflowRunAttempt) ||
+    !record ||
+    !RELEASE_PACKAGE_NAMES.includes(record.name) ||
+    record.version !== version ||
+    !["published", "already-published"].includes(record.status) ||
+    !local ||
+    typeof local.file !== "string" ||
+    !local.file ||
+    !Number.isInteger(local.size) ||
+    local.size < 0 ||
+    !SHA256.test(String(local.sha256 ?? "")) ||
+    !isSha512Integrity(local.integrity) ||
+    !isSha1Shasum(local.shasum) ||
+    !registry ||
+    registry.name !== record.name ||
+    registry.version !== record.version ||
+    !isSha512Integrity(registry.integrity) ||
+    !isSha1Shasum(registry.shasum)
+  ) {
+    return false;
+  }
+  return (
+    registry.integrity === local.integrity && registry.shasum === local.shasum
+  );
+}
+
 export function readPackageAttestations(directory) {
   return readdirSync(directory)
     .filter((file) => file.endsWith(".json"))
@@ -89,6 +133,8 @@ export function buildReleaseAttestation({
     throw new Error("attestation version is missing");
   if (tag !== `v${version}`)
     throw new Error("attestation tag/version mismatch");
+  if (!/^\d+$/.test(String(runId)) || !/^\d+$/.test(String(runAttempt)))
+    throw new Error("attestation workflow run identity is invalid");
   if (!Array.isArray(packages) || packages.length === 0)
     throw new Error("attestation has no package records");
   const names = new Set();
@@ -159,6 +205,16 @@ export function buildReleaseAttestation({
     }
     if (item.sourceSha !== sourceSha)
       throw new Error(`${record.name} has a different source SHA`);
+    if (
+      !isCompletePackageAttestation(item, {
+        sourceSha,
+        version,
+        workflowRunId: runId,
+        workflowRunAttempt: runAttempt,
+      })
+    ) {
+      throw new Error(`${record.name} has an incomplete package attestation`);
+    }
     names.add(record.name);
   }
   const missing = RELEASE_PACKAGE_NAMES.filter((name) => !names.has(name));

@@ -22,7 +22,11 @@ const VALID_SHASUM = "a".repeat(40);
 
 function attestationFor(candidate, overrides = {}) {
   const packages = RELEASE_PACKAGE_NAMES.map((name) => ({
+    schemaVersion: 1,
+    kind: "relayfileReleasePackage",
     sourceSha: candidate.parent,
+    workflowRunId: candidate.metadata?.workflowRunId ?? "123",
+    workflowRunAttempt: candidate.metadata?.workflowRunAttempt ?? "1",
     package: {
       name,
       version: candidate.version.raw,
@@ -286,6 +290,8 @@ test("same-workflow reruns accept only exact run/source/tree metadata", () => {
   });
   assert.equal(result.baselineVersion, "2.0.0");
   assert.equal(result.resumableVersion, "2.0.0");
+  assert.equal(result.resumableRunId, "12345");
+  assert.equal(result.resumableRunAttempt, "1");
   rmSync(cwd, { recursive: true, force: true });
 });
 
@@ -332,4 +338,26 @@ test("external attestations reject malformed digest strings even when equal", ()
     assert.equal(result.latestTag, "", field);
     rmSync(cwd, { recursive: true, force: true });
   }
+});
+
+test("a rerun attestation with a new attempt cannot replace immutable tag metadata", () => {
+  const { cwd, sourceSha } = sandboxWithPriorRelease();
+  const result = resolveReleaseBaseline({
+    cwd,
+    sourceSha,
+    currentVersion: "1.2.3",
+    currentRunId: "123",
+    currentRunAttempt: "2",
+    releaseAttestationVerifier: ({ candidate }) => {
+      const attestation = attestationFor(candidate);
+      attestation.producer.workflowRunAttempt = "2";
+      for (const item of attestation.packages) {
+        item.workflowRunAttempt = "2";
+      }
+      return attestation;
+    },
+  });
+  assert.equal(result.latestTag, "");
+  assert.equal(result.resumableVersion, "");
+  rmSync(cwd, { recursive: true, force: true });
 });

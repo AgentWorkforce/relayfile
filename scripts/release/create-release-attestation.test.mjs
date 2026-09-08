@@ -13,19 +13,35 @@ const OTHER_INTEGRITY = `sha512-${"A".repeat(85)}Q==`;
 const VALID_SHASUM = "a".repeat(40);
 const OTHER_SHASUM = "b".repeat(40);
 
-function packageRecords(sourceSha, version = "1.2.3") {
+function packageRecords(
+  sourceSha,
+  version = "1.2.3",
+  workflowRunId = 123,
+  workflowRunAttempt = 1,
+) {
   return RELEASE_PACKAGE_NAMES.map((name) => ({
+    schemaVersion: 1,
+    kind: "relayfileReleasePackage",
     sourceSha,
+    workflowRunId: String(workflowRunId),
+    workflowRunAttempt: String(workflowRunAttempt),
     package: {
       name,
       version,
       status: "already-published",
       local: {
+        file: "package.tgz",
+        size: 1,
         sha256: "a".repeat(64),
         integrity: VALID_INTEGRITY,
         shasum: VALID_SHASUM,
       },
-      registry: { integrity: VALID_INTEGRITY },
+      registry: {
+        name,
+        version,
+        integrity: VALID_INTEGRITY,
+        shasum: VALID_SHASUM,
+      },
     },
   }));
 }
@@ -41,7 +57,7 @@ test("attestation binds source, run, package digests, binaries and tag commit/tr
     tagCommit: "b".repeat(40),
     tagTree: "d".repeat(40),
     repository: "AgentWorkforce/relayfile",
-    packages: packageRecords(sourceSha),
+    packages: packageRecords(sourceSha, "1.2.3", 123, 2),
     binaries: RELEASE_BINARY_NAMES.map((file) => ({
       file,
       sha256: "c".repeat(64),
@@ -212,6 +228,56 @@ test("attestation rejects malformed equal digest strings", () => {
         })),
       }),
     /malformed package digest/,
+  );
+});
+
+test("attestation rejects package children from another workflow attempt", () => {
+  const sourceSha = "a".repeat(40);
+  const packages = packageRecords(sourceSha, "1.2.3", 999, 1);
+  assert.throws(
+    () =>
+      buildReleaseAttestation({
+        sourceSha,
+        runId: 123,
+        runAttempt: 2,
+        version: "1.2.3",
+        tag: "v1.2.3",
+        tagCommit: "b".repeat(40),
+        tagTree: "d".repeat(40),
+        repository: "AgentWorkforce/relayfile",
+        packages,
+        binaries: RELEASE_BINARY_NAMES.map((file) => ({
+          file,
+          sha256: "c".repeat(64),
+        })),
+      }),
+    /incomplete package attestation/,
+  );
+});
+
+test("attestation rejects incomplete local and registry package fields", () => {
+  const sourceSha = "a".repeat(40);
+  const packages = packageRecords(sourceSha, "1.2.3", 123, 1);
+  delete packages[0].package.local.file;
+  delete packages[0].package.registry.name;
+  assert.throws(
+    () =>
+      buildReleaseAttestation({
+        sourceSha,
+        runId: 123,
+        runAttempt: 1,
+        version: "1.2.3",
+        tag: "v1.2.3",
+        tagCommit: "b".repeat(40),
+        tagTree: "d".repeat(40),
+        repository: "AgentWorkforce/relayfile",
+        packages,
+        binaries: RELEASE_BINARY_NAMES.map((file) => ({
+          file,
+          sha256: "c".repeat(64),
+        })),
+      }),
+    /incomplete package attestation/,
   );
 });
 

@@ -82,6 +82,8 @@ jobs:
       source_sha: ${{ steps.source.outputs.source_sha }}
       release_package: ${{ steps.inputs.outputs.package }}
       release_dry_run: ${{ steps.inputs.outputs.dry_run }}
+      release_run_id: ${{ steps.bump.outputs.release_run_id }}
+      release_run_attempt: ${{ steps.bump.outputs.release_run_attempt }}
 
     steps:
       - name: Validate and map dispatch inputs
@@ -233,6 +235,8 @@ jobs:
           SOURCE_SHA="${SOURCE_SHA:-}"
           BASELINE_VERSION="$CURRENT_VERSION"
           RESUMABLE_VERSION=""
+          RESUMABLE_RUN_ID=""
+          RESUMABLE_RUN_ATTEMPT=""
           if [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             BASELINE_INFO=$(node "${GITHUB_WORKSPACE:-.}/scripts/release/resolve-release-baseline.mjs" \
               --source-sha "$SOURCE_SHA" \
@@ -244,6 +248,8 @@ jobs:
               --run-attempt "$RELEASE_RUN_ATTEMPT")
             BASELINE_VERSION=$(printf '%s\n' "$BASELINE_INFO" | awk -F= '$1 == "baseline_version" { print $2 }')
             RESUMABLE_VERSION=$(printf '%s\n' "$BASELINE_INFO" | awk -F= '$1 == "resumable_version" { print $2 }')
+            RESUMABLE_RUN_ID=$(printf '%s\n' "$BASELINE_INFO" | awk -F= '$1 == "resumable_run_id" { print $2 }')
+            RESUMABLE_RUN_ATTEMPT=$(printf '%s\n' "$BASELINE_INFO" | awk -F= '$1 == "resumable_run_attempt" { print $2 }')
             test -n "$BASELINE_VERSION"
             echo "Trusted release baseline: $BASELINE_VERSION"
           fi
@@ -254,6 +260,8 @@ jobs:
           # resolve-release-baseline has cryptographically verified the tag's
           # source/tree/run metadata and exposed its version as resumable.
           RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
+          ATTESTATION_RUN_ID="${RELEASE_RUN_ID:-${GITHUB_RUN_ID:-}}"
+          ATTESTATION_RUN_ATTEMPT="${RELEASE_RUN_ATTEMPT:-${GITHUB_RUN_ATTEMPT:-1}}"
           RESUMABLE_CUSTOM=false
           if [ "$RUN_ATTEMPT" -gt 1 ] && [ -n "$CUSTOM_VERSION" ] && \
             [ -n "$RESUMABLE_VERSION" ] && [ "$CUSTOM_VERSION" = "$RESUMABLE_VERSION" ]; then
@@ -313,6 +321,20 @@ jobs:
           NEW_VERSION=$(node -p "require('./package.json').version")
           echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
           echo "New version: $NEW_VERSION"
+
+          if git show-ref --verify --quiet "refs/tags/v${NEW_VERSION}" 2>/dev/null && \
+            [ "$RESUMABLE_VERSION" != "$NEW_VERSION" ]; then
+            echo "release tag v${NEW_VERSION} already exists without an exact verified recovery" >&2
+            exit 1
+          fi
+          if [ -n "$RESUMABLE_VERSION" ] && [ "$RESUMABLE_VERSION" = "$NEW_VERSION" ]; then
+            test -n "$RESUMABLE_RUN_ID"
+            test -n "$RESUMABLE_RUN_ATTEMPT"
+            ATTESTATION_RUN_ID="$RESUMABLE_RUN_ID"
+            ATTESTATION_RUN_ATTEMPT="$RESUMABLE_RUN_ATTEMPT"
+          fi
+          echo "release_run_id=$ATTESTATION_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "release_run_attempt=$ATTESTATION_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
 
           if [[ "$NEW_VERSION" == *"-"* ]]; then
             echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
@@ -610,6 +632,8 @@ jobs:
           RELEASE_DRY_RUN: ${{ needs.build.outputs.release_dry_run }}
           SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
           RELEASE_VERSION: ${{ needs.build.outputs.new_version }}
+          RELEASE_RUN_ID: ${{ needs.build.outputs.release_run_id }}
+          RELEASE_RUN_ATTEMPT: ${{ needs.build.outputs.release_run_attempt }}
         run: |
           set -euo pipefail
           node "$GITHUB_WORKSPACE/scripts/release/reconcile-package.mjs" \
@@ -618,8 +642,8 @@ jobs:
             --dry-run "$RELEASE_DRY_RUN" \
             --preflight true \
             --source-sha "$SOURCE_SHA" \
-            --run-id "$GITHUB_RUN_ID" \
-            --run-attempt "$GITHUB_RUN_ATTEMPT"
+            --run-id "$RELEASE_RUN_ID" \
+            --run-attempt "$RELEASE_RUN_ATTEMPT"
 
   # Publish all packages in parallel after the read-only barrier.
   publish-packages:
@@ -729,6 +753,8 @@ jobs:
           RELEASE_DRY_RUN: ${{ needs.build.outputs.release_dry_run }}
           SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
           RELEASE_VERSION: ${{ needs.build.outputs.new_version }}
+          RELEASE_RUN_ID: ${{ needs.build.outputs.release_run_id }}
+          RELEASE_RUN_ATTEMPT: ${{ needs.build.outputs.release_run_attempt }}
         run: |
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/package-attestations"
@@ -737,8 +763,8 @@ jobs:
             --tag "$NPM_TAG" \
             --dry-run "$RELEASE_DRY_RUN" \
             --source-sha "$SOURCE_SHA" \
-            --run-id "$GITHUB_RUN_ID" \
-            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --run-id "$RELEASE_RUN_ID" \
+            --run-attempt "$RELEASE_RUN_ATTEMPT" \
             --output "$GITHUB_WORKSPACE/package-attestations/${{ matrix.package }}.json"
 
       - name: Upload package attestation
@@ -842,6 +868,8 @@ jobs:
           RELEASE_DRY_RUN: ${{ needs.build.outputs.release_dry_run }}
           SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
           RELEASE_VERSION: ${{ needs.build.outputs.new_version }}
+          RELEASE_RUN_ID: ${{ needs.build.outputs.release_run_id }}
+          RELEASE_RUN_ATTEMPT: ${{ needs.build.outputs.release_run_attempt }}
         run: |
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/package-attestations"
@@ -850,8 +878,8 @@ jobs:
             --tag "$NPM_TAG" \
             --dry-run "$RELEASE_DRY_RUN" \
             --source-sha "$SOURCE_SHA" \
-            --run-id "$GITHUB_RUN_ID" \
-            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --run-id "$RELEASE_RUN_ID" \
+            --run-attempt "$RELEASE_RUN_ATTEMPT" \
             --output "$GITHUB_WORKSPACE/package-attestations/${{ needs.build.outputs.release_package }}.json"
 
       - name: Upload package attestation
@@ -985,8 +1013,8 @@ jobs:
         env:
           NEW_VERSION: ${{ needs.build.outputs.new_version }}
           SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
-          RELEASE_RUN_ID: ${{ github.run_id }}
-          RELEASE_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RELEASE_RUN_ID: ${{ needs.build.outputs.release_run_id }}
+          RELEASE_RUN_ATTEMPT: ${{ needs.build.outputs.release_run_attempt }}
         run: |
           set -euo pipefail
           git config user.name "GitHub Actions"
@@ -1038,6 +1066,8 @@ jobs:
         env:
           SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
           RELEASE_VERSION: ${{ needs.build.outputs.new_version }}
+          RELEASE_RUN_ID: ${{ needs.build.outputs.release_run_id }}
+          RELEASE_RUN_ATTEMPT: ${{ needs.build.outputs.release_run_attempt }}
           NPM_TAG: ${{ github.event.inputs.tag }}
         run: |
           set -euo pipefail
@@ -1046,8 +1076,8 @@ jobs:
             --package-dir package-attestations \
             --checksums checksums.txt \
             --source-sha "$SOURCE_SHA" \
-            --run-id "$GITHUB_RUN_ID" \
-            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --run-id "$RELEASE_RUN_ID" \
+            --run-attempt "$RELEASE_RUN_ATTEMPT" \
             --version "$RELEASE_VERSION" \
             --tag "v$RELEASE_VERSION" \
             --tag-commit "$TAG_COMMIT" \
@@ -1074,8 +1104,8 @@ jobs:
         env:
           NEW_VERSION: ${{ needs.build.outputs.new_version }}
           SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
-          RELEASE_RUN_ID: ${{ github.run_id }}
-          RELEASE_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RELEASE_RUN_ID: ${{ needs.build.outputs.release_run_id }}
+          RELEASE_RUN_ATTEMPT: ${{ needs.build.outputs.release_run_attempt }}
         run: |
           set -euo pipefail
           if [ "${TAG_EXISTS:-false}" = "true" ]; then

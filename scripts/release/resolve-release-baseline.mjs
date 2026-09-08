@@ -23,6 +23,7 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
+  isCompletePackageAttestation,
   isSha1Shasum,
   isSha512Integrity,
   RELEASE_BINARY_NAMES,
@@ -405,6 +406,16 @@ export function validateReleaseAttestation(
     const name = record?.name;
     const local = record?.local;
     const registry = record?.registry;
+    if (
+      !isCompletePackageAttestation(item, {
+        sourceSha: candidate.parent,
+        version: candidate.version.raw,
+        workflowRunId: metadata?.workflowRunId,
+        workflowRunAttempt: metadata?.workflowRunAttempt,
+      })
+    ) {
+      return false;
+    }
     const digestFieldsAreValid =
       (local?.integrity == null || isSha512Integrity(local.integrity)) &&
       (local?.shasum == null || isSha1Shasum(local.shasum)) &&
@@ -639,9 +650,15 @@ export function resolveReleaseBaseline({
     })
       ? latest.version.raw
       : "";
+  const resumableRunId = resumable ? latest.metadata.workflowRunId : "";
+  const resumableRunAttempt = resumable
+    ? latest.metadata.workflowRunAttempt
+    : "";
   return {
     baselineVersion: baseline,
     resumableVersion: resumable,
+    resumableRunId,
+    resumableRunAttempt,
     latestTag: latest?.tag ?? "",
   };
 }
@@ -674,6 +691,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     });
     console.log(`baseline_version=${result.baselineVersion}`);
     console.log(`resumable_version=${result.resumableVersion}`);
+    console.log(`resumable_run_id=${result.resumableRunId}`);
+    console.log(`resumable_run_attempt=${result.resumableRunAttempt}`);
     console.log(`latest_tag=${result.latestTag}`);
   } catch (error) {
     console.error(

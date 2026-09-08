@@ -152,6 +152,45 @@ function runVersionStep({
   }
 }
 
+function runVersionStepWithConflictingAutomaticTag() {
+  const dir = mkdtempSync(join(tmpdir(), "relayfile-version-conflict-"));
+  const output = join(dir, "output");
+  git(dir, "init", "-q");
+  git(dir, "config", "user.name", "Release Test");
+  git(dir, "config", "user.email", "release-test@example.invalid");
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({ name: "relayfile-test-release", version: "1.2.3" }) + "\n",
+  );
+  git(dir, "add", "package.json");
+  git(dir, "commit", "-qm", "source");
+  const sourceSha = git(dir, "rev-parse", "HEAD");
+  // A lightweight/untrusted tag must block the automatic 1.2.4 bump before
+  // any package reconciliation can start.
+  git(dir, "tag", "v1.2.4", sourceSha);
+  try {
+    return runBash(extractStepRun("Version all packages"), {
+      cwd: dir,
+      env: {
+        CUSTOM_VERSION: "",
+        VERSION_TYPE: "patch",
+        PREID: "beta",
+        NPM_TAG: "next",
+        GITHUB_OUTPUT: output,
+        GITHUB_WORKSPACE: REPO,
+        SOURCE_SHA: sourceSha,
+        GITHUB_RUN_ID: "12345",
+        GITHUB_RUN_ATTEMPT: "1",
+        RELEASE_RUN_ID: "12345",
+        RELEASE_RUN_ATTEMPT: "1",
+        RELEASE_REPOSITORY: "AgentWorkforce/relayfile",
+      },
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 function runVersionStepAfterTaggedRelease({
   customVersion = "",
   runAttempt = "1",
@@ -224,7 +263,11 @@ function runVersionStepAfterTaggedRelease({
         RELEASE_PACKAGE_NAMES.map((name) => [name, "1.2.4"]),
       ),
       packages: RELEASE_PACKAGE_NAMES.map((name) => ({
+        schemaVersion: 1,
+        kind: "relayfileReleasePackage",
         sourceSha,
+        workflowRunId: "12345",
+        workflowRunAttempt: "1",
         package: {
           name,
           version: "1.2.4",
@@ -296,8 +339,9 @@ exit 1
     },
   });
   const packageJson = readFileSync(join(dir, "package.json"), "utf8");
+  const outputFile = existsSync(output) ? readFileSync(output, "utf8") : "";
   rmSync(dir, { recursive: true, force: true });
-  return { ...result, packageJson };
+  return { ...result, packageJson, outputFile };
 }
 
 function writeNpmStub(dir, mode) {
@@ -535,6 +579,21 @@ test("custom versions colliding with an existing tag fail before publication", (
   assert.match(result.stdout, /already has a conflicting release tag/);
 });
 
+test("automatic versions colliding with an untrusted tag fail before publication", () => {
+  const result = runVersionStepWithConflictingAutomaticTag();
+  assert.notEqual(result.status, 0);
+  assert.match(
+    result.stdout,
+    /already exists without an exact verified recovery/,
+  );
+  const guard = WORKFLOW.indexOf(
+    "already exists without an exact verified recovery",
+  );
+  const build = WORKFLOW.indexOf("- name: Build packages");
+  const reconcile = WORKFLOW.indexOf("scripts/release/reconcile-package.mjs");
+  assert.ok(guard >= 0 && guard < build && guard < reconcile);
+});
+
 test("only an exact verified same-workflow rerun may reuse a tagged custom version", () => {
   const result = runVersionStepAfterTaggedRelease({
     customVersion: "1.2.4",
@@ -543,6 +602,8 @@ test("only an exact verified same-workflow rerun may reuse a tagged custom versi
   });
   assert.equal(result.status, 0, result.stdout);
   assert.match(result.packageJson, /"version"\s*:\s*"1\.2\.4"/);
+  assert.match(result.outputFile, /release_run_id=12345/);
+  assert.match(result.outputFile, /release_run_attempt=1/);
 });
 
 test("reconciliation CLI shell harness covers canonical E404, collision, and outage", () => {
@@ -735,6 +796,17 @@ test("versioning resolves a trusted tag baseline and preserves rerun targets", (
   assert.match(WORKFLOW, /BASELINE_VERSION=/);
   assert.match(WORKFLOW, /RUN_ATTEMPT=.*GITHUB_RUN_ATTEMPT/);
   assert.match(WORKFLOW, /npm version "\$RESUMABLE_VERSION"/);
+  assert.match(WORKFLOW, /RESUMABLE_RUN_ID=.*resumable_run_id/);
+  assert.match(WORKFLOW, /RESUMABLE_RUN_ATTEMPT=.*resumable_run_attempt/);
+  assert.match(
+    WORKFLOW,
+    /release_run_id: \$\{\{ steps\.bump\.outputs\.release_run_id \}\}/,
+  );
+  assert.match(
+    WORKFLOW,
+    /release_run_attempt: \$\{\{ steps\.bump\.outputs\.release_run_attempt \}\}/,
+  );
+  assert.match(WORKFLOW, /ATTESTATION_RUN_ID="\$RESUMABLE_RUN_ID"/);
 });
 
 test("tagging verifies the generated tag commit and never pushes a moving branch", () => {
