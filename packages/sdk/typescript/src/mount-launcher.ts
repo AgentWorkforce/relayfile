@@ -41,6 +41,9 @@ const LOG_ROTATION_FILES = 3
 const DEFAULT_CHECKPOINT_TIMEOUT_MS = 30_000
 const MAX_CHECKPOINT_OUTPUT_BYTES = 1024 * 1024
 const FUSE_UNAVAILABLE_SIGNATURE = "fuse mode is not available in this build"
+// relayfile-mount uses EX_TEMPFAIL only for the typed, resumable --once
+// bootstrap outcome. All other nonzero exits remain fatal.
+const INITIAL_BOOTSTRAP_INCOMPLETE_EXIT_CODE = 75
 
 interface DefaultMountLauncherOptions {
   spawnImpl?: typeof spawn
@@ -166,10 +169,9 @@ async function startRelayfileMount(
 
 class RelayfileMountProcessInstance
   implements CheckpointCapableMountLauncherInstance {
-  readonly pid?: number
   readonly ready: Promise<void>
 
-  private readonly child: ChildProcess
+  private child: ChildProcess
   private readonly logStream: NodeJS.WritableStream
   private readonly pidPath: string
   private readonly outputBuffer: string[]
@@ -183,6 +185,7 @@ class RelayfileMountProcessInstance
   private readonly spawnImpl: typeof spawn
 
   private exited = false
+  private exitCode: number | null = null
   private stopping?: Promise<void>
   private readyResolved = false
   private checkpointPromise?: Promise<CheckpointSeal>
@@ -215,15 +218,16 @@ class RelayfileMountProcessInstance
     this.effectiveEnv = input.effectiveEnv
     this.cwd = input.cwd
     this.spawnImpl = input.spawnImpl
-    this.pid = input.child.pid ?? undefined
     this.now = input.now
     this.readyPollIntervalMs = input.readyPollIntervalMs
 
-    this.child.once("exit", () => {
-      this.exited = true
-    })
+    this.attachExitListener(input.child)
 
     this.ready = this.waitForReady()
+  }
+
+  get pid(): number | undefined {
+    return this.child.pid ?? undefined
   }
 
   async status(): Promise<MountedWorkspaceStatus> {
@@ -240,7 +244,13 @@ class RelayfileMountProcessInstance
       suggestedRefreshAt: null,
       pid: this.pid
     })
-    return this.exited ? { ...status, ready: false } : status
+    // A foreground --once child is expected to exit after publishing its
+    // final state. Preserve that ready state; daemon exits still make an
+    // otherwise-stale state unready.
+    return this.exited &&
+      (this.input.background !== false || this.exitCode !== 0)
+      ? { ...status, ready: false }
+      : status
   }
 
   async stop(): Promise<void> {
@@ -318,7 +328,14 @@ class RelayfileMountProcessInstance
       }
 
       const status = await this.status()
-      if (status.ready) {
+      // Foreground --once is authoritative only after the child exits 0. A
+      // prior run may have left a fresh-looking public state file behind, so
+      // accepting it while this attempt is still running (or after exit 75)
+      // would skip the resumable checkpoint retry contract.
+      if (
+        status.ready &&
+        (this.input.background !== false || (this.exited && this.exitCode === 0))
+      ) {
         this.readyResolved = true
         return
       }
@@ -328,6 +345,18 @@ class RelayfileMountProcessInstance
       }
 
       if (this.exited) {
+        if (
+          this.isResumableOnceExit() &&
+          !this.stopping &&
+          this.now() < timeoutAt
+        ) {
+          await delay(this.readyPollIntervalMs)
+          if (this.input.signal?.aborted || this.now() >= timeoutAt) {
+            continue
+          }
+          await this.restartOnceMount()
+          continue
+        }
         throw this.buildEarlyExitError()
       }
 
@@ -359,6 +388,43 @@ class RelayfileMountProcessInstance
       normalizeMountMode(this.input.env.RELAYFILE_MOUNT_MODE) === "fuse" &&
       this.outputBuffer.join("").includes(FUSE_UNAVAILABLE_SIGNATURE)
     )
+  }
+
+  private isResumableOnceExit(): boolean {
+    return (
+      this.input.background === false &&
+      this.exitCode === INITIAL_BOOTSTRAP_INCOMPLETE_EXIT_CODE
+    )
+  }
+
+  private async restartOnceMount(): Promise<void> {
+    const child = this.spawnImpl(this.command, ["--once"], {
+      cwd: this.cwd,
+      env: this.effectiveEnv,
+      stdio: ["ignore", "pipe", "pipe"]
+    })
+    pipeChildOutput(child, this.logStream, this.outputBuffer, this.input)
+    this.child = child
+    this.exited = child.exitCode !== null
+    this.exitCode = child.exitCode
+    this.attachExitListener(child)
+    if (typeof child.pid === "number" && child.pid > 0) {
+      await writeAtomicFile(this.pidPath, `${child.pid}\n`)
+    }
+  }
+
+  private attachExitListener(child: ChildProcess): void {
+    if (child.exitCode !== null) {
+      this.exited = true
+      this.exitCode = child.exitCode
+    }
+    child.once("exit", (code) => {
+      // A late event from a previous resumable attempt must not mark its
+      // replacement as exited.
+      if (this.child !== child) return
+      this.exited = true
+      this.exitCode = code
+    })
   }
 
   private async performStop(): Promise<void> {

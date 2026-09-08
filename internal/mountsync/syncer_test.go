@@ -11973,6 +11973,35 @@ func TestLoadStateResetsBootstrapCompleteOnlyOnWriteOnlyToMirrorSyncMode(t *test
 	}
 }
 
+func TestInitialBootstrapCompleteAppliesWriteOnlyToMirrorMigration(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), ".relayfile-mount-state.json")
+	if err := writeMountState(stateFile, mountState{
+		Files: map[string]trackedFile{
+			"/notion/Docs/a.md": {
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Hash:        hashString("# A"),
+			},
+		},
+		BootstrapComplete: true,
+		SyncMode:          "write-only",
+	}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	syncer := &Syncer{stateFile: stateFile, writeOnly: false}
+	complete, err := syncer.InitialBootstrapComplete()
+	if err != nil {
+		t.Fatalf("inspect initial bootstrap completion: %v", err)
+	}
+	if complete {
+		t.Fatal("write-only -> mirror migration must re-arm the authoritative bootstrap")
+	}
+	if !syncer.loaded {
+		t.Fatal("bootstrap inspection must load and migrate private state")
+	}
+}
+
 func TestPullRemoteIncrementalDeleteEventStillDeletes(t *testing.T) {
 	client := &fakeClient{
 		files: map[string]RemoteFile{},

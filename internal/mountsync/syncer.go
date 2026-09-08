@@ -1744,6 +1744,20 @@ type Syncer struct {
 	checkpointVersion uint64
 }
 
+// InitialBootstrapComplete reports the authoritative private-state bootstrap
+// flag after applying load-time migrations such as a write-only to mirror or
+// pull-only transition. Callers must not infer this solely from the public
+// state file: that view can still describe the previous completed mode when a
+// cycle fails before the transition can publish its required new bootstrap.
+func (s *Syncer) InitialBootstrapComplete() (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.loadState(); err != nil {
+		return false, err
+	}
+	return s.state.BootstrapComplete, nil
+}
+
 // runFullPullIO temporarily releases the Syncer's state mutex around a remote
 // read that belongs to a full snapshot. Callers enter with mu held and must not
 // access mutable Syncer state from fn. Direct low-level tests that invoke full

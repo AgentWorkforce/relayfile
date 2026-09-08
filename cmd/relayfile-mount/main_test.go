@@ -821,6 +821,108 @@ func TestRunSinglePollingMountKeepsSuccessOnUnrelatedFailureAfterBootstrapComple
 	}
 }
 
+// A completed write-only mount has never hydrated provider history. Switching
+// it to mirror re-arms bootstrap in private state. If the first provider call
+// then fails before any new public bootstrap progress is published, the old
+// public success marker must not make --once exit successfully.
+func TestRunSinglePollingMountRejectsStalePublicCompletionAfterWriteOnlyToMirrorTransition(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "transient", http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	localDir := t.TempDir()
+	stateDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(localDir, ".relay"), 0o755); err != nil {
+		t.Fatalf("create public state dir: %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(localDir, ".relay", "state.json"),
+		[]byte(`{"lastSuccessfulReconcileAt":"2026-09-08T00:00:00Z"}`),
+		0o644,
+	); err != nil {
+		t.Fatalf("seed stale public completion: %v", err)
+	}
+
+	privatePath, err := mountsync.ResolveMountStatePath(mountsync.MountStatePathOptions{
+		WorkspaceID:     "ws_write_only_to_mirror",
+		RemoteRoot:      "/",
+		LocalRoot:       localDir,
+		StateDir:        stateDir,
+		MountKind:       mountsync.MountKindDaemon,
+		ValidateOutside: true,
+	})
+	if err != nil {
+		t.Fatalf("resolve private state path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(privatePath.StateFile), 0o755); err != nil {
+		t.Fatalf("create private state dir: %v", err)
+	}
+	if err := os.WriteFile(
+		privatePath.StateFile,
+		[]byte(`{"files":{},"bootstrapComplete":true,"syncMode":"write-only"}`),
+		0o644,
+	); err != nil {
+		t.Fatalf("seed completed write-only private state: %v", err)
+	}
+
+	cfg := mountConfig{
+		baseURL:          server.URL,
+		token:            "test-token",
+		workspaceID:      "ws_write_only_to_mirror",
+		remotePath:       "/",
+		localDir:         localDir,
+		stateDir:         stateDir,
+		mountKind:        mountsync.MountKindDaemon,
+		syncMode:         syncModeMirror,
+		interval:         time.Hour,
+		timeout:          time.Second,
+		websocketEnabled: false,
+		once:             true,
+	}
+
+	err = runSinglePollingMount(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("stale public completion must not suppress the required mirror backfill failure")
+	}
+	var incomplete *initialBootstrapIncompleteError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("expected typed incomplete bootstrap error, got %T: %v", err, err)
+	}
+	var httpErr *mountsync.HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected the first-cycle provider failure to remain in the chain, got %v", err)
+	}
+}
+
+func TestMountProcessExitCodeOnlyMarksTypedOnceBootstrapIncompleteRetryable(t *testing.T) {
+	incomplete := newInitialBootstrapIncompleteError(
+		bootstrapResumeState{inProgress: true, synced: 10, total: 20},
+		"resume bound reached",
+		context.DeadlineExceeded,
+	)
+
+	if got := mountProcessExitCode(mountConfig{once: true}, incomplete); got != initialBootstrapIncompleteExitCode {
+		t.Fatalf("typed --once incomplete exit = %d, want %d", got, initialBootstrapIncompleteExitCode)
+	}
+	if got := mountProcessExitCode(mountConfig{}, incomplete); got != 1 {
+		t.Fatalf("daemon typed incomplete exit = %d, want generic failure", got)
+	}
+	if got := mountProcessExitCode(mountConfig{once: true}, errors.New("initial bootstrap incomplete")); got != 1 {
+		t.Fatalf("text-only --once failure exit = %d, want generic failure", got)
+	}
+	if got := mountProcessExitCode(mountConfig{once: true}, fmt.Errorf("wrapped: %w", incomplete)); got != initialBootstrapIncompleteExitCode {
+		t.Fatalf("wrapped typed --once incomplete exit = %d, want %d", got, initialBootstrapIncompleteExitCode)
+	}
+	secondIncomplete := newInitialBootstrapIncompleteError(bootstrapResumeState{}, "another scope", nil)
+	if got := mountProcessExitCode(mountConfig{once: true}, errors.Join(incomplete, secondIncomplete)); got != initialBootstrapIncompleteExitCode {
+		t.Fatalf("all-incomplete scoped aggregate exit = %d, want %d", got, initialBootstrapIncompleteExitCode)
+	}
+	if got := mountProcessExitCode(mountConfig{once: true}, errors.Join(incomplete, errors.New("fatal sibling"))); got != 1 {
+		t.Fatalf("mixed scoped aggregate exit = %d, want generic failure", got)
+	}
+}
+
 // TestRunSinglePollingMountForceFullReconcileFailsOnceOnProviderErrorAfterPriorCompletion
 // is the forceFullRecon counterpart of
 // TestRunSinglePollingMountKeepsSuccessOnUnrelatedFailureAfterBootstrapComplete:

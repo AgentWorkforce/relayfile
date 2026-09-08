@@ -35,6 +35,11 @@ class FakeChildProcess extends EventEmitter {
   }
 }
 
+function exitFakeChild(child: FakeChildProcess, code: number): void {
+  child.exitCode = code
+  child.emit("exit", code, null)
+}
+
 function createMountEnv(localDir: string, mode: "poll" | "fuse" = "poll") {
   return {
     RELAYFILE_BASE_URL: "https://relayfile.mount.test",
@@ -239,6 +244,96 @@ describe("default mount launcher", () => {
 
       await expect(instance.ready).rejects.toBeInstanceOf(MountReadyTimeoutError)
       expect(child.killSignals).toContain("SIGTERM")
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("restarts only a resumable foreground bootstrap exit on the same mount", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-default-launcher-resume-once-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const first = new FakeChildProcess()
+    const second = new FakeChildProcess()
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response("not ready", { status: 503 }))
+    )
+    const spawnImpl = vi.fn()
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => exitFakeChild(first, 75))
+        return first as never
+      })
+      .mockImplementationOnce(() => {
+        queueMicrotask(async () => {
+          await writeReadyState(localDir)
+          exitFakeChild(second, 0)
+        })
+        return second as never
+      })
+    const launcher = createDefaultMountLauncher({
+      spawnImpl,
+      readyPollIntervalMs: 1
+    })
+
+    try {
+      // A prior run's fresh-looking state must not suppress the retry when
+      // this foreground attempt reports the typed incomplete exit.
+      await writeReadyState(localDir)
+      const instance = await launcher.start({
+        env: createMountEnv(localDir),
+        background: false,
+        readyTimeoutMs: 250
+      })
+
+      await instance.ready
+      expect(spawnImpl).toHaveBeenCalledTimes(2)
+      expect(spawnImpl).toHaveBeenNthCalledWith(
+        2,
+        expect.any(String),
+        ["--once"],
+        expect.objectContaining({
+          cwd: localDir,
+          env: expect.objectContaining({ RELAYFILE_LOCAL_DIR: localDir })
+        })
+      )
+      expect(instance.stopped).toBe(true)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("does not restart an ordinary foreground mount failure", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-default-launcher-fatal-once-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const child = new FakeChildProcess()
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response("not ready", { status: 503 }))
+    )
+    const spawnImpl = vi.fn().mockImplementation(() => {
+      queueMicrotask(() => exitFakeChild(child, 1))
+      return child as never
+    })
+    const launcher = createDefaultMountLauncher({
+      spawnImpl,
+      readyPollIntervalMs: 1
+    })
+
+    try {
+      const instance = await launcher.start({
+        env: createMountEnv(localDir),
+        background: false,
+        readyTimeoutMs: 50
+      })
+
+      await expect(instance.ready).rejects.toMatchObject({
+        code: "mount_launch_failed"
+      })
+      expect(spawnImpl).toHaveBeenCalledTimes(1)
     } finally {
       await rm(tempRoot, { recursive: true, force: true })
     }

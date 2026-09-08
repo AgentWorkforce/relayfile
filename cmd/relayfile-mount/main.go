@@ -34,6 +34,11 @@ const (
 	syncModePullOnly     = "pull-only"
 	syncModeWriteOnly    = "write-only"
 	minMountPollInterval = 5 * time.Second
+	// EX_TEMPFAIL is a stable process-level contract for a --once bootstrap
+	// that stopped at a resumable checkpoint. Callers may rerun the same
+	// command with the same local/state directories; every other mount error
+	// remains a generic failure and must not be retried automatically.
+	initialBootstrapIncompleteExitCode = 75
 )
 
 var errFuseModeUnavailable = errors.New("fuse mode is not available in this build")
@@ -260,8 +265,51 @@ func main() {
 		if errors.Is(err, errFuseModeUnavailable) {
 			log.Fatalf("failed to start %s mount: %v; rerun with --mode=%s", cfg.mode, err, mountModePoll)
 		}
-		log.Fatalf("failed to start %s mount: %v", cfg.mode, err)
+		log.Printf("failed to start %s mount: %v", cfg.mode, err)
+		os.Exit(mountProcessExitCode(cfg, err))
 	}
+}
+
+// mountProcessExitCode preserves the narrow resumable-bootstrap outcome at
+// the process boundary. It deliberately checks both --once and the typed
+// error so provider, configuration, terminal-bootstrap, and daemon failures
+// continue to use the ordinary nonzero exit and are never retryable merely
+// because their text happens to mention bootstrap progress.
+func mountProcessExitCode(cfg mountConfig, err error) int {
+	if cfg.once && onlyInitialBootstrapIncomplete(err) {
+		return initialBootstrapIncompleteExitCode
+	}
+	return 1
+}
+
+// onlyInitialBootstrapIncomplete is true when every branch of a joined or
+// wrapped error is the typed resumable outcome. A scoped run may join one
+// resumable scope with a genuinely fatal sibling; that aggregate must remain
+// fatal instead of being downgraded to EX_TEMPFAIL by errors.As matching just
+// one branch.
+func onlyInitialBootstrapIncomplete(err error) bool {
+	if err == nil {
+		return false
+	}
+	if _, ok := err.(*initialBootstrapIncompleteError); ok {
+		return true
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		children := joined.Unwrap()
+		if len(children) == 0 {
+			return false
+		}
+		for _, child := range children {
+			if !onlyInitialBootstrapIncomplete(child) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return onlyInitialBootstrapIncomplete(wrapped.Unwrap())
+	}
+	return false
 }
 
 func resolveMountMode(mode string, fuse bool) (string, error) {
@@ -644,6 +692,16 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 		return err
 	}
 	if cfg.once {
+		privateBootstrapComplete, err := syncer.InitialBootstrapComplete()
+		if err != nil {
+			return fmt.Errorf("inspect authoritative bootstrap state: %w", err)
+		}
+		// The public completion sampled before the cycle is reusable only when
+		// the syncer's authoritative private state still agrees after load-time
+		// mode migrations. In particular, write-only -> mirror/pull-only resets
+		// the private flag before the required backfill. A failure before that
+		// backfill starts may leave the older public view looking complete.
+		priorBootstrapComplete = priorBootstrapComplete && privateBootstrapComplete
 		return finishInitialBootstrap(rootCtx, cfg, run, func() error { return lastCycleErr }, priorBootstrapComplete)
 	}
 
