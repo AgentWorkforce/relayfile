@@ -2,7 +2,7 @@
 
 > **Status:** ✅ Completed
 > **Task:** relayfile#478-review
-> **Confidence:** 90%
+> **Confidence:** 75%
 > **Started:** September 8, 2026 at 06:19 PM
 > **Completed:** September 8, 2026 at 06:25 PM
 
@@ -10,7 +10,7 @@
 
 ## Summary
 
-Repaired fresh review findings: custom version is env-only, attestation precedes tag push, existing tags require exact source parent and release tree equivalence, binary attestations enforce the exact four mount plus six CLI set, registry E404 classification is fail-closed, and permissions are job-scoped. Commit fb0361c1d2aab3b67ca2e69e4f15d3cae7940af6.
+Historical record only: this session ended at fb0361c1d2aab3b67ca2e69e4f15d3cae7940af6 and predates later exact-head PR #479 fixes through 601d162ccd2264d187982239dd383f4c637fe742. Self-reported and non-gating: the recorded implementation claims have no captured command/output evidence and are not validation or release approval.
 
 **Approach:** Standard approach
 
@@ -35,7 +35,7 @@ Repaired fresh review findings: custom version is env-only, attestation precedes
 
 - Moved custom release input values into step env and scoped GitHub permissions per job
 - Generate attestation before remote tag push and reuse tags by parent/tree equivalence
-- Fresh review findings are repaired: release retries are tag-safe, binaries are an exact validated set, registry ambiguity fails closed, and permissions are least-privilege.
+- Self-reported and non-gating: the session recorded the fresh review findings as repaired (tag-safe retries, exact binary set, fail-closed registry ambiguity, least-privilege permissions), but captured no command/output evidence and predates later exact-head fixes.
 
 ---
 

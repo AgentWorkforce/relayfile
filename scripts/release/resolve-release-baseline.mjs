@@ -26,8 +26,8 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
   isCompletePackageAttestation,
-  isSha1Shasum,
-  isSha512Integrity,
+  isOptionalSha1Shasum,
+  isOptionalSha512Integrity,
   RELEASE_BINARY_NAMES,
   RELEASE_PACKAGE_NAMES,
 } from "./create-release-attestation.mjs";
@@ -419,10 +419,10 @@ export function validateReleaseAttestation(
       return false;
     }
     const digestFieldsAreValid =
-      (local?.integrity == null || isSha512Integrity(local.integrity)) &&
-      (local?.shasum == null || isSha1Shasum(local.shasum)) &&
-      (registry?.integrity == null || isSha512Integrity(registry.integrity)) &&
-      (registry?.shasum == null || isSha1Shasum(registry.shasum));
+      isOptionalSha512Integrity(local?.integrity) &&
+      isOptionalSha1Shasum(local?.shasum) &&
+      isOptionalSha512Integrity(registry?.integrity) &&
+      isOptionalSha1Shasum(registry?.shasum);
     if (
       !RELEASE_PACKAGE_NAMES.includes(name) ||
       packageNames.has(name) ||

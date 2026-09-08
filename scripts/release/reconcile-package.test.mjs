@@ -157,6 +157,64 @@ test("post-publish propagation retries an absent registry response", async () =>
   rmSync(dir, { recursive: true, force: true });
 });
 
+test("post-publish verification rejects an empty registry shasum", async () => {
+  const dir = sandbox();
+  const state = { views: 0, publishes: 0 };
+  const npm = async (command, args, { cwd }) => {
+    assert.equal(command, "npm");
+    if (args[0] === "pack") {
+      writeFileSync(
+        join(cwd, "relayfile-test-1.2.3.tgz"),
+        "immutable package content",
+      );
+      return {
+        code: 0,
+        stdout: JSON.stringify([
+          {
+            filename: "relayfile-test-1.2.3.tgz",
+            name: "@relayfile/test",
+            version: "1.2.3",
+            integrity: VALID_INTEGRITY,
+            shasum: VALID_SHASUM,
+          },
+        ]),
+        stderr: "",
+      };
+    }
+    if (args[0] === "view") {
+      state.views += 1;
+      if (state.views === 1)
+        return { code: 1, stdout: "", stderr: "npm error code E404" };
+      return {
+        code: 0,
+        stdout: JSON.stringify({ integrity: VALID_INTEGRITY, shasum: "" }),
+        stderr: "",
+      };
+    }
+    if (args[0] === "publish") {
+      state.publishes += 1;
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    throw new Error(`unexpected npm command: ${args.join(" ")}`);
+  };
+  await assert.rejects(
+    reconcilePackage({
+      packageDir: dir,
+      tag: "next",
+      sourceSha: "a".repeat(40),
+      runId: 1,
+      runAttempt: 1,
+      npm,
+      attempts: 1,
+      sleep: async () => {},
+    }),
+    /post-publish verification failed.*no usable digest/,
+  );
+  assert.equal(state.publishes, 1);
+  assert.equal(state.views, 2);
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("post-publish propagation retry delays are capped per wait and in total", async () => {
   const dir = sandbox();
   const state = { views: 0, publishes: 0 };
@@ -557,6 +615,52 @@ test("normalizes npm 11 pack JSON object output", () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+test("normalizePackRecord rejects an empty shasum beside valid integrity", () => {
+  const dir = sandbox();
+  writeFileSync(
+    join(dir, "relayfile-test-1.2.3.tgz"),
+    "immutable package content",
+  );
+  assert.throws(
+    () =>
+      normalizePackRecord(
+        {
+          filename: "relayfile-test-1.2.3.tgz",
+          name: "@relayfile/test",
+          version: "1.2.3",
+          integrity: VALID_INTEGRITY,
+          shasum: "",
+        },
+        dir,
+      ),
+    /malformed SHA-1 shasum/,
+  );
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("normalizePackRecord rejects a malformed shasum beside valid integrity", () => {
+  const dir = sandbox();
+  writeFileSync(
+    join(dir, "relayfile-test-1.2.3.tgz"),
+    "immutable package content",
+  );
+  assert.throws(
+    () =>
+      normalizePackRecord(
+        {
+          filename: "relayfile-test-1.2.3.tgz",
+          name: "@relayfile/test",
+          version: "1.2.3",
+          integrity: VALID_INTEGRITY,
+          shasum: "not-a-sha1",
+        },
+        dir,
+      ),
+    /malformed SHA-1 shasum/,
+  );
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("normalizes npm view dist JSON array output", async () => {
   const dir = sandbox();
   const state = { views: 0, publishes: 0 };
@@ -588,6 +692,36 @@ test("rejects ambiguous or wrong-version registry records", () => {
         name: "@relayfile/test",
         version: "1.2.4",
         integrity: VALID_INTEGRITY,
+      },
+      { name: "@relayfile/test", version: "1.2.3" },
+    ),
+    null,
+  );
+});
+
+test("normalizeRegistryRecord rejects an empty shasum beside valid integrity", () => {
+  assert.equal(
+    normalizeRegistryRecord(
+      {
+        name: "@relayfile/test",
+        version: "1.2.3",
+        integrity: VALID_INTEGRITY,
+        shasum: "",
+      },
+      { name: "@relayfile/test", version: "1.2.3" },
+    ),
+    null,
+  );
+});
+
+test("normalizeRegistryRecord rejects a malformed shasum beside valid integrity", () => {
+  assert.equal(
+    normalizeRegistryRecord(
+      {
+        name: "@relayfile/test",
+        version: "1.2.3",
+        integrity: VALID_INTEGRITY,
+        shasum: "not-a-sha1",
       },
       { name: "@relayfile/test", version: "1.2.3" },
     ),

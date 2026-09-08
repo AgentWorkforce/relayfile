@@ -27,14 +27,24 @@ export function isSha1Shasum(value) {
   return typeof value === "string" && /^[0-9a-f]{40}$/.test(value);
 }
 
+/** Optional npm digest fields may be omitted/null, but never malformed. */
+export function isOptionalSha512Integrity(value) {
+  return value === null || value === undefined || isSha512Integrity(value);
+}
+
+/** Optional npm digest fields may be omitted/null, but never malformed. */
+export function isOptionalSha1Shasum(value) {
+  return value === null || value === undefined || isSha1Shasum(value);
+}
+
 // npm may omit its legacy SHA-1 shasum, but package identity must always be
 // established by a canonical SHA-512 SRI value shared by the local tarball and
 // registry response.  A shared shasum is retained as an auxiliary check only.
 function hasValidPackageDigest(record) {
   return (
     !!record &&
-    (record.integrity == null || isSha512Integrity(record.integrity)) &&
-    (record.shasum == null || isSha1Shasum(record.shasum)) &&
+    isOptionalSha512Integrity(record.integrity) &&
+    isOptionalSha1Shasum(record.shasum) &&
     !!(record.integrity || record.shasum)
   );
 }
@@ -178,18 +188,10 @@ export function buildReleaseAttestation({
       throw new Error(`${record.name} has no local tarball SHA-256`);
     }
     if (
-      (record.local.integrity !== null &&
-        record.local.integrity !== undefined &&
-        !isSha512Integrity(record.local.integrity)) ||
-      (record.local.shasum !== null &&
-        record.local.shasum !== undefined &&
-        !isSha1Shasum(record.local.shasum)) ||
-      (record.registry?.integrity !== null &&
-        record.registry?.integrity !== undefined &&
-        !isSha512Integrity(record.registry.integrity)) ||
-      (record.registry?.shasum !== null &&
-        record.registry?.shasum !== undefined &&
-        !isSha1Shasum(record.registry.shasum))
+      !isOptionalSha512Integrity(record.local.integrity) ||
+      !isOptionalSha1Shasum(record.local.shasum) ||
+      !isOptionalSha512Integrity(record.registry?.integrity) ||
+      !isOptionalSha1Shasum(record.registry?.shasum)
     ) {
       throw new Error(`${record.name} has a malformed package digest`);
     }

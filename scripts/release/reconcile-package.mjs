@@ -28,8 +28,9 @@ import { basename, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import {
-  isSha1Shasum,
   isSha512Integrity,
+  isOptionalSha1Shasum,
+  isOptionalSha512Integrity,
 } from "./create-release-attestation.mjs";
 
 export const DEFAULT_ATTEMPTS = 10;
@@ -116,22 +117,21 @@ export function normalizePackRecord(raw, packageDir) {
   const filename = resolve(packageDir, record.filename);
   if (!existsSync(filename))
     throw new Error(`npm pack output is missing: ${basename(filename)}`);
-  const integrity =
-    typeof record.integrity === "string" ? record.integrity : null;
-  const shasum = typeof record.shasum === "string" ? record.shasum : null;
-  if (!integrity && !shasum) {
-    throw new Error(
-      "npm pack returned no integrity or shasum; refusing to release",
-    );
-  }
-  if (integrity && !isSha512Integrity(integrity)) {
+  const integrity = record.integrity ?? null;
+  const shasum = record.shasum ?? null;
+  if (!isOptionalSha512Integrity(integrity)) {
     throw new Error(
       "npm pack returned malformed SHA-512 integrity; refusing to release",
     );
   }
-  if (shasum && !isSha1Shasum(shasum)) {
+  if (!isOptionalSha1Shasum(shasum)) {
     throw new Error(
       "npm pack returned malformed SHA-1 shasum; refusing to release",
+    );
+  }
+  if (integrity === null && shasum === null) {
+    throw new Error(
+      "npm pack returned no integrity or shasum; refusing to release",
     );
   }
   return {
@@ -168,17 +168,12 @@ export function normalizeRegistryRecord(raw, { name, version }) {
   ) {
     return null;
   }
-  const integrity =
-    typeof record.integrity === "string" ? record.integrity : null;
-  const shasum = typeof record.shasum === "string" ? record.shasum : null;
+  const integrity = record.integrity ?? null;
+  const shasum = record.shasum ?? null;
   const tarball = typeof record.tarball === "string" ? record.tarball : null;
-  if (!integrity && !shasum) return null;
-  if (
-    (integrity && !isSha512Integrity(integrity)) ||
-    (shasum && !isSha1Shasum(shasum))
-  ) {
-    return null;
-  }
+  if (!isOptionalSha512Integrity(integrity)) return null;
+  if (!isOptionalSha1Shasum(shasum)) return null;
+  if (integrity === null && shasum === null) return null;
   return { name, version, integrity, shasum, tarball };
 }
 

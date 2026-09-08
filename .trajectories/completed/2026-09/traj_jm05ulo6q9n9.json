@@ -1,0 +1,92 @@
+{
+  "id": "traj_jm05ulo6q9n9",
+  "version": 1,
+  "task": {
+    "title": "Repair Relayfile release baseline with cryptographic provenance attestation",
+    "source": {
+      "system": "plain",
+      "id": "PR #479 candidate 925f617ff2038fabf871e26416738f13083b5450"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-09-08T18:34:14.911Z",
+  "completedAt": "2026-09-08T18:35:41.168Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-09-08T18:34:25.224Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_b5tfelzz9eoy",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-09-08T18:34:25.224Z",
+      "endedAt": "2026-09-08T18:35:41.168Z",
+      "events": [
+        {
+          "ts": 1788892465224,
+          "type": "decision",
+          "content": "Require GitHub artifact attestation before accepting any release-tag baseline: Require GitHub artifact attestation before accepting any release-tag baseline",
+          "raw": {
+            "question": "Require GitHub artifact attestation before accepting any release-tag baseline",
+            "chosen": "Require GitHub artifact attestation before accepting any release-tag baseline",
+            "alternatives": [],
+            "reasoning": "Git topology, subject, allowlisted paths, and package versions can be forged by an annotated sibling tag; gh attestation verify constrained to the repository/workflow and source digest supplies provenance."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1788892465584,
+          "type": "decision",
+          "content": "Permit same-workflow rerun recovery only through the exact run artifact and tag source/tree/run metadata: Permit same-workflow rerun recovery only through the exact run artifact and tag source/tree/run metadata",
+          "raw": {
+            "question": "Permit same-workflow rerun recovery only through the exact run artifact and tag source/tree/run metadata",
+            "chosen": "Permit same-workflow rerun recovery only through the exact run artifact and tag source/tree/run metadata",
+            "alternatives": [],
+            "reasoning": "A release asset may not exist before a rerun, but arbitrary sibling tags must never gain an artifact fallback."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1788892465966,
+          "type": "reflection",
+          "content": "The forged v99.99.99 exact-shape sibling is rejected without a valid signed attestation; valid stale releases advance and exact same-run reruns can recover from the immutable workflow artifact.",
+          "raw": {
+            "confidence": 0.9
+          },
+          "significance": "high",
+          "tags": [
+            "confidence:0.9"
+          ]
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Added cryptographically verified GitHub artifact attestations for release baseline tags, exact source/tag-tree binding, same-workflow rerun artifact recovery, and regressions for forged exact-shape siblings and mismatched attestations. Node 22 release suite passed twice.",
+    "approach": "Standard approach",
+    "confidence": 0.92
+  },
+  "commits": [
+    "73840800"
+  ],
+  "filesChanged": [
+    ".github/workflows/publish.yml",
+    ".trajectories/index.json",
+    "scripts/release/create-release-attestation.mjs",
+    "scripts/release/create-release-attestation.test.mjs",
+    "scripts/release/publish-workflow.test.mjs",
+    "scripts/release/resolve-release-baseline.mjs",
+    "scripts/release/resolve-release-baseline.test.mjs"
+  ],
+  "projectId": "/private/tmp/relayfile-release-snapshot-fix-0908",
+  "tags": [],
+  "_trace": {
+    "startRef": "925f617ff2038fabf871e26416738f13083b5450",
+    "endRef": "738408009352e9f22d51c1583261959ae9a7f404",
+    "traceId": "41658f93-c13d-48ac-ac54-2f9350163f1c"
+  }
+}
