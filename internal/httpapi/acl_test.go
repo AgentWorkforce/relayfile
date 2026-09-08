@@ -417,7 +417,7 @@ func TestIsValidACLRuleValue(t *testing.T) {
 		{"scope with internal glob", "scope", "relayfile:fs:read:/protected/*/private", false},
 		{"scope with unsupported plane", "scope", "other:fs:read:/protected/*", false},
 		{"scope empty segment", "scope", "fs:", false},
-		{"pathless relayfile scope", "scope", "relayfile:fs:read", false},
+		{"pathless relayfile scope remains a valid exact tag", "scope", "relayfile:fs:read", true},
 		{"pathless workspace scope", "scope", "workspace:relayfile-local:read", false},
 		{"valid workspace", "workspace", "ws_123", true},
 		{"workspace with uuid", "workspace", "abc-def-123", true},
@@ -446,6 +446,12 @@ func TestACLPathlessNamespacedScopesIgnoreWildcardClaims(t *testing.T) {
 	}
 	if aclScopeRuleMatches("relayfile:fs:read", &claims, "read", "/docs/item.md") {
 		t.Fatalf("pathless namespaced scope should not match wildcard claim")
+	}
+	exactClaims := tokenClaims{
+		Scopes: map[string]struct{}{"relayfile:fs:read": {}},
+	}
+	if !aclScopeRuleMatches("relayfile:fs:read", &exactClaims, "read", "/docs/item.md") {
+		t.Fatalf("pathless namespaced scope should preserve exact-tag matching")
 	}
 }
 

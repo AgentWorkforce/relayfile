@@ -1851,7 +1851,7 @@ func (s *Server) handleBulkRead(w http.ResponseWriter, r *http.Request, workspac
 		// prevents an ACL-denied caller from distinguishing an existing file
 		// from a missing one through the per-file status.
 		permissions := resolveFilePermissionsWithTarget(cachedACLReader, path, true)
-		if !filePermissionAllows(permissions, workspaceID, &claims) {
+		if !filePermissionAllows(permissions, workspaceID, &claims, "read", path, false) {
 			results = append(results, bulkReadError(path, http.StatusForbidden, "forbidden", "file access denied by permission policy"))
 			continue
 		}
@@ -1872,7 +1872,7 @@ func (s *Server) handleBulkRead(w http.ResponseWriter, r *http.Request, workspac
 		// snapshot before returning content so a concurrent target permission
 		// tightening cannot authorize the old snapshot and expose the new file.
 		freshPermissions := resolveBulkReadPermissionsForReturnedFile(aclReader, path, file)
-		if !filePermissionAllows(freshPermissions, workspaceID, &claims) {
+		if !filePermissionAllows(freshPermissions, workspaceID, &claims, "read", path, false) {
 			results = append(results, bulkReadError(path, http.StatusForbidden, "forbidden", "file access denied by permission policy"))
 			continue
 		}

@@ -80,9 +80,6 @@ func isValidACLRuleValue(kind, value string) bool {
 	case "agent":
 		return aclAgentNamePattern.MatchString(value)
 	case "scope":
-		if strings.HasPrefix(value, "relayfile:") || strings.HasPrefix(value, "workspace:") || strings.HasPrefix(value, "*:") {
-			return isValidACLFilesystemScope(value)
-		}
 		return aclScopePattern.MatchString(value) || isValidACLFilesystemScope(value)
 	case "workspace":
 		return aclWorkspacePattern.MatchString(value)
