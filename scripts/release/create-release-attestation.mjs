@@ -41,12 +41,10 @@ function hasValidPackageDigest(record) {
 
 function hasMatchingPackageDigest(local, registry) {
   return (
-    (!!local.integrity &&
-      !!registry.integrity &&
-      local.integrity === registry.integrity) &&
-    (!local.shasum ||
-      !registry.shasum ||
-      local.shasum === registry.shasum)
+    !!local.integrity &&
+    !!registry.integrity &&
+    local.integrity === registry.integrity &&
+    (!local.shasum || !registry.shasum || local.shasum === registry.shasum)
   );
 }
 
@@ -298,9 +296,12 @@ function parseArgs(argv) {
   return values;
 }
 
-const entrypoint = process.argv[1]
-  ? realpathSync(resolve(process.argv[1]))
-  : "";
+let entrypoint = "";
+try {
+  entrypoint = process.argv[1] ? realpathSync(resolve(process.argv[1])) : "";
+} catch {
+  // Import contexts such as `node -` do not name a filesystem entrypoint.
+}
 if (entrypoint && fileURLToPath(import.meta.url) === entrypoint) {
   const args = parseArgs(process.argv.slice(2));
   try {

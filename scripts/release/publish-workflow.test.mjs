@@ -7,7 +7,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -19,7 +19,7 @@ import {
 } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   RELEASE_BINARY_NAMES,
   RELEASE_PACKAGE_NAMES,
@@ -35,6 +35,21 @@ const WORKFLOW = readFileSync(
   join(REPO, ".github/workflows/publish.yml"),
   "utf8",
 );
+
+test("release modules are import-safe when the argv entrypoint is stdin", () => {
+  for (const script of [
+    "create-release-attestation.mjs",
+    "reconcile-package.mjs",
+    "resolve-release-baseline.mjs",
+  ]) {
+    const moduleUrl = pathToFileURL(join(REPO, "scripts", "release", script));
+    const result = spawnSync(process.execPath, ["--input-type=module", "-"], {
+      input: `await import(${JSON.stringify(moduleUrl.href)});\n`,
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, `${script}: ${result.stderr}`);
+  }
+});
 
 /** The package.json paths the release versions and publishes. */
 const EXPECTED_PACKAGE_PATHS = [
