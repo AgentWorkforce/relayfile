@@ -156,6 +156,20 @@ func TestFilePermissionAllows(t *testing.T) {
 			want:   false,
 		},
 		{
+			name: "relative request path cannot bypass a normalized deny",
+			permissions: []string{
+				"allow:scope:fs:write",
+				"deny:scope:relayfile:fs:write:/protected/*",
+			},
+			workspaceID: "ws_123",
+			claims: tokenClaims{
+				Scopes: map[string]struct{}{"relayfile:fs:write:*": {}},
+			},
+			action: "write",
+			path:   "protected/document.md",
+			want:   false,
+		},
+		{
 			name: "readonly write deny does not block reads",
 			permissions: []string{
 				"allow:scope:fs:read",
