@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-09-08T16:19:21.047Z",
+  "lastUpdated": "2026-09-08T16:20:28.927Z",
   "trajectories": {
     "traj_4pvrlmqfnzng": {
       "title": "Review PR #278 in AgentWorkforce/relayfile",
@@ -204,26 +204,6 @@
       "startedAt": "2026-08-27T20:19:59.085Z",
       "completedAt": "2026-08-27T20:20:27.355Z",
       "path": ".trajectories/completed/2026-08/traj_7n063n1f3wai.json"
-    },
-    "traj_5io1464ycrjc": {
-      "title": "Fix relayfile once timeout semantics",
-      "status": "completed",
-      "startedAt": "2026-09-08T08:30:39.855Z",
-      "completedAt": "2026-09-08T13:44:35.312Z",
-      "path": ".trajectories/completed/2026-09/traj_5io1464ycrjc.json"
-    },
-    "traj_q7vefcyaluc5": {
-      "title": "Fix pre-loop cancellation-vs-completion race in --once bootstrap resume; add CHANGELOG entry",
-      "status": "completed",
-      "startedAt": "2026-09-08T14:20:44.670Z",
-      "completedAt": "2026-09-08T14:21:03.470Z",
-      "path": ".trajectories/completed/2026-09/traj_q7vefcyaluc5.json"
-    },
-    "traj_7pk9n83ou91i": {
-      "title": "Repair PR 477 stale bootstrap mode transition and requalify exact fix",
-      "status": "active",
-      "startedAt": "2026-09-08T15:58:52.014Z",
-      "path": "/private/tmp/relayfile-once-timeout-fix-0908/.trajectories/active/traj_7pk9n83ou91i.json"
     }
   }
 }
