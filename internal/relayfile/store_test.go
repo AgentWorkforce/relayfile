@@ -1749,6 +1749,131 @@ func TestProviderDeleteWithoutPathEmitsReconcileControlEvent(t *testing.T) {
 	t.Fatal("timed out waiting for pathless provider deletion reconciliation event")
 }
 
+func TestProviderDeleteObjectIdentityResolution(t *testing.T) {
+	const provider = "external"
+	const objectID = "obj_delete_resolution"
+
+	tests := []struct {
+		name        string
+		files       map[string]File
+		indexPath   string
+		wantDelete  string
+		wantControl bool
+	}{
+		{
+			name: "unique metadata match repairs missing index",
+			files: map[string]File{
+				"/external/unique.md": {
+					Path:             "/external/unique.md",
+					Provider:         provider,
+					ProviderObjectID: objectID,
+					Semantics:        FileSemantics{Permissions: []string{"deny:agent:limited"}},
+				},
+			},
+			wantDelete: "/external/unique.md",
+		},
+		{
+			name:      "stale index does not delete wrong target",
+			indexPath: "/external/wrong.md",
+			files: map[string]File{
+				"/external/wrong.md": {
+					Path:             "/external/wrong.md",
+					Provider:         provider,
+					ProviderObjectID: "different-object",
+				},
+				"/external/real.md": {
+					Path:             "/external/real.md",
+					Provider:         provider,
+					ProviderObjectID: objectID,
+				},
+			},
+			wantDelete: "/external/real.md",
+		},
+		{
+			name: "ambiguous metadata matches fail closed",
+			files: map[string]File{
+				"/external/one.md": {Path: "/external/one.md", Provider: provider, ProviderObjectID: objectID},
+				"/external/two.md": {Path: "/external/two.md", Provider: provider, ProviderObjectID: objectID},
+			},
+			wantControl: true,
+		},
+		{
+			name: "zero metadata matches fail closed",
+			files: map[string]File{
+				"/external/other.md": {Path: "/external/other.md", Provider: provider, ProviderObjectID: "other-object"},
+			},
+			wantControl: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+			t.Cleanup(store.Close)
+			workspaceID := "ws_provider_delete_resolution_" + strings.ReplaceAll(tc.name, " ", "_")
+
+			store.mu.Lock()
+			ws := store.ensureWorkspaceLocked(workspaceID)
+			ws.Revision = "rev_before_delete"
+			for path, file := range tc.files {
+				ws.Files[path] = file
+			}
+			if tc.indexPath != "" {
+				ws.ProviderIndex[providerObjectKey(provider, objectID)] = tc.indexPath
+			}
+			store.applyProviderDeleteLocked(ws, provider, ApplyAction{
+				Type:             ActionFileDelete,
+				ProviderObjectID: objectID,
+			}, "corr_provider_delete_resolution")
+			gotRevision := ws.Revision
+			gotEvents := append([]Event(nil), ws.Events...)
+			gotFiles := make(map[string]File, len(ws.Files))
+			for path, file := range ws.Files {
+				gotFiles[path] = file
+			}
+			gotIndex := ws.ProviderIndex[providerObjectKey(provider, objectID)]
+			store.mu.Unlock()
+
+			if tc.wantDelete != "" {
+				if _, exists := gotFiles[tc.wantDelete]; exists {
+					t.Fatalf("resolved path %s was not deleted; files=%v", tc.wantDelete, gotFiles)
+				}
+				if gotRevision == "rev_before_delete" {
+					t.Fatal("resolved provider delete did not advance workspace revision")
+				}
+				if gotIndex != "" {
+					t.Fatalf("provider index entry survived resolved delete: %q", gotIndex)
+				}
+				if len(gotEvents) != 1 || gotEvents[0].Type != "file.deleted" || gotEvents[0].Path != tc.wantDelete {
+					t.Fatalf("resolved delete events = %+v", gotEvents)
+				}
+				if gotEvents[0].ACLPermissions == nil {
+					t.Fatal("resolved delete did not preserve a non-nil ACL snapshot")
+				}
+				if tc.name == "unique metadata match repairs missing index" && len(gotEvents[0].ACLPermissions) != 1 {
+					t.Fatalf("ACL snapshot = %v, want one permission", gotEvents[0].ACLPermissions)
+				}
+				if tc.indexPath == "/external/wrong.md" {
+					if _, exists := gotFiles[tc.indexPath]; !exists {
+						t.Fatalf("stale index target was incorrectly deleted: %s", tc.indexPath)
+					}
+				}
+				return
+			}
+
+			if !tc.wantControl {
+				t.Fatal("test case missing expected outcome")
+			}
+			if gotRevision != "rev_before_delete" {
+				t.Fatalf("ambiguous/unresolved delete advanced revision: %q", gotRevision)
+			}
+			if len(gotEvents) != 1 || gotEvents[0].Type != "sync.reconcile" || gotEvents[0].Path != "" {
+				t.Fatalf("ambiguous/unresolved delete events = %+v", gotEvents)
+			}
+		})
+	}
+}
+
 func TestPendingWritebacksRecoveredOnRestart(t *testing.T) {
 	stateFile := filepath.Join(t.TempDir(), "relayfile-state.json")
 

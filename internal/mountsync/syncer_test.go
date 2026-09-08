@@ -12057,7 +12057,10 @@ func TestLoadStateResetsBootstrapCompleteOnlyOnWriteOnlyToMirrorSyncMode(t *test
 	}
 }
 
-func TestPullRemoteIncrementalDeleteEventStillDeletes(t *testing.T) {
+// A resolved provider-object delete is emitted as one path-backed file.deleted
+// event. The mount must converge the local mirror from that single event; it
+// must not require a second full-pull observation.
+func TestPullRemoteIncrementalResolvedProviderDeleteConvergesInOneEvent(t *testing.T) {
 	client := &fakeClient{
 		files: map[string]RemoteFile{},
 		events: []FilesystemEvent{

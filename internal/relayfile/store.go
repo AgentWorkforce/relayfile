@@ -4456,17 +4456,28 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 
 func (s *Store) applyProviderDeleteLocked(ws *workspaceState, provider string, action ApplyAction, correlationID string) {
 	workspaceID := s.workspaceIDForStateLocked(ws)
-	objectID := action.ProviderObjectID
+	objectID := strings.TrimSpace(action.ProviderObjectID)
 	path := normalizePath(action.Path)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
-	if objectID != "" && path == "/" {
-		if indexed, ok := ws.ProviderIndex[providerObjectKey(provider, objectID)]; ok {
-			path = indexed
+	if objectID != "" {
+		if path == "/" {
+			if resolved, ok := resolveProviderObjectPathLocked(ws, provider, objectID); ok {
+				path = resolved
+			}
+		} else if file, exists := ws.Files[path]; !exists || !providerObjectMatchesFile(file, provider, objectID) {
+			// When an envelope carries both fields, never let a stale path
+			// override the provider object identity. Recover through the same
+			// verified index/unique-metadata resolver used by pathless deletes.
+			if resolved, ok := resolveProviderObjectPathLocked(ws, provider, objectID); ok {
+				path = resolved
+			} else {
+				path = "/"
+			}
 		}
 	}
 	if path == "/" {
-		if strings.TrimSpace(action.Path) == "" {
+		if strings.TrimSpace(action.Path) == "" || objectID != "" {
 			// A provider delete without a resolvable path cannot safely name a
 			// local file. Emit only a pathless control event so mounts perform
 			// an authoritative reconciliation; never emit file.deleted with an
@@ -4498,6 +4509,9 @@ func (s *Store) applyProviderDeleteLocked(ws *workspaceState, provider string, a
 		}
 		return
 	}
+	// A path supplied by the provider is authoritative for path-based
+	// adapters. For object-identity deletes, however, the resolved path must
+	// have been verified by resolveProviderObjectPathLocked above.
 	aclPermissions := resolvePermissionsFromFiles(ws.Files, path, true)
 	delete(ws.Files, path)
 	if objectID != "" {
@@ -4517,6 +4531,57 @@ func (s *Store) applyProviderDeleteLocked(ws *workspaceState, provider string, a
 	}
 	event.ACLPermissions = snapshotACLPermissions(aclPermissions)
 	s.appendWorkspaceEventLocked(workspaceID, ws, event)
+}
+
+// resolveProviderObjectPathLocked resolves an object-identity delete to a
+// currently materialized file. The persisted index is only a hint: legacy
+// state and interrupted writes can leave it absent or pointing at an
+// unrelated path. In those cases, a unique metadata match is safe to use and
+// repairs the index. Zero or multiple matches fail closed.
+func resolveProviderObjectPathLocked(ws *workspaceState, provider, objectID string) (string, bool) {
+	if ws == nil || strings.TrimSpace(objectID) == "" {
+		return "", false
+	}
+	normalizedProvider := normalizeProvider(provider)
+	if normalizedProvider == "" {
+		return "", false
+	}
+	objectID = strings.TrimSpace(objectID)
+	if ws.ProviderIndex != nil {
+		if indexed, ok := ws.ProviderIndex[providerObjectKey(provider, objectID)]; ok {
+			if file, exists := ws.Files[indexed]; exists &&
+				providerObjectMatchesFile(file, provider, objectID) {
+				return normalizePath(indexed), true
+			}
+		}
+	}
+
+	candidate := ""
+	matches := 0
+	for filePath, file := range ws.Files {
+		if !providerObjectMatchesFile(file, provider, objectID) {
+			continue
+		}
+		matches++
+		candidate = normalizePath(filePath)
+		if matches > 1 {
+			return "", false
+		}
+	}
+	if matches != 1 {
+		return "", false
+	}
+	if ws.ProviderIndex == nil {
+		ws.ProviderIndex = map[string]string{}
+	}
+	ws.ProviderIndex[providerObjectKey(provider, objectID)] = candidate
+	return candidate, true
+}
+
+func providerObjectMatchesFile(file File, provider, objectID string) bool {
+	return normalizeProvider(file.Provider) == normalizeProvider(provider) &&
+		normalizeProvider(provider) != "" &&
+		strings.TrimSpace(file.ProviderObjectID) == strings.TrimSpace(objectID)
 }
 
 func canonicalizeProviderActionLocked(ws *workspaceState, provider string, action ApplyAction) ApplyAction {
