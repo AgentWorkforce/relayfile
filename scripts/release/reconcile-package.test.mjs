@@ -248,6 +248,46 @@ test("registry commands and their retry time share the total retry budget", asyn
   rmSync(dir, { recursive: true, force: true });
 });
 
+test("overscheduled sleeps charge their actual elapsed retry time", async () => {
+  const dir = sandbox();
+  const state = { views: 0, publishes: 0 };
+  const timeouts = [];
+  const delays = [];
+  let clock = 0;
+  const npm = fakeNpm({
+    state,
+    registry: { integrity: VALID_INTEGRITY, shasum: VALID_SHASUM },
+    viewError: "npm error code E404",
+    onView: (_args, options) => timeouts.push(options.timeout),
+  });
+
+  await assert.rejects(
+    reconcilePackage({
+      packageDir: dir,
+      tag: "next",
+      sourceSha: "a".repeat(40),
+      runId: 1,
+      runAttempt: 1,
+      npm,
+      attempts: 99,
+      delayMs: 5,
+      maxDelayMs: 10,
+      maxTotalRetryDelayMs: 20,
+      now: () => clock,
+      sleep: async (delay) => {
+        delays.push(delay);
+        clock += delay + 10;
+      },
+    }),
+    /post-publish verification failed/,
+  );
+
+  assert.deepEqual(timeouts, [REGISTRY_QUERY_TIMEOUT_MS, 20, 5]);
+  assert.deepEqual(delays, [5, 5]);
+  assert.equal(clock, 30);
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("post-publish digest conflict fails closed without retrying", async () => {
   const dir = sandbox();
   const state = { views: 0, publishes: 0 };

@@ -27,6 +27,10 @@ import {
 import { basename, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
+import {
+  isSha1Shasum,
+  isSha512Integrity,
+} from "./create-release-attestation.mjs";
 
 export const DEFAULT_ATTEMPTS = 10;
 export const DEFAULT_DELAY_MS = 5000;
@@ -40,20 +44,6 @@ export const REGISTRY_FETCH_RETRY_MIN_TIMEOUT_MS = 1000;
 export const REGISTRY_FETCH_RETRY_MAX_TIMEOUT_MS = 5000;
 // Keep post-publish registry verification bounded when npm stays unavailable.
 export const MAX_TOTAL_RETRY_DELAY_MS = 5 * 60 * 1000;
-
-/** npm's integrity field must contain the complete SHA-512 SRI digest. */
-export function isSha512Integrity(value) {
-  if (typeof value !== "string") return false;
-  const match = /^sha512-([A-Za-z0-9+/]{86}==)$/.exec(value);
-  if (!match) return false;
-  const digest = Buffer.from(match[1], "base64");
-  return digest.length === 64 && digest.toString("base64") === match[1];
-}
-
-/** npm's legacy shasum field is the lowercase hexadecimal SHA-1 digest. */
-export function isSha1Shasum(value) {
-  return typeof value === "string" && /^[0-9a-f]{40}$/.test(value);
-}
 
 export function backoffDelay({
   attempt,
@@ -445,8 +435,12 @@ export async function reconcilePackage({
             remainingDelayMs,
           );
           if (delay === 0) break;
-          consumedRetryBudgetMs += delay;
+          const sleepStartedAt = now();
           await sleep(delay);
+          consumedRetryBudgetMs += Math.min(
+            remainingDelayMs,
+            Math.max(delay, now() - sleepStartedAt),
+          );
         }
       }
       if (!registry) {
