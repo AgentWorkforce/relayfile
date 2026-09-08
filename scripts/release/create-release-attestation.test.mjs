@@ -8,6 +8,11 @@ import {
   RELEASE_PACKAGE_NAMES,
 } from "./create-release-attestation.mjs";
 
+const VALID_INTEGRITY = `sha512-${"A".repeat(86)}==`;
+const OTHER_INTEGRITY = `sha512-${"A".repeat(85)}Q==`;
+const VALID_SHASUM = "a".repeat(40);
+const OTHER_SHASUM = "b".repeat(40);
+
 function packageRecords(sourceSha, version = "1.2.3") {
   return RELEASE_PACKAGE_NAMES.map((name) => ({
     sourceSha,
@@ -17,10 +22,10 @@ function packageRecords(sourceSha, version = "1.2.3") {
       status: "already-published",
       local: {
         sha256: "a".repeat(64),
-        integrity: "sha512-local",
-        shasum: "sha1-local",
+        integrity: VALID_INTEGRITY,
+        shasum: VALID_SHASUM,
       },
-      registry: { integrity: "sha512-local" },
+      registry: { integrity: VALID_INTEGRITY },
     },
   }));
 }
@@ -98,7 +103,7 @@ test("attestation rejects a missing package after validating the remaining set",
 test("attestation rejects registry content that differs from the local tarball", () => {
   const sourceSha = "a".repeat(40);
   const packages = packageRecords(sourceSha);
-  packages[0].package.registry.integrity = "sha512-conflict";
+  packages[0].package.registry.integrity = OTHER_INTEGRITY;
   assert.throws(
     () =>
       buildReleaseAttestation({
@@ -124,7 +129,7 @@ test("attestation rejects incomparable mixed digest types", () => {
   const sourceSha = "a".repeat(40);
   const packages = packageRecords(sourceSha);
   packages[0].package.local.shasum = null;
-  packages[0].package.registry = { shasum: "sha1-other" };
+  packages[0].package.registry = { shasum: OTHER_SHASUM };
   assert.throws(
     () =>
       buildReleaseAttestation({
@@ -157,10 +162,10 @@ test("attestation rejects unexpected package names", () => {
       status: "already-published",
       local: {
         sha256: "a".repeat(64),
-        integrity: "sha512-local",
-        shasum: "sha1-local",
+        integrity: VALID_INTEGRITY,
+        shasum: VALID_SHASUM,
       },
-      registry: { integrity: "sha512-local", shasum: "sha1-local" },
+      registry: { integrity: VALID_INTEGRITY, shasum: VALID_SHASUM },
     },
   });
   assert.throws(
@@ -181,6 +186,32 @@ test("attestation rejects unexpected package names", () => {
         })),
       }),
     /not a release package/,
+  );
+});
+
+test("attestation rejects malformed equal digest strings", () => {
+  const sourceSha = "a".repeat(40);
+  const packages = packageRecords(sourceSha);
+  packages[0].package.local.integrity = "sha512-not-a-digest";
+  packages[0].package.registry.integrity = "sha512-not-a-digest";
+  assert.throws(
+    () =>
+      buildReleaseAttestation({
+        sourceSha,
+        runId: 123,
+        runAttempt: 1,
+        version: "1.2.3",
+        tag: "v1.2.3",
+        tagCommit: "b".repeat(40),
+        tagTree: "d".repeat(40),
+        repository: "AgentWorkforce/relayfile",
+        packages,
+        binaries: RELEASE_BINARY_NAMES.map((file) => ({
+          file,
+          sha256: "c".repeat(64),
+        })),
+      }),
+    /malformed package digest/,
   );
 });
 

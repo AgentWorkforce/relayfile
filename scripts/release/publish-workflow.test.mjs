@@ -25,6 +25,11 @@ import {
   RELEASE_PACKAGE_NAMES,
 } from "./create-release-attestation.mjs";
 
+const VALID_INTEGRITY = `sha512-${"A".repeat(86)}==`;
+const VALID_SHASUM = "a".repeat(40);
+const OTHER_INTEGRITY = `sha512-${"A".repeat(85)}Q==`;
+const OTHER_SHASUM = "b".repeat(40);
+
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const WORKFLOW = readFileSync(
   join(REPO, ".github/workflows/publish.yml"),
@@ -150,7 +155,7 @@ function runVersionStep({
 function runVersionStepAfterTaggedRelease({
   customVersion = "",
   runAttempt = "1",
-  tagMetadata = false,
+  tagMetadata = true,
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "relayfile-version-tag-"));
   const output = join(dir, "output");
@@ -228,14 +233,14 @@ function runVersionStepAfterTaggedRelease({
             file: "package.tgz",
             size: 1,
             sha256: "a".repeat(64),
-            integrity: "sha512-local",
-            shasum: "sha1-local",
+            integrity: VALID_INTEGRITY,
+            shasum: VALID_SHASUM,
           },
           registry: {
             name,
             version: "1.2.4",
-            integrity: "sha512-local",
-            shasum: "sha1-local",
+            integrity: VALID_INTEGRITY,
+            shasum: VALID_SHASUM,
           },
         },
       })),
@@ -304,7 +309,7 @@ state="$PWD/npm-stub-state"
 case "$1" in
   pack)
     printf '%s' 'immutable package content' > relayfile-test-1.2.3.tgz
-    printf '%s\\n' '[{"filename":"relayfile-test-1.2.3.tgz","name":"@relayfile/test","version":"1.2.3","integrity":"sha512-local","shasum":"sha1-local"}]'
+    printf '%s\\n' '[{"filename":"relayfile-test-1.2.3.tgz","name":"@relayfile/test","version":"1.2.3","integrity":"${VALID_INTEGRITY}","shasum":"${VALID_SHASUM}"}]'
     ;;
   view)
     count=0
@@ -316,12 +321,12 @@ case "$1" in
       exit 1
     fi
     if [ "${mode}" = conflict ]; then
-      printf '%s\\n' '{"integrity":"sha512-other","shasum":"sha1-other"}'
+      printf '%s\\n' '{"integrity":"${OTHER_INTEGRITY}","shasum":"${OTHER_SHASUM}"}'
     elif [ "$count" -eq 1 ] && [ "${mode}" = absent ]; then
       printf '%s\\n' 'npm error code E404' >&2
       exit 1
     else
-      printf '%s\\n' '{"integrity":"sha512-local","shasum":"sha1-local"}'
+      printf '%s\\n' '{"integrity":"${VALID_INTEGRITY}","shasum":"${VALID_SHASUM}"}'
     fi
     ;;
   publish)

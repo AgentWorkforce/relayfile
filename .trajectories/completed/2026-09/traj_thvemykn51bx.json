@@ -1,0 +1,77 @@
+{
+  "id": "traj_thvemykn51bx",
+  "version": 1,
+  "task": {
+    "title": "Repair release attestation digest and provenance binding"
+  },
+  "status": "completed",
+  "startedAt": "2026-09-08T19:48:31.181Z",
+  "completedAt": "2026-09-08T19:48:41.454Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-09-08T19:48:32.527Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_7yqtvijjd4pg",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-09-08T19:48:32.527Z",
+      "endedAt": "2026-09-08T19:48:41.454Z",
+      "events": [
+        {
+          "ts": 1788896912528,
+          "type": "decision",
+          "content": "Bind validated artifacts to annotated tag run metadata: Bind validated artifacts to annotated tag run metadata",
+          "raw": {
+            "question": "Bind validated artifacts to annotated tag run metadata",
+            "chosen": "Bind validated artifacts to annotated tag run metadata",
+            "alternatives": [],
+            "reasoning": "A signed artifact must match the tag's source, tree, workflow run, and attempt before it can become a baseline or authorize same-run recovery."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1788896913574,
+          "type": "decision",
+          "content": "Validate exact npm digest formats in both attestation builder and baseline validator: Validate exact npm digest formats in both attestation builder and baseline validator",
+          "raw": {
+            "question": "Validate exact npm digest formats in both attestation builder and baseline validator",
+            "chosen": "Validate exact npm digest formats in both attestation builder and baseline validator",
+            "alternatives": [],
+            "reasoning": "Equal arbitrary strings are not evidence of package identity; require canonical SHA-512 SRI or lowercase SHA-1."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1788896914545,
+          "type": "reflection",
+          "content": "Focused and full release suites pass with metadata and malformed-digest regressions; final gates remain before commit.",
+          "raw": {
+            "confidence": 0.9
+          },
+          "significance": "high",
+          "tags": [
+            "confidence:0.9"
+          ]
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Strictly validated SHA-512 SRI/SHA-1 digests in release attestation builder and baseline validator; bound artifacts to annotated tag source/tree/run/attempt metadata; added regressions and passed 64-test Node22 release suite plus actionlint/Prettier/diff checks.",
+    "approach": "Standard approach",
+    "confidence": 0.95
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/private/tmp/relayfile-release-snapshot-fix-0908",
+  "tags": [],
+  "_trace": {
+    "startRef": "1873c3cf5ecbed21cd34e929952ccd7059837dcb",
+    "endRef": "1873c3cf5ecbed21cd34e929952ccd7059837dcb"
+  }
+}

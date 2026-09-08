@@ -23,6 +23,8 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
+  isSha1Shasum,
+  isSha512Integrity,
   RELEASE_BINARY_NAMES,
   RELEASE_PACKAGE_NAMES,
 } from "./create-release-attestation.mjs";
@@ -365,6 +367,24 @@ export function validateReleaseAttestation(
     return false;
   if (!RUN_ID.test(String(attestation.producer?.workflowRunAttempt ?? "")))
     return false;
+  // The signed artifact must describe the exact annotated tag metadata.  The
+  // tag metadata is the only trusted binding for a prior canonical workflow
+  // run, so a validly signed artifact from another run cannot authorize a
+  // same-attempt recovery.
+  const metadata = candidate.metadata;
+  if (
+    !metadata ||
+    metadata.sourceSha !== candidate.parent ||
+    metadata.tree !== candidate.tree ||
+    !RUN_ID.test(metadata.workflowRunId) ||
+    !RUN_ID.test(metadata.workflowRunAttempt) ||
+    attestation.sourceSha !== metadata.sourceSha ||
+    attestation.tag?.tree !== metadata.tree ||
+    attestation.producer.workflowRunId !== metadata.workflowRunId ||
+    attestation.producer.workflowRunAttempt !== metadata.workflowRunAttempt
+  ) {
+    return false;
+  }
   if (
     !attestation.versions ||
     typeof attestation.versions !== "object" ||
@@ -385,15 +405,11 @@ export function validateReleaseAttestation(
     const name = record?.name;
     const local = record?.local;
     const registry = record?.registry;
-    const digestFieldsAreStrings = [
-      local?.integrity,
-      local?.shasum,
-      registry?.integrity,
-      registry?.shasum,
-    ].every(
-      (value) =>
-        value === null || value === undefined || typeof value === "string",
-    );
+    const digestFieldsAreValid =
+      (local?.integrity == null || isSha512Integrity(local.integrity)) &&
+      (local?.shasum == null || isSha1Shasum(local.shasum)) &&
+      (registry?.integrity == null || isSha512Integrity(registry.integrity)) &&
+      (registry?.shasum == null || isSha1Shasum(registry.shasum));
     if (
       !RELEASE_PACKAGE_NAMES.includes(name) ||
       packageNames.has(name) ||
@@ -409,7 +425,7 @@ export function validateReleaseAttestation(
       !registry ||
       registry.name !== name ||
       registry.version !== record.version ||
-      !digestFieldsAreStrings ||
+      !digestFieldsAreValid ||
       (!registry.integrity && !registry.shasum)
     ) {
       return false;

@@ -17,6 +17,9 @@ import {
   resolveReleaseBaseline,
 } from "./resolve-release-baseline.mjs";
 
+const VALID_INTEGRITY = `sha512-${"A".repeat(86)}==`;
+const VALID_SHASUM = "a".repeat(40);
+
 function attestationFor(candidate, overrides = {}) {
   const packages = RELEASE_PACKAGE_NAMES.map((name) => ({
     sourceSha: candidate.parent,
@@ -28,14 +31,14 @@ function attestationFor(candidate, overrides = {}) {
         file: "package.tgz",
         size: 1,
         sha256: "a".repeat(64),
-        integrity: "sha512-local",
-        shasum: "sha1-local",
+        integrity: VALID_INTEGRITY,
+        shasum: VALID_SHASUM,
       },
       registry: {
         name,
         version: candidate.version.raw,
-        integrity: "sha512-local",
-        shasum: "sha1-local",
+        integrity: VALID_INTEGRITY,
+        shasum: VALID_SHASUM,
       },
     },
   }));
@@ -48,8 +51,8 @@ function attestationFor(candidate, overrides = {}) {
       repository: RELEASE_REPOSITORY,
       workflow: "Publish Package",
       workflowPath: RELEASE_WORKFLOW_PATH,
-      workflowRunId: "123",
-      workflowRunAttempt: "1",
+      workflowRunId: candidate.metadata?.workflowRunId ?? "123",
+      workflowRunAttempt: candidate.metadata?.workflowRunAttempt ?? "1",
     },
     tag: {
       name: candidate.tag,
@@ -99,7 +102,24 @@ function sandboxWithPriorRelease() {
   writePackages(cwd, "1.2.4");
   git(cwd, "commit", "-qam", "chore(release): v1.2.4");
   const releaseCommit = git(cwd, "rev-parse", "HEAD");
-  git(cwd, "tag", "-a", "v1.2.4", releaseCommit, "-m", "Release v1.2.4");
+  const releaseTree = git(cwd, "rev-parse", "HEAD^{tree}");
+  git(
+    cwd,
+    "tag",
+    "-a",
+    "v1.2.4",
+    releaseCommit,
+    "-m",
+    "Release v1.2.4",
+    "-m",
+    `source-sha=${sourceSha}`,
+    "-m",
+    `tag-tree=${releaseTree}`,
+    "-m",
+    "workflow-run-id=123",
+    "-m",
+    "workflow-run-attempt=1",
+  );
   return { cwd, sourceSha, releaseCommit };
 }
 
@@ -267,4 +287,49 @@ test("same-workflow reruns accept only exact run/source/tree metadata", () => {
   assert.equal(result.baselineVersion, "2.0.0");
   assert.equal(result.resumableVersion, "2.0.0");
   rmSync(cwd, { recursive: true, force: true });
+});
+
+test("a signed attestation from another canonical run cannot authorize recovery", () => {
+  const { cwd, sourceSha } = sandboxWithPriorRelease();
+  const result = resolveReleaseBaseline({
+    cwd,
+    sourceSha,
+    currentVersion: "1.2.3",
+    currentRunId: "123",
+    currentRunAttempt: "2",
+    releaseAttestationVerifier: ({ candidate }) => {
+      const attestation = attestationFor(candidate);
+      attestation.producer.workflowRunId = "999";
+      return attestation;
+    },
+  });
+  assert.equal(result.baselineVersion, "1.2.3");
+  assert.equal(result.latestTag, "");
+  assert.equal(result.resumableVersion, "");
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("external attestations reject malformed digest strings even when equal", () => {
+  for (const [field, value] of [
+    ["integrity", "sha512-not-a-digest"],
+    ["shasum", "sha1-not-a-digest"],
+  ]) {
+    const { cwd, sourceSha } = sandboxWithPriorRelease();
+    const result = resolveReleaseBaseline({
+      cwd,
+      sourceSha,
+      currentVersion: "1.2.3",
+      releaseAttestationVerifier: ({ candidate }) => {
+        const attestation = attestationFor(candidate);
+        for (const item of attestation.packages) {
+          item.package.local[field] = value;
+          item.package.registry[field] = value;
+        }
+        return attestation;
+      },
+    });
+    assert.equal(result.baselineVersion, "1.2.3", field);
+    assert.equal(result.latestTag, "", field);
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });

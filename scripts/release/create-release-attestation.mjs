@@ -7,6 +7,20 @@ import { basename, resolve } from "node:path";
 const SHA256 = /^[0-9a-f]{64}$/;
 const GIT_SHA = /^[0-9a-f]{40}$/;
 
+/** npm's integrity field must contain the complete SHA-512 SRI digest. */
+export function isSha512Integrity(value) {
+  if (typeof value !== "string") return false;
+  const match = /^sha512-([A-Za-z0-9+/]{86}==)$/.exec(value);
+  if (!match) return false;
+  const digest = Buffer.from(match[1], "base64");
+  return digest.length === 64 && digest.toString("base64") === match[1];
+}
+
+/** npm's legacy shasum field is the lowercase hexadecimal SHA-1 digest. */
+export function isSha1Shasum(value) {
+  return typeof value === "string" && /^[0-9a-f]{40}$/.test(value);
+}
+
 export const RELEASE_PACKAGE_NAMES = [
   "@relayfile/core",
   "@relayfile/sdk",
@@ -93,6 +107,22 @@ export function buildReleaseAttestation({
     }
     if (!record.local?.sha256 || !SHA256.test(record.local.sha256)) {
       throw new Error(`${record.name} has no local tarball SHA-256`);
+    }
+    if (
+      (record.local.integrity !== null &&
+        record.local.integrity !== undefined &&
+        !isSha512Integrity(record.local.integrity)) ||
+      (record.local.shasum !== null &&
+        record.local.shasum !== undefined &&
+        !isSha1Shasum(record.local.shasum)) ||
+      (record.registry?.integrity !== null &&
+        record.registry?.integrity !== undefined &&
+        !isSha512Integrity(record.registry.integrity)) ||
+      (record.registry?.shasum !== null &&
+        record.registry?.shasum !== undefined &&
+        !isSha1Shasum(record.registry.shasum))
+    ) {
+      throw new Error(`${record.name} has a malformed package digest`);
     }
     if (!record.registry?.integrity && !record.registry?.shasum) {
       throw new Error(`${record.name} has no registry digest`);
