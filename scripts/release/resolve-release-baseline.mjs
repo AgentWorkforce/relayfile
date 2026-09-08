@@ -4,9 +4,10 @@
  *
  * A release commit is deliberately tagged but is not pushed back to the
  * source branch.  Therefore package.json on the next dispatch can lag behind
- * the latest release.  Only annotated v<strict-semver> tags whose release
- * commit is a verified child of the dispatch source and whose complete
- * package tree carries the tag version are trusted as a baseline.
+ * the latest release.  Only annotated v<strict-semver> tags whose single
+ * release parent is on the dispatch source's first-parent lineage, whose
+ * commit has the exact release-only shape produced by publish.yml, and whose
+ * complete package tree carries the tag version are trusted as a baseline.
  */
 
 import { execFileSync } from "node:child_process";
@@ -25,6 +26,24 @@ export const RELEASE_PACKAGE_PATHS = [
   "packages/mount-linux-arm64/package.json",
   "packages/mount-linux-x64/package.json",
 ];
+
+// The release workflow creates one commit from SOURCE_SHA after npm version,
+// changelog finalization, and lockfile regeneration.  Keep this allowlist in
+// sync with the explicit `git add` in publish.yml: a baseline tag is not
+// trusted when its commit also carries an arbitrary side-branch change.
+export const RELEASE_COMMIT_PATHS = new Set([
+  "package.json",
+  "package-lock.json",
+  ...RELEASE_PACKAGE_PATHS,
+  "packages/core/CHANGELOG.md",
+  "packages/sdk/typescript/CHANGELOG.md",
+  "packages/sdk/typescript/package-lock.json",
+  "packages/client/CHANGELOG.md",
+  "packages/agents/CHANGELOG.md",
+  "packages/cli/CHANGELOG.md",
+  "packages/file-observer/CHANGELOG.md",
+  "packages/local-mount/CHANGELOG.md",
+]);
 
 const VERSION =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
@@ -98,6 +117,17 @@ function packageVersionAt(cwd, commit, path) {
   }
 }
 
+function commitSubjectAt(cwd, commit) {
+  return git(cwd, ["show", "-s", "--format=%s", commit], { allowFailure: true });
+}
+
+function changedPathsAt(cwd, parent, commit) {
+  const output = git(cwd, ["diff-tree", "--no-commit-id", "--name-only", "-r", parent, commit], {
+    allowFailure: true,
+  });
+  return output ? output.split(/\s+/).filter(Boolean) : [];
+}
+
 function trustedTag(cwd, tag, sourceSha) {
   const version = parseStrictVersion(tag.slice(1));
   if (!version) return null;
@@ -117,6 +147,34 @@ function trustedTag(cwd, tag, sourceSha) {
     git(cwd, ["merge-base", "--is-ancestor", parent, sourceSha], {
       allowFailure: true,
     }) === null
+  ) {
+    return null;
+  }
+  // A release commit that is already on the dispatch source's exact lineage
+  // is directly tied by its commit ancestry.  A prior release commit is often
+  // intentionally not merged back to the source branch; for that stale case,
+  // its parent must be on the source's first-parent line and the commit itself
+  // must retain the exact release-commit shape.  The subject and changed-path
+  // attestation prevent an arbitrary sibling branch rooted at an old source
+  // commit from becoming the monotonic baseline.
+  const commitOnSourceLineage =
+    git(cwd, ["merge-base", "--is-ancestor", commit, sourceSha], {
+      allowFailure: true,
+    }) === "";
+  const sourceLineage = git(cwd, ["rev-list", "--first-parent", sourceSha], {
+    allowFailure: true,
+  });
+  if (
+    !commitOnSourceLineage &&
+    (!sourceLineage || !sourceLineage.split(/\s+/).includes(parent))
+  ) {
+    return null;
+  }
+  if (commitSubjectAt(cwd, commit) !== `chore(release): v${version.raw}`) return null;
+  const changedPaths = changedPathsAt(cwd, parent, commit);
+  if (
+    changedPaths.length === 0 ||
+    changedPaths.some((path) => !RELEASE_COMMIT_PATHS.has(path))
   ) {
     return null;
   }

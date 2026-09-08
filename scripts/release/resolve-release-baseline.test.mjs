@@ -32,7 +32,7 @@ function sandboxWithPriorRelease() {
   git(cwd, "commit", "-qm", "source");
   const sourceSha = git(cwd, "rev-parse", "HEAD");
   writePackages(cwd, "1.2.4");
-  git(cwd, "commit", "-qam", "release");
+  git(cwd, "commit", "-qam", "chore(release): v1.2.4");
   const releaseCommit = git(cwd, "rev-parse", "HEAD");
   git(cwd, "tag", "-a", "v1.2.4", releaseCommit, "-m", "Release v1.2.4");
   return { cwd, sourceSha, releaseCommit };
@@ -51,12 +51,26 @@ test("next dispatch advances from a trusted release tag not merged to source", (
   rmSync(cwd, { recursive: true, force: true });
 });
 
-test("untrusted tag trees do not become a version baseline", () => {
-  const { cwd, sourceSha, releaseCommit } = sandboxWithPriorRelease();
-  git(cwd, "tag", "-a", "v9.9.9", releaseCommit, "-m", "Forged tree version");
+test("sibling-branch release tags do not become a version baseline", () => {
+  const { cwd, sourceSha } = sandboxWithPriorRelease();
+  git(cwd, "checkout", "-qb", "dispatch-main", sourceSha);
+  writePackages(cwd, "1.2.3");
+  writeFileSync(join(cwd, "main.txt"), "main\n");
+  git(cwd, "add", ".");
+  git(cwd, "commit", "-qm", "main advances");
+  const currentSourceSha = git(cwd, "rev-parse", "HEAD");
+
+  git(cwd, "checkout", "-q", "-b", "sibling", sourceSha);
+  writePackages(cwd, "9.9.9");
+  writeFileSync(join(cwd, "sibling.txt"), "forged side branch\n");
+  git(cwd, "add", ".");
+  git(cwd, "commit", "-qm", "chore(release): v9.9.9");
+  const siblingCommit = git(cwd, "rev-parse", "HEAD");
+  git(cwd, "tag", "-a", "v9.9.9", siblingCommit, "-m", "Release v9.9.9");
+
   const result = resolveReleaseBaseline({
     cwd,
-    sourceSha,
+    sourceSha: currentSourceSha,
     currentVersion: "1.2.3",
   });
   assert.equal(result.baselineVersion, "1.2.4");

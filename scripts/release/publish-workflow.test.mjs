@@ -148,7 +148,7 @@ function runVersionStepAfterTaggedRelease() {
       JSON.stringify({ name: path, version: "1.2.4" }) + "\n",
     );
   }
-  git(dir, "commit", "-qam", "release");
+  git(dir, "commit", "-qam", "chore(release): v1.2.4");
   const releaseCommit = git(dir, "rev-parse", "HEAD");
   git(dir, "tag", "-a", "v1.2.4", releaseCommit, "-m", "Release v1.2.4");
   git(dir, "checkout", "-q", sourceSha);
@@ -300,13 +300,17 @@ function makeTagSandbox() {
   return { dir, sourceSha };
 }
 
-function runTagPreparation({ existingTag = false, mismatch = false } = {}) {
+function runTagPreparation({ existingTag = false, mismatch = false, lightweight = false } = {}) {
   const { dir, sourceSha } = makeTagSandbox();
   const envFile = join(dir, "github-env");
   if (existingTag) {
     const releaseTree = git(dir, "rev-parse", "HEAD^{tree}");
     const tagCommit = git(dir, "commit-tree", releaseTree, "-p", sourceSha);
-    git(dir, "tag", "-a", "v1.2.4", tagCommit, "-m", "Release v1.2.4");
+    if (lightweight) {
+      git(dir, "tag", "v1.2.4", tagCommit);
+    } else {
+      git(dir, "tag", "-a", "v1.2.4", tagCommit, "-m", "Release v1.2.4");
+    }
     if (mismatch) {
       writeFileSync(join(dir, "version.txt"), "mismatch\n");
       git(dir, "commit", "-qam", "mismatch");
@@ -395,6 +399,10 @@ test("reconciliation CLI shell harness covers canonical E404, collision, and out
 });
 
 test("tag preparation shell harness proves new and existing tag invariants", () => {
+  assert.match(
+    extractTagPreparation(),
+    /git cat-file -t "refs\/tags\/v\$\{NEW_VERSION\}".*= "tag"/,
+  );
   const fresh = runTagPreparation();
   assert.equal(fresh.status, 0, fresh.stdout);
   assert.match(fresh.env, /TAG_EXISTS=false/);
@@ -406,6 +414,9 @@ test("tag preparation shell harness proves new and existing tag invariants", () 
 
   const mismatch = runTagPreparation({ existingTag: true, mismatch: true });
   assert.notEqual(mismatch.status, 0);
+
+  const lightweight = runTagPreparation({ existingTag: true, lightweight: true });
+  assert.notEqual(lightweight.status, 0);
 });
 
 /** The shared PACKAGE_PATHS_JSON assignment, verbatim. */
