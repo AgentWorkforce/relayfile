@@ -385,7 +385,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "delete_file":
 		s.handleDeleteFile(w, r, workspaceID, correlationID, claims)
 	case "events":
-		s.handleEvents(w, r, workspaceID, correlationID)
+		s.handleEvents(w, r, workspaceID, correlationID, claims)
 	case "query_files":
 		s.handleQueryFiles(w, r, workspaceID, correlationID, claims)
 	case "sync_status":
@@ -2365,20 +2365,87 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request, worksp
 	writeJSON(w, http.StatusAccepted, result)
 }
 
-func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string) {
+func (s *Server) eventVisibleToClaims(workspaceID string, claims tokenClaims, event relayfile.Event) bool {
+	path := strings.TrimSpace(event.Path)
+	if path == "" {
+		return true
+	}
+	path = normalizeACLPath(path)
+	if !scopeMatchesPath(claims.Scopes, "fs:read", path) {
+		return false
+	}
+	if event.ACLPermissions != nil && !filePermissionAllows(event.ACLPermissions, workspaceID, &claims, "read", path) {
+		return false
+	}
+	includeTarget := event.Type != "file.deleted"
+	return filePermissionAllows(s.resolveFilePermissions(workspaceID, "", path, includeTarget), workspaceID, &claims, "read", path)
+}
+
+func (s *Server) fileReadAllowedNow(workspaceID string, claims tokenClaims, path string, includeTarget bool) bool {
+	path = normalizeACLPath(path)
+	return scopeMatchesPath(claims.Scopes, "fs:read", path) &&
+		filePermissionAllows(s.resolveFilePermissions(workspaceID, "", path, includeTarget), workspaceID, &claims, "read", path)
+}
+
+const eventFilterPageSize = 1000
+
+func (s *Server) visibleEvents(workspaceID string, claims tokenClaims, provider, direction, cursor string, limit int) (relayfile.EventFeed, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	visible := make([]relayfile.Event, 0, limit)
+	seenCursors := map[string]struct{}{}
+	for {
+		var page relayfile.EventFeed
+		var err error
+		if direction == "desc" {
+			page, err = s.store.GetEventsTail(workspaceID, provider, cursor, eventFilterPageSize)
+		} else {
+			page, err = s.store.GetEvents(workspaceID, provider, cursor, eventFilterPageSize)
+		}
+		if err != nil {
+			return relayfile.EventFeed{}, err
+		}
+		for _, event := range page.Events {
+			if !s.eventVisibleToClaims(workspaceID, claims, event) {
+				continue
+			}
+			if len(visible) < limit {
+				visible = append(visible, event)
+				continue
+			}
+			next := visible[len(visible)-1].EventID
+			return relayfile.EventFeed{Events: visible, NextCursor: &next}, nil
+		}
+		if page.NextCursor == nil || strings.TrimSpace(*page.NextCursor) == "" {
+			return relayfile.EventFeed{Events: visible, NextCursor: nil}, nil
+		}
+		next := strings.TrimSpace(*page.NextCursor)
+		if next == cursor {
+			return relayfile.EventFeed{Events: visible, NextCursor: nil}, nil
+		}
+		if _, ok := seenCursors[next]; ok {
+			return relayfile.EventFeed{Events: visible, NextCursor: nil}, nil
+		}
+		seenCursors[next] = struct{}{}
+		cursor = next
+	}
+}
+
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
 	limit := parseBoundedInt(r.URL.Query().Get("limit"), 200, 1, 1000)
 	provider := r.URL.Query().Get("provider")
 	direction := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("direction")))
 	switch direction {
 	case "", "asc":
-		feed, err := s.store.GetEvents(workspaceID, provider, r.URL.Query().Get("cursor"), limit)
+		feed, err := s.visibleEvents(workspaceID, claims, provider, "asc", r.URL.Query().Get("cursor"), limit)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
 			return
 		}
 		writeJSON(w, http.StatusOK, feed)
 	case "desc":
-		feed, err := s.store.GetEventsTail(workspaceID, provider, r.URL.Query().Get("cursor"), limit)
+		feed, err := s.visibleEvents(workspaceID, claims, provider, "desc", r.URL.Query().Get("cursor"), limit)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
 			return

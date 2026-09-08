@@ -163,6 +163,140 @@ func TestFileEventsWebSocketCatchUpAndPingPong(t *testing.T) {
 	}
 }
 
+func TestACLFiltersHTTPEventsAndWebSocketCatchUpAndLive(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	workspaceID := "ws_acl_event_filter"
+	write := func(path, content string, semantics relayfile.FileSemantics) {
+		t.Helper()
+		if _, err := store.WriteFile(relayfile.WriteRequest{
+			WorkspaceID: workspaceID,
+			Path:        path,
+			IfMatch:     "0",
+			ContentType: "text/plain",
+			Content:     content,
+			Semantics:   semantics,
+		}); err != nil {
+			t.Fatalf("seed %s failed: %v", path, err)
+		}
+	}
+	write("/public.md", "public", relayfile.FileSemantics{})
+	write("/secret/.relayfile.acl", `{"semantics":{"permissions":["deny:agent:Limited"]}}`, relayfile.FileSemantics{Permissions: []string{"deny:agent:Limited"}})
+	write("/secret/hidden.md", "secret", relayfile.FileSemantics{})
+
+	server := httptest.NewServer(NewServer(store))
+	defer server.Close()
+	limitedToken := mustTestJWT(t, "dev-secret", workspaceID, "Limited", []string{"fs:read"}, time.Now().Add(time.Hour))
+	headers := map[string]string{
+		"Authorization":    "Bearer " + limitedToken,
+		"X-Correlation-Id": "corr_acl_event_filter",
+	}
+	for _, direction := range []string{"", "desc"} {
+		path := "/v1/workspaces/" + workspaceID + "/fs/events?limit=100"
+		if direction != "" {
+			path += "&direction=" + direction
+		}
+		resp := doRequest(t, NewServer(store), request{method: http.MethodGet, path: path, headers: headers})
+		if resp.Code != http.StatusOK {
+			t.Fatalf("events %s returned %d: %s", direction, resp.Code, resp.Body.String())
+		}
+		var feed relayfile.EventFeed
+		if err := json.NewDecoder(resp.Body).Decode(&feed); err != nil {
+			t.Fatalf("decode events %s: %v", direction, err)
+		}
+		for _, event := range feed.Events {
+			if strings.Contains(event.Path, "/secret/") {
+				t.Fatalf("ACL-hidden event leaked in %s feed: %+v", direction, event)
+			}
+		}
+		if len(feed.Events) != 1 || feed.Events[0].Path != "/public.md" {
+			t.Fatalf("unexpected visible events in %s feed: %+v", direction, feed.Events)
+		}
+		if feed.NextCursor != nil {
+			t.Fatalf("hidden events leaked through cursor in %s feed: %v", direction, *feed.NextCursor)
+		}
+	}
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/workspaces/" + workspaceID + "/fs/ws?token=" + limitedToken
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("websocket dial failed: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	var catchUp map[string]any
+	if err := wsjson.Read(ctx, conn, &catchUp); err != nil {
+		t.Fatalf("read visible catch-up event: %v", err)
+	}
+	if catchUp["path"] != "/public.md" || catchUp["content"] != "public" || catchUp["inlineContent"] != true {
+		t.Fatalf("unexpected catch-up event: %+v", catchUp)
+	}
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "ping"}); err != nil {
+		t.Fatalf("write ping failed: %v", err)
+	}
+	var pong map[string]any
+	if err := wsjson.Read(ctx, conn, &pong); err != nil || pong["type"] != "pong" {
+		t.Fatalf("expected pong after filtered catch-up, got %+v (%v)", pong, err)
+	}
+	write("/secret/live-hidden.md", "secret-live", relayfile.FileSemantics{})
+	write("/public-live.md", "public-live", relayfile.FileSemantics{})
+	var live map[string]any
+	if err := wsjson.Read(ctx, conn, &live); err != nil {
+		t.Fatalf("read visible live event: %v", err)
+	}
+	if live["path"] != "/public-live.md" || live["content"] != "public-live" || live["inlineContent"] != true {
+		t.Fatalf("unexpected visible live event: %+v", live)
+	}
+}
+
+func TestACLDeleteEventSnapshotAndPathNormalization(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	workspaceID := "ws_acl_delete_snapshot"
+	created, err := store.WriteFile(relayfile.WriteRequest{
+		WorkspaceID: workspaceID,
+		Path:        "/docs/deleted.md",
+		IfMatch:     "0",
+		Content:     "secret",
+		Semantics:   relayfile.FileSemantics{Permissions: []string{"deny:agent:Limited"}},
+	})
+	if err != nil {
+		t.Fatalf("seed protected file failed: %v", err)
+	}
+	if _, err := store.DeleteFile(relayfile.DeleteRequest{WorkspaceID: workspaceID, Path: "/docs/deleted.md", IfMatch: created.TargetRevision}); err != nil {
+		t.Fatalf("delete protected file failed: %v", err)
+	}
+	feed, err := store.GetEvents(workspaceID, "", "", 100)
+	if err != nil || len(feed.Events) != 2 {
+		t.Fatalf("unexpected event feed: %+v (%v)", feed, err)
+	}
+	server := NewServer(store)
+	claims := tokenClaims{WorkspaceID: workspaceID, AgentName: "Limited", Scopes: map[string]struct{}{"fs:read": {}}}
+	for _, event := range feed.Events {
+		if event.Type != "file.deleted" {
+			continue
+		}
+		if s := event.ACLPermissions; len(s) == 0 {
+			t.Fatalf("delete event lost ACL snapshot: %+v", event)
+		}
+		if server.eventVisibleToClaims(workspaceID, claims, event) {
+			t.Fatalf("protected delete event became visible: %+v", event)
+		}
+	}
+	deleteEvent := relayfile.Event{Type: "file.deleted", Path: "/docs/deleted.md"}
+	for _, event := range feed.Events {
+		if event.Type == "file.deleted" {
+			deleteEvent = event
+			break
+		}
+	}
+	deleteEvent.Path = "/docs/../docs/deleted.md"
+	if server.eventVisibleToClaims(workspaceID, claims, deleteEvent) {
+		t.Fatal("normalized protected path was treated as visible")
+	}
+}
+
 func TestFileEventsWebSocketCursorCatchUpDrainsMoreThanOnePage(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)

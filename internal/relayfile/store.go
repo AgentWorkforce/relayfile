@@ -184,6 +184,10 @@ type Event struct {
 	Provider      string `json:"provider,omitempty"`
 	CorrelationID string `json:"correlationId"`
 	Timestamp     string `json:"timestamp"`
+	// ACLPermissions is an internal snapshot used to keep delete and rename
+	// events subject to the permissions that governed the file revision. It is
+	// deliberately excluded from the public event payload.
+	ACLPermissions []string `json:"-"`
 }
 
 type EventFeed struct {
@@ -595,12 +599,13 @@ type Store struct {
 }
 
 type workspaceState struct {
-	Revision           string                     `json:"revision,omitempty"`
-	Files              map[string]File            `json:"files"`
-	Events             []Event                    `json:"events"`
-	Ops                map[string]OperationStatus `json:"ops"`
-	ProviderIndex      map[string]string          `json:"providerIndex,omitempty"`
-	ProviderWatermarks map[string]string          `json:"providerWatermarks,omitempty"`
+	Revision              string                     `json:"revision,omitempty"`
+	Files                 map[string]File            `json:"files"`
+	Events                []Event                    `json:"events"`
+	ACLPermissionsByEvent map[string][]string        `json:"aclPermissionsByEvent,omitempty"`
+	Ops                   map[string]OperationStatus `json:"ops"`
+	ProviderIndex         map[string]string          `json:"providerIndex,omitempty"`
+	ProviderWatermarks    map[string]string          `json:"providerWatermarks,omitempty"`
 }
 
 type WritebackQueueItem struct {
@@ -1578,11 +1583,12 @@ func (s *Store) DeleteFile(req DeleteRequest) (WriteResult, error) {
 		s.mu.Unlock()
 		return WriteResult{}, err
 	}
+	aclPermissions := resolvePermissionsFromFiles(ws.Files, path, true)
 	delete(ws.Files, path)
 
 	revision := s.nextRevisionLocked()
 	ws.Revision = revision
-	result, task := s.recordWriteLocked(ws, path, revision, "file.deleted", existing.Provider, req.CorrelationID)
+	result, task := s.recordWriteWithACLPermissionsLocked(ws, path, revision, "file.deleted", existing.Provider, req.CorrelationID, aclPermissions)
 	_ = s.saveLocked()
 	s.mu.Unlock()
 	s.enqueueWriteback(task)
@@ -1777,10 +1783,11 @@ func (s *Store) CommitForkWithValidator(workspaceID, forkID, correlationID strin
 		case "delete":
 			existing, existed := ws.Files[path]
 			if existed {
+				aclPermissions := resolvePermissionsFromFiles(ws.Files, path, true)
 				delete(ws.Files, path)
 				revision = s.nextRevisionLocked()
 				ws.Revision = revision
-				_, task := s.recordWriteLocked(ws, path, revision, "file.deleted", existing.Provider, correlationID)
+				_, task := s.recordWriteWithACLPermissionsLocked(ws, path, revision, "file.deleted", existing.Provider, correlationID, aclPermissions)
 				tasks = append(tasks, task)
 			}
 			if existed {
@@ -3667,15 +3674,19 @@ func (s *Store) ensureWorkspaceLocked(workspaceID string) *workspaceState {
 		if ws.ProviderWatermarks == nil {
 			ws.ProviderWatermarks = map[string]string{}
 		}
+		if ws.ACLPermissionsByEvent == nil {
+			ws.ACLPermissionsByEvent = map[string][]string{}
+		}
 		return ws
 	}
 	ws = &workspaceState{
-		Revision:           "0",
-		Files:              map[string]File{},
-		Events:             []Event{},
-		Ops:                map[string]OperationStatus{},
-		ProviderIndex:      map[string]string{},
-		ProviderWatermarks: map[string]string{},
+		Revision:              "0",
+		Files:                 map[string]File{},
+		Events:                []Event{},
+		Ops:                   map[string]OperationStatus{},
+		ACLPermissionsByEvent: map[string][]string{},
+		ProviderIndex:         map[string]string{},
+		ProviderWatermarks:    map[string]string{},
 	}
 	s.workspaces[workspaceID] = ws
 	return ws
@@ -3751,6 +3762,14 @@ func (s *Store) recordWriteLocked(ws *workspaceState, path, revision, eventType,
 }
 
 func (s *Store) recordWriteWithContentIdentityLocked(ws *workspaceState, path, revision, eventType, provider, correlationID string, contentIdentity *ContentIdentity) (WriteResult, writebackTask) {
+	return s.recordWriteWithContentIdentityAndACLPermissionsLocked(ws, path, revision, eventType, provider, correlationID, contentIdentity, nil, false)
+}
+
+func (s *Store) recordWriteWithACLPermissionsLocked(ws *workspaceState, path, revision, eventType, provider, correlationID string, aclPermissions []string) (WriteResult, writebackTask) {
+	return s.recordWriteWithContentIdentityAndACLPermissionsLocked(ws, path, revision, eventType, provider, correlationID, nil, aclPermissions, true)
+}
+
+func (s *Store) recordWriteWithContentIdentityAndACLPermissionsLocked(ws *workspaceState, path, revision, eventType, provider, correlationID string, contentIdentity *ContentIdentity, aclPermissions []string, snapshotACL bool) (WriteResult, writebackTask) {
 	if provider == "" {
 	}
 	workspaceID := s.workspaceIDForStateLocked(ws)
@@ -3786,6 +3805,12 @@ func (s *Store) recordWriteWithContentIdentityLocked(ws *workspaceState, path, r
 		Provider:      provider,
 		CorrelationID: correlationID,
 		Timestamp:     nowTS,
+	}
+	if !snapshotACL && strings.HasPrefix(eventType, "file.") {
+		aclPermissions = resolvePermissionsFromFiles(ws.Files, path, eventType != "file.deleted")
+	}
+	if snapshotACL || aclPermissions != nil {
+		event.ACLPermissions = append([]string(nil), aclPermissions...)
 	}
 	s.appendWorkspaceEventLocked(workspaceID, ws, event)
 
@@ -4361,10 +4386,11 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 	if objectID != "" {
 		key := providerObjectKey(provider, objectID)
 		if previousPath, ok := ws.ProviderIndex[key]; ok && previousPath != path {
+			aclPermissions := resolvePermissionsFromFiles(ws.Files, previousPath, true)
 			delete(ws.Files, previousPath)
 			moveRevision := s.nextRevisionLocked()
 			ws.Revision = moveRevision
-			s.appendWorkspaceEventLocked(workspaceID, ws, Event{
+			event := Event{
 				EventID:       s.nextEventIDLocked(),
 				Type:          "file.deleted",
 				Path:          previousPath,
@@ -4373,7 +4399,9 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 				Provider:      provider,
 				CorrelationID: correlationID,
 				Timestamp:     now,
-			})
+			}
+			event.ACLPermissions = append([]string(nil), aclPermissions...)
+			s.appendWorkspaceEventLocked(workspaceID, ws, event)
 		}
 	}
 
@@ -4408,7 +4436,7 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 			// Keep update event for sync observability, but still revision-incremented.
 		}
 	}
-	s.appendWorkspaceEventLocked(workspaceID, ws, Event{
+	event := Event{
 		EventID:       s.nextEventIDLocked(),
 		Type:          fsEvent,
 		Path:          path,
@@ -4418,7 +4446,9 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 		Provider:      provider,
 		CorrelationID: correlationID,
 		Timestamp:     now,
-	})
+	}
+	event.ACLPermissions = append([]string(nil), resolvePermissionsFromFiles(ws.Files, path, true)...)
+	s.appendWorkspaceEventLocked(workspaceID, ws, event)
 }
 
 func (s *Store) applyProviderDeleteLocked(ws *workspaceState, provider string, action ApplyAction, correlationID string) {
@@ -4438,13 +4468,14 @@ func (s *Store) applyProviderDeleteLocked(ws *workspaceState, provider string, a
 	if _, ok := ws.Files[path]; !ok {
 		return
 	}
+	aclPermissions := resolvePermissionsFromFiles(ws.Files, path, true)
 	delete(ws.Files, path)
 	if objectID != "" {
 		delete(ws.ProviderIndex, providerObjectKey(provider, objectID))
 	}
 	revision := s.nextRevisionLocked()
 	ws.Revision = revision
-	s.appendWorkspaceEventLocked(workspaceID, ws, Event{
+	event := Event{
 		EventID:       s.nextEventIDLocked(),
 		Type:          "file.deleted",
 		Path:          path,
@@ -4453,7 +4484,9 @@ func (s *Store) applyProviderDeleteLocked(ws *workspaceState, provider string, a
 		Provider:      provider,
 		CorrelationID: correlationID,
 		Timestamp:     now,
-	})
+	}
+	event.ACLPermissions = append([]string(nil), aclPermissions...)
+	s.appendWorkspaceEventLocked(workspaceID, ws, event)
 }
 
 func canonicalizeProviderActionLocked(ws *workspaceState, provider string, action ApplyAction) ApplyAction {
@@ -4539,6 +4572,14 @@ func (s *Store) loadFromDisk() error {
 			}
 			if ws.ProviderWatermarks == nil {
 				ws.ProviderWatermarks = map[string]string{}
+			}
+			if ws.ACLPermissionsByEvent == nil {
+				ws.ACLPermissionsByEvent = map[string][]string{}
+			}
+			for index := range ws.Events {
+				if permissions, ok := ws.ACLPermissionsByEvent[ws.Events[index].EventID]; ok {
+					ws.Events[index].ACLPermissions = append([]string(nil), permissions...)
+				}
 			}
 		}
 	}
@@ -5815,6 +5856,12 @@ func (s *Store) appendWorkspaceEventLocked(workspaceID string, ws *workspaceStat
 		return
 	}
 	ws.Events = append(ws.Events, event)
+	if event.ACLPermissions != nil {
+		if ws.ACLPermissionsByEvent == nil {
+			ws.ACLPermissionsByEvent = map[string][]string{}
+		}
+		ws.ACLPermissionsByEvent[event.EventID] = append([]string(nil), event.ACLPermissions...)
+	}
 	s.publishEvent(workspaceID, event)
 }
 
