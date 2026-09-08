@@ -876,7 +876,10 @@ test("release permissions are scoped by job", () => {
     WORKFLOW,
     /^permissions:\n\s+contents: write\n\s+id-token: write/m,
   );
-  assert.match(WORKFLOW, /build:\n[\s\S]*?permissions:\n\s+contents: read/);
+  assert.match(
+    WORKFLOW,
+    /build:\n[\s\S]*?permissions:\n\s+contents: read\n\s+actions: read\n\s+attestations: read/,
+  );
   assert.match(
     WORKFLOW,
     /publish-packages:[\s\S]*?permissions:\n\s+contents: read\n\s+id-token: write/,
