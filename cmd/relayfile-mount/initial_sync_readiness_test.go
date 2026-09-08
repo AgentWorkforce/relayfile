@@ -298,6 +298,68 @@ func TestFinishInitialBootstrapStopsAfterAFailedResumeCycle(t *testing.T) {
 	}
 }
 
+// TestFinishInitialBootstrapResumesAfterInProgressTimeoutYield reproduces the
+// low per-cycle timeout race: a non-traversal step (for example outbox or
+// digest work) times out after the bootstrap has persisted its cursor. That
+// timeout is a healthy yield while the checkpoint is in progress, so --once
+// must keep resuming until a later stable cycle removes the checkpoint.
+func TestFinishInitialBootstrapResumesAfterInProgressTimeoutYield(t *testing.T) {
+	localDir := bootstrapInProgressDir(t)
+	timeout := fmt.Errorf("non-traversal step: %w", context.DeadlineExceeded)
+	cycles := 0
+	err := finishInitialBootstrap(context.Background(), mountConfig{localDir: localDir},
+		func(bool) error {
+			cycles++
+			switch cycles {
+			case 1:
+				writeBootstrapProgressState(t, localDir, 6, 100, 6)
+			case 2:
+				writeBootstrapCompleteState(t, localDir)
+			}
+			return nil
+		},
+		func() error {
+			if cycles == 0 {
+				return &cycleOutcomeError{cause: timeout, yielded: true}
+			}
+			return nil
+		},
+		false,
+	)
+	if err != nil {
+		t.Fatalf("expected resumable timeout yield to continue to stable completion, got %v", err)
+	}
+	if cycles != 2 {
+		t.Fatalf("ran %d resume cycles after a non-traversal timeout yield, want 2", cycles)
+	}
+}
+
+// TestFinishInitialBootstrapDoesNotTreatFatalDeadlineAsYield keeps the other
+// half of the distinction explicit: a deadline without a persisted-yield
+// marker remains fatal and retains its typed error chain.
+func TestFinishInitialBootstrapDoesNotTreatFatalDeadlineAsYield(t *testing.T) {
+	localDir := bootstrapInProgressDir(t)
+	cause := fmt.Errorf("non-traversal step failed: %w", context.DeadlineExceeded)
+	err := finishInitialBootstrap(context.Background(), mountConfig{localDir: localDir},
+		func(bool) error { return nil },
+		func() error { return &cycleOutcomeError{cause: cause} },
+		false,
+	)
+	if err == nil {
+		t.Fatal("expected fatal deadline to stop the bootstrap attempt")
+	}
+	var incomplete *initialBootstrapIncompleteError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("unexpected error type: %v", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) == false {
+		t.Fatalf("fatal deadline lost its typed chain: %v", err)
+	}
+	if cycleYielded(cause) {
+		t.Fatal("plain fatal cause was marked as a resumable yield")
+	}
+}
+
 // TestFinishInitialBootstrapPrefersMidCycleCancellation pins the race where
 // the root deadline fires inside run. Cancellation is the authoritative reason
 // even if the cycle also records a transient provider failure before returning.
@@ -355,6 +417,14 @@ func bootstrapInProgressDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return localDir
+}
+
+func writeBootstrapProgressState(t *testing.T, localDir string, synced, total, offset int) {
+	t.Helper()
+	payload := fmt.Sprintf(`{"bootstrap":{"phase":"bootstrapping","filesSynced":%d,"filesTotal":%d,"pageOffset":%d}}`, synced, total, offset)
+	if err := os.WriteFile(filepath.Join(localDir, ".relay", "state.json"), []byte(payload), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // bootstrapAlreadyCompleteDir writes a public state with no bootstrap block

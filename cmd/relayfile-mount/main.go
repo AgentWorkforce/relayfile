@@ -567,10 +567,12 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 	log.Printf("%s", mountStartupLogLine(cfg))
 	log.Printf("Mirror started at %s. Sync interval %s +/- %.0f%%. Public state: %s", cfg.localDir, cfg.interval.Round(time.Second), cfg.intervalJitter*100, filepath.Join(cfg.localDir, ".relay", "state.json"))
 
-	// lastCycleErr records the most recent cycle failure that `run` swallowed
-	// as nonfatal. The `--once` bootstrap resume loop reads it so it only
-	// continues a traversal that yielded on its file budget, never one that
-	// failed: a failing cycle keeps its historical single-attempt behavior.
+	// lastCycleErr records the most recent cycle outcome that `run` swallowed
+	// as nonfatal. The value carries an explicit marker for a deadline yield
+	// while an in-progress bootstrap checkpoint is persisted; that yield is
+	// healthy and resumable, while every other swallowed error is fatal to the
+	// --once bootstrap attempt. Keeping the marker in the error chain preserves
+	// errors.Is/errors.As for the underlying provider or context error.
 	var lastCycleErr error
 	run := func(reconcile bool) error {
 		ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
@@ -581,21 +583,24 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 		} else {
 			err = syncer.SyncOnce(ctx)
 		}
-		lastCycleErr = err
+		lastCycleErr = nil
 		if err != nil {
 			if mountsync.IsBootstrapTerminalError(err) {
 				// This is an operator-actionable hard stop, not a transient
 				// cycle failure. Returning it terminates this runner (and, for
 				// scoped layouts, cancels sibling runners) instead of letting
 				// the polling ticker retry the same persisted checkpoint forever.
+				lastCycleErr = err
 				return err
 			}
 			if errors.Is(err, context.DeadlineExceeded) {
 				if synced, total, ok := readBootstrapProgress(cfg.localDir); ok {
+					lastCycleErr = &cycleOutcomeError{cause: err, yielded: true}
 					log.Printf("mount bootstrapping: %s (in progress)", formatBootstrapProgress(synced, total))
 					return nil
 				}
 			}
+			lastCycleErr = &cycleOutcomeError{cause: err}
 			log.Printf("mount sync cycle failed: %v", err)
 			return nil
 		}
@@ -897,7 +902,7 @@ func finishInitialBootstrap(rootCtx context.Context, cfg mountConfig, run func(r
 	if err := rootCtx.Err(); err != nil {
 		return newInitialBootstrapIncompleteError(state, "context cancelled before bootstrap resumed", err)
 	}
-	if err := lastCycleErr(); err != nil {
+	if err := lastCycleErr(); err != nil && !cycleYielded(err) {
 		return newInitialBootstrapIncompleteError(state, "initial cycle failed", err)
 	}
 	if !state.inProgress {
@@ -930,7 +935,7 @@ func finishInitialBootstrap(rootCtx context.Context, cfg mountConfig, run func(r
 		if cycleErr != nil {
 			return cycleErr
 		}
-		if err := lastCycleErr(); err != nil {
+		if err := lastCycleErr(); err != nil && !cycleYielded(err) {
 			log.Printf("initial sync: stopping after a failed resume cycle: %v", err)
 			return newInitialBootstrapIncompleteError(next, "resume cycle failed", err)
 		}
@@ -972,6 +977,26 @@ type bootstrapResumeState struct {
 	checkpoint string
 }
 
+// cycleOutcomeError keeps the cycle's underlying error available to
+// errors.Is/errors.As while distinguishing a deadline that yielded with a
+// persisted bootstrap checkpoint from a fatal cycle failure. The latter must
+// stop --once; the former must let finishInitialBootstrap resume the cursor.
+type cycleOutcomeError struct {
+	cause   error
+	yielded bool
+}
+
+func (e *cycleOutcomeError) Error() string {
+	if e.cause == nil {
+		return "sync cycle failed"
+	}
+	return e.cause.Error()
+}
+
+func (e *cycleOutcomeError) Unwrap() error {
+	return e.cause
+}
+
 type initialBootstrapIncompleteError struct {
 	state  bootstrapResumeState
 	reason string
@@ -987,6 +1012,11 @@ func newInitialBootstrapIncompleteError(state bootstrapResumeState, reason strin
 		reason: reason,
 		cause:  cause,
 	}
+}
+
+func cycleYielded(err error) bool {
+	var outcome *cycleOutcomeError
+	return errors.As(err, &outcome) && outcome.yielded
 }
 
 func (e *initialBootstrapIncompleteError) Error() string {
