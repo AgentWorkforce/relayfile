@@ -352,23 +352,16 @@ describe("default mount launcher", () => {
   })
 
   it("does not restart a resumable foreground mount after shutdown begins", async () => {
+    // Keep the retry backoff under test control. A real 20ms delay plus
+    // setImmediate makes this assertion depend on the host event loop: a
+    // loaded runner can advance the timer before stop() gets to run.
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] })
     const tempRoot = await mkdtemp(
       path.join(os.tmpdir(), "relayfile-default-launcher-stop-resume-race-")
     )
     const localDir = path.join(tempRoot, "mirror")
     const first = new FakeChildProcess()
     const unexpectedRestart = new FakeChildProcess()
-    let resolveProbeStarted!: () => void
-    const probeStarted = new Promise<void>((resolve) => {
-      resolveProbeStarted = resolve
-    })
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation(() => {
-        resolveProbeStarted()
-        return Promise.resolve(new Response("not ready", { status: 503 }))
-      })
-    )
     const spawnImpl = vi.fn()
       .mockImplementationOnce(() => {
         queueMicrotask(() => exitFakeChild(first, 75))
@@ -384,15 +377,21 @@ describe("default mount launcher", () => {
     })
 
     try {
+      // A ready state keeps the probe local and makes the first exit-75 path
+      // reach its resumable delay without any network or retry timing.
+      await writeReadyState(localDir)
       const instance = await launcher.start({
         env: createMountEnv(localDir),
         background: false,
         readyTimeoutMs: 250
       })
 
-      await probeStarted
+      // Let the child exit and waitForReady enter its fake-timer backoff.
       await new Promise<void>((resolve) => setImmediate(resolve))
       await instance.stop()
+      // Releasing the backoff after stop() proves that the post-delay guard,
+      // rather than test timing, prevents restartOnceMount().
+      await vi.advanceTimersByTimeAsync(20)
 
       await expect(instance.ready).rejects.toMatchObject({
         code: "mount_launch_failed"
