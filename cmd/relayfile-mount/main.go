@@ -885,18 +885,35 @@ const onceBootstrapStableCycleLimit = 3
 //
 // alreadyBootstrapped reports whether the checkpoint already showed a
 // complete bootstrap (with at least one prior successful reconcile) before
-// the caller's own first cycle ran — see bootstrapAlreadyComplete. When the
-// checkpoint is still not in progress after that cycle, a cancellation or an
-// unrelated cycle failure says nothing about bootstrap readiness: a mount
-// that was already fully synced before this process started must not be
-// reported as an incomplete bootstrap just because this attempt's one
-// cycle hit an unrelated transient error. That guard only short-circuits the
-// not-in-progress case; a checkpoint that is genuinely in progress (fresh or
-// forced) still runs the cancellation/failure checks and the resume loop
-// below exactly as before.
+// the caller's own first cycle ran — see bootstrapAlreadyComplete.
+//
+// When the checkpoint reads as not-in-progress right after that first cycle,
+// the on-disk checkpoint is checked, and takes precedence, before rootCtx or
+// lastCycleErr: it is the fact of record for whether that cycle finished the
+// bootstrap, and a signal or an unrelated error observed only after the
+// cycle already returned and persisted its checkpoint must not turn an
+// on-disk completion into a reported failure. This mirrors the resume loop's
+// own checkpoint-before-cancellation precedence below, and closes the
+// pre-loop counterpart of that race: a SIGTERM/cancellation landing exactly
+// as a fresh (not alreadyBootstrapped) bootstrap finishes in its very first
+// cycle must not be reported as incomplete. A checkpoint that is still
+// in-progress after that first cycle runs the cancellation/failure checks
+// and the resume loop below exactly as before.
 func finishInitialBootstrap(rootCtx context.Context, cfg mountConfig, run func(reconcile bool) error, lastCycleErr func() error, alreadyBootstrapped bool) error {
 	state := readBootstrapResumeState(cfg.localDir)
-	if !state.inProgress && alreadyBootstrapped {
+	if !state.inProgress {
+		if alreadyBootstrapped {
+			return nil
+		}
+		// Not already complete before this process started, and not in
+		// progress now: either the first cycle needed no bootstrap at all,
+		// or it just finished one. Both are on-disk completions and outrank
+		// a concurrent rootCtx cancellation. A real (non-yielded) cycle
+		// failure is still terminal here, since it can also mean the cycle
+		// failed before any bootstrap got the chance to start.
+		if err := lastCycleErr(); err != nil && !cycleYielded(err) {
+			return newInitialBootstrapIncompleteError(state, "initial cycle failed", err)
+		}
 		return nil
 	}
 	if err := rootCtx.Err(); err != nil {
@@ -904,9 +921,6 @@ func finishInitialBootstrap(rootCtx context.Context, cfg mountConfig, run func(r
 	}
 	if err := lastCycleErr(); err != nil && !cycleYielded(err) {
 		return newInitialBootstrapIncompleteError(state, "initial cycle failed", err)
-	}
-	if !state.inProgress {
-		return nil
 	}
 	log.Printf("initial sync: bootstrap incomplete after first cycle (%s); resuming from the persisted checkpoint", formatBootstrapProgress(state.synced, state.total))
 	stableCycles := 0

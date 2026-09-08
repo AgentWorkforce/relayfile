@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `relayfile-mount --once` now exits nonzero when the initial pull has not completed, preventing a timed-out large bootstrap from being reported as a successful mount.
 - Fixed a false-failure regression from the change above: `--once` against a mount whose bootstrap had already completed in a prior run no longer reports "initial bootstrap incomplete" when that invocation's cycle hits an unrelated transient error or is cancelled.
+- `--once` now resumes a persisted bootstrap checkpoint after a cycle yields on a non-traversal timeout (e.g. outbox or digest work) with the checkpoint still in progress, instead of reporting that cycle's swallowed deadline as a bootstrap failure.
 
 ## [0.10.56] - 2026-09-08
 

@@ -513,6 +513,64 @@ func TestFinishInitialBootstrapKeepsSuccessAfterPriorCompletion(t *testing.T) {
 	})
 }
 
+// TestFinishInitialBootstrapPrefersFreshCompletionOverPreLoopCancellation pins
+// the pre-loop counterpart of the mid-loop race already covered by
+// TestFinishInitialBootstrapPrefersCompletionOverMidCycleSignals: a SIGTERM
+// or other rootCtx cancellation landing exactly as the caller's own first
+// cycle finishes a *fresh* bootstrap (not alreadyBootstrapped -- the
+// checkpoint was still in progress, or nonexistent, before this process's
+// first cycle ran) must not turn that genuine completion into a reported
+// failure. The on-disk checkpoint, not the concurrently observed
+// cancellation, is authoritative for whether the first cycle succeeded.
+func TestFinishInitialBootstrapPrefersFreshCompletionOverPreLoopCancellation(t *testing.T) {
+	t.Run("cancellation lands as the first cycle completes", func(t *testing.T) {
+		// The state on disk already reads complete -- as it would immediately
+		// after the caller's own first cycle (run before finishInitialBootstrap
+		// is invoked) persisted a finished checkpoint -- while rootCtx is
+		// already cancelled, reproducing a SIGTERM racing that same return.
+		localDir := bootstrapAlreadyCompleteDir(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		cycles := 0
+		err := finishInitialBootstrap(ctx, mountConfig{localDir: localDir},
+			func(bool) error { cycles++; return nil },
+			func() error { return nil }, // the first cycle itself succeeded outright
+			false,                       // NOT already complete before this process's first cycle ran
+		)
+		if err != nil {
+			t.Fatalf("expected success when the first cycle itself completed the bootstrap despite a concurrent cancellation, got %v", err)
+		}
+		if cycles != 0 {
+			t.Errorf("ran %d resume cycles for a checkpoint that already read complete, want 0", cycles)
+		}
+	})
+
+	t.Run("real failure still reported despite the same cancellation", func(t *testing.T) {
+		// Control: the checkpoint reads not-in-progress because the first
+		// cycle failed outright before any bootstrap could start, not
+		// because it completed one. That must still be reported, even with
+		// rootCtx cancelled the same way -- completion, not cancellation, is
+		// what the fix gives precedence to.
+		localDir := bootstrapAlreadyCompleteDir(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		cause := errors.New("transient cloud error")
+
+		err := finishInitialBootstrap(ctx, mountConfig{localDir: localDir},
+			func(bool) error { return nil },
+			func() error { return cause },
+			false,
+		)
+		if err == nil {
+			t.Fatalf("expected error for a genuinely failed first cycle, got nil")
+		}
+		if !errors.Is(err, cause) {
+			t.Fatalf("expected cause %v, got %v", cause, err)
+		}
+	})
+}
+
 // TestFinishInitialBootstrapPrefersCompletionOverMidCycleSignals pins the
 // in-loop counterpart: when a resume cycle actually finishes the persisted
 // checkpoint, a rootCtx cancellation or an unrelated lastCycleErr recorded by
