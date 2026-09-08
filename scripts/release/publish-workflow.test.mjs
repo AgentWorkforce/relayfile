@@ -73,6 +73,16 @@ function dedent(block) {
     .join("\n");
 }
 
+function workflowJob(name) {
+  const marker = `  ${name}:\n`;
+  const start = WORKFLOW.indexOf(marker);
+  assert.notEqual(start, -1, `missing ${name} workflow job`);
+  const bodyStart = start + marker.length;
+  const nextJob = WORKFLOW.slice(bodyStart).match(/^  [A-Za-z0-9_-]+:\n/m);
+  const end = nextJob ? bodyStart + nextJob.index : WORKFLOW.length;
+  return WORKFLOW.slice(start, end);
+}
+
 function extractStepRun(name) {
   const marker = `      - name: ${name}`;
   const step = WORKFLOW.indexOf(marker);
@@ -872,13 +882,14 @@ test("release baseline uses a cryptographically verified external attestation", 
 });
 
 test("release permissions are scoped by job", () => {
+  const buildJob = workflowJob("build");
   assert.doesNotMatch(
     WORKFLOW,
     /^permissions:\n\s+contents: write\n\s+id-token: write/m,
   );
   assert.match(
-    WORKFLOW,
-    /build:\n[\s\S]*?permissions:\n\s+contents: read\n\s+actions: read\n\s+attestations: read/,
+    buildJob,
+    /^    permissions:\n      contents: read\n      actions: read\n      attestations: read$/m,
   );
   assert.match(
     WORKFLOW,
