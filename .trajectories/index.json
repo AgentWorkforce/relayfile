@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-09-08T19:13:52.574Z",
+  "lastUpdated": "2026-09-08T19:14:19.473Z",
   "trajectories": {
     "traj_4pvrlmqfnzng": {
       "title": "Review PR #278 in AgentWorkforce/relayfile",
@@ -221,9 +221,10 @@
     },
     "traj_vi6hsxq2kfs9": {
       "title": "Make Relayfile PR 477 shutdown retry regression deterministic",
-      "status": "active",
+      "status": "completed",
       "startedAt": "2026-09-08T19:13:47.472Z",
-      "path": "/private/tmp/relayfile-once-timeout-fix-0908/.trajectories/active/traj_vi6hsxq2kfs9.json"
+      "completedAt": "2026-09-08T19:14:19.279Z",
+      "path": "/private/tmp/relayfile-once-timeout-fix-0908/.trajectories/completed/2026-09/traj_vi6hsxq2kfs9.json"
     }
   }
 }

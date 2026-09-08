@@ -1,0 +1,52 @@
+{
+  "version": "1.0.0",
+  "id": "f816c77c-3ebc-41b8-8aa9-a255c83dee15",
+  "timestamp": "2026-09-08T19:14:19.348Z",
+  "trajectory": "traj_vi6hsxq2kfs9",
+  "files": [
+    {
+      "path": ".trajectories/index.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 6,
+              "revision": "bcb1e652774d766fef0758bd9557d5afdbbadda5"
+            },
+            {
+              "start_line": 218,
+              "end_line": 229,
+              "revision": "bcb1e652774d766fef0758bd9557d5afdbbadda5"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/typescript/src/mount-launcher.test.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 352,
+              "end_line": 367,
+              "revision": "bcb1e652774d766fef0758bd9557d5afdbbadda5"
+            },
+            {
+              "start_line": 377,
+              "end_line": 397,
+              "revision": "bcb1e652774d766fef0758bd9557d5afdbbadda5"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
