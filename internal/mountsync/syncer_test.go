@@ -6672,15 +6672,38 @@ func TestSyncOnceUsesWebSocketForRealtimeUpdatesAndSkipsPollingWhileConnected(t 
 	writeMountsyncRemoteFile(t, api.Client(), api.URL, token, workspaceID, "/notion/Docs/A.md", "0", "# A")
 
 	localDir := t.TempDir()
+	rootCtx, cancelRoot := context.WithCancel(context.Background())
 	client := NewHTTPClient(api.URL, token, api.Client())
 	syncer, err := NewSyncer(client, SyncerOptions{
 		WorkspaceID: workspaceID,
 		RemoteRoot:  "/notion",
 		LocalRoot:   localDir,
+		RootCtx:     rootCtx,
 	})
 	if err != nil {
+		cancelRoot()
 		t.Fatalf("new syncer failed: %v", err)
 	}
+	defer func() {
+		// SyncOnce leaves the realtime listener running under RootCtx. Stop it
+		// and wait for its final state checkpoint before t.TempDir removes the
+		// mount; otherwise the checkpoint can recreate a file during cleanup.
+		cancelRoot()
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			syncer.mu.Lock()
+			stopped := syncer.wsConn == nil && !syncer.wsConnecting
+			syncer.mu.Unlock()
+			if stopped {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Error("websocket listener did not stop before temporary mount cleanup")
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
