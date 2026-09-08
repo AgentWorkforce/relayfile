@@ -333,6 +333,7 @@ class RelayfileMountProcessInstance
       // accepting it while this attempt is still running (or after exit 75)
       // would skip the resumable checkpoint retry contract.
       if (
+        !this.stopping &&
         status.ready &&
         (this.input.background !== false || (this.exited && this.exitCode === 0))
       ) {
@@ -351,7 +352,11 @@ class RelayfileMountProcessInstance
           this.now() < timeoutAt
         ) {
           await delay(this.readyPollIntervalMs)
-          if (this.input.signal?.aborted || this.now() >= timeoutAt) {
+          if (
+            this.stopping ||
+            this.input.signal?.aborted ||
+            this.now() >= timeoutAt
+          ) {
             continue
           }
           await this.restartOnceMount()

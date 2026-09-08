@@ -304,6 +304,105 @@ describe("default mount launcher", () => {
     }
   })
 
+  it("does not resolve foreground readiness after shutdown begins", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-default-launcher-stop-ready-race-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const child = new FakeChildProcess()
+    let resolveProbeStarted!: () => void
+    let resolveProbe!: (response: Response) => void
+    const probeStarted = new Promise<void>((resolve) => {
+      resolveProbeStarted = resolve
+    })
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveProbe = resolve
+            resolveProbeStarted()
+          })
+      )
+    )
+    const spawnImpl = vi.fn().mockReturnValue(child as never)
+    const launcher = createDefaultMountLauncher({
+      spawnImpl,
+      readyPollIntervalMs: 1
+    })
+
+    try {
+      const instance = await launcher.start({
+        env: createMountEnv(localDir),
+        background: false,
+        readyTimeoutMs: 250
+      })
+
+      await probeStarted
+      await instance.stop()
+      resolveProbe(new Response("", { status: 200 }))
+
+      await expect(instance.ready).rejects.toMatchObject({
+        code: "mount_launch_failed"
+      })
+      expect(spawnImpl).toHaveBeenCalledTimes(1)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("does not restart a resumable foreground mount after shutdown begins", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-default-launcher-stop-resume-race-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const first = new FakeChildProcess()
+    const unexpectedRestart = new FakeChildProcess()
+    let resolveProbeStarted!: () => void
+    const probeStarted = new Promise<void>((resolve) => {
+      resolveProbeStarted = resolve
+    })
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() => {
+        resolveProbeStarted()
+        return Promise.resolve(new Response("not ready", { status: 503 }))
+      })
+    )
+    const spawnImpl = vi.fn()
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => exitFakeChild(first, 75))
+        return first as never
+      })
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => exitFakeChild(unexpectedRestart, 1))
+        return unexpectedRestart as never
+      })
+    const launcher = createDefaultMountLauncher({
+      spawnImpl,
+      readyPollIntervalMs: 20
+    })
+
+    try {
+      const instance = await launcher.start({
+        env: createMountEnv(localDir),
+        background: false,
+        readyTimeoutMs: 250
+      })
+
+      await probeStarted
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      await instance.stop()
+
+      await expect(instance.ready).rejects.toMatchObject({
+        code: "mount_launch_failed"
+      })
+      expect(spawnImpl).toHaveBeenCalledTimes(1)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
   it("does not restart an ordinary foreground mount failure", async () => {
     const tempRoot = await mkdtemp(
       path.join(os.tmpdir(), "relayfile-default-launcher-fatal-once-")

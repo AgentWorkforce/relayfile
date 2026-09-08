@@ -30,4 +30,4 @@ Repaired PR #477 once-mode classification: explicit resumable bootstrap markers 
 *Agent: default*
 
 - Mark resumable bootstrap outcomes explicitly so fatal once failures remain non-retryable: Mark resumable bootstrap outcomes explicitly so fatal once failures remain non-retryable
-- Focused race tests, full Go, SDK launcher, typecheck/build, contract, release, and secrets checks pass; the only SDK full-suite failure is the existing Node22 ErrorEvent expectation.
+- Focused race tests, full Go, SDK launcher, typecheck/build, contract, release, and secrets checks pass, including the full Node 22 SDK suite.

@@ -41,7 +41,7 @@
         {
           "ts": 1788885713349,
           "type": "reflection",
-          "content": "Focused race tests, full Go, SDK launcher, typecheck/build, contract, release, and secrets checks pass; the only SDK full-suite failure is the existing Node22 ErrorEvent expectation.",
+          "content": "Focused race tests, full Go, SDK launcher, typecheck/build, contract, release, and secrets checks pass, including the full Node 22 SDK suite.",
           "raw": {
             "focalPoints": [
               "exit classification",
