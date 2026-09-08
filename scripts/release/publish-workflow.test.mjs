@@ -7,8 +7,18 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join, dirname } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -38,6 +48,315 @@ function dedent(block) {
     .map((line) => line.replace(/^ {10}/, ""))
     .join("\n");
 }
+
+function extractStepRun(name) {
+  const marker = `      - name: ${name}`;
+  const step = WORKFLOW.indexOf(marker);
+  assert.notEqual(step, -1, `${name} step not found`);
+  const run = WORKFLOW.indexOf("\n        run: |", step);
+  assert.notEqual(run, -1, `${name} run block not found`);
+  const bodyStart = run + "\n        run: |".length + 1;
+  const bodyEnd = WORKFLOW.indexOf("\n      - name:", bodyStart);
+  assert.notEqual(bodyEnd, -1, `${name} run block is unterminated`);
+  return dedent(WORKFLOW.slice(bodyStart, bodyEnd));
+}
+
+function runBash(script, { cwd, env = {} }) {
+  try {
+    return {
+      status: 0,
+      stdout: execFileSync("bash", ["-c", `set -euo pipefail\n${script}`], {
+        cwd,
+        env: { ...process.env, ...env },
+        encoding: "utf8",
+      }),
+    };
+  } catch (error) {
+    return {
+      status: error.status ?? 1,
+      stdout: `${error.stdout ?? ""}${error.stderr ?? ""}`,
+    };
+  }
+}
+
+function runDispatchValidation({ packageInput, dryRunInput }) {
+  const dir = mkdtempSync(join(tmpdir(), "relayfile-dispatch-"));
+  const output = join(dir, "output");
+  const envOutput = join(dir, "env");
+  try {
+    return runBash(extractStepRun("Validate and map dispatch inputs"), {
+      cwd: REPO,
+      env: {
+        PACKAGE_INPUT: packageInput,
+        DRY_RUN_INPUT: dryRunInput,
+        GITHUB_OUTPUT: output,
+        GITHUB_ENV: envOutput,
+      },
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function runVersionStep({ customVersion = "", versionType = "patch" }) {
+  const dir = mkdtempSync(join(tmpdir(), "relayfile-version-"));
+  const output = join(dir, "output");
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({ name: "relayfile-test-release", version: "1.2.3" }) + "\n",
+  );
+  try {
+    const result = runBash(extractStepRun("Version all packages"), {
+      cwd: dir,
+      env: {
+        CUSTOM_VERSION: customVersion,
+        VERSION_TYPE: versionType,
+        PREID: "beta",
+        NPM_TAG: "next",
+        GITHUB_OUTPUT: output,
+      },
+    });
+    return {
+      ...result,
+      packageJson: readFileSync(join(dir, "package.json"), "utf8"),
+      outputFile: existsSync(output) ? readFileSync(output, "utf8") : "",
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function writeNpmStub(dir, mode) {
+  const bin = join(dir, "bin");
+  mkdirSync(bin);
+  const script = `#!/bin/sh
+set -eu
+state="$PWD/npm-stub-state"
+case "$1" in
+  pack)
+    printf '%s' 'immutable package content' > relayfile-test-1.2.3.tgz
+    printf '%s\\n' '[{"filename":"relayfile-test-1.2.3.tgz","name":"@relayfile/test","version":"1.2.3","integrity":"sha512-local","shasum":"sha1-local"}]'
+    ;;
+  view)
+    count=0
+    if [ -f "$state" ]; then count=$(cat "$state"); fi
+    count=$((count + 1))
+    printf '%s\\n' "$count" > "$state"
+    if [ "${mode}" = outage ]; then
+      printf '%s\\n' 'npm error code E503 service unavailable' >&2
+      exit 1
+    fi
+    if [ "${mode}" = conflict ]; then
+      printf '%s\\n' '{"integrity":"sha512-other","shasum":"sha1-other"}'
+    elif [ "$count" -eq 1 ] && [ "${mode}" = absent ]; then
+      printf '%s\\n' 'npm error code E404' >&2
+      exit 1
+    else
+      printf '%s\\n' '{"integrity":"sha512-local","shasum":"sha1-local"}'
+    fi
+    ;;
+  publish)
+    printf '%s\\n' published > "$PWD/npm-published"
+    ;;
+  *)
+    printf '%s\\n' "unexpected npm command: $*" >&2
+    exit 1
+    ;;
+esac
+`;
+  writeFileSync(join(bin, "npm"), script);
+  chmodSync(join(bin, "npm"), 0o755);
+  return bin;
+}
+
+function runReconcileCli(mode) {
+  const dir = mkdtempSync(join(tmpdir(), "relayfile-reconcile-cli-"));
+  const packageDir = join(dir, "package");
+  mkdirSync(packageDir);
+  writeFileSync(
+    join(packageDir, "package.json"),
+    JSON.stringify({ name: "@relayfile/test", version: "1.2.3" }) + "\n",
+  );
+  const output = join(dir, "attestation.json");
+  const bin = writeNpmStub(packageDir, mode);
+  const script = join(REPO, "scripts/release/reconcile-package.mjs");
+  try {
+    const result = execFileSync(
+      process.execPath,
+      [
+        script,
+        "--package-dir",
+        packageDir,
+        "--tag",
+        "next",
+        "--source-sha",
+        "a".repeat(40),
+        "--run-id",
+        "1",
+        "--run-attempt",
+        "1",
+        "--output",
+        output,
+      ],
+      {
+        cwd: packageDir,
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+        encoding: "utf8",
+      },
+    );
+    return {
+      status: 0,
+      output: result,
+      published: existsSync(join(packageDir, "npm-published")),
+    };
+  } catch (error) {
+    return {
+      status: error.status ?? 1,
+      output: `${error.stdout ?? ""}${error.stderr ?? ""}`,
+      published: existsSync(join(packageDir, "npm-published")),
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function extractTagPreparation() {
+  const start = WORKFLOW.indexOf(
+    "          INTENDED_TREE=$(git rev-parse 'HEAD^{tree}')",
+  );
+  assert.notEqual(start, -1, "tag preparation body not found");
+  const end = WORKFLOW.indexOf(
+    '\n          echo "TAG_EXISTS=$TAG_EXISTS" >> "$GITHUB_ENV"',
+    start,
+  );
+  assert.notEqual(end, -1, "tag preparation body is unterminated");
+  return dedent(
+    WORKFLOW.slice(
+      start,
+      end + '\n          echo "TAG_EXISTS=$TAG_EXISTS" >> "$GITHUB_ENV"'.length,
+    ),
+  );
+}
+
+function git(cwd, ...args) {
+  return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
+
+function makeTagSandbox() {
+  const dir = mkdtempSync(join(tmpdir(), "relayfile-tag-"));
+  git(dir, "init", "-q");
+  git(dir, "config", "user.name", "Release Test");
+  git(dir, "config", "user.email", "release-test@example.invalid");
+  writeFileSync(join(dir, "version.txt"), "source\n");
+  git(dir, "add", "version.txt");
+  git(dir, "commit", "-qm", "source");
+  const sourceSha = git(dir, "rev-parse", "HEAD");
+  writeFileSync(join(dir, "version.txt"), "release\n");
+  git(dir, "commit", "-qam", "release");
+  return { dir, sourceSha };
+}
+
+function runTagPreparation({ existingTag = false, mismatch = false } = {}) {
+  const { dir, sourceSha } = makeTagSandbox();
+  const envFile = join(dir, "github-env");
+  if (existingTag) {
+    const releaseTree = git(dir, "rev-parse", "HEAD^{tree}");
+    const tagCommit = git(dir, "commit-tree", releaseTree, "-p", sourceSha);
+    git(dir, "tag", "-a", "v1.2.4", tagCommit, "-m", "Release v1.2.4");
+    if (mismatch) {
+      writeFileSync(join(dir, "version.txt"), "mismatch\n");
+      git(dir, "commit", "-qam", "mismatch");
+    }
+  }
+  const result = runBash(extractTagPreparation(), {
+    cwd: dir,
+    env: {
+      NEW_VERSION: "1.2.4",
+      SOURCE_SHA: sourceSha,
+      GITHUB_ENV: envFile,
+    },
+  });
+  const env = existsSync(envFile) ? readFileSync(envFile, "utf8") : "";
+  rmSync(dir, { recursive: true, force: true });
+  return { ...result, env };
+}
+
+test("dispatch validation executes and rejects option-shaped values", () => {
+  assert.equal(
+    runDispatchValidation({ packageInput: "all", dryRunInput: "false" }).status,
+    0,
+  );
+  for (const values of [
+    { packageInput: "--help", dryRunInput: "false" },
+    { packageInput: "all", dryRunInput: "--help" },
+    { packageInput: "not-a-package", dryRunInput: "false" },
+    { packageInput: "all", dryRunInput: "maybe" },
+  ]) {
+    assert.notEqual(
+      runDispatchValidation(values).status,
+      0,
+      `accepted invalid dispatch values: ${JSON.stringify(values)}`,
+    );
+  }
+});
+
+test("version step executes strict custom and bump validation", () => {
+  const custom = runVersionStep({ customVersion: "1.2.4-beta.1" });
+  assert.equal(custom.status, 0, custom.stdout);
+  assert.match(custom.packageJson, /"version"\s*:\s*"1\.2\.4-beta\.1"/);
+  assert.match(custom.outputFile, /new_version=1\.2\.4-beta\.1/);
+
+  for (const customVersion of [
+    "--allow-same-version",
+    "1.2.3; echo PWNED",
+    "1.2",
+    "01.2.3",
+    "1.2.3-01",
+    "1.2.3\n",
+  ]) {
+    const result = runVersionStep({ customVersion });
+    assert.notEqual(
+      result.status,
+      0,
+      `accepted invalid custom_version: ${customVersion}`,
+    );
+    assert.match(result.packageJson, /"version"\s*:\s*"1\.2\.3"/);
+  }
+
+  const invalidBump = runVersionStep({ versionType: "--allow-same-version" });
+  assert.notEqual(invalidBump.status, 0);
+  assert.match(invalidBump.packageJson, /"version"\s*:\s*"1\.2\.3"/);
+});
+
+test("reconciliation CLI shell harness covers canonical E404, collision, and outage", () => {
+  const absent = runReconcileCli("absent");
+  assert.equal(absent.status, 0, absent.output);
+  assert.equal(absent.published, true);
+
+  const conflict = runReconcileCli("conflict");
+  assert.notEqual(conflict.status, 0);
+  assert.equal(conflict.published, false);
+  assert.match(conflict.output, /conflicts with the local release tarball/);
+
+  const outage = runReconcileCli("outage");
+  assert.notEqual(outage.status, 0);
+  assert.equal(outage.published, false);
+  assert.match(outage.output, /ambiguous/);
+});
+
+test("tag preparation shell harness proves new and existing tag invariants", () => {
+  const fresh = runTagPreparation();
+  assert.equal(fresh.status, 0, fresh.stdout);
+  assert.match(fresh.env, /TAG_EXISTS=false/);
+  assert.match(fresh.env, /TAG_COMMIT=[0-9a-f]{40}/);
+
+  const existing = runTagPreparation({ existingTag: true });
+  assert.equal(existing.status, 0, existing.stdout);
+  assert.match(existing.env, /TAG_EXISTS=true/);
+
+  const mismatch = runTagPreparation({ existingTag: true, mismatch: true });
+  assert.notEqual(mismatch.status, 0);
+});
 
 /** The shared PACKAGE_PATHS_JSON assignment, verbatim. */
 function extractPackagePaths() {
@@ -135,7 +454,11 @@ test("release input values are passed through env, not interpolated into shell s
     WORKFLOW.match(/\$\{\{ github\.event\.inputs\.package \}\}/g) ?? [];
   const dryRunInputs =
     WORKFLOW.match(/\$\{\{ github\.event\.inputs\.dry_run \}\}/g) ?? [];
-  assert.equal(packageInputs.length, 1, "package input must only enter via env");
+  assert.equal(
+    packageInputs.length,
+    1,
+    "package input must only enter via env",
+  );
   assert.equal(dryRunInputs.length, 1, "dry_run input must only enter via env");
   assert.match(WORKFLOW, /case "\$PACKAGE_INPUT" in[\s\S]*RELEASE_PACKAGE=/);
   assert.match(WORKFLOW, /case "\$DRY_RUN_INPUT" in[\s\S]*RELEASE_DRY_RUN=/);

@@ -168,6 +168,54 @@ jobs:
           PREID: ${{ github.event.inputs.preid }}
           NPM_TAG: ${{ github.event.inputs.tag }}
         run: |
+          set -euo pipefail
+          case "$VERSION_TYPE" in
+            patch|minor|major|prepatch|preminor|premajor|prerelease) ;;
+            *)
+              echo "Invalid version bump type: $VERSION_TYPE" >&2
+              exit 1
+              ;;
+          esac
+          case "$PREID" in
+            beta|alpha|rc) ;;
+            *)
+              echo "Invalid prerelease identifier: $PREID" >&2
+              exit 1
+              ;;
+          esac
+          case "$NPM_TAG" in
+            latest|next|beta|alpha) ;;
+            *)
+              echo "Invalid npm dist-tag: $NPM_TAG" >&2
+              exit 1
+              ;;
+          esac
+
+          if [ -n "$CUSTOM_VERSION" ]; then
+            CUSTOM_VERSION="$CUSTOM_VERSION" node <<'NODE'
+          const candidate = process.env.CUSTOM_VERSION ?? "";
+          const number = "(0|[1-9]\\d*)";
+          const prerelease =
+            "(0|[1-9]\\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)";
+          const build = "[0-9A-Za-z-]+";
+          const strictSemVer = new RegExp(
+            `^${number}\\.${number}\\.${number}` +
+              `(?:-${prerelease}(?:\\.${prerelease})*)?` +
+              `(?:\\+${build}(?:\\.${build})*)?$`,
+          );
+          if (
+            !strictSemVer.test(candidate) ||
+            /[\r\n\u2028\u2029]/.test(candidate)
+          ) {
+            console.error(
+              "Invalid custom_version (must be a strict SemVer release): " +
+                candidate,
+            );
+            process.exit(1);
+          }
+          NODE
+          fi
+
           CURRENT_VERSION=$(node -p "require('./package.json').version")
           echo "Current version: $CURRENT_VERSION"
 
@@ -190,6 +238,8 @@ jobs:
 
           if [ -n "$CUSTOM_VERSION" ]; then
             echo "Setting version to custom value: $CUSTOM_VERSION"
+            # npm version does not support a `--` separator; strict SemVer
+            # validation above rejects option-shaped values before this call.
             npm version "$CUSTOM_VERSION" --no-git-tag-version --allow-same-version
           else
             echo "Bumping version: $VERSION_TYPE (preid=$PREID)"

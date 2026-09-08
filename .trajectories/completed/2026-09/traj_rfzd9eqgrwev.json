@@ -1,0 +1,96 @@
+{
+  "id": "traj_rfzd9eqgrwev",
+  "version": 1,
+  "task": {
+    "title": "Harden release workflow action pinning and dispatch input handling",
+    "source": {
+      "system": "plain",
+      "id": "#478"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-09-08T16:39:17.422Z",
+  "completedAt": "2026-09-08T16:39:46.883Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-09-08T16:39:22.572Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_1m7qrra86i6j",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-09-08T16:39:22.572Z",
+      "endedAt": "2026-09-08T16:39:46.883Z",
+      "events": [
+        {
+          "ts": 1788885562573,
+          "type": "decision",
+          "content": "Pinned every publish-workflow action to a full commit SHA and retained major-version comments: Pinned every publish-workflow action to a full commit SHA and retained major-version comments",
+          "raw": {
+            "question": "Pinned every publish-workflow action to a full commit SHA and retained major-version comments",
+            "chosen": "Pinned every publish-workflow action to a full commit SHA and retained major-version comments",
+            "alternatives": [],
+            "reasoning": "The credential-bearing release workflow must not resolve mutable action tags at runtime."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1788885562891,
+          "type": "decision",
+          "content": "Validated package and dry_run inputs once, exported safe outputs, and consumed only mapped values downstream: Validated package and dry_run inputs once, exported safe outputs, and consumed only mapped values downstream",
+          "raw": {
+            "question": "Validated package and dry_run inputs once, exported safe outputs, and consumed only mapped values downstream",
+            "chosen": "Validated package and dry_run inputs once, exported safe outputs, and consumed only mapped values downstream",
+            "alternatives": [],
+            "reasoning": "Choice/boolean dispatch inputs must not be interpolated into shell source or paths."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1788885563241,
+          "type": "reflection",
+          "content": "Release hardening is implemented; action refs and dispatch input paths are immutable or validated, and automated validation is green.",
+          "raw": {
+            "focalPoints": [
+              "action-pinning",
+              "input-safety",
+              "release-validation"
+            ],
+            "confidence": 0.95
+          },
+          "significance": "high",
+          "tags": [
+            "focal:action-pinning",
+            "focal:input-safety",
+            "focal:release-validation",
+            "confidence:0.95"
+          ]
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Pinned all publish workflow actions to immutable commit SHAs, validated and mapped package/dry_run inputs before shell use, added regression tests, and passed release/actionlint/Node22 validation.",
+    "approach": "Standard approach",
+    "confidence": 0.95
+  },
+  "commits": [
+    "3ffc97ee"
+  ],
+  "filesChanged": [
+    ".github/workflows/publish.yml",
+    ".trajectories/index.json",
+    "scripts/release/publish-workflow.test.mjs"
+  ],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "9e32618a0be4ed0ad5eaf27f27428ce7b166a79e",
+    "endRef": "3ffc97eeae90a3810ae55e5c9b39007584f0f22e",
+    "traceId": "8972c4ec-3d34-4cee-be81-db03a0f3ded9"
+  }
+}

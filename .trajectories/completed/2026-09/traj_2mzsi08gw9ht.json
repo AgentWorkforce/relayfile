@@ -1,0 +1,57 @@
+{
+  "id": "traj_2mzsi08gw9ht",
+  "version": 1,
+  "task": {
+    "title": "Repair release snapshot review blockers",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#478-review-signoff"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-09-08T16:49:16.555Z",
+  "completedAt": "2026-09-08T16:56:07.870Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-09-08T16:56:03.343Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_vvosnj5sfgsp",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-09-08T16:56:03.343Z",
+      "endedAt": "2026-09-08T16:56:07.870Z",
+      "events": [
+        {
+          "ts": 1788886563344,
+          "type": "decision",
+          "content": "Validated release inputs before npm CLI parsing and restored executable workflow harnesses: Validated release inputs before npm CLI parsing and restored executable workflow harnesses",
+          "raw": {
+            "question": "Validated release inputs before npm CLI parsing and restored executable workflow harnesses",
+            "chosen": "Validated release inputs before npm CLI parsing and restored executable workflow harnesses",
+            "alternatives": [],
+            "reasoning": "npm version accepts option-shaped values as successful config queries, so explicit strict SemVer and bump-type validation are required; static regex contracts were insufficient for release-critical shell behavior."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Hardened immutable release snapshot inputs, restored executable shell coverage, and repaired newly added Trail records with tracked relative sources.",
+    "approach": "Standard approach",
+    "confidence": 0.95
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "3982741abce713da6b33f6e5954a7a05a65f380d",
+    "endRef": "3982741abce713da6b33f6e5954a7a05a65f380d"
+  }
+}
