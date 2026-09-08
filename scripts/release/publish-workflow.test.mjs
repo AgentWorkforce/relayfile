@@ -93,7 +93,7 @@ function runDispatchValidation({ packageInput, dryRunInput }) {
   const output = join(dir, "output");
   const envOutput = join(dir, "env");
   try {
-    return runBash(extractStepRun("Validate and map dispatch inputs"), {
+    const result = runBash(extractStepRun("Validate and map dispatch inputs"), {
       cwd: REPO,
       env: {
         PACKAGE_INPUT: packageInput,
@@ -102,6 +102,11 @@ function runDispatchValidation({ packageInput, dryRunInput }) {
         GITHUB_ENV: envOutput,
       },
     });
+    return {
+      ...result,
+      outputFile: existsSync(output) ? readFileSync(output, "utf8") : "",
+      envFile: existsSync(envOutput) ? readFileSync(envOutput, "utf8") : "",
+    };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -387,7 +392,7 @@ esac
   return bin;
 }
 
-function runReconcileCli(mode) {
+function runReconcileCli(mode, { relativeScript = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "relayfile-reconcile-cli-"));
   const packageDir = join(dir, "package");
   mkdirSync(packageDir);
@@ -402,7 +407,7 @@ function runReconcileCli(mode) {
     const result = execFileSync(
       process.execPath,
       [
-        script,
+        relativeScript ? "scripts/release/reconcile-package.mjs" : script,
         "--package-dir",
         packageDir,
         "--tag",
@@ -417,7 +422,7 @@ function runReconcileCli(mode) {
         output,
       ],
       {
-        cwd: packageDir,
+        cwd: relativeScript ? REPO : packageDir,
         env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
         encoding: "utf8",
       },
@@ -502,10 +507,15 @@ function runTagPreparation({
 }
 
 test("dispatch validation executes and rejects option-shaped values", () => {
-  assert.equal(
-    runDispatchValidation({ packageInput: "all", dryRunInput: "false" }).status,
-    0,
-  );
+  const valid = runDispatchValidation({
+    packageInput: "all",
+    dryRunInput: "false",
+  });
+  assert.equal(valid.status, 0);
+  assert.match(valid.outputFile, /^package=all$/m);
+  assert.match(valid.outputFile, /^dry_run=false$/m);
+  assert.match(valid.envFile, /^RELEASE_PACKAGE=all$/m);
+  assert.match(valid.envFile, /^RELEASE_DRY_RUN=false$/m);
   for (const values of [
     { packageInput: "--help", dryRunInput: "false" },
     { packageInput: "all", dryRunInput: "--help" },
@@ -610,6 +620,10 @@ test("reconciliation CLI shell harness covers canonical E404, collision, and out
   const absent = runReconcileCli("absent");
   assert.equal(absent.status, 0, absent.output);
   assert.equal(absent.published, true);
+
+  const relative = runReconcileCli("absent", { relativeScript: true });
+  assert.equal(relative.status, 0, relative.output);
+  assert.equal(relative.published, true);
 
   const conflict = runReconcileCli("conflict");
   assert.notEqual(conflict.status, 0);

@@ -24,6 +24,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const DEFAULT_ATTEMPTS = 10;
 export const DEFAULT_DELAY_MS = 5000;
@@ -376,7 +377,8 @@ export async function reconcilePackage({
   return attestation;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+const entrypoint = process.argv[1] ? resolve(process.argv[1]) : "";
+if (entrypoint && fileURLToPath(import.meta.url) === entrypoint) {
   const args = parseArgs(process.argv.slice(2));
   try {
     await reconcilePackage({
