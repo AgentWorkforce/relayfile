@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-09-08T18:56:22.614Z",
+  "lastUpdated": "2026-09-08T18:56:55.858Z",
   "trajectories": {
     "traj_4pvrlmqfnzng": {
       "title": "Review PR #278 in AgentWorkforce/relayfile",
@@ -242,9 +242,10 @@
     },
     "traj_xnlvfueuuj35": {
       "title": "Repair release attestation digest and package-set validation",
-      "status": "active",
+      "status": "completed",
       "startedAt": "2026-09-08T18:56:21.883Z",
-      "path": "/private/tmp/relayfile-release-snapshot-fix-0908/.trajectories/active/traj_xnlvfueuuj35.json"
+      "completedAt": "2026-09-08T18:56:55.631Z",
+      "path": "/private/tmp/relayfile-release-snapshot-fix-0908/.trajectories/completed/2026-09/traj_xnlvfueuuj35.json"
     }
   }
 }
