@@ -106,10 +106,22 @@ test("every checkout is pinned to the immutable dispatch/build source SHA", () =
 
 test("prereleases cannot use latest and GitHub marks them prerelease", () => {
   assert.match(WORKFLOW, /prereleases may not use the npm latest dist-tag/);
-  assert.match(WORKFLOW, /github\.event\.inputs\.tag.*latest/);
+  assert.match(WORKFLOW, /NPM_TAG: \$\{\{ github\.event\.inputs\.tag \}\}/);
+  assert.match(WORKFLOW, /\[ "\$NPM_TAG" = "latest" \]/);
   assert.match(
     WORKFLOW,
     /prerelease:\s+\$\{\{ needs\.build\.outputs\.is_prerelease \}\}/,
+  );
+});
+
+test("release input values are passed through env, not interpolated into shell source", () => {
+  assert.match(
+    WORKFLOW,
+    /CUSTOM_VERSION: \$\{\{ github\.event\.inputs\.custom_version \}\}/,
+  );
+  assert.doesNotMatch(
+    WORKFLOW,
+    /CUSTOM_VERSION="\$\{\{ github\.event\.inputs\.custom_version \}\}"/,
   );
 });
 
@@ -127,10 +139,34 @@ test("package publication goes through reconciliation and post-publish attestati
 });
 
 test("tagging verifies the generated tag commit and never pushes a moving branch", () => {
-  assert.match(WORKFLOW, /test "\$TAG_COMMIT" = "\$\(git rev-parse HEAD\)"/);
+  assert.match(WORKFLOW, /test "\$TAG_PARENT" = "\$SOURCE_SHA"/);
+  assert.match(WORKFLOW, /test "\$TAG_TREE" = "\$INTENDED_TREE"/);
   assert.match(
     WORKFLOW,
     /refs\/tags\/v\$\{NEW_VERSION\}:refs\/tags\/v\$\{NEW_VERSION\}/,
   );
+  const attest = WORKFLOW.indexOf("- name: Generate release attestation");
+  const push = WORKFLOW.indexOf("- name: Create and push release tag");
+  assert.ok(
+    attest >= 0 && push > attest,
+    "attestation must precede remote tag push",
+  );
   assert.doesNotMatch(WORKFLOW, /git push\s*\n/);
+});
+
+test("release permissions are scoped by job", () => {
+  assert.doesNotMatch(
+    WORKFLOW,
+    /^permissions:\n\s+contents: write\n\s+id-token: write/m,
+  );
+  assert.match(WORKFLOW, /build:\n[\s\S]*?permissions:\n\s+contents: read/);
+  assert.match(
+    WORKFLOW,
+    /publish-packages:[\s\S]*?permissions:\n\s+contents: read\n\s+id-token: write/,
+  );
+  assert.match(
+    WORKFLOW,
+    /create-release:[\s\S]*?permissions:\n\s+contents: write/,
+  );
+  assert.match(WORKFLOW, /persist-credentials: false/);
 });

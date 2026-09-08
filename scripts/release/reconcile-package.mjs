@@ -108,7 +108,12 @@ export function normalizePackRecord(raw, packageDir) {
 
 export function registryErrorKind(result) {
   const text = `${result.stdout}\n${result.stderr}`;
-  if (/\bE404\b|\b404\b/i.test(text)) return "absent";
+  const npmCodes = [
+    ...text.matchAll(/(?:^|\n)\s*npm\s+error\s+code\s+(E\d{3})\b/gi),
+  ].map((match) => match[1].toUpperCase());
+  if (npmCodes.includes("E404") && npmCodes.every((code) => code === "E404")) {
+    return "absent";
+  }
   return "ambiguous";
 }
 

@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import {
   comparePackageContent,
   normalizePackRecord,
+  registryErrorKind,
   reconcilePackage,
 } from "./reconcile-package.mjs";
 
@@ -142,6 +143,27 @@ test("an ambiguous registry response fails closed", async () => {
   );
   assert.equal(state.publishes, 0);
   rmSync(dir, { recursive: true, force: true });
+});
+
+test("registry errors are absent only for a canonical npm E404 response", () => {
+  assert.equal(
+    registryErrorKind({
+      stdout: "",
+      stderr: "npm error code E404\nnpm error 404 Not Found",
+    }),
+    "absent",
+  );
+  assert.equal(
+    registryErrorKind({
+      stdout: "",
+      stderr: "npm error code E503\nnpm error 404 Not Found",
+    }),
+    "ambiguous",
+  );
+  assert.equal(
+    registryErrorKind({ stdout: "HTTP 404", stderr: "npm error code E503" }),
+    "ambiguous",
+  );
 });
 
 test("content comparison requires at least one comparable digest", () => {

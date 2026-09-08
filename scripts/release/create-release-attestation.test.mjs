@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   buildReleaseAttestation,
   parseChecksums,
+  RELEASE_BINARY_NAMES,
   RELEASE_PACKAGE_NAMES,
 } from "./create-release-attestation.mjs";
 
@@ -35,7 +36,10 @@ test("attestation binds source, run, package digests, binaries and tag commit", 
     tagCommit: "b".repeat(40),
     repository: "AgentWorkforce/relayfile",
     packages: packageRecords(sourceSha),
-    binaries: [{ file: "relayfile-mount-linux-amd64", sha256: "c".repeat(64) }],
+    binaries: RELEASE_BINARY_NAMES.map((file) => ({
+      file,
+      sha256: "c".repeat(64),
+    })),
   });
   assert.equal(result.sourceSha, sourceSha);
   assert.equal(result.producer.workflowRunAttempt, "2");
@@ -56,7 +60,10 @@ test("attestation rejects a package from a different source or missing package",
         tagCommit: "b".repeat(40),
         repository: "AgentWorkforce/relayfile",
         packages: packageRecords("d".repeat(40)).slice(0, -1),
-        binaries: [],
+        binaries: RELEASE_BINARY_NAMES.map((file) => ({
+          file,
+          sha256: "c".repeat(64),
+        })),
       }),
     /different source SHA|missing packages/,
   );
@@ -77,7 +84,10 @@ test("attestation rejects registry content that differs from the local tarball",
         tagCommit: "b".repeat(40),
         repository: "AgentWorkforce/relayfile",
         packages,
-        binaries: [],
+        binaries: RELEASE_BINARY_NAMES.map((file) => ({
+          file,
+          sha256: "c".repeat(64),
+        })),
       }),
     /registry integrity does not match/,
   );
@@ -92,4 +102,33 @@ test("binary checksum parser rejects malformed or non-SHA256 records", () => {
     () => parseChecksums("not-a-checksum relayfile"),
     /invalid binary checksum/,
   );
+});
+
+test("attestation rejects missing, duplicate, or unexpected binaries", () => {
+  const sourceSha = "a".repeat(40);
+  const valid = RELEASE_BINARY_NAMES.map((file) => ({
+    file,
+    sha256: "c".repeat(64),
+  }));
+  for (const binaries of [
+    valid.slice(0, -1),
+    [...valid.slice(0, -1), valid[0]],
+    [...valid.slice(0, -1), { file: "unexpected", sha256: "c".repeat(64) }],
+  ]) {
+    assert.throws(
+      () =>
+        buildReleaseAttestation({
+          sourceSha,
+          runId: 123,
+          runAttempt: 1,
+          version: "1.2.3",
+          tag: "v1.2.3",
+          tagCommit: "b".repeat(40),
+          repository: "AgentWorkforce/relayfile",
+          packages: packageRecords(sourceSha),
+          binaries,
+        }),
+      /exactly/,
+    );
+  }
 });

@@ -21,6 +21,19 @@ export const RELEASE_PACKAGE_NAMES = [
   "@relayfile/mount-linux-x64",
 ];
 
+export const RELEASE_BINARY_NAMES = [
+  "relayfile-mount-linux-amd64",
+  "relayfile-mount-linux-arm64",
+  "relayfile-mount-darwin-amd64",
+  "relayfile-mount-darwin-arm64",
+  "relayfile-cli-linux-amd64",
+  "relayfile-cli-linux-arm64",
+  "relayfile-cli-darwin-amd64",
+  "relayfile-cli-darwin-arm64",
+  "relayfile-cli-windows-amd64.exe",
+  "relayfile-cli-windows-arm64.exe",
+];
+
 export function readPackageAttestations(directory) {
   return readdirSync(directory)
     .filter((file) => file.endsWith(".json"))
@@ -113,6 +126,18 @@ export function buildReleaseAttestation({
   const missing = RELEASE_PACKAGE_NAMES.filter((name) => !names.has(name));
   if (missing.length)
     throw new Error(`attestation is missing packages: ${missing.join(", ")}`);
+  const actualBinaries = (binaries ?? []).map((binary) => binary.file);
+  const expectedBinaries = [...RELEASE_BINARY_NAMES].sort();
+  const actualUniqueBinaries = [...new Set(actualBinaries)].sort();
+  if (
+    actualBinaries.length !== RELEASE_BINARY_NAMES.length ||
+    actualUniqueBinaries.length !== actualBinaries.length ||
+    actualUniqueBinaries.some((name, index) => name !== expectedBinaries[index])
+  ) {
+    throw new Error(
+      `attestation binary set must contain exactly: ${RELEASE_BINARY_NAMES.join(", ")}`,
+    );
+  }
   for (const binary of binaries ?? []) {
     if (!binary.file || !SHA256.test(binary.sha256))
       throw new Error("attestation binary checksum is invalid");

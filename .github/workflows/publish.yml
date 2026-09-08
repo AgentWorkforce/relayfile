@@ -66,10 +66,6 @@ concurrency:
   group: publish-package
   cancel-in-progress: false
 
-permissions:
-  contents: write
-  id-token: write
-
 env:
   NPM_CONFIG_FUND: false
 
@@ -78,6 +74,8 @@ jobs:
   build:
     name: Build & Version
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       new_version: ${{ steps.bump.outputs.new_version }}
       is_prerelease: ${{ steps.bump.outputs.is_prerelease }}
@@ -105,6 +103,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Resolve immutable source snapshot
         id: source
@@ -136,10 +135,12 @@ jobs:
 
       - name: Version all packages
         id: bump
+        env:
+          CUSTOM_VERSION: ${{ github.event.inputs.custom_version }}
+          VERSION_TYPE: ${{ github.event.inputs.version }}
+          PREID: ${{ github.event.inputs.preid }}
+          NPM_TAG: ${{ github.event.inputs.tag }}
         run: |
-          CUSTOM_VERSION="${{ github.event.inputs.custom_version }}"
-          VERSION_TYPE="${{ github.event.inputs.version }}"
-          PREID="${{ github.event.inputs.preid }}"
           CURRENT_VERSION=$(node -p "require('./package.json').version")
           echo "Current version: $CURRENT_VERSION"
 
@@ -174,7 +175,7 @@ jobs:
 
           if [[ "$NEW_VERSION" == *"-"* ]]; then
             echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
-            if [ "${{ github.event.inputs.tag }}" = "latest" ]; then
+            if [ "$NPM_TAG" = "latest" ]; then
               echo "ERROR: prereleases may not use the npm latest dist-tag" >&2
               exit 1
             fi
@@ -287,6 +288,8 @@ jobs:
     name: Build relayfile-mount (${{ matrix.suffix }})
     needs: build
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
     if: github.event.inputs.dry_run != 'true'
     strategy:
       fail-fast: false
@@ -315,6 +318,7 @@ jobs:
         with:
           ref: ${{ needs.build.outputs.source_sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Verify immutable source snapshot
         run: |
@@ -365,6 +369,9 @@ jobs:
     name: Publish ${{ matrix.package }}
     needs: [build, build-mount-binaries]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     if: |
       always() &&
       github.event.inputs.package == 'all' &&
@@ -415,6 +422,7 @@ jobs:
         with:
           ref: ${{ needs.build.outputs.source_sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Verify immutable source snapshot
         run: |
@@ -488,6 +496,9 @@ jobs:
     name: Publish single package
     needs: [build, build-mount-binaries]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     if: |
       always() &&
       github.event.inputs.package != 'all' &&
@@ -500,6 +511,7 @@ jobs:
         with:
           ref: ${{ needs.build.outputs.source_sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Verify immutable source snapshot
         run: |
@@ -593,6 +605,8 @@ jobs:
     name: Create Release
     needs: [build, publish-packages, publish-single, build-mount-binaries]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     if: |
       always() &&
       github.event.inputs.dry_run != 'true' &&
@@ -606,6 +620,7 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
           ref: ${{ needs.build.outputs.source_sha }}
+          persist-credentials: true
 
       - name: Verify immutable source snapshot
         run: |
@@ -651,6 +666,24 @@ jobs:
           chmod +x mount-binaries/relayfile-mount-*
           test -d package-attestations
           test "$(find package-attestations -type f -name '*.json' | wc -l | tr -d ' ')" -eq 11
+          for BINARY in \
+            relayfile-mount-linux-amd64 \
+            relayfile-mount-linux-arm64 \
+            relayfile-mount-darwin-amd64 \
+            relayfile-mount-darwin-arm64 \
+            relayfile-cli-linux-amd64 \
+            relayfile-cli-linux-arm64 \
+            relayfile-cli-darwin-amd64 \
+            relayfile-cli-darwin-arm64 \
+            relayfile-cli-windows-amd64.exe \
+            relayfile-cli-windows-arm64.exe; do
+            case "$BINARY" in
+              relayfile-mount-*) test -f "mount-binaries/$BINARY" ;;
+              *) test -f "packages/cli/bin/$BINARY" ;;
+            esac
+          done
+          test "$(find mount-binaries -maxdepth 1 -type f -name 'relayfile-mount-*' | wc -l | tr -d ' ')" -eq 4
+          test "$(find packages/cli/bin -maxdepth 1 -type f -name 'relayfile-cli-*' | wc -l | tr -d ' ')" -eq 6
 
       - name: Generate checksums
         run: |
@@ -677,7 +710,7 @@ jobs:
           RELEASE_VERSION: ${{ needs.build.outputs.new_version }}
         run: node scripts/release/regenerate-release-lockfiles.mjs "$RELEASE_VERSION"
 
-      - name: Commit version bump and create tag
+      - name: Commit version bump and prepare tag target
         env:
           NEW_VERSION: ${{ needs.build.outputs.new_version }}
           SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
@@ -702,17 +735,26 @@ jobs:
             git commit -m "chore(release): v${NEW_VERSION}"
           fi
 
+          INTENDED_TREE=$(git rev-parse 'HEAD^{tree}')
           if git show-ref --verify --quiet "refs/tags/v${NEW_VERSION}"; then
             TAG_COMMIT=$(git rev-list -n 1 "refs/tags/v${NEW_VERSION}")
-            test "$TAG_COMMIT" = "$(git rev-parse HEAD)"
-            echo "Reusing existing tag v${NEW_VERSION} at $TAG_COMMIT"
+            TAG_PARENTS=$(git rev-list --parents -n 1 "$TAG_COMMIT")
+            test "$(printf '%s\n' "$TAG_PARENTS" | awk '{print NF}')" -eq 2
+            TAG_PARENT=$(printf '%s\n' "$TAG_PARENTS" | cut -d' ' -f2)
+            TAG_TREE=$(git rev-parse "${TAG_COMMIT}^{tree}")
+            test "$TAG_PARENT" = "$SOURCE_SHA"
+            test "$TAG_TREE" = "$INTENDED_TREE"
+            TAG_EXISTS=true
+            echo "Reusing existing tag v${NEW_VERSION} at $TAG_COMMIT with the intended tree"
           else
-            git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}"
-            git push origin "refs/tags/v${NEW_VERSION}:refs/tags/v${NEW_VERSION}"
-            TAG_COMMIT=$(git rev-list -n 1 "refs/tags/v${NEW_VERSION}")
+            TAG_COMMIT=$(git rev-parse HEAD)
+            TAG_EXISTS=false
+            TAG_PARENTS=$(git rev-list --parents -n 1 "$TAG_COMMIT")
+            test "$(printf '%s\n' "$TAG_PARENTS" | awk '{print NF}')" -eq 2
+            test "$(printf '%s\n' "$TAG_PARENTS" | cut -d' ' -f2)" = "$SOURCE_SHA"
           fi
-          test "$TAG_COMMIT" = "$(git rev-parse HEAD)"
           echo "TAG_COMMIT=$TAG_COMMIT" >> "$GITHUB_ENV"
+          echo "TAG_EXISTS=$TAG_EXISTS" >> "$GITHUB_ENV"
 
       - name: Generate release attestation
         env:
@@ -733,6 +775,19 @@ jobs:
             --tag-commit "$TAG_COMMIT" \
             --repository "$GITHUB_REPOSITORY" \
             --output release-attestation.json
+
+      - name: Create and push release tag
+        env:
+          NEW_VERSION: ${{ needs.build.outputs.new_version }}
+        run: |
+          set -euo pipefail
+          if [ "${TAG_EXISTS:-false}" = "true" ]; then
+            test "$(git rev-list -n 1 "refs/tags/v${NEW_VERSION}")" = "$TAG_COMMIT"
+            exit 0
+          fi
+          git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}"
+          git push origin "refs/tags/v${NEW_VERSION}:refs/tags/v${NEW_VERSION}"
+          test "$(git rev-list -n 1 "refs/tags/v${NEW_VERSION}")" = "$TAG_COMMIT"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -804,6 +859,8 @@ jobs:
         create-release,
       ]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     if: always()
 
     steps:
