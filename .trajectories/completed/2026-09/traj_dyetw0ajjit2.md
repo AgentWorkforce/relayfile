@@ -10,7 +10,7 @@
 
 ## Summary
 
-Repaired PR #479 review findings at aa6248c: resolved relative CLI entrypoint guard with fileURLToPath/path resolution and executable relative-path regression coverage; asserted exact dispatch GITHUB_OUTPUT/GITHUB_ENV mappings; corrected traj_9ecscwloe7cl to canonical project provenance and withdrew unsupported GREEN/pre-existing-issue claims. Full release suite 68/68, actionlint, diff check, targeted Prettier, and secret scans passed.
+Repaired PR #479 review findings at aa6248c: resolved relative CLI entrypoint guard with fileURLToPath/path resolution and executable relative-path regression coverage; asserted exact dispatch GITHUB_OUTPUT/GITHUB_ENV mappings; corrected traj_9ecscwloe7cl to canonical project provenance and withdrew unsupported GREEN/pre-existing-issue claims. The validation results recorded below are contemporaneous self-reports only: this trajectory captured no command output, commits, or changed-file evidence and must not be used as a merge gate.
 
 **Approach:** Standard approach
 
@@ -38,4 +38,4 @@ _Agent: default_
 
 - Accepted four current unresolved review findings as valid and scoped repairs: Accepted four current unresolved review findings as valid and scoped repairs
 - Corrected traj_9ecscwloe7cl as historical non-gating provenance: Corrected traj_9ecscwloe7cl as historical non-gating provenance
-- Patched the two valid code/test findings and corrected the two invalid historical-provenance claims. Full release tests are 68/68; actionlint, diff check, targeted Prettier, Git TruffleHog delta, and changed-file filesystem secret scan are green. Revalidated P1 preflight gating, trusted-tag baseline and exact rerun metadata, same-version handling, shared package list, package attestation schema/digest/source/run bindings, and retry/fail-closed cases.
+- Self-reported, non-gating session note: the agent stated that it patched the two code/test findings, corrected two historical-provenance claims, and observed the release tests and validation scans passing. This trajectory captured no commands, outputs, commits, or changed-file evidence, so those claims require independent verification.

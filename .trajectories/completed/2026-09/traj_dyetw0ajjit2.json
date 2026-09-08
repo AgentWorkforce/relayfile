@@ -53,7 +53,7 @@
         {
           "ts": 1788899282640,
           "type": "reflection",
-          "content": "Patched the two valid code/test findings and corrected the two invalid historical-provenance claims. Full release tests are 68/68; actionlint, diff check, targeted Prettier, Git TruffleHog delta, and changed-file filesystem secret scan are green. Revalidated P1 preflight gating, trusted-tag baseline and exact rerun metadata, same-version handling, shared package list, package attestation schema/digest/source/run bindings, and retry/fail-closed cases.",
+          "content": "Self-reported, non-gating session note: the agent stated that it patched the two code/test findings, corrected two historical-provenance claims, and observed the release tests and validation scans passing. This trajectory captured no commands, outputs, commits, or changed-file evidence, so those claims require independent verification.",
           "raw": {
             "focalPoints": [
               "relative-cli",
@@ -76,7 +76,7 @@
     }
   ],
   "retrospective": {
-    "summary": "Repaired PR #479 review findings at aa6248c: resolved relative CLI entrypoint guard with fileURLToPath/path resolution and executable relative-path regression coverage; asserted exact dispatch GITHUB_OUTPUT/GITHUB_ENV mappings; corrected traj_9ecscwloe7cl to canonical project provenance and withdrew unsupported GREEN/pre-existing-issue claims. Full release suite 68/68, actionlint, diff check, targeted Prettier, and secret scans passed.",
+    "summary": "Repaired PR #479 review findings at aa6248c: resolved relative CLI entrypoint guard with fileURLToPath/path resolution and executable relative-path regression coverage; asserted exact dispatch GITHUB_OUTPUT/GITHUB_ENV mappings; corrected traj_9ecscwloe7cl to canonical project provenance and withdrew unsupported GREEN/pre-existing-issue claims. Validation results mentioned in this record are self-reported and non-gating because the trajectory captured no command output, commits, or changed-file evidence.",
     "approach": "Standard approach",
     "confidence": 0.96
   },
