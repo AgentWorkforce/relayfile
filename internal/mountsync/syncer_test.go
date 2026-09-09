@@ -6672,15 +6672,38 @@ func TestSyncOnceUsesWebSocketForRealtimeUpdatesAndSkipsPollingWhileConnected(t 
 	writeMountsyncRemoteFile(t, api.Client(), api.URL, token, workspaceID, "/notion/Docs/A.md", "0", "# A")
 
 	localDir := t.TempDir()
+	rootCtx, cancelRoot := context.WithCancel(context.Background())
 	client := NewHTTPClient(api.URL, token, api.Client())
 	syncer, err := NewSyncer(client, SyncerOptions{
 		WorkspaceID: workspaceID,
 		RemoteRoot:  "/notion",
 		LocalRoot:   localDir,
+		RootCtx:     rootCtx,
 	})
 	if err != nil {
+		cancelRoot()
 		t.Fatalf("new syncer failed: %v", err)
 	}
+	defer func() {
+		// SyncOnce leaves the realtime listener running under RootCtx. Stop it
+		// and wait for its final state checkpoint before t.TempDir removes the
+		// mount; otherwise the checkpoint can recreate a file during cleanup.
+		cancelRoot()
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			syncer.mu.Lock()
+			stopped := syncer.wsConn == nil && !syncer.wsConnecting
+			syncer.mu.Unlock()
+			if stopped {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Error("websocket listener did not stop before temporary mount cleanup")
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -12106,6 +12129,35 @@ func TestLoadStateResetsBootstrapCompleteOnlyOnWriteOnlyToMirrorSyncMode(t *test
 				}
 			}
 		})
+	}
+}
+
+func TestInitialBootstrapCompleteAppliesWriteOnlyToMirrorMigration(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), ".relayfile-mount-state.json")
+	if err := writeMountState(stateFile, mountState{
+		Files: map[string]trackedFile{
+			"/notion/Docs/a.md": {
+				Revision:    "rev_1",
+				ContentType: "text/markdown",
+				Hash:        hashString("# A"),
+			},
+		},
+		BootstrapComplete: true,
+		SyncMode:          "write-only",
+	}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	syncer := &Syncer{stateFile: stateFile, writeOnly: false}
+	complete, err := syncer.InitialBootstrapComplete()
+	if err != nil {
+		t.Fatalf("inspect initial bootstrap completion: %v", err)
+	}
+	if complete {
+		t.Fatal("write-only -> mirror migration must re-arm the authoritative bootstrap")
+	}
+	if !syncer.loaded {
+		t.Fatal("bootstrap inspection must load and migrate private state")
 	}
 }
 

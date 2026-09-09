@@ -718,10 +718,10 @@ func TestRunSinglePollingMountStopsOnBootstrapStall(t *testing.T) {
 	}
 }
 
-// TestRunSinglePollingMountKeepsNormalCycleFailuresNonFatal verifies that a
-// normal cloud error keeps its historical per-cycle retry behavior rather
-// than terminating the mount runner.
-func TestRunSinglePollingMountKeepsNormalCycleFailuresNonFatal(t *testing.T) {
+// TestRunSinglePollingMountReportsErrorForNormalCycleFailure asserts that
+// a normal cloud error during --once is surfaced so the process exits nonzero instead
+// of pretending the bootstrap completed.
+func TestRunSinglePollingMountReportsErrorForNormalCycleFailure(t *testing.T) {
 	t.Setenv("RELAYFILE_BOOTSTRAP_STALL_CYCLES", "2")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "transient", http.StatusBadGateway)
@@ -742,8 +742,280 @@ func TestRunSinglePollingMountKeepsNormalCycleFailuresNonFatal(t *testing.T) {
 		websocketEnabled: false,
 		once:             true,
 	})
+	if err == nil {
+		t.Fatalf("expected --once to return an error when bootstrap is incomplete")
+	}
+	var incomplete *initialBootstrapIncompleteError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("unexpected error type: %v", err)
+	}
+	var httpErr *mountsync.HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected a 502 HTTP cause, got %v", err)
+	}
+}
+
+// TestRunSinglePollingMountKeepsSuccessOnUnrelatedFailureAfterBootstrapComplete
+// is the end-to-end counterpart of
+// TestFinishInitialBootstrapKeepsSuccessAfterPriorCompletion: it exercises the
+// real syncer against a persistent localDir/stateDir (the ensureRelayfileMount
+// pattern of reusing a mount point across invocations), rather than injected
+// callbacks. A workspace that already finished its full-tree bootstrap in one
+// --once run must not have a later, unrelated --once cycle failure reported
+// as an incomplete bootstrap.
+func TestRunSinglePollingMountKeepsSuccessOnUnrelatedFailureAfterBootstrapComplete(t *testing.T) {
+	entries := []mountsync.TreeEntry{
+		{Path: "/f/one.txt", Type: "file"},
+		{Path: "/f/two.txt", Type: "file"},
+	}
+	var failing atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if failing.Load() {
+			http.Error(w, "transient", http.StatusBadGateway)
+			return
+		}
+		switch {
+		case strings.Contains(r.URL.Path, "/fs/tree"):
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(mountsync.TreeResponse{Entries: entries})
+		case strings.Contains(r.URL.Path, "/fs/file"):
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(mountsync.RemoteFile{
+				Path:        r.URL.Query().Get("path"),
+				ContentType: "text/plain",
+				Content:     "content",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	localDir := t.TempDir()
+	cfg := mountConfig{
+		baseURL:          server.URL,
+		token:            "test-token",
+		workspaceID:      "ws_already_bootstrapped",
+		remotePath:       "/",
+		localDir:         localDir,
+		stateDir:         t.TempDir(),
+		mountKind:        mountsync.MountKindDaemon,
+		syncMode:         syncModeMirror,
+		interval:         time.Hour,
+		timeout:          30 * time.Second,
+		websocketEnabled: false,
+		once:             true,
+	}
+
+	if err := runSinglePollingMount(context.Background(), cfg); err != nil {
+		t.Fatalf("initial bootstrap run failed: %v", err)
+	}
+	statePath := filepath.Join(localDir, ".relay", "state.json")
+	if ready, reason := sandboxInitialSyncGuard(statePath); !ready {
+		t.Fatalf("expected the first --once run to leave bootstrap complete: %s", reason)
+	}
+
+	failing.Store(true)
+	if err := runSinglePollingMount(context.Background(), cfg); err != nil {
+		t.Fatalf("expected --once to succeed on an already-bootstrapped mount despite an unrelated cycle failure, got %v", err)
+	}
+}
+
+// A completed write-only mount has never hydrated provider history. Switching
+// it to mirror re-arms bootstrap in private state. If the first provider call
+// then fails before any new public bootstrap progress is published, the old
+// public success marker must not make --once exit successfully.
+func TestRunSinglePollingMountRejectsStalePublicCompletionAfterWriteOnlyToMirrorTransition(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "transient", http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	localDir := t.TempDir()
+	stateDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(localDir, ".relay"), 0o755); err != nil {
+		t.Fatalf("create public state dir: %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(localDir, ".relay", "state.json"),
+		[]byte(`{"lastSuccessfulReconcileAt":"2026-09-08T00:00:00Z"}`),
+		0o644,
+	); err != nil {
+		t.Fatalf("seed stale public completion: %v", err)
+	}
+
+	privatePath, err := mountsync.ResolveMountStatePath(mountsync.MountStatePathOptions{
+		WorkspaceID:     "ws_write_only_to_mirror",
+		RemoteRoot:      "/",
+		LocalRoot:       localDir,
+		StateDir:        stateDir,
+		MountKind:       mountsync.MountKindDaemon,
+		ValidateOutside: true,
+	})
 	if err != nil {
-		t.Fatalf("normal cycle failure must remain nonfatal to the runner, got %v", err)
+		t.Fatalf("resolve private state path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(privatePath.StateFile), 0o755); err != nil {
+		t.Fatalf("create private state dir: %v", err)
+	}
+	if err := os.WriteFile(
+		privatePath.StateFile,
+		[]byte(`{"files":{},"bootstrapComplete":true,"syncMode":"write-only"}`),
+		0o644,
+	); err != nil {
+		t.Fatalf("seed completed write-only private state: %v", err)
+	}
+
+	cfg := mountConfig{
+		baseURL:          server.URL,
+		token:            "test-token",
+		workspaceID:      "ws_write_only_to_mirror",
+		remotePath:       "/",
+		localDir:         localDir,
+		stateDir:         stateDir,
+		mountKind:        mountsync.MountKindDaemon,
+		syncMode:         syncModeMirror,
+		interval:         time.Hour,
+		timeout:          time.Second,
+		websocketEnabled: false,
+		once:             true,
+	}
+
+	err = runSinglePollingMount(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("stale public completion must not suppress the required mirror backfill failure")
+	}
+	var incomplete *initialBootstrapIncompleteError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("expected typed incomplete bootstrap error, got %T: %v", err, err)
+	}
+	var httpErr *mountsync.HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected the first-cycle provider failure to remain in the chain, got %v", err)
+	}
+}
+
+func TestMountProcessExitCodeOnlyMarksTypedOnceBootstrapIncompleteRetryable(t *testing.T) {
+	incomplete := newResumableInitialBootstrapIncompleteError(
+		bootstrapResumeState{inProgress: true, synced: 10, total: 20},
+		"resume bound reached",
+		context.DeadlineExceeded,
+	)
+
+	if got := mountProcessExitCode(mountConfig{once: true}, incomplete); got != initialBootstrapIncompleteExitCode {
+		t.Fatalf("typed --once incomplete exit = %d, want %d", got, initialBootstrapIncompleteExitCode)
+	}
+	if got := mountProcessExitCode(mountConfig{}, incomplete); got != 1 {
+		t.Fatalf("daemon typed incomplete exit = %d, want generic failure", got)
+	}
+	if got := mountProcessExitCode(mountConfig{once: true}, errors.New("initial bootstrap incomplete")); got != 1 {
+		t.Fatalf("text-only --once failure exit = %d, want generic failure", got)
+	}
+	if got := mountProcessExitCode(mountConfig{once: true}, fmt.Errorf("wrapped: %w", incomplete)); got != initialBootstrapIncompleteExitCode {
+		t.Fatalf("wrapped typed --once incomplete exit = %d, want %d", got, initialBootstrapIncompleteExitCode)
+	}
+	secondIncomplete := newResumableInitialBootstrapIncompleteError(bootstrapResumeState{}, "another scope", nil)
+	if got := mountProcessExitCode(mountConfig{once: true}, errors.Join(incomplete, secondIncomplete)); got != initialBootstrapIncompleteExitCode {
+		t.Fatalf("all-incomplete scoped aggregate exit = %d, want %d", got, initialBootstrapIncompleteExitCode)
+	}
+	if got := mountProcessExitCode(mountConfig{once: true}, errors.Join(incomplete, errors.New("fatal sibling"))); got != 1 {
+		t.Fatalf("mixed scoped aggregate exit = %d, want generic failure", got)
+	}
+	fatalProvider := newInitialBootstrapIncompleteError(
+		bootstrapResumeState{inProgress: true, synced: 10, total: 20},
+		"initial cycle failed",
+		&mountsync.HTTPError{StatusCode: http.StatusBadGateway, Message: "bad gateway"},
+	)
+	if got := mountProcessExitCode(mountConfig{once: true}, fatalProvider); got != 1 {
+		t.Fatalf("fatal provider --once exit = %d, want generic failure", got)
+	}
+	if got := mountProcessExitCode(mountConfig{once: true}, fmt.Errorf("wrapped provider: %w", fatalProvider)); got != 1 {
+		t.Fatalf("wrapped fatal provider --once exit = %d, want generic failure", got)
+	}
+	if got := mountProcessExitCode(mountConfig{once: true}, errors.Join(incomplete, fatalProvider)); got != 1 {
+		t.Fatalf("mixed resumable/fatal provider aggregate exit = %d, want generic failure", got)
+	}
+}
+
+// TestRunSinglePollingMountForceFullReconcileFailsOnceOnProviderErrorAfterPriorCompletion
+// is the forceFullRecon counterpart of
+// TestRunSinglePollingMountKeepsSuccessOnUnrelatedFailureAfterBootstrapComplete:
+// --full-reconcile is an explicit request for a real full-tree reconcile to
+// run and succeed on THIS invocation, so an already-complete checkpoint from
+// an earlier, unrelated --once run must NOT exempt this run's own forced
+// reconcile from a genuine tree/provider request failure. Without the
+// cfg.forceFullRecon carve-out in finishInitialBootstrap, this second run
+// would report success (err == nil) purely because bootstrap had already
+// finished at some prior point -- even though the full reconcile it was
+// explicitly asked to run never got past a 502 from the provider.
+func TestRunSinglePollingMountForceFullReconcileFailsOnceOnProviderErrorAfterPriorCompletion(t *testing.T) {
+	entries := []mountsync.TreeEntry{
+		{Path: "/f/one.txt", Type: "file"},
+		{Path: "/f/two.txt", Type: "file"},
+	}
+	var failing atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if failing.Load() {
+			http.Error(w, "transient", http.StatusBadGateway)
+			return
+		}
+		switch {
+		case strings.Contains(r.URL.Path, "/fs/tree"):
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(mountsync.TreeResponse{Entries: entries})
+		case strings.Contains(r.URL.Path, "/fs/file"):
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(mountsync.RemoteFile{
+				Path:        r.URL.Query().Get("path"),
+				ContentType: "text/plain",
+				Content:     "content",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	localDir := t.TempDir()
+	cfg := mountConfig{
+		baseURL:          server.URL,
+		token:            "test-token",
+		workspaceID:      "ws_force_full_recon_after_bootstrapped",
+		remotePath:       "/",
+		localDir:         localDir,
+		stateDir:         t.TempDir(),
+		mountKind:        mountsync.MountKindDaemon,
+		syncMode:         syncModeMirror,
+		interval:         time.Hour,
+		timeout:          30 * time.Second,
+		websocketEnabled: false,
+		once:             true,
+	}
+
+	// Run 1: an ordinary --once run (no --full-reconcile) completes the
+	// bootstrap and leaves a completed checkpoint on disk -- the "create
+	// completed state" step.
+	if err := runSinglePollingMount(context.Background(), cfg); err != nil {
+		t.Fatalf("initial bootstrap run failed: %v", err)
+	}
+	statePath := filepath.Join(localDir, ".relay", "state.json")
+	if ready, reason := sandboxInitialSyncGuard(statePath); !ready {
+		t.Fatalf("expected the first --once run to leave bootstrap complete: %s", reason)
+	}
+
+	// Run 2: the same already-bootstrapped mount, but with --full-reconcile
+	// explicitly requested this time, and the provider now failing every
+	// request. This must NOT reuse run 1's success.
+	forceFullReconCfg := cfg
+	forceFullReconCfg.forceFullRecon = true
+	failing.Store(true)
+	err := runSinglePollingMount(context.Background(), forceFullReconCfg)
+	if err == nil {
+		t.Fatal("expected --once --full-reconcile to fail when the provider request fails, not reuse an unrelated prior completion")
+	}
+	var httpErr *mountsync.HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected a 502 HTTP provider error in the chain, got %v", err)
 	}
 }
 
@@ -1028,8 +1300,12 @@ func TestRunScopedPollingMountsRejectsSharedExactStateFileOverride(t *testing.T)
 	}
 }
 
-func TestRunScopedPollingMountsCancelsSiblingsOnFirstError(t *testing.T) {
-	wantErr := errors.New("boom")
+// TestRunScopedPollingMountsCancelsSiblingsOnTerminalError pins the
+// fail-fast half of the contract: an operator-actionable terminal bootstrap
+// error (mountsync.IsBootstrapTerminalError) in one scope still cancels its
+// siblings rather than letting them retry a wedged checkpoint forever.
+func TestRunScopedPollingMountsCancelsSiblingsOnTerminalError(t *testing.T) {
+	wantErr := &mountsync.BootstrapStalledError{Cycles: 3, Limit: 3, Path: "/github"}
 	var canceled atomic.Bool
 	started := make(chan string, 2)
 	releaseFailingMount := make(chan struct{})
@@ -1052,7 +1328,7 @@ func TestRunScopedPollingMountsCancelsSiblingsOnFirstError(t *testing.T) {
 		},
 	)
 	if !errors.Is(err, wantErr) {
-		t.Fatalf("expected first error %v, got %v", wantErr, err)
+		t.Fatalf("expected aggregate error to include %v, got %v", wantErr, err)
 	}
 	if !canceled.Load() {
 		t.Fatal("expected sibling mount to observe context cancellation")
@@ -1064,6 +1340,233 @@ func TestRunScopedPollingMountsCancelsSiblingsOnFirstError(t *testing.T) {
 	}
 	if !seen["/github"] || !seen["/slack"] {
 		t.Fatalf("expected both scoped mounts to start, saw %v", seen)
+	}
+}
+
+// TestRunScopedPollingMountsCancelsSiblingsOnGenericErrorInDaemonMode pins
+// the daemon-mode half of the fix: outside --once (cfg.once unset), ANY
+// non-nil error -- including a generic one that is neither
+// mountsync.IsBootstrapTerminalError nor *initialBootstrapIncompleteError
+// (which only --once's finishInitialBootstrap ever produces) -- still
+// cancels every sibling. The --once sibling-cancellation suppression must
+// never leak into daemon mode, where a wedged or failed scope should not be
+// left running indefinitely alongside a sibling that will exit nonzero
+// anyway.
+func TestRunScopedPollingMountsCancelsSiblingsOnGenericErrorInDaemonMode(t *testing.T) {
+	wantErr := errors.New("generic runtime error unrelated to bootstrap")
+	var canceled atomic.Bool
+	started := make(chan string, 2)
+	releaseFailingMount := make(chan struct{})
+	var once sync.Once
+
+	err := runScopedPollingMountsWithRunner(
+		context.Background(),
+		mountConfig{localDir: t.TempDir(), stateDir: t.TempDir()}, // once unset: daemon mode
+		[]string{"/github", "/slack"},
+		func(ctx context.Context, cfg mountConfig) error {
+			started <- cfg.remotePath
+			if strings.HasSuffix(cfg.remotePath, "/github") {
+				<-releaseFailingMount
+				return wantErr
+			}
+			once.Do(func() { close(releaseFailingMount) })
+			<-ctx.Done()
+			canceled.Store(true)
+			return nil
+		},
+	)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected aggregate error to include %v, got %v", wantErr, err)
+	}
+	if !canceled.Load() {
+		t.Fatal("expected sibling mount to observe context cancellation for a generic error in daemon mode")
+	}
+	close(started)
+	seen := map[string]bool{}
+	for path := range started {
+		seen[path] = true
+	}
+	if !seen["/github"] || !seen["/slack"] {
+		t.Fatalf("expected both scoped mounts to start, saw %v", seen)
+	}
+}
+
+// TestRunScopedPollingMountsCancelsSiblingsOnGenericErrorInOnceMode pins the
+// narrowness of the --once suppression: even with cfg.once set, a generic
+// error that is NOT the typed *initialBootstrapIncompleteError (e.g. an
+// initialization/runtime error, or any other error finishInitialBootstrap
+// did not itself produce) still cancels every sibling. Only that one typed
+// outcome is exempted -- see
+// TestRunScopedPollingMountsLetsHealthySiblingFinishOnNonTerminalError.
+func TestRunScopedPollingMountsCancelsSiblingsOnGenericErrorInOnceMode(t *testing.T) {
+	wantErr := errors.New("generic initialization error unrelated to bootstrap")
+	var canceled atomic.Bool
+	started := make(chan string, 2)
+	releaseFailingMount := make(chan struct{})
+	var once sync.Once
+
+	err := runScopedPollingMountsWithRunner(
+		context.Background(),
+		mountConfig{localDir: t.TempDir(), stateDir: t.TempDir(), once: true},
+		[]string{"/github", "/slack"},
+		func(ctx context.Context, cfg mountConfig) error {
+			started <- cfg.remotePath
+			if strings.HasSuffix(cfg.remotePath, "/github") {
+				<-releaseFailingMount
+				return wantErr
+			}
+			once.Do(func() { close(releaseFailingMount) })
+			<-ctx.Done()
+			canceled.Store(true)
+			return nil
+		},
+	)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected aggregate error to include %v, got %v", wantErr, err)
+	}
+	if !canceled.Load() {
+		t.Fatal("expected sibling mount to observe context cancellation for a generic --once error that is not *initialBootstrapIncompleteError")
+	}
+	close(started)
+	seen := map[string]bool{}
+	for path := range started {
+		seen[path] = true
+	}
+	if !seen["/github"] || !seen["/slack"] {
+		t.Fatalf("expected both scoped mounts to start, saw %v", seen)
+	}
+}
+
+// TestRunScopedPollingMountsCancelsSiblingsOnMixedIncompleteAndFatalError
+// pins the all-branches rule for joined outcomes. A provider failure may be
+// wrapped alongside a resumable bootstrap checkpoint, but the aggregate is
+// fatal and must still cancel a sibling instead of being downgraded by a
+// one-branch errors.As match.
+func TestRunScopedPollingMountsCancelsSiblingsOnMixedIncompleteAndFatalError(t *testing.T) {
+	resumable := newResumableInitialBootstrapIncompleteError(
+		bootstrapResumeState{inProgress: true, synced: 1, total: 10},
+		"checkpoint stopped advancing",
+		nil,
+	)
+	fatalProvider := &mountsync.HTTPError{StatusCode: http.StatusBadGateway, Message: "bad gateway"}
+	wantErr := errors.Join(resumable, fmt.Errorf("provider request: %w", fatalProvider))
+	var canceled atomic.Bool
+	started := make(chan string, 2)
+	releaseFailingMount := make(chan struct{})
+	var once sync.Once
+
+	err := runScopedPollingMountsWithRunner(
+		context.Background(),
+		mountConfig{localDir: t.TempDir(), stateDir: t.TempDir(), once: true},
+		[]string{"/github", "/slack"},
+		func(ctx context.Context, cfg mountConfig) error {
+			started <- cfg.remotePath
+			if strings.HasSuffix(cfg.remotePath, "/github") {
+				<-releaseFailingMount
+				return wantErr
+			}
+			once.Do(func() { close(releaseFailingMount) })
+			<-ctx.Done()
+			canceled.Store(true)
+			return nil
+		},
+	)
+	if !errors.Is(err, fatalProvider) {
+		t.Fatalf("expected aggregate error to include fatal provider error, got %v", err)
+	}
+	if !errors.Is(err, resumable) {
+		t.Fatalf("expected aggregate error to include resumable scope error, got %v", err)
+	}
+	if !canceled.Load() {
+		t.Fatal("expected mixed resumable/fatal --once error to cancel sibling")
+	}
+	close(started)
+	seen := map[string]bool{}
+	for path := range started {
+		seen[path] = true
+	}
+	if !seen["/github"] || !seen["/slack"] {
+		t.Fatalf("expected both scoped mounts to start, saw %v", seen)
+	}
+}
+
+// TestRunScopedPollingMountsLetsHealthySiblingFinishOnNonTerminalError pins
+// the counterpart: in --once mode (cfg.once), a failed or stalled scope
+// reporting the explicitly resumable *initialBootstrapIncompleteError outcome
+// finishInitialBootstrap returns for a resume-cycle ceiling, a stall bound,
+// or a cancelled rootCtx must not cancel a healthy sibling still making
+// progress within its own bound. The healthy sibling runs to its own bounded
+// completion -- proven here by an explicit delay it must survive uncancelled
+// -- and the aggregate result is still a nonzero error once every sibling
+// has finished, so a real `--once` operator still sees the failure and
+// exits nonzero.
+//
+// cfg.once must be set here: the sibling-cancellation suppression is scoped
+// to --once specifically (see runScopedPollingMountsWithRunner). Its two
+// boundaries are pinned by
+// TestRunScopedPollingMountsCancelsSiblingsOnGenericErrorInDaemonMode
+// (outside --once, any error still cancels) and
+// TestRunScopedPollingMountsCancelsSiblingsOnGenericErrorInOnceMode (inside
+// --once, only the explicitly resumable outcome is exempted -- a generic or
+// fatal error still cancels).
+func TestRunScopedPollingMountsLetsHealthySiblingFinishOnNonTerminalError(t *testing.T) {
+	nonTerminalErr := newResumableInitialBootstrapIncompleteError(
+		bootstrapResumeState{inProgress: true, synced: 1, total: 10},
+		"bootstrap checkpoint stopped advancing",
+		nil,
+	)
+	const healthySiblingBoundedWork = 150 * time.Millisecond
+	healthyFinished := make(chan struct{})
+	var healthyCtxCancelledBeforeFinish atomic.Bool
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runScopedPollingMountsWithRunner(
+			context.Background(),
+			mountConfig{localDir: t.TempDir(), stateDir: t.TempDir(), once: true},
+			[]string{"/github", "/slack"},
+			func(ctx context.Context, cfg mountConfig) error {
+				if strings.HasSuffix(cfg.remotePath, "/github") {
+					// Simulates a stalled/incomplete scope returning
+					// immediately with a non-terminal outcome.
+					return nonTerminalErr
+				}
+				// Healthy sibling: simulates its own bounded --once work.
+				// If the unrelated scope's failure cancelled the shared
+				// ctx, this select returns early via ctx.Done() instead of
+				// running its full bounded duration.
+				select {
+				case <-time.After(healthySiblingBoundedWork):
+				case <-ctx.Done():
+				}
+				if ctx.Err() != nil {
+					healthyCtxCancelledBeforeFinish.Store(true)
+				}
+				close(healthyFinished)
+				return nil
+			},
+		)
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected a nonzero aggregate error once every sibling finished")
+		}
+		if !errors.Is(err, nonTerminalErr) {
+			t.Fatalf("expected aggregate error to include the stalled scope's error, got %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("runScopedPollingMountsWithRunner did not return after every sibling's own bounded completion")
+	}
+
+	select {
+	case <-healthyFinished:
+	default:
+		t.Fatal("healthy sibling never reached its own bounded completion")
+	}
+	if healthyCtxCancelledBeforeFinish.Load() {
+		t.Fatal("healthy sibling's context was cancelled before its own bounded --once work completed, due to an unrelated non-terminal sibling failure")
 	}
 }
 

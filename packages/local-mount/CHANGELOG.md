@@ -6,7 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Fixed
+
+- `relayfile-mount --once` now exits nonzero when the initial pull has not completed, preventing a timed-out large bootstrap from being reported as a successful mount.
+- Fixed a false-failure regression from the change above: `--once` against a mount whose bootstrap had already completed in a prior run no longer reports "initial bootstrap incomplete" when that invocation's cycle hits an unrelated transient error or is cancelled.
+- `--once` now resumes a persisted bootstrap checkpoint after a cycle yields on a non-traversal timeout (e.g. outbox or digest work) with the checkpoint still in progress, instead of reporting that cycle's swallowed deadline as a bootstrap failure.
+- `--local-layout=scoped --once` with multiple `--remote-path` values no longer cancels a healthy scope's still-in-progress bootstrap just because a sibling scope hit its own bounded resume-cycle ceiling or stall bound. Every scope now runs to its own bounded `--once` completion; the aggregate exit is still nonzero if any scope failed. This suppression is narrowly scoped to `--once` and to that one specific, bounded outcome — a generic initialization or runtime error, an operator-actionable terminal bootstrap error (e.g. a wedged checkpoint), and any error at all outside `--once` (daemon mode) all still cancel siblings immediately, unchanged.
+- Fixed a precedence bug where a terminal bootstrap error (e.g. a wedged checkpoint) racing a concurrent cancellation in the same `--once` resume cycle could be reported as a generic "context cancelled" failure instead of the specific, operator-actionable terminal error, breaking `errors.As` for callers inspecting the cause.
+- `--once --full-reconcile` against a mount whose bootstrap had already completed in an unrelated prior run no longer reports success when this invocation's forced full reconcile itself fails (e.g. a tree/provider request error). `--full-reconcile` is an explicit request for a real reconcile cycle to run and succeed on that invocation; only a plain `--once` (no `--full-reconcile`) still treats a prior completion as exempting that cycle from an unrelated transient failure, per the false-failure fix above.
+- A write-only mount changed to mirror or pull-only no longer reuses a stale public completion marker when its first backfill cycle fails before publishing bootstrap progress; `--once` now follows the authoritative private mode-transition state and exits nonzero.
+- An incomplete but resumable `--once` bootstrap now exits with `EX_TEMPFAIL` (75), and the TypeScript mount launcher retries only that typed foreground outcome on the same mount and private checkpoint until its existing readiness deadline; fatal exits remain non-retryable.
 
 ## [0.10.56] - 2026-09-08
 
