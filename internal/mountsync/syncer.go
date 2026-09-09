@@ -395,6 +395,21 @@ func (e *BootstrapTraversalLimitError) Error() string {
 	)
 }
 
+// EmptyRemoteTreeError distinguishes an unverified empty source tree (or a
+// listing contradicting its advertised total) from a successfully empty mount.
+// It remains retryable: provider materialization can finish on a later cycle.
+type EmptyRemoteTreeError struct {
+	Path          string
+	ExpectedFiles int
+}
+
+func (e *EmptyRemoteTreeError) Error() string {
+	if e.ExpectedFiles > 0 {
+		return fmt.Sprintf("empty remote tree at %q: listing advertised %d files but traversal returned none; check provider sync/materialization and retry", e.Path, e.ExpectedFiles)
+	}
+	return fmt.Sprintf("empty remote tree at %q: GitHub source materialization is unverified; check provider sync and clone import before retrying (an empty listing does not prove the upstream repository is empty)", e.Path)
+}
+
 // IsBootstrapTerminalError identifies bootstrap failures that polling runners
 // must return instead of treating as one more retryable cycle failure.
 func IsBootstrapTerminalError(err error) bool {
@@ -6276,11 +6291,13 @@ func (s *Syncer) pullRemoteFull(ctx context.Context, conflicted map[string]struc
 			s.fullPullUpPaths = nil
 		}()
 	}
+	var seedErr error
 	if client, ok := s.client.(githubWorkingTreeTarClient); ok {
 		used, err := s.pullRemoteFullGithubTarSeed(ctx, client, conflicted, prog)
 		if used {
 			return err
 		}
+		seedErr = err
 	}
 	if !s.state.BootstrapComplete {
 		s.logf("skipping atomic export for initial bootstrap; using bounded resumable tree pull")
@@ -6290,7 +6307,13 @@ func (s *Syncer) pullRemoteFull(ctx context.Context, conflicted map[string]struc
 			return err
 		}
 	}
-	return s.pullRemoteFullTree(ctx, conflicted, prog)
+	err := s.pullRemoteFullTree(ctx, conflicted, prog)
+	if err != nil && seedErr != nil {
+		// Preserve the diagnostic without making an optional seed timeout turn
+		// the tree's failure into a resumable deadline yield in the --once runner.
+		return fmt.Errorf("%w; github tar seed unavailable: %v", err, seedErr)
+	}
+	return err
 }
 
 type githubCloneManifest struct {
@@ -6312,10 +6335,10 @@ func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubW
 	})
 	if err != nil {
 		if exportSnapshotUnsupported(err) {
-			return false, nil
+			return false, err
 		}
 		s.logf("github tar seed unavailable: read clone manifest failed: %v", err)
-		return false, nil
+		return false, err
 	}
 	headSHA := strings.TrimSpace(manifest.HeadSHA)
 	if headSHA == "" {
@@ -6334,12 +6357,12 @@ func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubW
 		})
 		if err != nil {
 			s.logf("github tar seed unavailable: resolve clone manifest cursor failed: %v", err)
-			return false, nil
+			return false, err
 		}
 	}
 	if cursor == "" {
 		s.logf("github tar seed unavailable: clone manifest has no event cursor")
-		return false, nil
+		return false, fmt.Errorf("clone manifest has no event cursor")
 	}
 
 	var tree map[string]githubTreeFile
@@ -6349,7 +6372,7 @@ func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubW
 	})
 	if err != nil {
 		s.logf("github tar seed unavailable: tree verification snapshot failed: %v", err)
-		return false, nil
+		return false, err
 	}
 	if len(tree) == 0 {
 		return false, nil
@@ -6443,6 +6466,11 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 		return true, err
 	}
 	s.recordCloudSuccess()
+	if len(files) == 0 && s.githubWorkingTree != nil && !s.lazyRepos {
+		// An empty export cannot establish source readiness either. Recheck via
+		// the tree path, which surfaces unverified materialization explicitly.
+		return false, nil
+	}
 	sort.Slice(files, func(i, j int) bool {
 		return normalizeRemotePath(files[i].Path) < normalizeRemotePath(files[j].Path)
 	})
@@ -6900,6 +6928,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		maxDirectories = defaultBootstrapMaxDirectories
 	}
 	metrics := fullTreeTraversalMetrics{startedAt: time.Now()}
+	expectedFiles := 0
 	defer func() {
 		s.logf(
 			"mount full-tree traversal summary remote_root=%q list_calls=%d entries_seen=%d files_seen=%d directories_seen=%d bytes_seen=%d runtime_entries_seen=%d runtime_subtrees_pruned=%d traversal_complete=%t traversal_failed=%t duration_ms=%d",
@@ -6911,7 +6940,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			metrics.bytesSeen,
 			metrics.runtimeEntriesSeen,
 			metrics.runtimeSubtreesPruned,
-			metrics.traversalComplete,
+			metrics.traversalComplete && returnErr == nil,
 			returnErr != nil,
 			time.Since(metrics.startedAt).Milliseconds(),
 		)
@@ -7081,6 +7110,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 				}
 			}
 			if currentDirectory == s.remoteRoot && !s.lazyRepos && !s.state.BootstrapFilesTotalUnavailable && page.TotalFiles > 0 {
+				expectedFiles = page.TotalFiles
 				// totalFiles is stable across server pagination and counts the full
 				// caller-visible subtree, not just this page. Persist it on the root
 				// frontier so N/M is an actual completion denominator. Older servers
@@ -7365,6 +7395,20 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 	if transientBootstrapAbort {
 		s.logf("bootstrap paused due to transient read error(s); will resume from last cursor next cycle")
 		return nil
+	}
+
+	// A drained cursor only proves enumeration ended. With no files, a source
+	// mount has no evidence that its upstream tree was ever materialized. A
+	// positive server total independently proves an empty listing is incomplete.
+	// A resumed final page may legitimately contain no files after earlier
+	// cycles mirrored the prefix, and pruned/lazy totals are not comparable.
+	if len(remotePaths) == 0 && (startedFromEmpty || s.state.BootstrapFilesSynced == 0) && !s.lazyRepos {
+		if s.state.BootstrapFilesTotalUnavailable {
+			expectedFiles = 0
+		}
+		if s.githubWorkingTree != nil || expectedFiles > 0 {
+			return &EmptyRemoteTreeError{Path: s.remoteRoot, ExpectedFiles: expectedFiles}
+		}
 	}
 
 	// Resumed/partial traversal safety: only run the authoritative
@@ -10856,6 +10900,12 @@ func classifyStatusError(err error) *statusError {
 		Kind:    "error",
 		Message: err.Error(),
 		At:      time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	var emptyTree *EmptyRemoteTreeError
+	if errors.As(err, &emptyTree) {
+		status.Kind = "source_unavailable"
+		status.Code = "empty_remote_tree"
+		return status
 	}
 	var bootstrapStalled *BootstrapStalledError
 	if errors.As(err, &bootstrapStalled) {
