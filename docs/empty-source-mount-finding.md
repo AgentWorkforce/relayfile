@@ -46,7 +46,10 @@ clone import job and the clone marker and contents under the same mount scope.
   `EmptyRemoteTreeError`, with public `lastError.code=empty_remote_tree` and
   `lastError.kind=source_unavailable`. Failed seed diagnostics are retained.
 - A generic traversal advertising a positive `totalFiles` but returning no
-  files also fails. Pruned runtime totals and deliberately lazy mounts are
+  files also fails. Resuming a persisted directory or pagination frontier
+  retains the root's advertised total across retries and daemon restarts, so
+  an initial empty-tree failure cannot become success on the next cycle.
+  Pruned runtime totals and deliberately lazy mounts are
   excluded; an empty final page after a populated resumed prefix is valid.
 - The failure summary reports `traversal_complete=false traversal_failed=true`.
   Initial bootstrap remains incomplete, no successful reconcile timestamp or

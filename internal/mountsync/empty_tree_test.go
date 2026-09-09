@@ -3,6 +3,7 @@ package mountsync
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -12,6 +13,107 @@ type emptyListingClient struct {
 	*fakeExportClient
 	empty bool
 	total int
+}
+
+// The root advertises files but only returns a frontier. Traversing its empty
+// tail persists that frontier before the empty-tree error is raised.
+type advertisedEmptyFrontierClient struct {
+	*fakeClient
+	paginated bool
+	rootCalls int
+}
+
+func (c *advertisedEmptyFrontierClient) ListTree(_ context.Context, _ string, path string, _ int, cursor string) (TreeResponse, error) {
+	if path != "/documents" || cursor != "" {
+		return TreeResponse{Path: path}, nil
+	}
+	c.rootCalls++
+	page := TreeResponse{Path: path, TotalFiles: 286}
+	if c.paginated {
+		next := "empty-tail"
+		page.NextCursor = &next
+	} else {
+		page.Entries = []TreeEntry{{Path: path + "/a/b/c", Type: "dir"}}
+	}
+	return page, nil
+}
+
+func TestAdvertisedEmptyTreeRemainsRejectedAfterResume(t *testing.T) {
+	for _, paginated := range []bool{false, true} {
+		name := "directory frontier"
+		if paginated {
+			name = "page frontier"
+		}
+		t.Run(name, func(t *testing.T) {
+			client := &advertisedEmptyFrontierClient{fakeClient: &fakeClient{files: map[string]RemoteFile{}}, paginated: paginated}
+			localDir := t.TempDir()
+			logger := &captureLogger{}
+			opts := SyncerOptions{WorkspaceID: "ws_empty_frontier", RemoteRoot: "/documents", LocalRoot: localDir, StateFile: filepath.Join(localDir, "private-state.json"), Logger: logger, WebSocket: boolPtr(false)}
+			s, err := NewSyncer(client, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for cycle := 0; cycle < 3; cycle++ {
+				if cycle == 2 {
+					// Reload the checkpoint from disk, as a restarted daemon does.
+					s, err = NewSyncer(client, opts)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				err := s.Reconcile(context.Background())
+				var emptyTree *EmptyRemoteTreeError
+				if !errors.As(err, &emptyTree) || emptyTree.ExpectedFiles != 286 {
+					t.Fatalf("cycle %d lost advertised empty-tree rejection: %v", cycle, err)
+				}
+				if s.state.BootstrapComplete || s.fullPullAuthoritative || s.state.LastSuccessfulReconcileAt != "" || s.state.EventsCursor != "" {
+					t.Fatalf("cycle %d marked the empty tree ready", cycle)
+				}
+				if s.state.BootstrapFilesTotal != 286 || len(s.state.BootstrapDirectories) == 0 {
+					t.Fatalf("cycle %d did not preserve root total and resume frontier", cycle)
+				}
+			}
+			if client.rootCalls != 1 {
+				t.Fatalf("expected retries to use the saved frontier, got %d root requests", client.rootCalls)
+			}
+			logs := strings.Join(logger.lines, "\n")
+			if strings.Count(logs, "traversal_complete=false traversal_failed=true") != 3 {
+				t.Fatalf("resumed failure summaries missing: %s", logs)
+			}
+		})
+	}
+}
+
+func TestEmptyTreeDoesNotReuseUnrelatedOrUnavailableTotals(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		resumed, unavailable bool
+		filesSynced          int
+	}{
+		{name: "fresh traversal ignores historical total"},
+		{name: "resumed pruned total is unavailable", resumed: true, unavailable: true},
+		{name: "resumed tail follows populated prefix", resumed: true, filesSynced: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &emptyListingClient{fakeExportClient: &fakeExportClient{fakeClient: &fakeClient{files: map[string]RemoteFile{}}}, empty: true}
+			s, err := NewSyncer(client, SyncerOptions{WorkspaceID: "ws_empty_total", RemoteRoot: "/documents", LocalRoot: t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.state.BootstrapFilesTotal = 286
+			s.state.BootstrapFilesTotalUnavailable = tc.unavailable
+			s.state.BootstrapFilesSynced = tc.filesSynced
+			if tc.resumed {
+				s.state.BootstrapDirectories = []string{"/documents/a/b/c"}
+			}
+			if err := s.pullRemoteFullTree(context.Background(), nil, bootstrapProgress{}); err != nil {
+				t.Fatalf("valid empty traversal: %v", err)
+			}
+			if !s.state.BootstrapComplete {
+				t.Fatal("valid empty traversal should complete")
+			}
+		})
+	}
 }
 
 func (c *emptyListingClient) ListTree(ctx context.Context, workspace, path string, depth int, cursor string) (TreeResponse, error) {

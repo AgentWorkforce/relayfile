@@ -6969,6 +6969,12 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			cursor = strings.TrimSpace(s.state.BootstrapCursor)
 			pageOffset = s.state.BootstrapPageOffset
 			startedFromEmpty = false
+			// The root's advertised total belongs to the saved traversal, even
+			// when this frontier no longer lists the root (or its later pages
+			// omit totalFiles). Keep it across retries and daemon restarts so an
+			// empty-tree failure cannot become successful on the next cycle.
+			// Fresh traversals must not inherit a historical bootstrap total.
+			expectedFiles = s.state.BootstrapFilesTotal
 			s.logf("resuming bootstrap bounded-tree pull at %s from persisted cursor and page offset %d (%d directories pending, %d files already synced)", directories[0], pageOffset, len(directories), s.state.BootstrapFilesSynced)
 		}
 	} else if !s.state.BootstrapComplete && strings.TrimSpace(s.state.BootstrapCursor) != "" {
