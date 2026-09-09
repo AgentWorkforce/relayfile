@@ -45,3 +45,9 @@ jobs:
         run: |
           node --test scripts/validate-mount-qualification-workflow.test.mjs
           node scripts/validate-mount-qualification-workflow.mjs
+
+      - name: Validate protected release workflows
+        run: |
+          ./scripts/check-publish-workflow.sh
+          ./scripts/check-publish-workflow.sh .github/workflows/publish-python.yml
+          ./scripts/test-check-publish-workflow.sh

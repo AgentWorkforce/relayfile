@@ -35,6 +35,10 @@ const WORKFLOW = readFileSync(
   join(REPO, ".github/workflows/publish.yml"),
   "utf8",
 );
+const PYTHON_WORKFLOW = readFileSync(
+  join(REPO, ".github/workflows/publish-python.yml"),
+  "utf8",
+);
 
 test("release modules are import-safe when the argv entrypoint is stdin", () => {
   for (const script of [
@@ -904,4 +908,25 @@ test("release permissions are scoped by job", () => {
     /create-release:[\s\S]*?permissions:[\s\S]*?attestations: write[\s\S]*?artifact-metadata: write/,
   );
   assert.match(WORKFLOW, /persist-credentials: false/);
+});
+
+test("Python release is ephemeral and publishes only an annotated source tag", () => {
+  assert.doesNotMatch(PYTHON_WORKFLOW, /git push origin HEAD:main/);
+  assert.doesNotMatch(PYTHON_WORKFLOW, /git commit/);
+  assert.doesNotMatch(PYTHON_WORKFLOW, /git add packages\/sdk\/python/);
+  assert.match(
+    PYTHON_WORKFLOW,
+    /--sort=-version:refname[\s\S]*refs\/tags\/sdk-python-v\[0-9\]\*/,
+  );
+  assert.match(PYTHON_WORKFLOW, /gh api[\s\S]*releases\/tags\/\$\{CANDIDATE_TAG\}/);
+  assert.match(
+    PYTHON_WORKFLOW,
+    /git tag -a "\$TAG"[\s\S]*source-sha=\$\{SOURCE_SHA\}[\s\S]*tag-tree=\$\{TAG_TREE\}/,
+  );
+  assert.match(
+    PYTHON_WORKFLOW,
+    /git push origin "refs\/tags\/sdk-python-v\$\{NEW_VERSION\}:refs\/tags\/sdk-python-v\$\{NEW_VERSION\}"/,
+  );
+  assert.match(PYTHON_WORKFLOW, /relayfile-sdk \$\{NEW_VERSION\} already exists/);
+  assert.match(PYTHON_WORKFLOW, /--connect-timeout 5 --max-time 20/);
 });
