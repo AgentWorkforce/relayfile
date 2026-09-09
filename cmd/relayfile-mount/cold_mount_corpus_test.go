@@ -386,37 +386,25 @@ type coldCorpusMountResult struct {
 	output       string
 }
 
-var (
-	coldCorpusBinaryOnce sync.Once
-	coldCorpusBinaryPath string
-	coldCorpusBinaryErr  error
-)
-
 func coldCorpusMountBinary(t *testing.T) string {
 	t.Helper()
-	coldCorpusBinaryOnce.Do(func() {
-		binaryPath := filepath.Join(t.TempDir(), "relayfile-mount")
-		// The test binary's working directory is this package directory.
-		output, err := exec.Command("go", "build", "-trimpath", "-o", binaryPath, ".").CombinedOutput()
-		if err != nil {
-			coldCorpusBinaryErr = fmt.Errorf("go build failed: %v: %s", err, output)
-			return
-		}
-		coldCorpusBinaryPath = binaryPath
-	})
-	if coldCorpusBinaryErr != nil {
-		t.Fatalf("mount binary: %v", coldCorpusBinaryErr)
+	binaryPath := filepath.Join(t.TempDir(), "relayfile-mount")
+	// The test binary's working directory is this package directory. Build a
+	// fresh binary per test invocation: a package-global sync.Once would cache
+	// a path inside the first invocation's t.TempDir, which is removed before a
+	// later -count run can use it.
+	output, err := exec.Command("go", "build", "-trimpath", "-o", binaryPath, ".").CombinedOutput()
+	if err != nil {
+		t.Fatalf("mount binary: %v: %s", err, output)
 	}
-	return coldCorpusBinaryPath
+	return binaryPath
 }
 
 // runColdCorpusMount spawns one relayfile-mount process with the exact
 // qualification flags. CPU time and peak RSS come from the child's rusage on
 // unix (see cold_mount_corpus_unix_test.go), matching the cgroup-v2 telemetry
 // the Cloud acceptance verifies; the windows helper reports them unavailable.
-func runColdCorpusMount(t *testing.T, label, baseURL, localDir, stateFile string) coldCorpusMountResult {
-	t.Helper()
-	binary := coldCorpusMountBinary(t)
+func runColdCorpusMount(binary, label, baseURL, localDir, stateFile string) (coldCorpusMountResult, error) {
 	args := []string{
 		"-base-url", baseURL,
 		"-workspace", "ws_cold_corpus",
@@ -437,15 +425,15 @@ func runColdCorpusMount(t *testing.T, label, baseURL, localDir, stateFile string
 	cmd.Env = append(os.Environ(), "RELAYFILE_TOKEN="+coldCorpusToken)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		t.Fatalf("%s stdout pipe: %v", label, err)
+		return coldCorpusMountResult{label: label}, fmt.Errorf("%s stdout pipe: %w", label, err)
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		t.Fatalf("%s stderr pipe: %v", label, err)
+		return coldCorpusMountResult{label: label}, fmt.Errorf("%s stderr pipe: %w", label, err)
 	}
 	result := coldCorpusMountResult{label: label, startedAt: time.Now()}
 	if err := cmd.Start(); err != nil {
-		t.Fatalf("%s start: %v", label, err)
+		return result, fmt.Errorf("%s start: %w", label, err)
 	}
 	output := make(chan string, 2)
 	go func() { data, _ := io.ReadAll(stdout); output <- string(data) }()
@@ -467,7 +455,7 @@ func runColdCorpusMount(t *testing.T, label, baseURL, localDir, stateFile string
 	result.finishedAt = time.Now()
 	result.wallMs = result.finishedAt.Sub(result.startedAt).Milliseconds()
 	result.output = <-output + <-output
-	return result
+	return result, nil
 }
 
 func verifyColdCorpusMount(t *testing.T, label, localDir string) {
@@ -724,7 +712,11 @@ func TestColdMountScaleCorpusContract(t *testing.T) {
 		}
 	}
 
-	initial := runColdCorpusMount(t, "initial cold mount", cloud.URL, mountA, filepath.Join(stateDir, "mount-a.json"))
+	binary := coldCorpusMountBinary(t)
+	initial, err := runColdCorpusMount(binary, "initial cold mount", cloud.URL, mountA, filepath.Join(stateDir, "mount-a.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	verifyColdCorpusResources(t, initial)
 	verifyColdCorpusMount(t, "initial cold mount", mountA)
 
@@ -734,6 +726,7 @@ func TestColdMountScaleCorpusContract(t *testing.T) {
 
 	var concurrentWait sync.WaitGroup
 	concurrentResults := make([]coldCorpusMountResult, 2)
+	concurrentErrors := make([]error, 2)
 	concurrentResults[0].label, concurrentResults[1].label = "concurrent cold mount B", "concurrent cold mount C"
 	concurrentDirs := []string{mountB, mountC}
 	concurrentStates := []string{filepath.Join(stateDir, "mount-b.json"), filepath.Join(stateDir, "mount-c.json")}
@@ -741,10 +734,15 @@ func TestColdMountScaleCorpusContract(t *testing.T) {
 		concurrentWait.Add(1)
 		go func(i int) {
 			defer concurrentWait.Done()
-			concurrentResults[i] = runColdCorpusMount(t, concurrentResults[i].label, cloud.URL, concurrentDirs[i], concurrentStates[i])
+			concurrentResults[i], concurrentErrors[i] = runColdCorpusMount(binary, concurrentResults[i].label, cloud.URL, concurrentDirs[i], concurrentStates[i])
 		}(i)
 	}
 	concurrentWait.Wait()
+	for i, err := range concurrentErrors {
+		if err != nil {
+			t.Fatalf("concurrent mount %d: %v", i, err)
+		}
+	}
 	if !coldCorpusMountsOverlap(concurrentResults) {
 		t.Fatalf("concurrent cold mounts did not overlap: %s-%s and %s-%s", concurrentResults[0].startedAt.Format(time.RFC3339Nano), concurrentResults[0].finishedAt.Format(time.RFC3339Nano), concurrentResults[1].startedAt.Format(time.RFC3339Nano), concurrentResults[1].finishedAt.Format(time.RFC3339Nano))
 	}
