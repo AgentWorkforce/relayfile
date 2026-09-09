@@ -1,0 +1,81 @@
+{
+  "id": "traj_9ecscwloe7cl",
+  "version": 1,
+  "task": {
+    "title": "Historical review record for Relayfile release snapshot 1f049cdd",
+    "source": {
+      "system": "plain",
+      "id": "release-snapshot-review-0908"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-09-08T17:04:02.501Z",
+  "completedAt": "2026-09-08T17:09:06.028Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-09-08T17:09:01.357Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_q6mz26wmhwk8",
+      "title": "Historical record disposition",
+      "agentName": "default",
+      "startedAt": "2026-09-08T17:09:01.357Z",
+      "endedAt": "2026-09-08T17:09:06.028Z",
+      "events": [
+        {
+          "ts": 1788887341358,
+          "type": "decision",
+          "content": "Unsupported GREEN release claim withdrawn",
+          "raw": {
+            "question": "What release verdict is supported by this record?",
+            "chosen": "No release verdict is asserted",
+            "alternatives": [],
+            "reasoning": "The source trajectory contains no captured command output, commit/file evidence, or test/actionlint event supporting a release decision."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1788887341671,
+          "type": "reflection",
+          "content": "Historical provenance was corrected: the unsupported GREEN claim and pre-existing-issue statement are not release evidence.",
+          "raw": {
+            "focalPoints": [
+              "semver",
+              "registry-reconciliation",
+              "immutability",
+              "artifacts",
+              "trail"
+            ],
+            "confidence": 0.2
+          },
+          "significance": "high",
+          "tags": [
+            "focal:semver",
+            "focal:registry-reconciliation",
+            "focal:immutability",
+            "focal:artifacts",
+            "focal:trail",
+            "confidence:0.2"
+          ]
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Historical review record retained for provenance at the earlier 1f049cdd ancestor; its unsupported GREEN claim is withdrawn because no command, output, commit, changed-file, test, or actionlint evidence was captured. It is self-reported, non-authoritative, non-gating, and not a release approval.",
+    "approach": "Historical review record (non-gating)",
+    "confidence": 0.2
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": ["historical", "self-reported", "non-authoritative", "non-gating"],
+  "_trace": {
+    "startRef": "1f049cdd55cdb789c8ace207665f4701ce6925da",
+    "endRef": "1f049cdd55cdb789c8ace207665f4701ce6925da"
+  }
+}

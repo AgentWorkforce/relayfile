@@ -1,0 +1,57 @@
+{
+  "id": "traj_exs0cxg89t7s",
+  "version": 1,
+  "task": {
+    "title": "Address final hosted review findings for release snapshot",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#479"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-09-09T01:15:54.392Z",
+  "completedAt": "2026-09-09T01:16:16.495Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-09-09T01:16:02.380Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_9vce15jtt6ak",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-09-09T01:16:02.380Z",
+      "endedAt": "2026-09-09T01:16:16.495Z",
+      "events": [
+        {
+          "ts": 1788916562381,
+          "type": "decision",
+          "content": "Fix the three executable Cubic findings and retain historically accurate trajectory refs: Fix the three executable Cubic findings and retain historically accurate trajectory refs",
+          "raw": {
+            "question": "Fix the three executable Cubic findings and retain historically accurate trajectory refs",
+            "chosen": "Fix the three executable Cubic findings and retain historically accurate trajectory refs",
+            "alternatives": [],
+            "reasoning": "Zero-delay retries, non-finite registry timeouts, and preserved-symlink entrypoints are valid edge cases. The two trajectory findings are not: every cited ref resolves to a commit and is an ancestor of the PR head, while replacing historical refs with the moving PR head would falsify when those trajectories were recorded."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Historical self-report of decisions about zero-delay verification retries, bounded registry query timeouts, preserved-symlink CLI execution, and historical trajectory refs. This trajectory captured no command, output, commit, changed-file, or test evidence, so all implementation and validation statements are non-authoritative and non-gating.",
+    "approach": "Historical decision record (non-gating)",
+    "confidence": 0.2
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": ["historical", "self-reported", "non-authoritative", "non-gating"],
+  "_trace": {
+    "startRef": "40b79c171495a388a610c1d331bfe25d21d90c19",
+    "endRef": "40b79c171495a388a610c1d331bfe25d21d90c19"
+  }
+}

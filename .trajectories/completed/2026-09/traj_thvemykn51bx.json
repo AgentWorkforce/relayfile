@@ -1,0 +1,75 @@
+{
+  "id": "traj_thvemykn51bx",
+  "version": 1,
+  "task": {
+    "title": "Historical decisions on release digest and provenance binding"
+  },
+  "status": "completed",
+  "startedAt": "2026-09-08T19:48:31.181Z",
+  "completedAt": "2026-09-08T19:48:41.454Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-09-08T19:48:32.527Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_7yqtvijjd4pg",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-09-08T19:48:32.527Z",
+      "endedAt": "2026-09-08T19:48:41.454Z",
+      "events": [
+        {
+          "ts": 1788896912528,
+          "type": "decision",
+          "content": "Bind validated artifacts to annotated tag run metadata",
+          "raw": {
+            "question": "Bind validated artifacts to annotated tag run metadata",
+            "chosen": "Bind validated artifacts to annotated tag run metadata",
+            "alternatives": [],
+            "reasoning": "A signed artifact must match the tag's source, tree, workflow run, and attempt before it can become a baseline or authorize same-run recovery."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1788896913574,
+          "type": "decision",
+          "content": "Validate exact npm digest formats in both attestation builder and baseline validator",
+          "raw": {
+            "question": "Validate exact npm digest formats in both attestation builder and baseline validator",
+            "chosen": "Validate exact npm digest formats in both attestation builder and baseline validator",
+            "alternatives": [],
+            "reasoning": "Equal arbitrary strings are not evidence of package identity; require canonical SHA-512 SRI or lowercase SHA-1."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1788896914545,
+          "type": "reflection",
+          "content": "Self-reported, non-gating session note: the agent stated that focused and full release suites passed. This trajectory captured no command, commit, changed-file, or test evidence.",
+          "raw": {
+            "confidence": 0.2
+          },
+          "significance": "high",
+          "tags": ["confidence:0.2"]
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Historical decision record only: chose strict SHA-512 SRI and SHA-1 validation and binding artifacts to annotated tag source, tree, run, and attempt metadata. The stored 1873c3cf trace is an earlier PR ancestor, not the current head. This trajectory captured no command, output, commit, changed-file, or test evidence; all implementation and validation statements are self-reported, non-authoritative, and non-gating.",
+    "approach": "Historical decision record (non-gating)",
+    "confidence": 0.2
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": ["historical", "self-reported", "non-authoritative", "non-gating"],
+  "_trace": {
+    "startRef": "1873c3cf5ecbed21cd34e929952ccd7059837dcb",
+    "endRef": "1873c3cf5ecbed21cd34e929952ccd7059837dcb"
+  }
+}
