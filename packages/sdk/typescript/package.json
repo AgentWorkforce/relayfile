@@ -46,7 +46,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "node scripts/sync-package-version.mjs && tsc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:bundle:bun": "node scripts/verify-bun-workspace-mount.mjs",

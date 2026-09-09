@@ -5,6 +5,8 @@
 > **Started:** September 10, 2026 at 12:35 AM
 > **Completed:** September 10, 2026 at 12:38 AM
 
+> **Timestamp basis:** The source timestamps are September 9, 2026 22:35:53–22:38:01 UTC, which renders as September 10, 2026 12:35–12:38 AM in Europe/Oslo.
+
 ---
 
 ## Summary

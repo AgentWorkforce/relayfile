@@ -3,6 +3,10 @@
 
 Record your work as a trajectory for future agents and humans to follow.
 
+For this repository, use `npm run trail -- ...` for trajectory commands. The
+wrapper pins `TRAJECTORIES_PROJECT` to `AgentWorkforce/relayfile` so artifacts
+do not record local workstation paths.
+
 ## Usage
 
 If `trail` is installed globally, run commands directly:

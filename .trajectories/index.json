@@ -371,7 +371,7 @@
       "status": "completed",
       "startedAt": "2026-09-09T22:35:53.204Z",
       "completedAt": "2026-09-09T22:38:01.543Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/.worktrees/relayfile-sdk-bun-0910/.trajectories/completed/2026-09/traj_xq9s9vigbhum.json"
+      "path": ".trajectories/completed/2026-09/traj_xq9s9vigbhum.json"
     }
   }
 }

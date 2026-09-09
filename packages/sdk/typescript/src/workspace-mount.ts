@@ -17,9 +17,8 @@ import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
 import { assertExactMountLayout } from './mount-layout-guard.js';
-import packageJson from '../package.json' with { type: 'json' };
+import { RELAYFILE_VERSION } from './package-version.js';
 
-const RELAYFILE_VERSION = String(packageJson.version);
 const RELEASE_BASE_URL = 'https://github.com/AgentWorkforce/relayfile/releases/download';
 const CHECKSUMS_FILE = 'checksums.txt';
 const CACHE_DIR = path.join(os.homedir(), '.agent-relay', 'bin');
