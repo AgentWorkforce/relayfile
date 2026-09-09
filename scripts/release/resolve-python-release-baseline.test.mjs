@@ -135,6 +135,26 @@ test("a completed release from the same workflow run is resumable", () => {
   }
 });
 
+test("release API failures abort baseline resolution instead of downgrading", () => {
+  const { cwd, sourceSha } = repository();
+  try {
+    annotatedTag(cwd, "1.2.3", sourceSha);
+    assert.throws(
+      () => resolvePythonReleaseBaseline({
+        cwd,
+        sourceSha,
+        currentVersion: "1.2.2",
+        releaseVerifier: () => {
+          throw new Error("GitHub API unavailable");
+        },
+      }),
+      /GitHub API unavailable/,
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("no valid prior release safely bootstraps from the manifest", () => {
   const { cwd, sourceSha } = repository();
   try {

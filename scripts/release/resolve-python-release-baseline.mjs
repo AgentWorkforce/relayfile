@@ -129,17 +129,15 @@ export function resolvePythonReleaseBaseline({
   let latest = null;
   let resumable = null;
   for (const candidate of candidates.slice().reverse()) {
-    let complete = false;
-    try {
-      complete = releaseVerifier({
-        repository,
-        tag: candidate.tag,
-        candidate,
-        env: verifierEnv,
-      });
-    } catch {
-      complete = false;
-    }
+    // completedRelease returns false only for a canonical 404 (no release).
+    // Authentication, transport, and API failures must escape rather than
+    // silently selecting an older or manifest-derived version baseline.
+    const complete = releaseVerifier({
+      repository,
+      tag: candidate.tag,
+      candidate,
+      env: verifierEnv,
+    });
     if (complete) {
       // A rerun keeps github.run_id and github.sha. Reuse the completed
       // release reserved by that run before applying another version bump.
