@@ -8492,8 +8492,12 @@ Flags:
   --event TYPE         filter by event type: file.created, file.updated, file.deleted
                        (default: all types)
   --run CMD            shell command to execute per matching event.
-                       Use {{path}}, {{type}}, {{provider}}, {{revision}}, and
-                       {{event}} (full JSON) as placeholders.
+                       Use {{path}}, {{type}}, {{provider}}, {{revision}},
+                       {{event}} (full JSON), and {{event_file}} (path to a
+                       temp file holding the full JSON) as placeholders. The
+                       full event is also piped to the command's stdin. Prefer
+                       stdin or {{event_file}} over {{event}} for large events:
+                       a multi-MiB {{event}} can exceed the OS argument limit.
   --format text|json   output format when --run is not set (default: text)
 
 Examples:
@@ -8747,17 +8751,6 @@ func runListen(args []string, stdout io.Writer) error {
 	wsTransport.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
 	wsHTTPClient := &http.Client{Transport: wsTransport}
 
-	conn, _, err := websocket.Dial(rootCtx, base.String(), &websocket.DialOptions{
-		HTTPClient: wsHTTPClient,
-		HTTPHeader: http.Header{
-			"Authorization": []string{"Bearer " + commandClient.client.token},
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("connect to event stream: %w", err)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
-
 	typeFilter := strings.TrimSpace(*eventFlag)
 	runCmd := strings.TrimSpace(*runFlag)
 	format := strings.TrimSpace(*formatFlag)
@@ -8774,7 +8767,7 @@ func runListen(args []string, stdout io.Writer) error {
 		label += " (" + typeFilter + ")"
 	}
 	if !*daemonized {
-		fmt.Fprintf(stdout, "Listening on %s — Ctrl+C to stop\n", label)
+		fmt.Fprintf(stdout, "Listening on %s \u2014 Ctrl+C to stop\n", label)
 		if runCmd == "" && format == "text" {
 			fmt.Fprintln(stdout, "Tip: pass --run to execute a command per event.")
 			fmt.Fprintln(stdout, "     See 'relayfile help listen' for examples with Linear, Notion, HubSpot, and more.")
@@ -8783,55 +8776,143 @@ func runListen(args []string, stdout io.Writer) error {
 		fmt.Fprintln(stdout)
 	}
 
+	cfg := listenSessionConfig{
+		dialURL:    base.String(),
+		httpClient: wsHTTPClient,
+		token:      commandClient.client.token,
+		typeFilter: typeFilter,
+		pathFilter: pathFilter,
+		runCmd:     runCmd,
+		format:     format,
+		suppressor: runDuplicateSuppressor,
+		stdout:     stdout,
+	}
+
+	// Reconnect loop: a dropped websocket (server restart, idle timeout, or a
+	// transient network blip) must not terminate a long-running listener.
+	// Redial with capped exponential backoff until the context is cancelled
+	// (Ctrl+C / SIGTERM) or the server closes the stream cleanly. A dial
+	// failure on the very first attempt (bad auth/URL) surfaces immediately;
+	// once we have connected at least once, every failure is retried.
+	const (
+		baseBackoff = time.Second
+		maxBackoff  = 30 * time.Second
+	)
+	backoff := baseBackoff
+	everConnected := false
+	for {
+		connected, err := runListenSession(rootCtx, cfg)
+		if connected {
+			everConnected = true
+			backoff = baseBackoff
+		}
+		if err == nil {
+			return nil
+		}
+		if !everConnected {
+			return fmt.Errorf("connect to event stream: %w", err)
+		}
+		if !*daemonized {
+			fmt.Fprintf(os.Stderr, "listen: stream error (%v); reconnecting in %s\n", err, backoff)
+		}
+		select {
+		case <-rootCtx.Done():
+			return nil
+		case <-time.After(backoff):
+		}
+		if backoff < maxBackoff {
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+	}
+}
+
+// listenSessionConfig carries the per-session inputs for runListenSession so a
+// dropped connection can be re-established without recomputing filters.
+type listenSessionConfig struct {
+	dialURL    string
+	httpClient *http.Client
+	token      string
+	typeFilter string
+	pathFilter string
+	runCmd     string
+	format     string
+	suppressor *listenRunDuplicateSuppressor
+	stdout     io.Writer
+}
+
+// runListenSession dials the event stream once and pumps events until the
+// context is cancelled, the server closes cleanly, or a read error occurs. The
+// bool reports whether the websocket was successfully established, so the
+// caller can tell a first-attempt dial failure (fatal) from a mid-flight
+// disconnect (retryable).
+func runListenSession(rootCtx context.Context, cfg listenSessionConfig) (bool, error) {
+	conn, _, err := websocket.Dial(rootCtx, cfg.dialURL, &websocket.DialOptions{
+		HTTPClient: cfg.httpClient,
+		HTTPHeader: http.Header{
+			"Authorization": []string{"Bearer " + cfg.token},
+		},
+	})
+	if err != nil {
+		return false, err
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	// The websocket library defaults to a 32 KiB read limit; a single large
+	// event (e.g. an issue with a long description/history) exceeds it and
+	// terminates the read with "read limited at 32769 bytes". Match the
+	// generous limit the mount consumers use so listen survives large events.
+	conn.SetReadLimit(8 << 20) // 8 MiB
+
+	stdout := cfg.stdout
 	for {
 		var raw json.RawMessage
 		if err := wsjson.Read(rootCtx, conn, &raw); err != nil {
-			if websocket.CloseStatus(err) == websocket.StatusNormalClosure ||
-				websocket.CloseStatus(err) == websocket.StatusGoingAway ||
-				errors.Is(err, context.Canceled) {
-				return nil
+			// Only a local stop request (Ctrl+C / SIGTERM cancels rootCtx)
+			// ends the listener. A server-initiated close — including
+			// NormalClosure / GoingAway sent on deploys, restarts, or proxy
+			// idle-timeouts — is NOT a request to stop watching, so surface it
+			// as an error and let the caller reconnect. Returning nil there
+			// would exit 0 and a `Restart=on-failure` supervisor unit would
+			// not bring the listener back.
+			if errors.Is(err, context.Canceled) || rootCtx.Err() != nil {
+				return true, nil
 			}
-			return fmt.Errorf("event stream error: %w", err)
+			return true, fmt.Errorf("event stream error: %w", err)
 		}
 
 		var evt listenEvent
 		if err := json.Unmarshal(raw, &evt); err != nil || evt.Type == "" || evt.Type == "pong" {
 			continue
 		}
-		if typeFilter != "" && evt.Type != typeFilter {
+		if cfg.typeFilter != "" && evt.Type != cfg.typeFilter {
 			continue
 		}
-		if pathFilter != "" && !matchListenPath(pathFilter, evt.Path) {
+		if cfg.pathFilter != "" && !matchListenPath(cfg.pathFilter, evt.Path) {
 			continue
 		}
 
-		if runCmd != "" {
-			if runDuplicateSuppressor.shouldSuppress(evt, time.Now()) {
+		if cfg.runCmd != "" {
+			if cfg.suppressor.shouldSuppress(evt, time.Now()) {
 				continue
 			}
-			expanded := listenExpandTemplate(runCmd, evt, raw)
-			cmd := exec.CommandContext(rootCtx, "sh", "-c", expanded)
-			cmd.Stdout = stdout
-			cmd.Stderr = os.Stderr
-			if err := cmd.Run(); err != nil && !errors.Is(err, context.Canceled) {
-				fmt.Fprintf(os.Stderr, "run error for %s: %v\n", evt.Path, err)
-			}
+			runListenCommand(rootCtx, cfg.runCmd, evt, raw, stdout)
 			continue
 		}
 
-		if format == "json" {
+		if cfg.format == "json" {
 			fmt.Fprintf(stdout, "%s\n", string(raw))
 			continue
 		}
 
-		// Default text output.
 		ts := strings.TrimSpace(evt.Timestamp)
 		if ts == "" {
 			ts = time.Now().UTC().Format(time.RFC3339)
 		}
 		provider := strings.TrimSpace(evt.Provider)
 		if provider == "" {
-			// Infer provider from the leading path segment.
 			seg := strings.TrimPrefix(evt.Path, "/")
 			if i := strings.IndexByte(seg, '/'); i > 0 {
 				provider = seg[:i]
@@ -8892,14 +8973,76 @@ func spawnBackgroundListenProcess(originalArgs []string, pidFile, logFile string
 	return nil
 }
 
-func listenExpandTemplate(tmpl string, evt listenEvent, raw json.RawMessage) string {
+func listenExpandTemplate(tmpl string, evt listenEvent, raw json.RawMessage, eventFile string) string {
 	return strings.NewReplacer(
 		"{{path}}", evt.Path,
 		"{{type}}", evt.Type,
 		"{{provider}}", evt.Provider,
 		"{{revision}}", evt.Revision,
+		"{{event_file}}", eventFile,
 		"{{event}}", string(raw),
 	).Replace(tmpl)
+}
+
+// maxRunListenCommandBytes caps the size of the expanded `--run` command
+// string. A single argv entry is limited by the OS (Linux MAX_ARG_STRLEN is
+// 128 KiB); inlining a multi-MiB event via {{event}} would otherwise make the
+// `sh -c` exec fail with E2BIG. Well under that limit, with headroom.
+const maxRunListenCommandBytes = 100 * 1024
+
+// runListenCommand executes the user's --run handler for one event. The full
+// raw event is always available on the handler's stdin and, for larger events,
+// via a temp file referenced by {{event_file}} — either channel avoids the
+// argument-size limit that inlining {{event}} into `sh -c` would hit. If the
+// expanded command is still too large to exec safely (a big {{event}}), it is
+// skipped with an actionable message rather than failing with a cryptic E2BIG.
+func runListenCommand(rootCtx context.Context, runCmd string, evt listenEvent, raw json.RawMessage, stdout io.Writer) {
+	// Materialize the raw event so {{event_file}} and stdin can carry it
+	// regardless of size. This function runs once per event, so a deferred
+	// remove is scoped correctly. The temp file is removed whether or not the
+	// write succeeds, and a materialization failure is surfaced rather than
+	// silently leaving {{event_file}} empty.
+	eventFile := ""
+	if f, err := os.CreateTemp("", "relayfile-event-*.json"); err != nil {
+		fmt.Fprintf(os.Stderr, "run for %s: could not create event file: %v\n", evt.Path, err)
+	} else {
+		name := f.Name()
+		defer func() { _ = os.Remove(name) }()
+		_, werr := f.Write(raw)
+		cerr := f.Close()
+		if werr != nil || cerr != nil {
+			if werr == nil {
+				werr = cerr
+			}
+			fmt.Fprintf(os.Stderr, "run for %s: could not write event file: %v\n", evt.Path, werr)
+		} else {
+			eventFile = name
+		}
+	}
+
+	// If the handler references {{event_file}} but materialization failed,
+	// skip rather than run a command with an empty path. The event is still
+	// available on stdin for handlers that read it there.
+	if eventFile == "" && strings.Contains(runCmd, "{{event_file}}") {
+		fmt.Fprintf(os.Stderr, "run skipped for %s: {{event_file}} requested but the event file could not be created; read the event from stdin instead.\n", evt.Path)
+		return
+	}
+
+	expanded := listenExpandTemplate(runCmd, evt, raw, eventFile)
+	if len(expanded) > maxRunListenCommandBytes {
+		fmt.Fprintf(os.Stderr,
+			"run skipped for %s: expanded --run command is %d bytes (limit %d) — the event is too large to inline via {{event}}. Read it from the handler's stdin, or reference {{event_file}} instead.\n",
+			evt.Path, len(expanded), maxRunListenCommandBytes)
+		return
+	}
+
+	cmd := exec.CommandContext(rootCtx, "sh", "-c", expanded)
+	cmd.Stdin = bytes.NewReader(raw)
+	cmd.Stdout = stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil && !errors.Is(err, context.Canceled) {
+		fmt.Fprintf(os.Stderr, "run error for %s: %v\n", evt.Path, err)
+	}
 }
 
 func printSupervisorUsage(w io.Writer) {
