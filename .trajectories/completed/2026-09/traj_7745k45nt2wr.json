@@ -55,7 +55,7 @@
             "focal:exit classification",
             "focal:sibling cancellation",
             "focal:validation",
-            "confidence:0.92"
+            "confidence:0.75"
           ]
         }
       ]
