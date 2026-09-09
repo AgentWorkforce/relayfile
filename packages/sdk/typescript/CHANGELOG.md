@@ -6,7 +6,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Fixed
+
+- Resolve the mount binary release version from bundled package metadata so compiled Bun consumers can start the SDK without a package-tree lookup.
 
 ## [0.10.56] - 2026-09-08
 
