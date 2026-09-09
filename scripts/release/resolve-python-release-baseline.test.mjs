@@ -26,7 +26,7 @@ function repository() {
   return { cwd, sourceSha: git(cwd, "rev-parse", "HEAD") };
 }
 
-function annotatedTag(cwd, version, commit, metadata = true) {
+function annotatedTag(cwd, version, commit, metadata = true, runId = "123") {
   const args = ["tag", "-a", `sdk-python-v${version}`, commit, "-m", `Python SDK v${version}`];
   if (metadata) {
     args.push(
@@ -35,7 +35,7 @@ function annotatedTag(cwd, version, commit, metadata = true) {
       "-m",
       `tag-tree=${git(cwd, "rev-parse", `${commit}^{tree}`)}`,
       "-m",
-      "workflow-run-id=123",
+      `workflow-run-id=${runId}`,
       "-m",
       "workflow-run-attempt=1",
     );
@@ -59,6 +59,23 @@ test("forged, wrong-target, malformed, and missing-provenance tags are rejected"
     annotatedTag(cwd, "90.0.0b01", sourceSha);
     annotatedTag(cwd, "91.0", sourceSha);
     annotatedTag(cwd, "92.0.0", sourceSha, false);
+    git(
+      cwd,
+      "tag",
+      "-a",
+      "sdk-python-v92.0.1",
+      sourceSha,
+      "-m",
+      "Python SDK v92.0.1",
+      "-m",
+      `source-sha=${"f".repeat(40)}`,
+      "-m",
+      `tag-tree=${git(cwd, "rev-parse", `${sourceSha}^{tree}`)}`,
+      "-m",
+      "workflow-run-id=123",
+      "-m",
+      "workflow-run-attempt=1",
+    );
     writeFileSync(join(cwd, "wrong-target.txt"), "wrong target\n");
     git(cwd, "add", ".");
     git(cwd, "commit", "-qm", "wrong target");
@@ -93,6 +110,26 @@ test("draft or incomplete releases are skipped in favor of the newest completed 
     });
     assert.equal(result.baselineVersion, "1.2.4b1");
     assert.equal(result.latestTag, "sdk-python-v1.2.4b1");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a completed release from the same workflow run is resumable", () => {
+  const { cwd, sourceSha } = repository();
+  try {
+    annotatedTag(cwd, "1.2.3", sourceSha);
+    annotatedTag(cwd, "1.2.4", sourceSha, true, "456");
+    const result = resolvePythonReleaseBaseline({
+      cwd,
+      sourceSha,
+      currentVersion: "1.2.2",
+      currentRunId: "123",
+      releaseVerifier: () => true,
+    });
+    assert.equal(result.baselineVersion, "1.2.3");
+    assert.equal(result.resumableVersion, "1.2.3");
+    assert.equal(result.latestTag, "sdk-python-v1.2.3");
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

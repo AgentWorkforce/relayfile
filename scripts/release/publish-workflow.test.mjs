@@ -971,6 +971,11 @@ test("Python release is ephemeral and publishes only an annotated source tag", (
   assert.match(PYTHON_BASELINE, /draft !== true/);
   assert.match(PYTHON_BASELINE, /published_at/);
   assert.match(PYTHON_BASELINE, /source-sha/);
+  assert.match(PYTHON_WORKFLOW, /WORKFLOW_RUN_ID: \$\{\{ github\.run_id \}\}/);
+  assert.match(PYTHON_WORKFLOW, /--workflow-run-id "\$WORKFLOW_RUN_ID"/);
+  assert.match(PYTHON_WORKFLOW, /RESUMABLE_VERSION=/);
+  assert.match(PYTHON_WORKFLOW, /Reusing completed Python SDK release/);
+  assert.match(PYTHON_WORKFLOW, /canonical PEP 440/);
   assert.match(
     PYTHON_WORKFLOW,
     /git tag -a "\$TAG"[\s\S]*source-sha=\$\{SOURCE_SHA\}[\s\S]*tag-tree=\$\{TAG_TREE\}/,

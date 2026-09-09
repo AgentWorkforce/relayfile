@@ -119,6 +119,7 @@ export function resolvePythonReleaseBaseline({
   sourceSha,
   currentVersion,
   repository = "AgentWorkforce/relayfile",
+  currentRunId,
   releaseVerifier = completedRelease,
   verifierEnv = {},
 }) {
@@ -126,6 +127,7 @@ export function resolvePythonReleaseBaseline({
   if (!current) throw new Error("current Python package version is not strict PEP 440");
   const candidates = findTrustedPythonReleaseTags({ cwd, sourceSha });
   let latest = null;
+  let resumable = null;
   for (const candidate of candidates.slice().reverse()) {
     let complete = false;
     try {
@@ -139,15 +141,23 @@ export function resolvePythonReleaseBaseline({
       complete = false;
     }
     if (complete) {
-      latest = candidate;
-      break;
+      // A rerun keeps github.run_id and github.sha. Reuse the completed
+      // release reserved by that run before applying another version bump.
+      if (currentRunId && candidate.metadata["workflow-run-id"] === String(currentRunId)) {
+        resumable = candidate;
+        break;
+      }
+      // Keep scanning for an exact same-run reservation. A later, unrelated
+      // release tag on the same source must not hide the resumable target.
+      latest ??= candidate;
     }
   }
   return {
-    baselineVersion: latest && comparePep440(latest.version, current) > 0
+    baselineVersion: resumable?.version.raw ?? (latest && comparePep440(latest.version, current) > 0
       ? latest.version.raw
-      : current.raw,
-    latestTag: latest?.tag ?? "",
+      : current.raw),
+    latestTag: resumable?.tag ?? latest?.tag ?? "",
+    resumableVersion: resumable?.version.raw ?? "",
   };
 }
 
@@ -169,10 +179,12 @@ if (process.argv[1]?.endsWith("resolve-python-release-baseline.mjs")) {
       sourceSha: args.source_sha,
       currentVersion: args.current_version,
       repository: args.repository,
+      currentRunId: args.workflow_run_id,
       verifierEnv: { GH_TOKEN: process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN ?? "" },
     });
     console.log(`baseline_version=${result.baselineVersion}`);
     console.log(`latest_tag=${result.latestTag}`);
+    console.log(`resumable_version=${result.resumableVersion}`);
   } catch (error) {
     console.error(error instanceof Error ? error.message : "Python release baseline resolution failed");
     process.exitCode = 1;
