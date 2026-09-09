@@ -8747,24 +8747,6 @@ func runListen(args []string, stdout io.Writer) error {
 	wsTransport.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
 	wsHTTPClient := &http.Client{Transport: wsTransport}
 
-	conn, _, err := websocket.Dial(rootCtx, base.String(), &websocket.DialOptions{
-		HTTPClient: wsHTTPClient,
-		HTTPHeader: http.Header{
-			"Authorization": []string{"Bearer " + commandClient.client.token},
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("connect to event stream: %w", err)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
-
-	// The websocket library defaults to a 32 KiB read limit; a single large
-	// event (e.g. an issue with a long description/history) exceeds it and
-	// terminates the whole listen loop with "read limited at 32769 bytes".
-	// Match the generous limit the mount consumers use so listen survives
-	// large events.
-	conn.SetReadLimit(8 << 20) // 8 MiB
-
 	typeFilter := strings.TrimSpace(*eventFlag)
 	runCmd := strings.TrimSpace(*runFlag)
 	format := strings.TrimSpace(*formatFlag)
@@ -8781,7 +8763,7 @@ func runListen(args []string, stdout io.Writer) error {
 		label += " (" + typeFilter + ")"
 	}
 	if !*daemonized {
-		fmt.Fprintf(stdout, "Listening on %s — Ctrl+C to stop\n", label)
+		fmt.Fprintf(stdout, "Listening on %s \u2014 Ctrl+C to stop\n", label)
 		if runCmd == "" && format == "text" {
 			fmt.Fprintln(stdout, "Tip: pass --run to execute a command per event.")
 			fmt.Fprintln(stdout, "     See 'relayfile help listen' for examples with Linear, Notion, HubSpot, and more.")
@@ -8790,33 +8772,124 @@ func runListen(args []string, stdout io.Writer) error {
 		fmt.Fprintln(stdout)
 	}
 
+	cfg := listenSessionConfig{
+		dialURL:    base.String(),
+		httpClient: wsHTTPClient,
+		token:      commandClient.client.token,
+		typeFilter: typeFilter,
+		pathFilter: pathFilter,
+		runCmd:     runCmd,
+		format:     format,
+		suppressor: runDuplicateSuppressor,
+		stdout:     stdout,
+	}
+
+	// Reconnect loop: a dropped websocket (server restart, idle timeout, or a
+	// transient network blip) must not terminate a long-running listener.
+	// Redial with capped exponential backoff until the context is cancelled
+	// (Ctrl+C / SIGTERM) or the server closes the stream cleanly. A dial
+	// failure on the very first attempt (bad auth/URL) surfaces immediately;
+	// once we have connected at least once, every failure is retried.
+	const (
+		baseBackoff = time.Second
+		maxBackoff  = 30 * time.Second
+	)
+	backoff := baseBackoff
+	everConnected := false
+	for {
+		connected, err := runListenSession(rootCtx, cfg)
+		if connected {
+			everConnected = true
+			backoff = baseBackoff
+		}
+		if err == nil {
+			return nil
+		}
+		if !everConnected {
+			return fmt.Errorf("connect to event stream: %w", err)
+		}
+		if !*daemonized {
+			fmt.Fprintf(os.Stderr, "listen: stream error (%v); reconnecting in %s\n", err, backoff)
+		}
+		select {
+		case <-rootCtx.Done():
+			return nil
+		case <-time.After(backoff):
+		}
+		if backoff < maxBackoff {
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+	}
+}
+
+// listenSessionConfig carries the per-session inputs for runListenSession so a
+// dropped connection can be re-established without recomputing filters.
+type listenSessionConfig struct {
+	dialURL    string
+	httpClient *http.Client
+	token      string
+	typeFilter string
+	pathFilter string
+	runCmd     string
+	format     string
+	suppressor *listenRunDuplicateSuppressor
+	stdout     io.Writer
+}
+
+// runListenSession dials the event stream once and pumps events until the
+// context is cancelled, the server closes cleanly, or a read error occurs. The
+// bool reports whether the websocket was successfully established, so the
+// caller can tell a first-attempt dial failure (fatal) from a mid-flight
+// disconnect (retryable).
+func runListenSession(rootCtx context.Context, cfg listenSessionConfig) (bool, error) {
+	conn, _, err := websocket.Dial(rootCtx, cfg.dialURL, &websocket.DialOptions{
+		HTTPClient: cfg.httpClient,
+		HTTPHeader: http.Header{
+			"Authorization": []string{"Bearer " + cfg.token},
+		},
+	})
+	if err != nil {
+		return false, err
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	// The websocket library defaults to a 32 KiB read limit; a single large
+	// event (e.g. an issue with a long description/history) exceeds it and
+	// terminates the read with "read limited at 32769 bytes". Match the
+	// generous limit the mount consumers use so listen survives large events.
+	conn.SetReadLimit(8 << 20) // 8 MiB
+
+	stdout := cfg.stdout
 	for {
 		var raw json.RawMessage
 		if err := wsjson.Read(rootCtx, conn, &raw); err != nil {
 			if websocket.CloseStatus(err) == websocket.StatusNormalClosure ||
 				websocket.CloseStatus(err) == websocket.StatusGoingAway ||
 				errors.Is(err, context.Canceled) {
-				return nil
+				return true, nil
 			}
-			return fmt.Errorf("event stream error: %w", err)
+			return true, fmt.Errorf("event stream error: %w", err)
 		}
 
 		var evt listenEvent
 		if err := json.Unmarshal(raw, &evt); err != nil || evt.Type == "" || evt.Type == "pong" {
 			continue
 		}
-		if typeFilter != "" && evt.Type != typeFilter {
+		if cfg.typeFilter != "" && evt.Type != cfg.typeFilter {
 			continue
 		}
-		if pathFilter != "" && !matchListenPath(pathFilter, evt.Path) {
+		if cfg.pathFilter != "" && !matchListenPath(cfg.pathFilter, evt.Path) {
 			continue
 		}
 
-		if runCmd != "" {
-			if runDuplicateSuppressor.shouldSuppress(evt, time.Now()) {
+		if cfg.runCmd != "" {
+			if cfg.suppressor.shouldSuppress(evt, time.Now()) {
 				continue
 			}
-			expanded := listenExpandTemplate(runCmd, evt, raw)
+			expanded := listenExpandTemplate(cfg.runCmd, evt, raw)
 			cmd := exec.CommandContext(rootCtx, "sh", "-c", expanded)
 			cmd.Stdout = stdout
 			cmd.Stderr = os.Stderr
@@ -8826,19 +8899,17 @@ func runListen(args []string, stdout io.Writer) error {
 			continue
 		}
 
-		if format == "json" {
+		if cfg.format == "json" {
 			fmt.Fprintf(stdout, "%s\n", string(raw))
 			continue
 		}
 
-		// Default text output.
 		ts := strings.TrimSpace(evt.Timestamp)
 		if ts == "" {
 			ts = time.Now().UTC().Format(time.RFC3339)
 		}
 		provider := strings.TrimSpace(evt.Provider)
 		if provider == "" {
-			// Infer provider from the leading path segment.
 			seg := strings.TrimPrefix(evt.Path, "/")
 			if i := strings.IndexByte(seg, '/'); i > 0 {
 				provider = seg[:i]
