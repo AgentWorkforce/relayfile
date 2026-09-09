@@ -42,14 +42,14 @@
     }
   ],
   "retrospective": {
-    "summary": "Closed PR #479's pre-publish identity gap by requiring canonical SHA-512 npm pack integrity while retaining optional SHA-1 shasums; added a regression proving SHA-1-only local metadata cannot query or publish; focused and full release tests, Prettier, diff check, and TruffleHog passed.",
-    "approach": "Standard approach",
-    "confidence": 0.95
+    "summary": "Historical self-report of the decision to require canonical SHA-512 npm pack integrity while retaining optional SHA-1 shasums. This trajectory captured no command, output, commit, changed-file, or test evidence, so all implementation and validation statements are non-authoritative and non-gating.",
+    "approach": "Historical decision record (non-gating)",
+    "confidence": 0.2
   },
   "commits": [],
   "filesChanged": [],
   "projectId": "AgentWorkforce/relayfile",
-  "tags": [],
+  "tags": ["historical", "self-reported", "non-authoritative", "non-gating"],
   "_trace": {
     "startRef": "3e9406891e9c36706d7e135ceca3f88f5cf67421",
     "endRef": "3e9406891e9c36706d7e135ceca3f88f5cf67421"
