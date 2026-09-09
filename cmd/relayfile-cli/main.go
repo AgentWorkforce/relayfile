@@ -8870,9 +8870,14 @@ func runListenSession(rootCtx context.Context, cfg listenSessionConfig) (bool, e
 	for {
 		var raw json.RawMessage
 		if err := wsjson.Read(rootCtx, conn, &raw); err != nil {
-			if websocket.CloseStatus(err) == websocket.StatusNormalClosure ||
-				websocket.CloseStatus(err) == websocket.StatusGoingAway ||
-				errors.Is(err, context.Canceled) {
+			// Only a local stop request (Ctrl+C / SIGTERM cancels rootCtx)
+			// ends the listener. A server-initiated close — including
+			// NormalClosure / GoingAway sent on deploys, restarts, or proxy
+			// idle-timeouts — is NOT a request to stop watching, so surface it
+			// as an error and let the caller reconnect. Returning nil there
+			// would exit 0 and a `Restart=on-failure` supervisor unit would
+			// not bring the listener back.
+			if errors.Is(err, context.Canceled) || rootCtx.Err() != nil {
 				return true, nil
 			}
 			return true, fmt.Errorf("event stream error: %w", err)
@@ -8993,17 +8998,34 @@ const maxRunListenCommandBytes = 100 * 1024
 // skipped with an actionable message rather than failing with a cryptic E2BIG.
 func runListenCommand(rootCtx context.Context, runCmd string, evt listenEvent, raw json.RawMessage, stdout io.Writer) {
 	// Materialize the raw event so {{event_file}} and stdin can carry it
-	// regardless of size. Cleaned up before returning (no defer: this runs in
-	// a long-lived read loop, so a deferred remove would leak until exit).
+	// regardless of size. This function runs once per event, so a deferred
+	// remove is scoped correctly. The temp file is removed whether or not the
+	// write succeeds, and a materialization failure is surfaced rather than
+	// silently leaving {{event_file}} empty.
 	eventFile := ""
-	if f, err := os.CreateTemp("", "relayfile-event-*.json"); err == nil {
-		if _, werr := f.Write(raw); werr == nil {
-			eventFile = f.Name()
+	if f, err := os.CreateTemp("", "relayfile-event-*.json"); err != nil {
+		fmt.Fprintf(os.Stderr, "run for %s: could not create event file: %v\n", evt.Path, err)
+	} else {
+		name := f.Name()
+		defer func() { _ = os.Remove(name) }()
+		_, werr := f.Write(raw)
+		cerr := f.Close()
+		if werr != nil || cerr != nil {
+			if werr == nil {
+				werr = cerr
+			}
+			fmt.Fprintf(os.Stderr, "run for %s: could not write event file: %v\n", evt.Path, werr)
+		} else {
+			eventFile = name
 		}
-		_ = f.Close()
 	}
-	if eventFile != "" {
-		defer func() { _ = os.Remove(eventFile) }()
+
+	// If the handler references {{event_file}} but materialization failed,
+	// skip rather than run a command with an empty path. The event is still
+	// available on stdin for handlers that read it there.
+	if eventFile == "" && strings.Contains(runCmd, "{{event_file}}") {
+		fmt.Fprintf(os.Stderr, "run skipped for %s: {{event_file}} requested but the event file could not be created; read the event from stdin instead.\n", evt.Path)
+		return
 	}
 
 	expanded := listenExpandTemplate(runCmd, evt, raw, eventFile)
