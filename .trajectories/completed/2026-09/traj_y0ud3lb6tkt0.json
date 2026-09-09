@@ -1,0 +1,63 @@
+{
+  "id": "traj_y0ud3lb6tkt0",
+  "version": 1,
+  "task": {
+    "title": "Historical decisions on release entrypoints and registry retries"
+  },
+  "status": "completed",
+  "startedAt": "2026-09-08T20:45:57.250Z",
+  "completedAt": "2026-09-08T20:50:19.439Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-09-08T20:50:18.750Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_z33hk4o5sidd",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-09-08T20:50:18.750Z",
+      "endedAt": "2026-09-08T20:50:19.439Z",
+      "events": [
+        {
+          "ts": 1788900618751,
+          "type": "decision",
+          "content": "Chose entrypoint, retry-budget, fixture-isolation, and portable-trajectory constraints",
+          "raw": {
+            "question": "Which constraints should the repair apply?",
+            "chosen": "Use canonical entrypoints, bounded retry budgets, isolated fixtures, and portable trajectory metadata",
+            "alternatives": [],
+            "reasoning": "Spaced paths can differ from Node's canonical module path; package retries were unbounded; shallow fixture overrides confounded negative provenance tests; and PR-added trajectory metadata contained checkout-specific paths."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1788900619121,
+          "type": "reflection",
+          "content": "Self-reported, non-gating session note: the agent stated that it added spaced-path tests, bounded retry delays, isolated fixtures, normalized trajectory metadata, and observed the release suite passing twice. This trajectory captured no command, commit, changed-file, or test evidence.",
+          "raw": {
+            "confidence": 0.2
+          },
+          "significance": "high",
+          "tags": ["confidence:0.2"]
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Historical decision record only: chose entrypoint, retry-budget, fixture-isolation, and portable-trajectory constraints. The stored 1bd242ab trace is an earlier PR ancestor, not the current head. This trajectory captured no command, output, commit, changed-file, or test evidence; all repair and validation statements are self-reported, non-authoritative, and non-gating.",
+    "approach": "Historical decision record (non-gating)",
+    "confidence": 0.2
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": ["historical", "self-reported", "non-authoritative", "non-gating"],
+  "_trace": {
+    "startRef": "1bd242ab09dc14db87fffba9ab2e958899ac1a44",
+    "endRef": "1bd242ab09dc14db87fffba9ab2e958899ac1a44"
+  }
+}

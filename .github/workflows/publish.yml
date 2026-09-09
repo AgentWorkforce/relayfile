@@ -66,10 +66,6 @@ concurrency:
   group: publish-package
   cancel-in-progress: false
 
-permissions:
-  contents: write
-  id-token: write
-
 env:
   NPM_CONFIG_FUND: false
 
@@ -78,15 +74,49 @@ jobs:
   build:
     name: Build & Version
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      attestations: read
     outputs:
       new_version: ${{ steps.bump.outputs.new_version }}
       is_prerelease: ${{ steps.bump.outputs.is_prerelease }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      release_package: ${{ steps.inputs.outputs.package }}
+      release_dry_run: ${{ steps.inputs.outputs.dry_run }}
+      release_run_id: ${{ steps.bump.outputs.release_run_id }}
+      release_run_attempt: ${{ steps.bump.outputs.release_run_attempt }}
 
     steps:
+      - name: Validate and map dispatch inputs
+        id: inputs
+        env:
+          PACKAGE_INPUT: ${{ github.event.inputs.package }}
+          DRY_RUN_INPUT: ${{ github.event.inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          case "$PACKAGE_INPUT" in
+            all|core|sdk|client|agents|cli|file-observer|local-mount|mount-darwin-arm64|mount-darwin-x64|mount-linux-arm64|mount-linux-x64)
+              RELEASE_PACKAGE="$PACKAGE_INPUT"
+              ;;
+            *)
+              echo "Unsupported package input" >&2
+              exit 1
+              ;;
+          esac
+          case "$DRY_RUN_INPUT" in
+            true|false) RELEASE_DRY_RUN="$DRY_RUN_INPUT" ;;
+            *) echo "Invalid dry_run input" >&2; exit 1 ;;
+          esac
+          echo "package=$RELEASE_PACKAGE" >> "$GITHUB_OUTPUT"
+          echo "dry_run=$RELEASE_DRY_RUN" >> "$GITHUB_OUTPUT"
+          echo "RELEASE_PACKAGE=$RELEASE_PACKAGE" >> "$GITHUB_ENV"
+          echo "RELEASE_DRY_RUN=$RELEASE_DRY_RUN" >> "$GITHUB_ENV"
+
       - name: Validate release mode
         run: |
           set -euo pipefail
-          if [ "${{ github.event.inputs.package }}" != "all" ] && [ "${{ github.event.inputs.dry_run }}" != "true" ]; then
+          if [ "$RELEASE_PACKAGE" != "all" ] && [ "$RELEASE_DRY_RUN" != "true" ]; then
             cat >&2 <<'EOF'
           ERROR: the publish workflow version-bumps every @relayfile package, and
           release lockfile regeneration needs every @relayfile/mount-* package at
@@ -99,19 +129,31 @@ jobs:
           fi
 
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve immutable source snapshot
+        id: source
+        run: |
+          set -euo pipefail
+          SOURCE_SHA=$(git rev-parse HEAD)
+          test "$SOURCE_SHA" = "$GITHUB_SHA"
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          echo "Building immutable source snapshot $SOURCE_SHA"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           cache: "npm"
           registry-url: "https://registry.npmjs.org"
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
           cache: true
@@ -124,12 +166,121 @@ jobs:
 
       - name: Version all packages
         id: bump
+        env:
+          CUSTOM_VERSION: ${{ github.event.inputs.custom_version }}
+          VERSION_TYPE: ${{ github.event.inputs.version }}
+          PREID: ${{ github.event.inputs.preid }}
+          NPM_TAG: ${{ github.event.inputs.tag }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_RUN_ID: ${{ github.run_id }}
+          RELEASE_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
-          CUSTOM_VERSION="${{ github.event.inputs.custom_version }}"
-          VERSION_TYPE="${{ github.event.inputs.version }}"
-          PREID="${{ github.event.inputs.preid }}"
+          set -euo pipefail
+          case "$VERSION_TYPE" in
+            patch|minor|major|prepatch|preminor|premajor|prerelease) ;;
+            *)
+              echo "Invalid version bump type: $VERSION_TYPE" >&2
+              exit 1
+              ;;
+          esac
+          case "$PREID" in
+            beta|alpha|rc) ;;
+            *)
+              echo "Invalid prerelease identifier: $PREID" >&2
+              exit 1
+              ;;
+          esac
+          case "$NPM_TAG" in
+            latest|next|beta|alpha) ;;
+            *)
+              echo "Invalid npm dist-tag: $NPM_TAG" >&2
+              exit 1
+              ;;
+          esac
+
+          if [ -n "$CUSTOM_VERSION" ]; then
+            CUSTOM_VERSION="$CUSTOM_VERSION" node <<'NODE'
+          const candidate = process.env.CUSTOM_VERSION ?? "";
+          const number = "(0|[1-9]\\d*)";
+          const prerelease =
+            "(0|[1-9]\\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)";
+          const build = "[0-9A-Za-z-]+";
+          const strictSemVer = new RegExp(
+            `^${number}\\.${number}\\.${number}` +
+              `(?:-${prerelease}(?:\\.${prerelease})*)?` +
+              `(?:\\+${build}(?:\\.${build})*)?$`,
+          );
+          if (
+            !strictSemVer.test(candidate) ||
+            /[\r\n\u2028\u2029]/.test(candidate)
+          ) {
+            console.error(
+              "Invalid custom_version (must be a strict SemVer release): " +
+                candidate,
+            );
+            process.exit(1);
+          }
+          NODE
+          fi
+
           CURRENT_VERSION=$(node -p "require('./package.json').version")
           echo "Current version: $CURRENT_VERSION"
+
+          # Release commits are tagged in Create Release but intentionally are
+          # not pushed back to the source branch.  Resolve the highest
+          # strictly-attested release tag reachable from this dispatch before
+          # applying a bump, otherwise the next dispatch would repeat the
+          # previous version.  A rerun of the same workflow attempt reuses an
+          # already-created tag instead of advancing past its target.
+          SOURCE_SHA="${SOURCE_SHA:-}"
+          BASELINE_VERSION="$CURRENT_VERSION"
+          RESUMABLE_VERSION=""
+          RESUMABLE_RUN_ID=""
+          RESUMABLE_RUN_ATTEMPT=""
+          if [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            BASELINE_INFO=$(node "${GITHUB_WORKSPACE:-.}/scripts/release/resolve-release-baseline.mjs" \
+              --source-sha "$SOURCE_SHA" \
+              --cwd "$PWD" \
+              --current-version "$CURRENT_VERSION" \
+              --repository "$RELEASE_REPOSITORY" \
+              --workflow-path ".github/workflows/publish.yml" \
+              --run-id "$RELEASE_RUN_ID" \
+              --run-attempt "$RELEASE_RUN_ATTEMPT")
+            BASELINE_VERSION=$(printf '%s\n' "$BASELINE_INFO" | awk -F= '$1 == "baseline_version" { print $2 }')
+            RESUMABLE_VERSION=$(printf '%s\n' "$BASELINE_INFO" | awk -F= '$1 == "resumable_version" { print $2 }')
+            RESUMABLE_RUN_ID=$(printf '%s\n' "$BASELINE_INFO" | awk -F= '$1 == "resumable_run_id" { print $2 }')
+            RESUMABLE_RUN_ATTEMPT=$(printf '%s\n' "$BASELINE_INFO" | awk -F= '$1 == "resumable_run_attempt" { print $2 }')
+            test -n "$BASELINE_VERSION"
+            echo "Trusted release baseline: $BASELINE_VERSION"
+          fi
+
+          # A custom version must not be allowed to reach package
+          # reconciliation when it is already the source version or already
+          # tagged. The only exception is an exact same-workflow recovery:
+          # resolve-release-baseline has cryptographically verified the tag's
+          # source/tree/run metadata and exposed its version as resumable.
+          RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
+          ATTESTATION_RUN_ID="${RELEASE_RUN_ID:-${GITHUB_RUN_ID:-}}"
+          ATTESTATION_RUN_ATTEMPT="${RELEASE_RUN_ATTEMPT:-${GITHUB_RUN_ATTEMPT:-1}}"
+          RESUMABLE_CUSTOM=false
+          if [ "$RUN_ATTEMPT" -gt 1 ] && [ -n "$CUSTOM_VERSION" ] && \
+            [ -n "$RESUMABLE_VERSION" ] && [ "$CUSTOM_VERSION" = "$RESUMABLE_VERSION" ]; then
+            RESUMABLE_CUSTOM=true
+          fi
+          if [ -n "$CUSTOM_VERSION" ]; then
+            if [ "$CUSTOM_VERSION" = "$CURRENT_VERSION" ] && [ "$RESUMABLE_CUSTOM" != true ]; then
+              echo "custom_version must differ from the source version unless this is an exact resumable release attempt" >&2
+              exit 1
+            fi
+            if git rev-parse --git-dir >/dev/null 2>&1 && \
+              git show-ref --verify --quiet "refs/tags/v${CUSTOM_VERSION}" && \
+              [ "$RESUMABLE_CUSTOM" != true ]; then
+              echo "custom_version v${CUSTOM_VERSION} already has a conflicting release tag" >&2
+              exit 1
+            fi
+          fi
 
           # Every workspace package this release publishes. Used both by the
           # collision guard below and by the version-sync script, so the two can
@@ -150,63 +301,49 @@ jobs:
 
           if [ -n "$CUSTOM_VERSION" ]; then
             echo "Setting version to custom value: $CUSTOM_VERSION"
+            # npm version does not support a `--` separator; strict SemVer
+            # validation above rejects option-shaped values before this call.
             npm version "$CUSTOM_VERSION" --no-git-tag-version --allow-same-version
           else
+            BASELINE_VERSION="$BASELINE_VERSION" node -e '
+              const fs = require("fs");
+              const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+              pkg.version = process.env.BASELINE_VERSION;
+              fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+            '
+            if [ "$RUN_ATTEMPT" -gt 1 ] && [ -n "$RESUMABLE_VERSION" ]; then
+              echo "Reusing resumable release tag version: $RESUMABLE_VERSION"
+              npm version "$RESUMABLE_VERSION" --no-git-tag-version --allow-same-version
+            else
             echo "Bumping version: $VERSION_TYPE (preid=$PREID)"
             npm version "$VERSION_TYPE" --no-git-tag-version --preid="$PREID"
+            fi
           fi
 
           NEW_VERSION=$(node -p "require('./package.json').version")
           echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
           echo "New version: $NEW_VERSION"
 
-          # A collision on an auto-computed version means the repo's package.json
-          # has drifted behind the registry (see the 0.10.52-vs-0.10.54 resync).
-          # Without this guard the run reaches the publish matrix before every
-          # job fails with "cannot publish over the previously published
-          # versions", which half-releases: some packages land, the rest do not.
-          #
-          # Every published package is checked, not just `relayfile`. A previous
-          # run can die partway through the matrix, leaving some names taken at a
-          # version the others never reached — checking one name would wave that
-          # straight back into the same failure.
-          #
-          # Skipped when an operator names a custom version — that is a
-          # deliberate choice, including re-running a release step by hand.
-          if [ -z "$CUSTOM_VERSION" ]; then
-            TAKEN=""
-            for PKG_NAME in $(node -e "
-              const fs = require('fs');
-              const paths = ${PACKAGE_PATHS_JSON};
-              const names = paths
-                .filter((p) => fs.existsSync(p))
-                .map((p) => JSON.parse(fs.readFileSync(p, 'utf8')).name);
-              console.log(names.join(' '));
-            "); do
-              # `npm view` exits non-zero both for "no such version" and for a
-              # registry outage. Only a genuine E404 means the version is free;
-              # treating an unanswerable query as free would let a taken version
-              # reach the publish matrix and partially release.
-              if VIEW_OUT=$(npm view "$PKG_NAME@$NEW_VERSION" version 2>&1); then
-                TAKEN="$TAKEN $PKG_NAME"
-              elif ! printf '%s' "$VIEW_OUT" | grep -q 'code E404'; then
-                echo "::error::could not determine whether $PKG_NAME@$NEW_VERSION" \
-                  "is published; refusing to release on an unanswered registry query." \
-                  "npm said: $VIEW_OUT"
-                exit 1
-              fi
-            done
-            if [ -n "$TAKEN" ]; then
-              echo "::error::version $NEW_VERSION is already published for:$TAKEN." \
-                "The repo's package.json ($CURRENT_VERSION) is behind the registry;" \
-                "resync the repo to the published version before releasing." \
-                "Publishing anyway would fail mid-matrix and half-release."
-              exit 1
-            fi
+          if git show-ref --verify --quiet "refs/tags/v${NEW_VERSION}" 2>/dev/null && \
+            [ "$RESUMABLE_VERSION" != "$NEW_VERSION" ]; then
+            echo "release tag v${NEW_VERSION} already exists without an exact verified recovery" >&2
+            exit 1
           fi
+          if [ -n "$RESUMABLE_VERSION" ] && [ "$RESUMABLE_VERSION" = "$NEW_VERSION" ]; then
+            test -n "$RESUMABLE_RUN_ID"
+            test -n "$RESUMABLE_RUN_ATTEMPT"
+            ATTESTATION_RUN_ID="$RESUMABLE_RUN_ID"
+            ATTESTATION_RUN_ATTEMPT="$RESUMABLE_RUN_ATTEMPT"
+          fi
+          echo "release_run_id=$ATTESTATION_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "release_run_attempt=$ATTESTATION_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
 
           if [[ "$NEW_VERSION" == *"-"* ]]; then
             echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+            if [ "$NPM_TAG" = "latest" ]; then
+              echo "ERROR: prereleases may not use the npm latest dist-tag" >&2
+              exit 1
+            fi
           else
             echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
           fi
@@ -241,6 +378,9 @@ jobs:
             }
           "
 
+      - name: Test release tooling on the immutable source
+        run: npm run test:release
+
       # Rename each package's `## [Unreleased]` section to `## [X.Y.Z] - <today>`
       # and reopen an empty Unreleased section. Skipped on prereleases and dry
       # runs — prereleases would fragment a single logical release into many
@@ -248,7 +388,7 @@ jobs:
       - name: Finalize CHANGELOGs
         if: |
           steps.bump.outputs.is_prerelease == 'false' &&
-          github.event.inputs.dry_run != 'true'
+          steps.inputs.outputs.dry_run != 'true'
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: node scripts/finalize-changelogs.mjs "${{ steps.bump.outputs.new_version }}"
@@ -265,11 +405,12 @@ jobs:
           npm run pages:build --prefix packages/file-observer
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: build-output
           path: |
             package.json
+            package-lock.json
             packages/core/package.json
             packages/core/dist/
             packages/core/CHANGELOG.md
@@ -312,7 +453,9 @@ jobs:
     name: Build relayfile-mount (${{ matrix.suffix }})
     needs: build
     runs-on: ${{ matrix.runner }}
-    if: github.event.inputs.dry_run != 'true'
+    permissions:
+      contents: read
+    if: needs.build.outputs.release_dry_run != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -336,10 +479,19 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.build.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify immutable source snapshot
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ needs.build.outputs.source_sha }}"
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
           cache: true
@@ -371,22 +523,25 @@ jobs:
         run: ./relayfile-mount-${{ matrix.suffix }} --help | head -20
 
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: relayfile-mount-${{ matrix.suffix }}
           path: relayfile-mount-${{ matrix.suffix }}
           retention-days: 1
 
-  # Publish all packages in parallel
-  publish-packages:
-    name: Publish ${{ matrix.package }}
+  # Read-only barrier: every package must reconcile before any package can
+  # publish.  This prevents an absent package from publishing while another
+  # package in the matrix is still about to fail on a conflicting tarball.
+  preflight-packages:
+    name: Preflight ${{ matrix.package }}
     needs: [build, build-mount-binaries]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     if: |
       always() &&
-      github.event.inputs.package == 'all' &&
       needs.build.result == 'success' &&
-      (github.event.inputs.dry_run == 'true' || needs.build-mount-binaries.result == 'success')
+      (needs.build.outputs.release_dry_run == 'true' || needs.build-mount-binaries.result == 'success')
     strategy:
       fail-fast: false
       max-parallel: 10
@@ -428,16 +583,25 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.build.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify immutable source snapshot
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ needs.build.outputs.source_sha }}"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: build-output
           path: .
@@ -447,14 +611,133 @@ jobs:
         run: chmod 755 packages/cli/bin/relayfile-cli-*
 
       - name: Download relayfile-mount binary
-        if: matrix.mount_binary != '' && github.event.inputs.dry_run != 'true'
-        uses: actions/download-artifact@v4
+        if: matrix.mount_binary != '' && needs.build.outputs.release_dry_run != 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ${{ matrix.mount_binary }}
           path: /tmp/relayfile-mount-binary
 
       - name: Prepare mount platform package
-        if: matrix.mount_binary != '' && github.event.inputs.dry_run != 'true'
+        if: matrix.mount_binary != '' && needs.build.outputs.release_dry_run != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ matrix.path }}/bin"
+          cp "/tmp/relayfile-mount-binary/${{ matrix.mount_binary }}" "${{ matrix.path }}/bin/relayfile-mount"
+          chmod 755 "${{ matrix.path }}/bin/relayfile-mount"
+
+      - name: Update npm for OIDC support
+        run: npm install -g npm@11
+
+      - name: Reconcile package read-only
+        env:
+          NPM_TAG: ${{ github.event.inputs.tag }}
+          RELEASE_DRY_RUN: ${{ needs.build.outputs.release_dry_run }}
+          SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
+          RELEASE_VERSION: ${{ needs.build.outputs.new_version }}
+          RELEASE_RUN_ID: ${{ needs.build.outputs.release_run_id }}
+          RELEASE_RUN_ATTEMPT: ${{ needs.build.outputs.release_run_attempt }}
+        run: |
+          set -euo pipefail
+          node "$GITHUB_WORKSPACE/scripts/release/reconcile-package.mjs" \
+            --package-dir "$GITHUB_WORKSPACE/${{ matrix.path }}" \
+            --tag "$NPM_TAG" \
+            --dry-run "$RELEASE_DRY_RUN" \
+            --preflight true \
+            --source-sha "$SOURCE_SHA" \
+            --run-id "$RELEASE_RUN_ID" \
+            --run-attempt "$RELEASE_RUN_ATTEMPT"
+
+  # Publish all packages in parallel after the read-only barrier.
+  publish-packages:
+    name: Publish ${{ matrix.package }}
+    needs: [build, build-mount-binaries, preflight-packages]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    if: |
+      always() &&
+      needs.build.outputs.release_package == 'all' &&
+      needs.build.result == 'success' &&
+      needs.preflight-packages.result == 'success' &&
+      (needs.build.outputs.release_dry_run == 'true' || needs.build-mount-binaries.result == 'success')
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        include:
+          - package: core
+            path: packages/core
+            mount_binary: ""
+          - package: sdk
+            path: packages/sdk/typescript
+            mount_binary: ""
+          - package: client
+            path: packages/client
+            mount_binary: ""
+          - package: agents
+            path: packages/agents
+            mount_binary: ""
+          - package: cli
+            path: packages/cli
+            mount_binary: ""
+          - package: file-observer
+            path: packages/file-observer
+            mount_binary: ""
+          - package: local-mount
+            path: packages/local-mount
+            mount_binary: ""
+          - package: mount-darwin-arm64
+            path: packages/mount-darwin-arm64
+            mount_binary: relayfile-mount-darwin-arm64
+          - package: mount-darwin-x64
+            path: packages/mount-darwin-x64
+            mount_binary: relayfile-mount-darwin-amd64
+          - package: mount-linux-arm64
+            path: packages/mount-linux-arm64
+            mount_binary: relayfile-mount-linux-arm64
+          - package: mount-linux-x64
+            path: packages/mount-linux-x64
+            mount_binary: relayfile-mount-linux-amd64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.build.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify immutable source snapshot
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ needs.build.outputs.source_sha }}"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: build-output
+          path: .
+
+      - name: Restore CLI binary permissions
+        if: matrix.package == 'cli'
+        run: chmod 755 packages/cli/bin/relayfile-cli-*
+
+      - name: Download relayfile-mount binary
+        if: matrix.mount_binary != '' && needs.build.outputs.release_dry_run != 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ matrix.mount_binary }}
+          path: /tmp/relayfile-mount-binary
+
+      - name: Prepare mount platform package
+        if: matrix.mount_binary != '' && needs.build.outputs.release_dry_run != 'true'
         run: |
           set -euo pipefail
           mkdir -p "${{ matrix.path }}/bin"
@@ -466,54 +749,84 @@ jobs:
       - name: Update npm for OIDC support
         run: npm install -g npm@11
 
-      - name: Dry run check
-        if: github.event.inputs.dry_run == 'true'
-        working-directory: ${{ matrix.path }}
+      - name: Reconcile package with NPM
+        env:
+          NPM_TAG: ${{ github.event.inputs.tag }}
+          RELEASE_DRY_RUN: ${{ needs.build.outputs.release_dry_run }}
+          SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
+          RELEASE_VERSION: ${{ needs.build.outputs.new_version }}
+          RELEASE_RUN_ID: ${{ needs.build.outputs.release_run_id }}
+          RELEASE_RUN_ATTEMPT: ${{ needs.build.outputs.release_run_attempt }}
         run: |
-          PACKAGE_NAME=$(node -p "require('./package.json').name")
-          echo "Dry run - would publish ${PACKAGE_NAME}"
-          npm publish --dry-run --access public --tag ${{ github.event.inputs.tag }} --ignore-scripts
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/package-attestations"
+          node "$GITHUB_WORKSPACE/scripts/release/reconcile-package.mjs" \
+            --package-dir "$GITHUB_WORKSPACE/${{ matrix.path }}" \
+            --tag "$NPM_TAG" \
+            --dry-run "$RELEASE_DRY_RUN" \
+            --source-sha "$SOURCE_SHA" \
+            --run-id "$RELEASE_RUN_ID" \
+            --run-attempt "$RELEASE_RUN_ATTEMPT" \
+            --output "$GITHUB_WORKSPACE/package-attestations/${{ matrix.package }}.json"
 
-      - name: Publish to NPM
-        if: github.event.inputs.dry_run != 'true'
-        working-directory: ${{ matrix.path }}
-        run: npm publish --access public --provenance --tag ${{ github.event.inputs.tag }} --ignore-scripts
+      - name: Upload package attestation
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: package-attestation-${{ matrix.package }}
+          path: package-attestations/${{ matrix.package }}.json
+          if-no-files-found: error
+          retention-days: 1
 
   # Publish single package (when not 'all')
   publish-single:
     name: Publish single package
-    needs: [build, build-mount-binaries]
+    needs: [build, build-mount-binaries, preflight-packages]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     if: |
       always() &&
-      github.event.inputs.package != 'all' &&
+      needs.build.outputs.release_package != 'all' &&
       needs.build.result == 'success' &&
-      (github.event.inputs.dry_run == 'true' || needs.build-mount-binaries.result == 'success')
+      needs.preflight-packages.result == 'success' &&
+      (needs.build.outputs.release_dry_run == 'true' || needs.build-mount-binaries.result == 'success')
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.build.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify immutable source snapshot
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ needs.build.outputs.source_sha }}"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: build-output
           path: .
 
       - name: Restore CLI binary permissions
-        if: github.event.inputs.package == 'cli'
+        if: needs.build.outputs.release_package == 'cli'
         run: chmod 755 packages/cli/bin/relayfile-cli-*
 
       - name: Resolve package path
         id: resolve-package
+        env:
+          RELEASE_PACKAGE: ${{ needs.build.outputs.release_package }}
         run: |
-          case "${{ github.event.inputs.package }}" in
+          case "$RELEASE_PACKAGE" in
             core) echo "path=packages/core" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
             sdk) echo "path=packages/sdk/typescript" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
             client) echo "path=packages/client" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
@@ -526,20 +839,20 @@ jobs:
             mount-linux-arm64) echo "path=packages/mount-linux-arm64" >> "$GITHUB_OUTPUT"; echo "mount_binary=relayfile-mount-linux-arm64" >> "$GITHUB_OUTPUT" ;;
             mount-linux-x64) echo "path=packages/mount-linux-x64" >> "$GITHUB_OUTPUT"; echo "mount_binary=relayfile-mount-linux-amd64" >> "$GITHUB_OUTPUT" ;;
             *)
-              echo "Unsupported package: ${{ github.event.inputs.package }}" >&2
+              echo "Unsupported package: $RELEASE_PACKAGE" >&2
               exit 1
               ;;
           esac
 
       - name: Download relayfile-mount binary
-        if: steps.resolve-package.outputs.mount_binary != '' && github.event.inputs.dry_run != 'true'
-        uses: actions/download-artifact@v4
+        if: steps.resolve-package.outputs.mount_binary != '' && needs.build.outputs.release_dry_run != 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ${{ steps.resolve-package.outputs.mount_binary }}
           path: /tmp/relayfile-mount-binary
 
       - name: Prepare mount platform package
-        if: steps.resolve-package.outputs.mount_binary != '' && github.event.inputs.dry_run != 'true'
+        if: steps.resolve-package.outputs.mount_binary != '' && needs.build.outputs.release_dry_run != 'true'
         run: |
           set -euo pipefail
           mkdir -p "${{ steps.resolve-package.outputs.path }}/bin"
@@ -551,53 +864,94 @@ jobs:
       - name: Update npm for OIDC support
         run: npm install -g npm@11
 
-      - name: Dry run check
-        if: github.event.inputs.dry_run == 'true'
-        working-directory: ${{ steps.resolve-package.outputs.path }}
+      - name: Reconcile package with NPM
+        env:
+          NPM_TAG: ${{ github.event.inputs.tag }}
+          RELEASE_DRY_RUN: ${{ needs.build.outputs.release_dry_run }}
+          SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
+          RELEASE_VERSION: ${{ needs.build.outputs.new_version }}
+          RELEASE_RUN_ID: ${{ needs.build.outputs.release_run_id }}
+          RELEASE_RUN_ATTEMPT: ${{ needs.build.outputs.release_run_attempt }}
         run: |
-          PACKAGE_NAME=$(node -p "require('./package.json').name")
-          echo "Dry run - would publish ${PACKAGE_NAME}"
-          npm publish --dry-run --access public --tag ${{ github.event.inputs.tag }} --ignore-scripts
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/package-attestations"
+          node "$GITHUB_WORKSPACE/scripts/release/reconcile-package.mjs" \
+            --package-dir "$GITHUB_WORKSPACE/${{ steps.resolve-package.outputs.path }}" \
+            --tag "$NPM_TAG" \
+            --dry-run "$RELEASE_DRY_RUN" \
+            --source-sha "$SOURCE_SHA" \
+            --run-id "$RELEASE_RUN_ID" \
+            --run-attempt "$RELEASE_RUN_ATTEMPT" \
+            --output "$GITHUB_WORKSPACE/package-attestations/${{ needs.build.outputs.release_package }}.json"
 
-      - name: Publish to NPM
-        if: github.event.inputs.dry_run != 'true'
-        working-directory: ${{ steps.resolve-package.outputs.path }}
-        run: npm publish --access public --provenance --tag ${{ github.event.inputs.tag }} --ignore-scripts
+      - name: Upload package attestation
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: package-attestation-${{ needs.build.outputs.release_package }}
+          path: package-attestations/${{ needs.build.outputs.release_package }}.json
+          if-no-files-found: error
+          retention-days: 1
 
   create-release:
     name: Create Release
-    needs: [build, publish-packages, publish-single, build-mount-binaries]
+    needs:
+      [
+        build,
+        preflight-packages,
+        publish-packages,
+        publish-single,
+        build-mount-binaries,
+      ]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     if: |
       always() &&
-      github.event.inputs.dry_run != 'true' &&
+      needs.build.outputs.release_dry_run != 'true' &&
       needs.build-mount-binaries.result == 'success' &&
       (needs.publish-packages.result == 'success' || needs.publish-single.result == 'success')
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ needs.build.outputs.source_sha }}
+          persist-credentials: true
+
+      - name: Verify immutable source snapshot
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ needs.build.outputs.source_sha }}"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: build-output
           path: .
 
       - name: Download relayfile-mount binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: relayfile-mount-*
           path: mount-binaries
+          merge-multiple: true
+
+      - name: Download package attestations
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: package-attestation-*
+          path: package-attestations
           merge-multiple: true
 
       - name: Verify mount binaries present
@@ -611,6 +965,26 @@ jobs:
             fi
           done
           chmod +x mount-binaries/relayfile-mount-*
+          test -d package-attestations
+          test "$(find package-attestations -type f -name '*.json' | wc -l | tr -d ' ')" -eq 11
+          for BINARY in \
+            relayfile-mount-linux-amd64 \
+            relayfile-mount-linux-arm64 \
+            relayfile-mount-darwin-amd64 \
+            relayfile-mount-darwin-arm64 \
+            relayfile-cli-linux-amd64 \
+            relayfile-cli-linux-arm64 \
+            relayfile-cli-darwin-amd64 \
+            relayfile-cli-darwin-arm64 \
+            relayfile-cli-windows-amd64.exe \
+            relayfile-cli-windows-arm64.exe; do
+            case "$BINARY" in
+              relayfile-mount-*) test -f "mount-binaries/$BINARY" ;;
+              *) test -f "packages/cli/bin/$BINARY" ;;
+            esac
+          done
+          test "$(find mount-binaries -maxdepth 1 -type f -name 'relayfile-mount-*' | wc -l | tr -d ' ')" -eq 4
+          test "$(find packages/cli/bin -maxdepth 1 -type f -name 'relayfile-cli-*' | wc -l | tr -d ' ')" -eq 6
 
       - name: Generate checksums
         run: |
@@ -637,12 +1011,15 @@ jobs:
           RELEASE_VERSION: ${{ needs.build.outputs.new_version }}
         run: node scripts/release/regenerate-release-lockfiles.mjs "$RELEASE_VERSION"
 
-      - name: Commit version bump and create tag
+      - name: Commit version bump and prepare tag target
         env:
           NEW_VERSION: ${{ needs.build.outputs.new_version }}
+          SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
         run: |
+          set -euo pipefail
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
 
           git add \
             package.json package-lock.json \
@@ -657,17 +1034,99 @@ jobs:
             packages/mount-linux-arm64/package.json packages/mount-linux-x64/package.json
           if ! git diff --staged --quiet; then
             git commit -m "chore(release): v${NEW_VERSION}"
-            git push
           fi
 
-          git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}"
-          git push origin "v${NEW_VERSION}"
+          INTENDED_TREE=$(git rev-parse 'HEAD^{tree}')
+          if git show-ref --verify --quiet "refs/tags/v${NEW_VERSION}"; then
+            test "$(git cat-file -t "refs/tags/v${NEW_VERSION}")" = "tag"
+            TAG_COMMIT=$(git rev-list -n 1 "refs/tags/v${NEW_VERSION}")
+            TAG_PARENTS=$(git rev-list --parents -n 1 "$TAG_COMMIT")
+            test "$(printf '%s\n' "$TAG_PARENTS" | awk '{print NF}')" -eq 2
+            TAG_PARENT=$(printf '%s\n' "$TAG_PARENTS" | cut -d' ' -f2)
+            TAG_TREE=$(git rev-parse "${TAG_COMMIT}^{tree}")
+            test "$TAG_PARENT" = "$SOURCE_SHA"
+            test "$TAG_TREE" = "$INTENDED_TREE"
+            TAG_EXISTS=true
+            echo "Reusing existing tag v${NEW_VERSION} at $TAG_COMMIT with the intended tree"
+          else
+            TAG_COMMIT=$(git rev-parse HEAD)
+            TAG_EXISTS=false
+            TAG_PARENTS=$(git rev-list --parents -n 1 "$TAG_COMMIT")
+            test "$(printf '%s\n' "$TAG_PARENTS" | awk '{print NF}')" -eq 2
+            test "$(printf '%s\n' "$TAG_PARENTS" | cut -d' ' -f2)" = "$SOURCE_SHA"
+          fi
+          TAG_TREE=$(git rev-parse "${TAG_COMMIT}^{tree}")
+          {
+            echo "TAG_COMMIT=$TAG_COMMIT"
+            echo "TAG_EXISTS=$TAG_EXISTS"
+            echo "TAG_TREE=$TAG_TREE"
+          } >> "$GITHUB_ENV"
+
+      - name: Generate release attestation
+        env:
+          SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
+          RELEASE_VERSION: ${{ needs.build.outputs.new_version }}
+          RELEASE_RUN_ID: ${{ needs.build.outputs.release_run_id }}
+          RELEASE_RUN_ATTEMPT: ${{ needs.build.outputs.release_run_attempt }}
+          NPM_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          test -n "${TAG_COMMIT:-}"
+          node scripts/release/create-release-attestation.mjs \
+            --package-dir package-attestations \
+            --checksums checksums.txt \
+            --source-sha "$SOURCE_SHA" \
+            --run-id "$RELEASE_RUN_ID" \
+            --run-attempt "$RELEASE_RUN_ATTEMPT" \
+            --version "$RELEASE_VERSION" \
+            --tag "v$RELEASE_VERSION" \
+            --tag-commit "$TAG_COMMIT" \
+            --tag-tree "$TAG_TREE" \
+            --repository "$GITHUB_REPOSITORY" \
+            --output release-attestation.json
+
+      - name: Generate cryptographic release attestation
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: release-attestation.json
+
+      # Keep a copy available for a same-workflow rerun even if the GitHub
+      # Release asset has not been created yet. The tag message records the
+      # exact run/attempt used to select this artifact below.
+      - name: Upload release metadata for resumable reruns
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-attestation-${{ github.run_attempt }}
+          path: release-attestation.json
+          retention-days: 30
+
+      - name: Create and push release tag
+        env:
+          NEW_VERSION: ${{ needs.build.outputs.new_version }}
+          SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
+          RELEASE_RUN_ID: ${{ needs.build.outputs.release_run_id }}
+          RELEASE_RUN_ATTEMPT: ${{ needs.build.outputs.release_run_attempt }}
+        run: |
+          set -euo pipefail
+          if [ "${TAG_EXISTS:-false}" = "true" ]; then
+            test "$(git rev-list -n 1 "refs/tags/v${NEW_VERSION}")" = "$TAG_COMMIT"
+            exit 0
+          fi
+          git tag -a "v${NEW_VERSION}" \
+            -m "Release v${NEW_VERSION}" \
+            -m "source-sha=${SOURCE_SHA}" \
+            -m "tag-tree=${TAG_TREE}" \
+            -m "workflow-run-id=${RELEASE_RUN_ID}" \
+            -m "workflow-run-attempt=${RELEASE_RUN_ATTEMPT}"
+          git push origin "refs/tags/v${NEW_VERSION}:refs/tags/v${NEW_VERSION}"
+          test "$(git rev-list -n 1 "refs/tags/v${NEW_VERSION}")" = "$TAG_COMMIT"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: v${{ needs.build.outputs.new_version }}
           name: v${{ needs.build.outputs.new_version }}
+          prerelease: ${{ needs.build.outputs.is_prerelease }}
           body: |
             ## relayfile v${{ needs.build.outputs.new_version }}
 
@@ -716,27 +1175,41 @@ jobs:
             packages/cli/bin/relayfile-cli-*
             mount-binaries/relayfile-mount-*
             checksums.txt
+            release-attestation.json
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   summary:
     name: Summary
-    needs: [build, publish-packages, publish-single, build-mount-binaries, create-release]
+    needs:
+      [
+        build,
+        publish-packages,
+        publish-single,
+        build-mount-binaries,
+        create-release,
+      ]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     if: always()
 
     steps:
       - name: Summary
+        env:
+          RELEASE_PACKAGE: ${{ needs.build.outputs.release_package }}
+          RELEASE_TAG: ${{ github.event.inputs.tag }}
+          RELEASE_DRY_RUN: ${{ needs.build.outputs.release_dry_run }}
         run: |
           {
             echo "## Publish Summary"
             echo ""
-            echo "**Package**: \`${{ github.event.inputs.package }}\`"
+            echo "**Package**: \`$RELEASE_PACKAGE\`"
             echo "**Version**: \`${{ needs.build.outputs.new_version }}\`"
-            echo "**NPM Tag**: \`${{ github.event.inputs.tag }}\`"
+            echo "**NPM Tag**: \`$RELEASE_TAG\`"
             echo "**Prerelease**: \`${{ needs.build.outputs.is_prerelease }}\`"
-            echo "**Dry Run**: \`${{ github.event.inputs.dry_run }}\`"
+            echo "**Dry Run**: \`$RELEASE_DRY_RUN\`"
             echo "**Provenance**: \`enabled\`"
             echo ""
             echo "### Results"

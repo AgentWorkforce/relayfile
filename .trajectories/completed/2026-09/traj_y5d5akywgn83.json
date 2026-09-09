@@ -1,0 +1,97 @@
+{
+  "id": "traj_y5d5akywgn83",
+  "version": 1,
+  "task": {
+    "title": "Historical decisions from an earlier relayfile#478 repair branch",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#478-review"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-09-08T16:19:00.597Z",
+  "completedAt": "2026-09-08T16:25:59.738Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-09-08T16:25:29.433Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_awmy5z8hm52w",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-09-08T16:25:29.433Z",
+      "endedAt": "2026-09-08T16:25:59.738Z",
+      "events": [
+        {
+          "ts": 1788884729434,
+          "type": "decision",
+          "content": "Chose step-environment release inputs and per-job GitHub permissions",
+          "raw": {
+            "question": "How should custom release inputs and GitHub permissions be scoped?",
+            "chosen": "Pass release inputs through step env and scope permissions per job",
+            "alternatives": [],
+            "reasoning": "Direct expression interpolation could turn a custom version into shell source, while workflow-wide write permissions exceeded build and publish needs."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1788884729753,
+          "type": "decision",
+          "content": "Chose attestation-before-tag and parent/tree equivalence for retries",
+          "raw": {
+            "question": "How should release tag retries be constrained?",
+            "chosen": "Generate attestation before remote tag push and require parent/tree equivalence for reuse",
+            "alternatives": [],
+            "reasoning": "A retry can regenerate a different commit object for the same intended release; proving the immutable source parent and exact release tree allows safe reuse without tagging un-attested code."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1788884730106,
+          "type": "reflection",
+          "content": "Self-reported and non-gating: the session stated that tag retries, binary selection, registry ambiguity, and permissions were repaired, but captured no command/output evidence and describes an earlier divergent branch state.",
+          "raw": {
+            "focalPoints": [
+              "retry-safety",
+              "binary-integrity",
+              "least-privilege"
+            ],
+            "confidence": 0.2
+          },
+          "significance": "high",
+          "tags": [
+            "focal:retry-safety",
+            "focal:binary-integrity",
+            "focal:least-privilege",
+            "confidence:0.2"
+          ]
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Historical decision record only: the stored refs resolve locally, but endRef fb0361c1 is from an earlier divergent branch state and is not an ancestor of the current PR head. The reported commit/file list is non-authoritative historical metadata. The record captured no command or output evidence, so all implementation claims are self-reported, non-gating, and not validation or release approval.",
+    "approach": "Historical decision record (non-gating)",
+    "confidence": 0.2
+  },
+  "commits": ["fb0361c1"],
+  "filesChanged": [
+    ".github/workflows/publish.yml",
+    ".trajectories/index.json",
+    "scripts/release/create-release-attestation.mjs",
+    "scripts/release/create-release-attestation.test.mjs",
+    "scripts/release/publish-workflow.test.mjs",
+    "scripts/release/reconcile-package.mjs",
+    "scripts/release/reconcile-package.test.mjs"
+  ],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": ["historical", "self-reported", "non-authoritative", "non-gating"],
+  "_trace": {
+    "startRef": "e175daba8a97f95308281573125f3c072f1cb695",
+    "endRef": "fb0361c1d2aab3b67ca2e69e4f15d3cae7940af6"
+  }
+}

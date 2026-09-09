@@ -1,0 +1,62 @@
+{
+  "id": "traj_xnlvfueuuj35",
+  "version": 1,
+  "task": {
+    "title": "Historical decisions on release digest and package-set validation",
+    "source": {
+      "system": "plain",
+      "id": "relayfile-release-snapshot-fix-479"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-09-08T18:56:21.883Z",
+  "completedAt": "2026-09-08T18:56:55.631Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-09-08T18:56:22.611Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_xzw3nc0qadj5",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-09-08T18:56:22.611Z",
+      "endedAt": "2026-09-08T18:56:55.631Z",
+      "events": [
+        {
+          "ts": 1788893782612,
+          "type": "decision",
+          "content": "Require a shared exact digest and allowlisted package set in release attestations: Require a shared exact digest and allowlisted package set in release attestations",
+          "raw": {
+            "question": "Require a shared exact digest and allowlisted package set in release attestations",
+            "chosen": "Require a shared exact digest and allowlisted package set in release attestations",
+            "alternatives": [],
+            "reasoning": "Without a common digest, integrity and shasum-only records are incomparable; without an allowlist, extra package records can be attested."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Historical session self-report: require common exact package digests, reject unexpected package records, and add missing-package plus post-publish retry/conflict regressions. The stored refs 922498fd through 508be165 and reported commits resolve to earlier PR ancestors, but they are historical implementation metadata rather than the current PR head. No command or output evidence was captured, so all result and validation claims are non-authoritative and non-gating.",
+    "approach": "Historical decision record (non-gating)",
+    "confidence": 0.2
+  },
+  "commits": ["508be165", "b5be0df1"],
+  "filesChanged": [
+    ".trajectories/index.json",
+    "scripts/release/create-release-attestation.mjs",
+    "scripts/release/create-release-attestation.test.mjs",
+    "scripts/release/reconcile-package.test.mjs"
+  ],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": ["historical", "self-reported", "non-authoritative", "non-gating"],
+  "_trace": {
+    "startRef": "922498fdcdcfd8ae18757d5e2088281d9ec32ce5",
+    "endRef": "508be165a6738e9899e407aae308d1ae1414d7bf"
+  }
+}

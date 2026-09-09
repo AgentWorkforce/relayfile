@@ -1,0 +1,91 @@
+{
+  "id": "traj_dyetw0ajjit2",
+  "version": 1,
+  "task": {
+    "title": "Historical session report for PR #479 repair decisions at aa6248c",
+    "source": {
+      "system": "plain",
+      "id": "relayfile-pr-479-postmerge-repair"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-09-08T20:24:35.669Z",
+  "completedAt": "2026-09-08T20:28:02.969Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-09-08T20:26:23.536Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_v25cg5cnsfwp",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-09-08T20:26:23.536Z",
+      "endedAt": "2026-09-08T20:28:02.969Z",
+      "events": [
+        {
+          "ts": 1788899183537,
+          "type": "decision",
+          "content": "Recorded four review findings and proposed repair scope",
+          "raw": {
+            "question": "How should the four review findings be scoped?",
+            "chosen": "Treat the entrypoint, dispatch-output, and trajectory-provenance concerns as repair candidates",
+            "alternatives": [],
+            "reasoning": "The session classified two findings as relative-entrypoint and dispatch-output concerns and two as trajectory-provenance concerns. The record captured no evidence proving their repair or any test coverage."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1788899183854,
+          "type": "decision",
+          "content": "Recorded the historical non-gating disposition of traj_9ecscwloe7cl",
+          "raw": {
+            "question": "How should traj_9ecscwloe7cl be interpreted?",
+            "chosen": "Treat it as historical non-gating provenance",
+            "alternatives": [],
+            "reasoning": "Its source record has no captured validation evidence. This event records the disposition only; it does not claim that this trajectory introduced the already-present metadata correction."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1788899282640,
+          "type": "reflection",
+          "content": "Self-reported, non-gating session note: the agent stated that it patched the two code/test findings, corrected two historical-provenance claims, and observed the release tests and validation scans passing. This trajectory captured no commands, outputs, commits, or changed-file evidence, so those claims require independent verification.",
+          "raw": {
+            "focalPoints": [
+              "relative-cli",
+              "dispatch-contract",
+              "trajectory-provenance",
+              "release-invariants"
+            ],
+            "confidence": 0.2
+          },
+          "significance": "high",
+          "tags": [
+            "focal:relative-cli",
+            "focal:dispatch-contract",
+            "focal:trajectory-provenance",
+            "focal:release-invariants",
+            "confidence:0.2"
+          ]
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Historical session report only: the agent reported repair decisions at the earlier aa6248c ancestor. The empty commits/filesChanged fields and absence of command or output evidence mean it does not prove those repairs or any revalidation; the traj_9ecscwloe7cl disposition also pre-existed this record's current delta. All result claims are self-reported, non-authoritative, and non-gating.",
+    "approach": "Historical session report (non-gating)",
+    "confidence": 0.2
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": ["historical", "self-reported", "non-authoritative", "non-gating"],
+  "_trace": {
+    "startRef": "aa6248cdfbab3910d81b8fb7e268e4b53056e898",
+    "endRef": "aa6248cdfbab3910d81b8fb7e268e4b53056e898"
+  }
+}

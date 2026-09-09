@@ -1,0 +1,119 @@
+{
+  "id": "traj_ku42xm2erukv",
+  "version": 1,
+  "task": {
+    "title": "Historical PR #479 repair decision record through 601d162c"
+  },
+  "status": "completed",
+  "startedAt": "2026-09-08T20:53:38.056Z",
+  "completedAt": "2026-09-08T23:26:25.667Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-09-08T23:24:29.350Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_qp7pi1cjsump",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-09-08T23:24:29.350Z",
+      "endedAt": "2026-09-08T23:26:25.667Z",
+      "events": [
+        {
+          "ts": 1788909869350,
+          "type": "decision",
+          "content": "Reject present non-null malformed npm shasums before reconciliation or attestation: Reject present non-null malformed npm shasums before reconciliation or attestation",
+          "raw": {
+            "question": "Reject present non-null malformed npm shasums before reconciliation or attestation",
+            "chosen": "Reject present non-null malformed npm shasums before reconciliation or attestation",
+            "alternatives": [],
+            "reasoning": "The normalizers previously treated empty or non-string shasums as absent when integrity was valid, leaving a post-publish attestation failure window; shared null-or-valid validators now close all release paths."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1788909869877,
+          "type": "decision",
+          "content": "Restore the two removed release trajectory records instead of compacting: Restore the two removed release trajectory records instead of compacting",
+          "raw": {
+            "question": "Restore the two removed release trajectory records instead of compacting",
+            "chosen": "Restore the two removed release trajectory records instead of compacting",
+            "alternatives": [],
+            "reasoning": "Git history shows b70f3528 removed their index entries without a deliberate compaction, and preserved JSON/Markdown originals are available locally."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1788909870741,
+          "type": "reflection",
+          "content": "Self-reported, non-gating session note: the agent stated that digest regressions and trajectory provenance repairs were in place through its historical workspace state. The record captured no command or output evidence and does not validate 3a1594a8 or any later PR head.",
+          "raw": {
+            "focalPoints": ["digest-validation", "trajectory-provenance"],
+            "confidence": 0.2
+          },
+          "significance": "high",
+          "tags": [
+            "focal:digest-validation",
+            "focal:trajectory-provenance",
+            "confidence:0.2"
+          ]
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Historical decision record through stored endRef 601d162c: the session reported optional-digest validation repairs, regressions, restored uncompacted trajectories, and provenance qualifications. Its stored start/end refs resolve locally but describe historical workspace states rather than the current PR head; the startRef is not an ancestor of this branch. The record captured file ranges but no command or output evidence, so its implementation and validation claims are self-reported, non-authoritative, and non-gating. It does not validate 3a1594a8 or any later repair commit.",
+    "approach": "Historical decision record (non-gating)",
+    "confidence": 0.2
+  },
+  "commits": [
+    "601d162c",
+    "1e5b2642",
+    "b0293d36",
+    "a78139cb",
+    "18b1470f",
+    "aa6e89bc",
+    "be78ac61",
+    "4a3000d2",
+    "b70f3528"
+  ],
+  "filesChanged": [
+    ".github/workflows/publish.yml",
+    ".trajectories/completed/2026-09/traj_2mzsi08gw9ht.json",
+    ".trajectories/completed/2026-09/traj_2mzsi08gw9ht.md",
+    ".trajectories/completed/2026-09/traj_3r6zk2fhua5h.json",
+    ".trajectories/completed/2026-09/traj_3r6zk2fhua5h.md",
+    ".trajectories/completed/2026-09/traj_9i36a7py61ph.json",
+    ".trajectories/completed/2026-09/traj_9i36a7py61ph.md",
+    ".trajectories/completed/2026-09/traj_dyetw0ajjit2.json",
+    ".trajectories/completed/2026-09/traj_dyetw0ajjit2.md",
+    ".trajectories/completed/2026-09/traj_gar68vc7e6r8.json",
+    ".trajectories/completed/2026-09/traj_gar68vc7e6r8.md",
+    ".trajectories/completed/2026-09/traj_rfzd9eqgrwev.json",
+    ".trajectories/completed/2026-09/traj_rfzd9eqgrwev.md",
+    ".trajectories/completed/2026-09/traj_thvemykn51bx.json",
+    ".trajectories/completed/2026-09/traj_thvemykn51bx.md",
+    ".trajectories/completed/2026-09/traj_y0ud3lb6tkt0.json",
+    ".trajectories/completed/2026-09/traj_y0ud3lb6tkt0.md",
+    ".trajectories/completed/2026-09/traj_y5d5akywgn83.json",
+    ".trajectories/completed/2026-09/traj_y5d5akywgn83.md",
+    ".trajectories/index.json",
+    "scripts/release/create-release-attestation.mjs",
+    "scripts/release/create-release-attestation.test.mjs",
+    "scripts/release/publish-workflow.test.mjs",
+    "scripts/release/reconcile-package.mjs",
+    "scripts/release/reconcile-package.test.mjs",
+    "scripts/release/resolve-release-baseline.mjs",
+    "scripts/release/resolve-release-baseline.test.mjs"
+  ],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": ["historical", "self-reported", "non-authoritative", "non-gating"],
+  "_trace": {
+    "startRef": "1a7359dab2ac8b849efc6e4522f8e664177671a5",
+    "endRef": "601d162ccd2264d187982239dd383f4c637fe742",
+    "traceId": "cf9899fe-acb3-4195-8cb7-b4c9c945651a"
+  }
+}
