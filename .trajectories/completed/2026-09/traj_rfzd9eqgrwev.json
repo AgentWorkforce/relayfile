@@ -88,7 +88,6 @@
   "tags": ["historical", "self-reported", "non-authoritative", "non-gating"],
   "_trace": {
     "startRef": "9e32618a0be4ed0ad5eaf27f27428ce7b166a79e",
-    "endRef": "3ffc97eeae90a3810ae55e5c9b39007584f0f22e",
-    "traceId": "8972c4ec-3d34-4cee-be81-db03a0f3ded9"
+    "endRef": "3ffc97eeae90a3810ae55e5c9b39007584f0f22e"
   }
 }
