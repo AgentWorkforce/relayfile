@@ -2,7 +2,7 @@
   "id": "traj_9ecscwloe7cl",
   "version": 1,
   "task": {
-    "title": "Independent final review of Relayfile release snapshot 1f049cdd",
+    "title": "Historical review record for Relayfile release snapshot 1f049cdd",
     "source": {
       "system": "plain",
       "id": "release-snapshot-review-0908"
@@ -66,14 +66,14 @@
     }
   ],
   "retrospective": {
-    "summary": "Historical review record retained for provenance; its unsupported GREEN claim is withdrawn because no command, commit, file, or test/actionlint evidence was captured. It is not a release approval.",
-    "approach": "Independent adversarial release review",
+    "summary": "Historical review record retained for provenance at the earlier 1f049cdd ancestor; its unsupported GREEN claim is withdrawn because no command, output, commit, changed-file, test, or actionlint evidence was captured. It is self-reported, non-authoritative, non-gating, and not a release approval.",
+    "approach": "Historical review record (non-gating)",
     "confidence": 0.2
   },
   "commits": [],
   "filesChanged": [],
   "projectId": "AgentWorkforce/relayfile",
-  "tags": [],
+  "tags": ["historical", "self-reported", "non-authoritative", "non-gating"],
   "_trace": {
     "startRef": "1f049cdd55cdb789c8ace207665f4701ce6925da",
     "endRef": "1f049cdd55cdb789c8ace207665f4701ce6925da"

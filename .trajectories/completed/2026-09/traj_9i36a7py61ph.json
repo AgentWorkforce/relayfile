@@ -2,7 +2,7 @@
   "id": "traj_9i36a7py61ph",
   "version": 1,
   "task": {
-    "title": "Repair release snapshot review findings: tag collision, rerun attestation metadata, package attestation schema binding",
+    "title": "Historical decisions on release tag and attestation safeguards",
     "source": {
       "system": "plain",
       "id": "PR-479"
@@ -66,14 +66,14 @@
     }
   ],
   "retrospective": {
-    "summary": "Decision record only: chose to reject untrusted automatic tag collisions before package jobs, preserve immutable tag producer metadata across exact reruns, and validate complete child attestations before composition. This trajectory captured no command, commit, file, or test evidence and is non-gating.",
-    "approach": "Standard approach",
-    "confidence": 0.94
+    "summary": "Historical decision record only: chose to reject untrusted automatic tag collisions before package jobs, preserve immutable tag producer metadata across exact reruns, and validate complete child attestations before composition. The stored 8afcd036 trace is an earlier PR ancestor, not the current head. This trajectory captured no command, output, commit, changed-file, or test evidence; all implementation statements are self-reported, non-authoritative, and non-gating.",
+    "approach": "Historical decision record (non-gating)",
+    "confidence": 0.2
   },
   "commits": [],
   "filesChanged": [],
   "projectId": "AgentWorkforce/relayfile",
-  "tags": [],
+  "tags": ["historical", "self-reported", "non-authoritative", "non-gating"],
   "_trace": {
     "startRef": "8afcd036e8cd29a4ea8d4de33453a4897f954be9",
     "endRef": "8afcd036e8cd29a4ea8d4de33453a4897f954be9"

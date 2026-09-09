@@ -2,7 +2,7 @@
   "id": "traj_gar68vc7e6r8",
   "version": 1,
   "task": {
-    "title": "Repair Relayfile release snapshot safeguards: reject unsafe custom versions, ambiguous registry records, and incomplete external attestations"
+    "title": "Historical self-report about release snapshot safeguards"
   },
   "status": "completed",
   "startedAt": "2026-09-08T19:22:07.834Z",
@@ -10,14 +10,14 @@
   "agents": [],
   "chapters": [],
   "retrospective": {
-    "summary": "Historical self-report about release version, tag, registry, and attestation work. This trajectory captured no decisions, commands, commits, changed files, or test evidence and is not a release approval or merge gate.",
-    "approach": "Standard approach",
-    "confidence": 0.96
+    "summary": "Historical self-report about release version, tag, registry, and attestation work at the earlier 9f48d6e5 ancestor. This trajectory captured no decisions, commands, outputs, commits, changed files, or test evidence. Its result claims are non-authoritative and it is not a release approval or merge gate.",
+    "approach": "Historical self-report (non-gating)",
+    "confidence": 0.2
   },
   "commits": [],
   "filesChanged": [],
   "projectId": "AgentWorkforce/relayfile",
-  "tags": [],
+  "tags": ["historical", "self-reported", "non-authoritative", "non-gating"],
   "_trace": {
     "startRef": "9f48d6e5497ade218183eca737bc80e6a3a52c33",
     "endRef": "9f48d6e5497ade218183eca737bc80e6a3a52c33"

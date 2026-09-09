@@ -2,7 +2,7 @@
   "id": "traj_rfzd9eqgrwev",
   "version": 1,
   "task": {
-    "title": "Harden release workflow action pinning and dispatch input handling",
+    "title": "Historical decisions on action pinning and dispatch input handling",
     "source": {
       "system": "plain",
       "id": "#478"
@@ -29,10 +29,10 @@
         {
           "ts": 1788885562573,
           "type": "decision",
-          "content": "Pinned every publish-workflow action to a full commit SHA and retained major-version comments",
+          "content": "Chose full-SHA action pinning with major-version comments",
           "raw": {
-            "question": "Pinned every publish-workflow action to a full commit SHA and retained major-version comments",
-            "chosen": "Pinned every publish-workflow action to a full commit SHA and retained major-version comments",
+            "question": "How should publish-workflow action references be constrained?",
+            "chosen": "Use full commit SHA pins and retain major-version comments",
             "alternatives": [],
             "reasoning": "The credential-bearing release workflow must not resolve mutable action tags at runtime."
           },
@@ -41,10 +41,10 @@
         {
           "ts": 1788885562891,
           "type": "decision",
-          "content": "Validated package and dry_run inputs once, exported safe outputs, and consumed only mapped values downstream",
+          "content": "Chose one-time package/dry_run validation with mapped downstream outputs",
           "raw": {
-            "question": "Validated package and dry_run inputs once, exported safe outputs, and consumed only mapped values downstream",
-            "chosen": "Validated package and dry_run inputs once, exported safe outputs, and consumed only mapped values downstream",
+            "question": "How should package and dry_run inputs reach shell steps?",
+            "chosen": "Validate once, export safe outputs, and consume only mapped values downstream",
             "alternatives": [],
             "reasoning": "Choice/boolean dispatch inputs must not be interpolated into shell source or paths."
           },
@@ -53,30 +53,30 @@
         {
           "ts": 1788885563241,
           "type": "reflection",
-          "content": "Release hardening is implemented; action refs and dispatch input paths are immutable or validated. This record does not establish test, actionlint, or Node 22 validation results.",
+          "content": "Self-reported, non-gating session note: the agent stated that action refs and dispatch input paths were hardened. Historical commit/file metadata exists, but the record captured no command or output evidence and does not establish test, actionlint, or Node 22 results.",
           "raw": {
             "focalPoints": [
               "action-pinning",
               "input-safety",
               "release-validation"
             ],
-            "confidence": 0.95
+            "confidence": 0.2
           },
           "significance": "high",
           "tags": [
             "focal:action-pinning",
             "focal:input-safety",
             "focal:release-validation",
-            "confidence:0.95"
+            "confidence:0.2"
           ]
         }
       ]
     }
   ],
   "retrospective": {
-    "summary": "Pinned all publish workflow actions to immutable commit SHAs, validated and mapped package/dry_run inputs before shell use, and added regression tests. Any validation statement in this record is self-reported and non-gating: it captured no command output or test/actionlint/Node22 evidence; its commit and file metadata support implementation statements only.",
-    "approach": "Standard approach",
-    "confidence": 0.95
+    "summary": "Historical decision record at refs 9e32618a through 3ffc97ee: the session reported immutable action pins, mapped package/dry_run inputs, and regressions. Those refs resolve to earlier PR ancestors and the stored commit/file list is historical implementation metadata only. No command or output evidence establishes tests, actionlint, or Node 22 results; validation claims are self-reported, non-authoritative, and non-gating.",
+    "approach": "Historical decision record (non-gating)",
+    "confidence": 0.2
   },
   "commits": ["3ffc97ee"],
   "filesChanged": [
@@ -85,7 +85,7 @@
     "scripts/release/publish-workflow.test.mjs"
   ],
   "projectId": "AgentWorkforce/relayfile",
-  "tags": [],
+  "tags": ["historical", "self-reported", "non-authoritative", "non-gating"],
   "_trace": {
     "startRef": "9e32618a0be4ed0ad5eaf27f27428ce7b166a79e",
     "endRef": "3ffc97eeae90a3810ae55e5c9b39007584f0f22e",

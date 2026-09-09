@@ -1015,8 +1015,6 @@ jobs:
         env:
           NEW_VERSION: ${{ needs.build.outputs.new_version }}
           SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
-          RELEASE_RUN_ID: ${{ needs.build.outputs.release_run_id }}
-          RELEASE_RUN_ATTEMPT: ${{ needs.build.outputs.release_run_attempt }}
         run: |
           set -euo pipefail
           git config user.name "GitHub Actions"

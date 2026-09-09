@@ -206,42 +206,42 @@
       "path": ".trajectories/completed/2026-08/traj_7n063n1f3wai.json"
     },
     "traj_y5d5akywgn83": {
-      "title": "Repair fresh review findings for relayfile#478 release snapshot fix",
+      "title": "Historical decisions from an earlier relayfile#478 repair branch",
       "status": "completed",
       "startedAt": "2026-09-08T16:19:00.597Z",
       "completedAt": "2026-09-08T16:25:59.738Z",
       "path": ".trajectories/completed/2026-09/traj_y5d5akywgn83.json"
     },
     "traj_rfzd9eqgrwev": {
-      "title": "Harden release workflow action pinning and dispatch input handling",
+      "title": "Historical decisions on action pinning and dispatch input handling",
       "status": "completed",
       "startedAt": "2026-09-08T16:39:17.422Z",
       "completedAt": "2026-09-08T16:39:46.883Z",
       "path": ".trajectories/completed/2026-09/traj_rfzd9eqgrwev.json"
     },
     "traj_2mzsi08gw9ht": {
-      "title": "Repair release snapshot review blockers",
+      "title": "Historical decision record for release snapshot review blockers",
       "status": "completed",
       "startedAt": "2026-09-08T16:49:16.555Z",
       "completedAt": "2026-09-08T16:56:07.870Z",
       "path": ".trajectories/completed/2026-09/traj_2mzsi08gw9ht.json"
     },
     "traj_9ecscwloe7cl": {
-      "title": "Independent final review of Relayfile release snapshot 1f049cdd",
+      "title": "Historical review record for Relayfile release snapshot 1f049cdd",
       "status": "completed",
       "startedAt": "2026-09-08T17:04:02.501Z",
       "completedAt": "2026-09-08T17:09:06.028Z",
       "path": ".trajectories/completed/2026-09/traj_9ecscwloe7cl.json"
     },
     "traj_gar68vc7e6r8": {
-      "title": "Repair Relayfile release snapshot safeguards: reject unsafe custom versions, ambiguous registry records, and incomplete external attestations",
+      "title": "Historical self-report about release snapshot safeguards",
       "status": "completed",
       "startedAt": "2026-09-08T19:22:07.834Z",
       "completedAt": "2026-09-08T19:22:28.321Z",
       "path": ".trajectories/completed/2026-09/traj_gar68vc7e6r8.json"
     },
     "traj_thvemykn51bx": {
-      "title": "Repair release attestation digest and provenance binding",
+      "title": "Historical decisions on release digest and provenance binding",
       "status": "completed",
       "startedAt": "2026-09-08T19:48:31.181Z",
       "completedAt": "2026-09-08T19:48:41.454Z",
@@ -269,49 +269,49 @@
       "path": "/private/tmp/relayfile-acl423-fix-0908/.trajectories/completed/2026-09/traj_f5e9ezrw8o6g.json"
     },
     "traj_9i36a7py61ph": {
-      "title": "Repair release snapshot review findings: tag collision, rerun attestation metadata, package attestation schema binding",
+      "title": "Historical decisions on release tag and attestation safeguards",
       "status": "completed",
       "startedAt": "2026-09-08T20:03:36.554Z",
       "completedAt": "2026-09-08T20:13:37.765Z",
       "path": ".trajectories/completed/2026-09/traj_9i36a7py61ph.json"
     },
     "traj_dyetw0ajjit2": {
-      "title": "Repair PR #479 review findings at exact aa6248c: relative CLI invocation, dispatch output assertions, and trajectory provenance; revalidate release gates",
+      "title": "Historical session report for PR #479 repair decisions at aa6248c",
       "status": "completed",
       "startedAt": "2026-09-08T20:24:35.669Z",
       "completedAt": "2026-09-08T20:28:02.969Z",
       "path": ".trajectories/completed/2026-09/traj_dyetw0ajjit2.json"
     },
     "traj_3r6zk2fhua5h": {
-      "title": "Align release attestation digest validation with optional npm digest contract",
+      "title": "Historical decision record for optional npm digest validation",
       "status": "completed",
       "startedAt": "2026-09-08T20:37:56.999Z",
       "completedAt": "2026-09-08T20:39:34.044Z",
       "path": ".trajectories/completed/2026-09/traj_3r6zk2fhua5h.json"
     },
     "traj_y0ud3lb6tkt0": {
-      "title": "Harden release CLI entrypoints and bounded registry propagation retries",
+      "title": "Historical decisions on release entrypoints and registry retries",
       "status": "completed",
       "startedAt": "2026-09-08T20:45:57.250Z",
       "completedAt": "2026-09-08T20:50:19.439Z",
       "path": ".trajectories/completed/2026-09/traj_y0ud3lb6tkt0.json"
     },
     "traj_ku42xm2erukv": {
-      "title": "Independent exact-head release review for Relayfile PR #479",
+      "title": "Historical PR #479 repair decision record through 601d162c",
       "status": "completed",
       "startedAt": "2026-09-08T20:53:38.056Z",
       "completedAt": "2026-09-08T23:26:25.667Z",
       "path": ".trajectories/completed/2026-09/traj_ku42xm2erukv.json"
     },
     "traj_jm05ulo6q9n9": {
-      "title": "Repair Relayfile release baseline with cryptographic provenance attestation",
+      "title": "Historical decisions on cryptographic release-baseline provenance",
       "status": "completed",
       "startedAt": "2026-09-08T18:34:14.911Z",
       "completedAt": "2026-09-08T18:35:41.168Z",
       "path": ".trajectories/completed/2026-09/traj_jm05ulo6q9n9.json"
     },
     "traj_xnlvfueuuj35": {
-      "title": "Repair release attestation digest and package-set validation",
+      "title": "Historical decisions on release digest and package-set validation",
       "status": "completed",
       "startedAt": "2026-09-08T18:56:21.883Z",
       "completedAt": "2026-09-08T18:56:55.631Z",

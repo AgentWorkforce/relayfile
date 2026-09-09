@@ -2,7 +2,7 @@
   "id": "traj_ku42xm2erukv",
   "version": 1,
   "task": {
-    "title": "Independent exact-head release review for Relayfile PR #479"
+    "title": "Historical PR #479 repair decision record through 601d162c"
   },
   "status": "completed",
   "startedAt": "2026-09-08T20:53:38.056Z",
@@ -49,28 +49,25 @@
         {
           "ts": 1788909870741,
           "type": "reflection",
-          "content": "Exact-head release regressions now reject empty and malformed shasums in pack, registry, post-publish, attestation, and baseline paths; trajectory provenance repair remains pending final validation.",
+          "content": "Self-reported, non-gating session note: the agent stated that digest regressions and trajectory provenance repairs were in place through its historical workspace state. The record captured no command or output evidence and does not validate 3a1594a8 or any later PR head.",
           "raw": {
-            "focalPoints": [
-              "digest-validation",
-              "trajectory-provenance"
-            ],
-            "confidence": 0.9
+            "focalPoints": ["digest-validation", "trajectory-provenance"],
+            "confidence": 0.2
           },
           "significance": "high",
           "tags": [
             "focal:digest-validation",
             "focal:trajectory-provenance",
-            "confidence:0.9"
+            "confidence:0.2"
           ]
         }
       ]
     }
   ],
   "retrospective": {
-    "summary": "Closed PR #479 feedback at exact head: shared optional digest validators reject present malformed shasums before publish/reconciliation, with pack, registry, and post-publish regressions; restored trajectory records removed without compaction; qualified stale/self-reported historical evidence.",
-    "approach": "Standard approach",
-    "confidence": 0.9
+    "summary": "Historical decision record through stored endRef 601d162c: the session reported optional-digest validation repairs, regressions, restored uncompacted trajectories, and provenance qualifications. Its stored start/end refs resolve locally but describe historical workspace states rather than the current PR head; the startRef is not an ancestor of this branch. The record captured file ranges but no command or output evidence, so its implementation and validation claims are self-reported, non-authoritative, and non-gating. It does not validate 3a1594a8 or any later repair commit.",
+    "approach": "Historical decision record (non-gating)",
+    "confidence": 0.2
   },
   "commits": [
     "601d162c",
@@ -112,8 +109,8 @@
     "scripts/release/resolve-release-baseline.mjs",
     "scripts/release/resolve-release-baseline.test.mjs"
   ],
-  "projectId": "/private/tmp/relayfile-release-snapshot-fix-0908",
-  "tags": [],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": ["historical", "self-reported", "non-authoritative", "non-gating"],
   "_trace": {
     "startRef": "1a7359dab2ac8b849efc6e4522f8e664177671a5",
     "endRef": "601d162ccd2264d187982239dd383f4c637fe742",

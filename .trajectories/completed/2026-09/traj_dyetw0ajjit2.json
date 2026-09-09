@@ -2,7 +2,7 @@
   "id": "traj_dyetw0ajjit2",
   "version": 1,
   "task": {
-    "title": "Repair PR #479 review findings at exact aa6248c: relative CLI invocation, dispatch output assertions, and trajectory provenance; revalidate release gates",
+    "title": "Historical session report for PR #479 repair decisions at aa6248c",
     "source": {
       "system": "plain",
       "id": "relayfile-pr-479-postmerge-repair"
@@ -29,24 +29,24 @@
         {
           "ts": 1788899183537,
           "type": "decision",
-          "content": "Accepted four current unresolved review findings as valid and scoped repairs",
+          "content": "Recorded four review findings and proposed repair scope",
           "raw": {
-            "question": "Accepted four current unresolved review findings as valid and scoped repairs",
-            "chosen": "Accepted four current unresolved review findings as valid and scoped repairs",
+            "question": "How should the four review findings be scoped?",
+            "chosen": "Treat the entrypoint, dispatch-output, and trajectory-provenance concerns as repair candidates",
             "alternatives": [],
-            "reasoning": "Two findings expose a real relative-entrypoint execution bug and missing dispatch output assertions; two findings expose inaccurate trajectory provenance. Seven other threads are explicitly addressed in aa6248c and remain covered by tests."
+            "reasoning": "The session classified two findings as relative-entrypoint and dispatch-output concerns and two as trajectory-provenance concerns. The record captured no evidence proving their repair or any test coverage."
           },
           "significance": "high"
         },
         {
           "ts": 1788899183854,
           "type": "decision",
-          "content": "Corrected traj_9ecscwloe7cl as historical non-gating provenance",
+          "content": "Recorded the historical non-gating disposition of traj_9ecscwloe7cl",
           "raw": {
-            "question": "Corrected traj_9ecscwloe7cl as historical non-gating provenance",
-            "chosen": "Corrected traj_9ecscwloe7cl as historical non-gating provenance",
+            "question": "How should traj_9ecscwloe7cl be interpreted?",
+            "chosen": "Treat it as historical non-gating provenance",
             "alternatives": [],
-            "reasoning": "Its source record has no captured validation evidence, so the unsupported GREEN and pre-existing-issue claims were withdrawn rather than replaced with invented evidence; projectId now uses AgentWorkforce/relayfile."
+            "reasoning": "Its source record has no captured validation evidence. This event records the disposition only; it does not claim that this trajectory introduced the already-present metadata correction."
           },
           "significance": "high"
         },
@@ -61,7 +61,7 @@
               "trajectory-provenance",
               "release-invariants"
             ],
-            "confidence": 0.96
+            "confidence": 0.2
           },
           "significance": "high",
           "tags": [
@@ -69,21 +69,21 @@
             "focal:dispatch-contract",
             "focal:trajectory-provenance",
             "focal:release-invariants",
-            "confidence:0.96"
+            "confidence:0.2"
           ]
         }
       ]
     }
   ],
   "retrospective": {
-    "summary": "Session record only: the agent reported resolving PR #479 entrypoint, dispatch-output, and trajectory-provenance findings at aa6248c. These implementation and validation statements are self-reported and non-gating because this trajectory captured no command output, commits, or changed-file evidence.",
-    "approach": "Standard approach",
-    "confidence": 0.96
+    "summary": "Historical session report only: the agent reported repair decisions at the earlier aa6248c ancestor. The empty commits/filesChanged fields and absence of command or output evidence mean it does not prove those repairs or any revalidation; the traj_9ecscwloe7cl disposition also pre-existed this record's current delta. All result claims are self-reported, non-authoritative, and non-gating.",
+    "approach": "Historical session report (non-gating)",
+    "confidence": 0.2
   },
   "commits": [],
   "filesChanged": [],
   "projectId": "AgentWorkforce/relayfile",
-  "tags": [],
+  "tags": ["historical", "self-reported", "non-authoritative", "non-gating"],
   "_trace": {
     "startRef": "aa6248cdfbab3910d81b8fb7e268e4b53056e898",
     "endRef": "aa6248cdfbab3910d81b8fb7e268e4b53056e898"

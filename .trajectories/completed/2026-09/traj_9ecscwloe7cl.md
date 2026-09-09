@@ -1,8 +1,8 @@
 # Trajectory: Historical review record for Relayfile release snapshot 1f049cdd
 
-> **Status:** ⚠️ Completed record; not a release sign-off
+> **Status:** ⚠️ Completed historical record; non-gating
 > **Task:** release-snapshot-review-0908
-> **Confidence:** 20% (the original record has no command, commit, file, or test evidence)
+> **Confidence:** 20% (no captured command, output, commit, changed-file, test, or actionlint evidence)
 > **Started:** September 8, 2026 at 07:04 PM
 > **Completed:** September 8, 2026 at 07:09 PM
 
@@ -10,9 +10,9 @@
 
 ## Summary
 
-This historical record is retained for provenance, but its original GREEN claim is withdrawn. The record contains no captured command output, commit/file evidence, or test/actionlint event proving the validations it describes, so it must not be used as a release approval.
+This historical record is retained for provenance at the earlier `1f049cdd` ancestor, but its original GREEN claim is withdrawn. The record contains no captured command output, commit/changed-file evidence, or test/actionlint event proving the validations it describes, so it is self-reported, non-authoritative, non-gating, and must not be used as a release approval.
 
-**Approach:** Independent adversarial release review
+**Approach:** Historical review record (non-gating)
 
 ---
 

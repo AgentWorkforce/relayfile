@@ -2,7 +2,7 @@
   "id": "traj_3r6zk2fhua5h",
   "version": 1,
   "task": {
-    "title": "Align release attestation digest validation with optional npm digest contract"
+    "title": "Historical decision record for optional npm digest validation"
   },
   "status": "completed",
   "startedAt": "2026-09-08T20:37:56.999Z",
@@ -25,10 +25,10 @@
         {
           "ts": 1788899973362,
           "type": "decision",
-          "content": "Accepted optional digest validation repair",
+          "content": "Chose the optional digest validation contract",
           "raw": {
-            "question": "Accepted optional digest validation repair",
-            "chosen": "Accepted optional digest validation repair",
+            "question": "How should optional npm digests be validated?",
+            "chosen": "Require one canonical local/registry digest match and reject malformed or incomparable values",
             "alternatives": [],
             "reasoning": "Reconciliation safely accepts either canonical SHA-512 SRI or SHA-1 when local and registry share one; the later attestation gate incorrectly demanded both after publication."
           },
@@ -39,23 +39,23 @@
           "type": "reflection",
           "content": "Self-reported, non-gating session note: the agent stated that it aligned attestation and baseline validation with the reconciliation contract and observed the release suite passing. This trajectory captured no command, commit, or changed-file evidence.",
           "raw": {
-            "confidence": 0.92
+            "confidence": 0.2
           },
           "significance": "high",
-          "tags": ["confidence:0.92"]
+          "tags": ["confidence:0.2"]
         }
       ]
     }
   ],
   "retrospective": {
-    "summary": "Decision record only: chose to accept an optional npm digest only when the local tarball and registry share one canonical matching value, while refusing malformed or incomparable digests. This trajectory captured no command, commit, or changed-file evidence and is non-gating.",
-    "approach": "Standard approach",
-    "confidence": 0.92
+    "summary": "Historical decision record only: chose to accept an optional npm digest only when the local tarball and registry share one canonical matching value, while refusing malformed or incomparable digests. The stored f811fd48 trace is an earlier PR ancestor, not the current head. This trajectory captured no command, output, commit, changed-file, or test evidence; all implementation and validation statements are self-reported, non-authoritative, and non-gating.",
+    "approach": "Historical decision record (non-gating)",
+    "confidence": 0.2
   },
   "commits": [],
   "filesChanged": [],
   "projectId": "AgentWorkforce/relayfile",
-  "tags": [],
+  "tags": ["historical", "self-reported", "non-authoritative", "non-gating"],
   "_trace": {
     "startRef": "f811fd488e8fad09299abdca789d522af821185e",
     "endRef": "f811fd488e8fad09299abdca789d522af821185e"

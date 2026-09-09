@@ -2,7 +2,7 @@
   "id": "traj_y5d5akywgn83",
   "version": 1,
   "task": {
-    "title": "Repair fresh review findings for relayfile#478 release snapshot fix",
+    "title": "Historical decisions from an earlier relayfile#478 repair branch",
     "source": {
       "system": "plain",
       "id": "relayfile#478-review"
@@ -29,10 +29,10 @@
         {
           "ts": 1788884729434,
           "type": "decision",
-          "content": "Moved custom release input values into step env and scoped GitHub permissions per job",
+          "content": "Chose step-environment release inputs and per-job GitHub permissions",
           "raw": {
-            "question": "Moved custom release input values into step env and scoped GitHub permissions per job",
-            "chosen": "Moved custom release input values into step env and scoped GitHub permissions per job",
+            "question": "How should custom release inputs and GitHub permissions be scoped?",
+            "chosen": "Pass release inputs through step env and scope permissions per job",
             "alternatives": [],
             "reasoning": "Direct expression interpolation could turn a custom version into shell source, while workflow-wide write permissions exceeded build and publish needs."
           },
@@ -41,10 +41,10 @@
         {
           "ts": 1788884729753,
           "type": "decision",
-          "content": "Generate attestation before remote tag push and reuse tags by parent/tree equivalence",
+          "content": "Chose attestation-before-tag and parent/tree equivalence for retries",
           "raw": {
-            "question": "Generate attestation before remote tag push and reuse tags by parent/tree equivalence",
-            "chosen": "Generate attestation before remote tag push and reuse tags by parent/tree equivalence",
+            "question": "How should release tag retries be constrained?",
+            "chosen": "Generate attestation before remote tag push and require parent/tree equivalence for reuse",
             "alternatives": [],
             "reasoning": "A retry can regenerate a different commit object for the same intended release; proving the immutable source parent and exact release tree allows safe reuse without tagging un-attested code."
           },
@@ -53,30 +53,30 @@
         {
           "ts": 1788884730106,
           "type": "reflection",
-          "content": "Self-reported and non-gating: the session recorded the fresh review findings as repaired (tag-safe retries, exact binary set, fail-closed registry ambiguity, least-privilege permissions), but captured no command/output evidence and predates later exact-head fixes.",
+          "content": "Self-reported and non-gating: the session stated that tag retries, binary selection, registry ambiguity, and permissions were repaired, but captured no command/output evidence and describes an earlier divergent branch state.",
           "raw": {
             "focalPoints": [
               "retry-safety",
               "binary-integrity",
               "least-privilege"
             ],
-            "confidence": 0.9
+            "confidence": 0.2
           },
           "significance": "high",
           "tags": [
             "focal:retry-safety",
             "focal:binary-integrity",
             "focal:least-privilege",
-            "confidence:0.9"
+            "confidence:0.2"
           ]
         }
       ]
     }
   ],
   "retrospective": {
-    "summary": "Historical record only: this session ended at fb0361c1d2aab3b67ca2e69e4f15d3cae7940af6 and predates later exact-head PR #479 fixes through 601d162ccd2264d187982239dd383f4c637fe742. Self-reported and non-gating: the recorded implementation claims have no captured command/output evidence and are not validation or release approval.",
-    "approach": "Standard approach",
-    "confidence": 0.75
+    "summary": "Historical decision record only: the stored refs resolve locally, but endRef fb0361c1 is from an earlier divergent branch state and is not an ancestor of the current PR head. The reported commit/file list is non-authoritative historical metadata. The record captured no command or output evidence, so all implementation claims are self-reported, non-gating, and not validation or release approval.",
+    "approach": "Historical decision record (non-gating)",
+    "confidence": 0.2
   },
   "commits": ["fb0361c1"],
   "filesChanged": [
@@ -89,7 +89,7 @@
     "scripts/release/reconcile-package.test.mjs"
   ],
   "projectId": "AgentWorkforce/relayfile",
-  "tags": [],
+  "tags": ["historical", "self-reported", "non-authoritative", "non-gating"],
   "_trace": {
     "startRef": "e175daba8a97f95308281573125f3c072f1cb695",
     "endRef": "fb0361c1d2aab3b67ca2e69e4f15d3cae7940af6",

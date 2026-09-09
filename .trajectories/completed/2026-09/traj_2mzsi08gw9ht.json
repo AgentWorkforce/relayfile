@@ -2,7 +2,7 @@
   "id": "traj_2mzsi08gw9ht",
   "version": 1,
   "task": {
-    "title": "Repair release snapshot review blockers",
+    "title": "Historical decision record for release snapshot review blockers",
     "source": {
       "system": "plain",
       "id": "relayfile#478-review-signoff"
@@ -29,10 +29,10 @@
         {
           "ts": 1788886563344,
           "type": "decision",
-          "content": "Validated release inputs before npm CLI parsing and restored executable workflow harnesses",
+          "content": "Chose explicit release-input validation and executable workflow harnesses",
           "raw": {
-            "question": "Validated release inputs before npm CLI parsing and restored executable workflow harnesses",
-            "chosen": "Validated release inputs before npm CLI parsing and restored executable workflow harnesses",
+            "question": "How should release inputs and workflow harness execution be hardened?",
+            "chosen": "Use explicit release-input validation and executable workflow harnesses",
             "alternatives": [],
             "reasoning": "npm version accepts option-shaped values as successful config queries, so explicit strict SemVer and bump-type validation are required; static regex contracts were insufficient for release-critical shell behavior."
           },
@@ -42,14 +42,14 @@
     }
   ],
   "retrospective": {
-    "summary": "Decision record only: chose to validate release inputs before npm CLI parsing, restore executable workflow harnesses, and keep Trail sources repository-relative. This trajectory captured no command, commit, or changed-file evidence and is non-gating.",
-    "approach": "Standard approach",
-    "confidence": 0.95
+    "summary": "Historical decision record only: chose explicit release-input validation, executable workflow harnesses, and repository-relative Trail sources. The stored trace points to the earlier 3982741a ancestor, not the current PR head. This trajectory captured no command, output, commit, changed-file, or test evidence; its implementation statements are self-reported, non-authoritative, and non-gating.",
+    "approach": "Historical decision record (non-gating)",
+    "confidence": 0.2
   },
   "commits": [],
   "filesChanged": [],
   "projectId": "AgentWorkforce/relayfile",
-  "tags": [],
+  "tags": ["historical", "self-reported", "non-authoritative", "non-gating"],
   "_trace": {
     "startRef": "3982741abce713da6b33f6e5954a7a05a65f380d",
     "endRef": "3982741abce713da6b33f6e5954a7a05a65f380d"

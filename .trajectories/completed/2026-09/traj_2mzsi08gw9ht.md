@@ -1,8 +1,8 @@
-# Trajectory: Repair release snapshot review blockers
+# Trajectory: Historical decision record for release snapshot review blockers
 
-> **Status:** ✅ Completed
+> **Status:** ⚠️ Completed historical record; non-gating
 > **Task:** relayfile#478-review-signoff
-> **Confidence:** 95%
+> **Confidence:** 20% (no captured command, output, commit, changed-file, or test evidence)
 > **Started:** September 8, 2026 at 06:49 PM
 > **Completed:** September 8, 2026 at 06:56 PM
 
@@ -10,16 +10,17 @@
 
 ## Summary
 
-Decision record only: chose to validate release inputs before npm CLI parsing, restore executable workflow harnesses, and keep Trail sources repository-relative. This trajectory captured no command, commit, or changed-file evidence and is non-gating.
+Historical decision record only: chose explicit release-input validation, executable workflow harnesses, and repository-relative Trail sources. The stored trace points to the earlier `3982741a` ancestor, not the current PR head. This trajectory captured no command, output, commit, changed-file, or test evidence; its implementation statements are self-reported, non-authoritative, and non-gating.
 
-**Approach:** Standard approach
+**Approach:** Historical decision record (non-gating)
 
 ---
 
 ## Key Decisions
 
-### Validated release inputs before npm CLI parsing and restored executable workflow harnesses
-- **Chose:** Validated release inputs before npm CLI parsing and restored executable workflow harnesses
+### Chose explicit release-input validation and executable workflow harnesses
+
+- **Chose:** Use explicit release-input validation and executable workflow harnesses
 - **Reasoning:** npm version accepts option-shaped values as successful config queries, so explicit strict SemVer and bump-type validation are required; static regex contracts were insufficient for release-critical shell behavior.
 
 ---
@@ -27,6 +28,7 @@ Decision record only: chose to validate release inputs before npm CLI parsing, r
 ## Chapters
 
 ### 1. Work
-*Agent: default*
 
-- Validated release inputs before npm CLI parsing and restored executable workflow harnesses
+_Agent: default_
+
+- Chose explicit release-input validation and executable workflow harnesses

@@ -1,8 +1,8 @@
-# Trajectory: Repair fresh review findings for relayfile#478 release snapshot fix
+# Trajectory: Historical decisions from an earlier relayfile#478 repair branch
 
-> **Status:** ✅ Completed
+> **Status:** ⚠️ Completed historical record; non-gating
 > **Task:** relayfile#478-review
-> **Confidence:** 75%
+> **Confidence:** 20% (historical commit/file metadata, but no captured command or output evidence)
 > **Started:** September 8, 2026 at 06:19 PM
 > **Completed:** September 8, 2026 at 06:25 PM
 
@@ -10,20 +10,22 @@
 
 ## Summary
 
-Historical record only: this session ended at fb0361c1d2aab3b67ca2e69e4f15d3cae7940af6 and predates later exact-head PR #479 fixes through 601d162ccd2264d187982239dd383f4c637fe742. Self-reported and non-gating: the recorded implementation claims have no captured command/output evidence and are not validation or release approval.
+Historical decision record only: the stored refs resolve locally, but endRef `fb0361c1` is from an earlier divergent branch state and is not an ancestor of the current PR head. The reported commit/file list is non-authoritative historical metadata. The record captured no command or output evidence, so all implementation claims are self-reported, non-gating, and not validation or release approval.
 
-**Approach:** Standard approach
+**Approach:** Historical decision record (non-gating)
 
 ---
 
 ## Key Decisions
 
-### Moved custom release input values into step env and scoped GitHub permissions per job
-- **Chose:** Moved custom release input values into step env and scoped GitHub permissions per job
+### Chose step-environment release inputs and per-job GitHub permissions
+
+- **Chose:** Pass release inputs through step env and scope permissions per job
 - **Reasoning:** Direct expression interpolation could turn a custom version into shell source, while workflow-wide write permissions exceeded build and publish needs.
 
-### Generate attestation before remote tag push and reuse tags by parent/tree equivalence
-- **Chose:** Generate attestation before remote tag push and reuse tags by parent/tree equivalence
+### Chose attestation-before-tag and parent/tree equivalence for retries
+
+- **Chose:** Generate attestation before remote tag push and require parent/tree equivalence for reuse
 - **Reasoning:** A retry can regenerate a different commit object for the same intended release; proving the immutable source parent and exact release tree allows safe reuse without tagging un-attested code.
 
 ---
@@ -31,15 +33,16 @@ Historical record only: this session ended at fb0361c1d2aab3b67ca2e69e4f15d3cae7
 ## Chapters
 
 ### 1. Work
-*Agent: default*
 
-- Moved custom release input values into step env and scoped GitHub permissions per job
-- Generate attestation before remote tag push and reuse tags by parent/tree equivalence
-- Self-reported and non-gating: the session recorded the fresh review findings as repaired (tag-safe retries, exact binary set, fail-closed registry ambiguity, least-privilege permissions), but captured no command/output evidence and predates later exact-head fixes.
+_Agent: default_
+
+- Chose step-environment release inputs and per-job GitHub permissions
+- Chose attestation-before-tag and parent/tree equivalence for retries
+- Self-reported and non-gating: the session stated that tag retries, binary selection, registry ambiguity, and permissions were repaired, but captured no command/output evidence and describes an earlier divergent branch state.
 
 ---
 
-## Artifacts
+## Historical metadata (non-authoritative)
 
 **Commits:** fb0361c1
 **Files changed:** 7

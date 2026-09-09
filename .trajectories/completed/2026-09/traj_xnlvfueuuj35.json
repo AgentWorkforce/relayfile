@@ -2,7 +2,7 @@
   "id": "traj_xnlvfueuuj35",
   "version": 1,
   "task": {
-    "title": "Repair release attestation digest and package-set validation",
+    "title": "Historical decisions on release digest and package-set validation",
     "source": {
       "system": "plain",
       "id": "relayfile-release-snapshot-fix-479"
@@ -42,22 +42,19 @@
     }
   ],
   "retrospective": {
-    "summary": "Require common exact package digests, reject unexpected package records, and add missing-package plus post-publish retry/conflict regressions.",
-    "approach": "Standard approach",
-    "confidence": 0.95
+    "summary": "Historical session self-report: require common exact package digests, reject unexpected package records, and add missing-package plus post-publish retry/conflict regressions. The stored refs 922498fd through 508be165 and reported commits resolve to earlier PR ancestors, but they are historical implementation metadata rather than the current PR head. No command or output evidence was captured, so all result and validation claims are non-authoritative and non-gating.",
+    "approach": "Historical decision record (non-gating)",
+    "confidence": 0.2
   },
-  "commits": [
-    "508be165",
-    "b5be0df1"
-  ],
+  "commits": ["508be165", "b5be0df1"],
   "filesChanged": [
     ".trajectories/index.json",
     "scripts/release/create-release-attestation.mjs",
     "scripts/release/create-release-attestation.test.mjs",
     "scripts/release/reconcile-package.test.mjs"
   ],
-  "projectId": "/private/tmp/relayfile-release-snapshot-fix-0908",
-  "tags": [],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": ["historical", "self-reported", "non-authoritative", "non-gating"],
   "_trace": {
     "startRef": "922498fdcdcfd8ae18757d5e2088281d9ec32ce5",
     "endRef": "508be165a6738e9899e407aae308d1ae1414d7bf",

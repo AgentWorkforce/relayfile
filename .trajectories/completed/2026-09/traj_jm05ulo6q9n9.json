@@ -2,7 +2,7 @@
   "id": "traj_jm05ulo6q9n9",
   "version": 1,
   "task": {
-    "title": "Repair Relayfile release baseline with cryptographic provenance attestation",
+    "title": "Historical decisions on cryptographic release-baseline provenance",
     "source": {
       "system": "plain",
       "id": "PR #479 candidate 925f617ff2038fabf871e26416738f13083b5450"
@@ -53,26 +53,22 @@
         {
           "ts": 1788892465966,
           "type": "reflection",
-          "content": "The forged v99.99.99 exact-shape sibling is rejected without a valid signed attestation; valid stale releases advance and exact same-run reruns can recover from the immutable workflow artifact.",
+          "content": "Self-reported, non-gating session note: the agent stated that forged sibling tags were rejected, valid stale releases advanced, and same-run reruns recovered from the workflow artifact. No command or output evidence was captured.",
           "raw": {
-            "confidence": 0.9
+            "confidence": 0.2
           },
           "significance": "high",
-          "tags": [
-            "confidence:0.9"
-          ]
+          "tags": ["confidence:0.2"]
         }
       ]
     }
   ],
   "retrospective": {
-    "summary": "Added cryptographically verified GitHub artifact attestations for release baseline tags, exact source/tag-tree binding, same-workflow rerun artifact recovery, and regressions for forged exact-shape siblings and mismatched attestations. Node 22 release suite passed twice.",
-    "approach": "Standard approach",
-    "confidence": 0.92
+    "summary": "Historical decision record: the session reported cryptographic artifact attestations, exact source/tag-tree binding, same-workflow recovery, and related regressions at historical refs 925f617f through 73840800. Those refs resolve to earlier PR ancestors, but the stored commit/file list is historical implementation metadata only. No command or output evidence substantiates the stated Node 22 runs, so all validation claims are self-reported, non-authoritative, and non-gating.",
+    "approach": "Historical decision record (non-gating)",
+    "confidence": 0.2
   },
-  "commits": [
-    "73840800"
-  ],
+  "commits": ["73840800"],
   "filesChanged": [
     ".github/workflows/publish.yml",
     ".trajectories/index.json",
@@ -82,8 +78,8 @@
     "scripts/release/resolve-release-baseline.mjs",
     "scripts/release/resolve-release-baseline.test.mjs"
   ],
-  "projectId": "/private/tmp/relayfile-release-snapshot-fix-0908",
-  "tags": [],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": ["historical", "self-reported", "non-authoritative", "non-gating"],
   "_trace": {
     "startRef": "925f617ff2038fabf871e26416738f13083b5450",
     "endRef": "738408009352e9f22d51c1583261959ae9a7f404",
