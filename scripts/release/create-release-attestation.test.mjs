@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
+import {
+  copyFileSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -29,6 +34,21 @@ function runCliFromSpacedPath(args) {
     return spawnSync(process.execPath, [entrypoint, ...args(directory)], {
       encoding: "utf8",
     });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+function runCliThroughSymlink(args) {
+  const directory = mkdtempSync(join(tmpdir(), "relayfile-attestation-symlink-"));
+  const entrypoint = join(directory, "create-release-attestation.mjs");
+  symlinkSync(SCRIPT, entrypoint);
+  try {
+    return spawnSync(
+      process.execPath,
+      ["--preserve-symlinks-main", entrypoint, ...args(directory)],
+      { encoding: "utf8" },
+    );
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -146,6 +166,17 @@ test("attestation rejects SHA-1-only npm identity", () => {
 
 test("attestation CLI executes when its entrypoint path contains spaces", () => {
   const result = runCliFromSpacedPath((directory) => [
+    "--package-dir",
+    join(directory, "missing-package-attestations"),
+    "--checksums",
+    join(directory, "missing-checksums"),
+  ]);
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stdout}${result.stderr}`, /ENOENT/);
+});
+
+test("attestation CLI executes through a preserved main-module symlink", () => {
+  const result = runCliThroughSymlink((directory) => [
     "--package-dir",
     join(directory, "missing-package-attestations"),
     "--checksums",
@@ -318,7 +349,7 @@ test("attestation rejects malformed equal digest strings", () => {
 
 test("attestation rejects package children from another workflow attempt", () => {
   const sourceSha = "a".repeat(40);
-  const packages = packageRecords(sourceSha, "1.2.3", 999, 1);
+  const packages = packageRecords(sourceSha, "1.2.3", 123, 1);
   assert.throws(
     () =>
       buildReleaseAttestation({

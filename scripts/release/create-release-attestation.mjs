@@ -304,7 +304,10 @@ try {
 } catch {
   // Import contexts such as `node -` do not name a filesystem entrypoint.
 }
-if (entrypoint && fileURLToPath(import.meta.url) === entrypoint) {
+if (
+  entrypoint &&
+  realpathSync(fileURLToPath(import.meta.url)) === entrypoint
+) {
   const args = parseArgs(process.argv.slice(2));
   try {
     const packages = readPackageAttestations(args.package_dir);
