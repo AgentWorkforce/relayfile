@@ -46,6 +46,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Set up uv
@@ -67,45 +68,27 @@ jobs:
           CUSTOM_VERSION: ${{ github.event.inputs.custom_version }}
           VERSION_TYPE: ${{ github.event.inputs.version }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ github.sha }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
           PYPROJECT="pyproject.toml"
 
           MANIFEST_VERSION=$(awk -F '"' '/^version = / { print $2; exit }' "$PYPROJECT")
-          LATEST_TAG=""
-          while IFS= read -r CANDIDATE_TAG; do
-            if [ "$(git cat-file -t "refs/tags/${CANDIDATE_TAG}")" != "tag" ]; then
-              continue
-            fi
-            RELEASE_ERROR=$(mktemp)
-            if gh api \
-              "repos/${GITHUB_REPOSITORY}/releases/tags/${CANDIDATE_TAG}" \
-              --silent 2>"$RELEASE_ERROR"; then
-              LATEST_TAG="$CANDIDATE_TAG"
-              rm -f "$RELEASE_ERROR"
-              break
-            fi
-            if grep -q 'HTTP 404' "$RELEASE_ERROR"; then
-              rm -f "$RELEASE_ERROR"
-              continue
-            fi
-            cat "$RELEASE_ERROR" >&2
-            rm -f "$RELEASE_ERROR"
-            echo "ERROR: could not verify completed release ${CANDIDATE_TAG}" >&2
-            exit 1
-          done < <(git -c versionsort.suffix=- for-each-ref \
-            --sort=-version:refname \
-            --format='%(refname:strip=2)' \
-            'refs/tags/sdk-python-v[0-9]*')
-
-          if [ -z "$LATEST_TAG" ]; then
-            echo "ERROR: no completed Python SDK GitHub release exists" >&2
-            exit 1
-          fi
-
-          CURRENT_VERSION="${LATEST_TAG#sdk-python-v}"
+          BASELINE_INFO=$(node "$GITHUB_WORKSPACE/scripts/release/resolve-python-release-baseline.mjs" \
+            --source-sha "$SOURCE_SHA" \
+            --cwd "$GITHUB_WORKSPACE" \
+            --current-version "$MANIFEST_VERSION" \
+            --repository "$RELEASE_REPOSITORY")
+          CURRENT_VERSION=$(printf '%s\n' "$BASELINE_INFO" | awk -F= '$1 == "baseline_version" { print $2 }')
+          LATEST_TAG=$(printf '%s\n' "$BASELINE_INFO" | awk -F= '$1 == "latest_tag" { print $2 }')
+          test -n "$CURRENT_VERSION"
           echo "Manifest version: $MANIFEST_VERSION"
-          echo "Release baseline: $CURRENT_VERSION ($LATEST_TAG)"
+          if [ -n "$LATEST_TAG" ]; then
+            echo "Release baseline: $CURRENT_VERSION ($LATEST_TAG)"
+          else
+            echo "No attested Python release tag found; using the manifest as the initial baseline"
+          fi
 
           bump_semver() {
             local current="$1"
@@ -210,6 +193,7 @@ jobs:
 
       - name: Check PyPI version state
         id: pypi-state
+        if: github.ref == 'refs/heads/main' && github.event.inputs.dry_run != 'true'
         env:
           NEW_VERSION: ${{ steps.bump.outputs.new_version }}
           RELEASE_RECOVERY: ${{ steps.bump.outputs.is_recovery }}
@@ -256,6 +240,7 @@ jobs:
           RELEASE_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
           TAG="sdk-python-v${NEW_VERSION}"

@@ -39,12 +39,17 @@ const PYTHON_WORKFLOW = readFileSync(
   join(REPO, ".github/workflows/publish-python.yml"),
   "utf8",
 );
+const PYTHON_BASELINE = readFileSync(
+  join(REPO, "scripts/release/resolve-python-release-baseline.mjs"),
+  "utf8",
+);
 
 test("release modules are import-safe when the argv entrypoint is stdin", () => {
   for (const script of [
     "create-release-attestation.mjs",
     "reconcile-package.mjs",
     "resolve-release-baseline.mjs",
+    "resolve-python-release-baseline.mjs",
   ]) {
     const moduleUrl = pathToFileURL(join(REPO, "scripts", "release", script));
     const result = spawnSync(process.execPath, ["--input-type=module", "-"], {
@@ -88,15 +93,23 @@ function workflowJob(name) {
 }
 
 function extractStepRun(name) {
+  return extractStepRunFrom(WORKFLOW, name);
+}
+
+function extractStepRunFrom(workflow, name) {
   const marker = `      - name: ${name}`;
-  const step = WORKFLOW.indexOf(marker);
+  const step = workflow.indexOf(marker);
   assert.notEqual(step, -1, `${name} step not found`);
-  const run = WORKFLOW.indexOf("\n        run: |", step);
+  const run = workflow.indexOf("\n        run: |", step);
   assert.notEqual(run, -1, `${name} run block not found`);
   const bodyStart = run + "\n        run: |".length + 1;
-  const bodyEnd = WORKFLOW.indexOf("\n      - name:", bodyStart);
+  const bodyEnd = workflow.indexOf("\n      - name:", bodyStart);
   assert.notEqual(bodyEnd, -1, `${name} run block is unterminated`);
-  return dedent(WORKFLOW.slice(bodyStart, bodyEnd));
+  return dedent(workflow.slice(bodyStart, bodyEnd));
+}
+
+function extractPythonStepRun(name) {
+  return extractStepRunFrom(PYTHON_WORKFLOW, name);
 }
 
 function runBash(script, { cwd, env = {} }) {
@@ -114,6 +127,45 @@ function runBash(script, { cwd, env = {} }) {
       status: error.status ?? 1,
       stdout: `${error.stdout ?? ""}${error.stderr ?? ""}`,
     };
+  }
+}
+
+function runPythonPypiState(statuses, { recovery = "false" } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "relayfile-python-pypi-state-"));
+  const bin = join(dir, "bin");
+  const output = join(dir, "output");
+  mkdirSync(bin);
+  writeFileSync(join(dir, "statuses"), `${statuses.join("\n")}\n`);
+  writeFileSync(join(dir, "cursor"), "1\n");
+  writeFileSync(
+    join(bin, "curl"),
+    '#!/bin/sh\n' +
+      'n=$(cat "$PYPI_CURSOR")\n' +
+      'status=$(sed -n "${n}p" "$PYPI_STATUSES")\n' +
+      'printf "%s" "$((n + 1))" > "$PYPI_CURSOR"\n' +
+      'printf "%s" "${status:-000}"\n',
+  );
+  writeFileSync(join(bin, "sleep"), "#!/bin/sh\nexit 0\n");
+  chmodSync(join(bin, "curl"), 0o755);
+  chmodSync(join(bin, "sleep"), 0o755);
+  try {
+    const result = runBash(extractPythonStepRun("Check PyPI version state"), {
+      cwd: REPO,
+      env: {
+        NEW_VERSION: "1.2.4",
+        RELEASE_RECOVERY: recovery,
+        GITHUB_OUTPUT: output,
+        PYPI_STATUSES: join(dir, "statuses"),
+        PYPI_CURSOR: join(dir, "cursor"),
+        PATH: `${bin}:${process.env.PATH}`,
+      },
+    });
+    return {
+      ...result,
+      outputFile: existsSync(output) ? readFileSync(output, "utf8") : "",
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 }
 
@@ -914,11 +966,11 @@ test("Python release is ephemeral and publishes only an annotated source tag", (
   assert.doesNotMatch(PYTHON_WORKFLOW, /git push origin HEAD:main/);
   assert.doesNotMatch(PYTHON_WORKFLOW, /git commit/);
   assert.doesNotMatch(PYTHON_WORKFLOW, /git add packages\/sdk\/python/);
-  assert.match(
-    PYTHON_WORKFLOW,
-    /--sort=-version:refname[\s\S]*refs\/tags\/sdk-python-v\[0-9\]\*/,
-  );
-  assert.match(PYTHON_WORKFLOW, /gh api[\s\S]*releases\/tags\/\$\{CANDIDATE_TAG\}/);
+  assert.match(PYTHON_WORKFLOW, /resolve-python-release-baseline\.mjs/);
+  assert.match(PYTHON_BASELINE, /parseStrictPep440/);
+  assert.match(PYTHON_BASELINE, /draft !== true/);
+  assert.match(PYTHON_BASELINE, /published_at/);
+  assert.match(PYTHON_BASELINE, /source-sha/);
   assert.match(
     PYTHON_WORKFLOW,
     /git tag -a "\$TAG"[\s\S]*source-sha=\$\{SOURCE_SHA\}[\s\S]*tag-tree=\$\{TAG_TREE\}/,
@@ -929,4 +981,60 @@ test("Python release is ephemeral and publishes only an annotated source tag", (
   );
   assert.match(PYTHON_WORKFLOW, /relayfile-sdk \$\{NEW_VERSION\} already exists/);
   assert.match(PYTHON_WORKFLOW, /--connect-timeout 5 --max-time 20/);
+  assert.match(
+    PYTHON_WORKFLOW,
+    /name: Check PyPI version state[\s\S]*if: github\.ref == 'refs\/heads\/main' && github\.event\.inputs\.dry_run != 'true'/,
+  );
+  assert.match(PYTHON_WORKFLOW, /No attested Python release tag found/);
+});
+
+test("Python PyPI state gate handles absence, recovery, outage, and existing versions", () => {
+  const absent = runPythonPypiState(["404"]);
+  assert.equal(absent.status, 0, absent.stdout);
+  assert.match(absent.outputFile, /published=false/);
+
+  const existing = runPythonPypiState(["200"]);
+  assert.notEqual(existing.status, 0);
+  assert.match(existing.stdout, /already exists without a same-source tag reservation/);
+
+  const recovery = runPythonPypiState(["200"], { recovery: "true" });
+  assert.equal(recovery.status, 0, recovery.stdout);
+  assert.match(recovery.outputFile, /published=true/);
+
+  const outage = runPythonPypiState(["503", "503", "503", "503"]);
+  assert.notEqual(outage.status, 0);
+  assert.match(outage.stdout, /remained transiently unavailable/);
+
+  assert.match(
+    PYTHON_WORKFLOW,
+    /name: Check PyPI version state[\s\S]*if: github\.ref == 'refs\/heads\/main' && github\.event\.inputs\.dry_run != 'true'/,
+  );
+});
+
+test("Python tag reservation refuses a checkout that is not the declared source", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "relayfile-python-source-"));
+  try {
+    git(cwd, "init", "-q");
+    git(cwd, "config", "user.name", "Release Test");
+    git(cwd, "config", "user.email", "release-test@example.invalid");
+    writeFileSync(join(cwd, "source.txt"), "source\n");
+    git(cwd, "add", ".");
+    git(cwd, "commit", "-qm", "source");
+    const result = runBash(
+      extractPythonStepRun("Reserve Python SDK release tag"),
+      {
+        cwd,
+        env: {
+          NEW_VERSION: "1.2.4",
+          SOURCE_SHA: "a".repeat(40),
+          RELEASE_RUN_ID: "123",
+          RELEASE_RUN_ATTEMPT: "1",
+        },
+      },
+    );
+    assert.notEqual(result.status, 0);
+    assert.doesNotMatch(result.stdout, /git push/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });

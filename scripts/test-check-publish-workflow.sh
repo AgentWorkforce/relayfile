@@ -39,6 +39,20 @@ assert_rejected backticks 'echo `git push origin main`'
 assert_rejected grouping '{ git push origin main; }'
 assert_rejected redirect '>out git push origin main'
 
+multiline="$fixture_dir/multiline.yml"
+printf 'run: |\n  git \\\n  push origin main\n' > "$multiline"
+if "$checker" "$multiline" allow-zero >/dev/null 2>&1; then
+  echo "checker accepted a multiline git push" >&2
+  exit 1
+fi
+
+indirect="$fixture_dir/indirect.yml"
+printf 'run: |\n  GIT=git\n  $GIT push origin main\n' > "$indirect"
+if "$checker" "$indirect" allow-zero >/dev/null 2>&1; then
+  echo "checker accepted an indirect git push" >&2
+  exit 1
+fi
+
 no_push="$fixture_dir/no-push.yml"
 printf 'run: echo release\n' > "$no_push"
 "$checker" "$no_push" allow-zero >/dev/null

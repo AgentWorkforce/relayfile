@@ -42,6 +42,19 @@ while IFS= read -r source_line; do
   fi
 done < "$workflow_file"
 
+# The line matcher above intentionally keeps the positive allowlist exact.
+# These fail-closed guards cover shell continuations and indirect command
+# names, which otherwise span lines or never contain the literal `git` token.
+workflow_source=$(<"$workflow_file")
+if [[ "$workflow_source" =~ (^|[^[:alnum:]_])git[[:space:]]*\\[[:space:]]*push[[:space:]]+ ]]; then
+  echo "publish workflow check failed: multiline git push is forbidden" >&2
+  exit 1
+fi
+if [[ "$workflow_source" =~ (^|[^[:alnum:]_])\$[A-Za-z_][A-Za-z0-9_]*[[:space:]]+push[[:space:]]+ ]]; then
+  echo "publish workflow check failed: indirect git push is forbidden" >&2
+  exit 1
+fi
+
 case "$expected_tag_pushes" in
   allow-zero)
     expected_max=1
