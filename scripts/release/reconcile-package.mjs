@@ -313,6 +313,11 @@ export async function reconcilePackage({
     throw new Error(
       "package.json is missing name/version; refusing to release",
     );
+  if (!Number.isFinite(registryQueryTimeoutMs) || registryQueryTimeoutMs <= 0) {
+    throw new Error(
+      "registry query timeout must be a finite positive number; refusing to release",
+    );
+  }
 
   const local = await packPackage({ packageDir, npm });
   if (local.name && local.name !== name)
@@ -426,13 +431,15 @@ export async function reconcilePackage({
             backoffDelay({ attempt, baseDelayMs: delayMs, maxDelayMs }),
             remainingDelayMs,
           );
-          if (delay === 0) break;
-          const sleepStartedAt = now();
-          await sleep(delay);
-          consumedRetryBudgetMs += Math.min(
-            remainingDelayMs,
-            Math.max(delay, now() - sleepStartedAt),
-          );
+          if (remainingDelayMs === 0) break;
+          if (delay > 0) {
+            const sleepStartedAt = now();
+            await sleep(delay);
+            consumedRetryBudgetMs += Math.min(
+              remainingDelayMs,
+              Math.max(delay, now() - sleepStartedAt),
+            );
+          }
         }
       }
       if (!registry) {

@@ -196,6 +196,61 @@ test("post-publish propagation retries an absent registry response", async () =>
   rmSync(dir, { recursive: true, force: true });
 });
 
+test("post-publish verification retries immediately when delay is zero", async () => {
+  const dir = sandbox();
+  const state = { views: 0, publishes: 0 };
+  const sleeps = [];
+  const npm = async (command, args, options) => {
+    if (args[0] === "view" && state.views < 2) {
+      state.views += 1;
+      return { code: 1, stdout: "", stderr: "npm error code E404" };
+    }
+    return fakeNpm({
+      state,
+      registry: { integrity: VALID_INTEGRITY, shasum: VALID_SHASUM },
+    })(command, args, options);
+  };
+  const result = await reconcilePackage({
+    packageDir: dir,
+    tag: "next",
+    sourceSha: "a".repeat(40),
+    npm,
+    attempts: 2,
+    delayMs: 0,
+    sleep: async (delay) => sleeps.push(delay),
+  });
+  assert.equal(result.package.status, "published");
+  assert.deepEqual(state, { views: 3, publishes: 1 });
+  assert.deepEqual(sleeps, []);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("invalid registry query timeouts fail before npm is invoked", async () => {
+  for (const registryQueryTimeoutMs of [
+    0,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+  ]) {
+    const dir = sandbox();
+    let npmCalls = 0;
+    await assert.rejects(
+      reconcilePackage({
+        packageDir: dir,
+        tag: "next",
+        sourceSha: "a".repeat(40),
+        registryQueryTimeoutMs,
+        npm: async () => {
+          npmCalls += 1;
+          throw new Error("npm must not be invoked");
+        },
+      }),
+      /registry query timeout must be a finite positive number/,
+    );
+    assert.equal(npmCalls, 0);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("post-publish verification rejects an empty registry shasum", async () => {
   const dir = sandbox();
   const state = { views: 0, publishes: 0 };

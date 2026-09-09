@@ -676,12 +676,14 @@ function parseArgs(argv) {
 }
 
 let entrypoint = "";
+let modulePath = "";
 try {
   entrypoint = process.argv[1] ? realpathSync(resolve(process.argv[1])) : "";
+  modulePath = realpathSync(fileURLToPath(import.meta.url));
 } catch {
   // Import contexts such as `node -` do not name a filesystem entrypoint.
 }
-if (entrypoint && fileURLToPath(import.meta.url) === entrypoint) {
+if (entrypoint && modulePath === entrypoint) {
   try {
     const args = parseArgs(process.argv.slice(2));
     const result = resolveReleaseBaseline({

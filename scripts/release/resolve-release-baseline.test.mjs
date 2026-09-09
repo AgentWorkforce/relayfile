@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -43,6 +44,35 @@ function runCliFromSpacedPath() {
     return spawnSync(
       process.execPath,
       [
+        entrypoint,
+        "--source-sha",
+        "a".repeat(40),
+        "--current-version",
+        "not-a-version",
+      ],
+      { encoding: "utf8" },
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+function runCliThroughSymlink() {
+  const directory = mkdtempSync(join(tmpdir(), "relayfile-baseline-symlink-"));
+  const entrypoint = join(directory, "resolve-release-baseline.mjs");
+  symlinkSync(
+    join(SCRIPTS_DIRECTORY, "resolve-release-baseline.mjs"),
+    entrypoint,
+  );
+  symlinkSync(
+    join(SCRIPTS_DIRECTORY, "create-release-attestation.mjs"),
+    join(directory, "create-release-attestation.mjs"),
+  );
+  try {
+    return spawnSync(
+      process.execPath,
+      [
+        "--preserve-symlinks-main",
         entrypoint,
         "--source-sha",
         "a".repeat(40),
@@ -287,6 +317,15 @@ test("missing, invalid, and mismatched external attestations fail closed", () =>
 
 test("baseline CLI executes when its entrypoint path contains spaces", () => {
   const result = runCliFromSpacedPath();
+  assert.notEqual(result.status, 0);
+  assert.match(
+    `${result.stdout}${result.stderr}`,
+    /current package version is not strict SemVer/,
+  );
+});
+
+test("baseline CLI executes through a preserved main-module symlink", () => {
+  const result = runCliThroughSymlink();
   assert.notEqual(result.status, 0);
   assert.match(
     `${result.stdout}${result.stderr}`,
