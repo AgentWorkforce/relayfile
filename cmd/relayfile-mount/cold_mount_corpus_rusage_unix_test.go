@@ -4,7 +4,6 @@ package main
 
 import (
 	"os/exec"
-	"runtime"
 	"syscall"
 )
 
@@ -32,11 +31,4 @@ func rusageCPUMs(usage syscall.Rusage) int64 {
 	user := float64(usage.Utime.Sec)*1000 + float64(usage.Utime.Usec)/1000
 	sys := float64(usage.Stime.Sec)*1000 + float64(usage.Stime.Usec)/1000
 	return int64(user + sys)
-}
-
-func rusageMaxRSSBytes(usage syscall.Rusage) int64 {
-	if runtime.GOOS == "darwin" {
-		return usage.Maxrss // bytes on darwin
-	}
-	return usage.Maxrss * 1024 // KiB on the other unix GOOS values
 }

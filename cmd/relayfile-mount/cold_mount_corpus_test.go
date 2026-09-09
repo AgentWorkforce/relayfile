@@ -13,9 +13,11 @@ package main
 // local/cold-mount-fixture.ts: 851 files, 454 directories, 270,532,608 bytes,
 // manifest SHA-256 905968a14268ec5e8ec38ae1d6b24749e855cac035976a87a65ef43f6
 // 612a55a. One cold mount plus two genuinely concurrent consumers must
-// complete using at least one bulk read, zero point reads, at most 120,000 ms
-// of mount CPU time, and at most 3 GiB of mount peak RSS — the same per-mount
-// telemetry bounds the Cloud candidate acceptance verifies.
+// complete using at least one bulk read, zero point reads, at most 10 minutes
+// wall time, 120,000 ms of mount CPU time, and 3 GiB of mount peak RSS. The
+// two concurrent consumers must have overlapping process lifetimes. These
+// are the same per-mount telemetry bounds the Cloud candidate acceptance
+// verifies, but this local test does not replace that production gate.
 
 import (
 	"bytes"
@@ -27,6 +29,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,6 +51,7 @@ const (
 	coldCorpusManifestSHA256 = "905968a14268ec5e8ec38ae1d6b24749e855cac035976a87a65ef43f6612a55a"
 
 	coldCorpusMaxCPUMs        = 120_000
+	coldCorpusMaxWallMs       = 10 * 60 * 1000
 	coldCorpusMaxPeakRSSBytes = 3 << 30
 
 	coldCorpusTreePageSize = 652
@@ -56,6 +60,7 @@ const (
 
 	// coldCorpusQualifyEnv explicitly opts in to this heavyweight gate.
 	coldCorpusQualifyEnv = "RELAYFILE_COLD_MOUNT_QUALIFY"
+	coldCorpusToken      = "token-cold-corpus"
 )
 
 type coldCorpusFile struct {
@@ -191,23 +196,91 @@ func newColdCorpusCloud() *coldCorpusCloud {
 }
 
 func (c *coldCorpusCloud) dispatch(w http.ResponseWriter, r *http.Request) {
-	switch {
-	case strings.Contains(r.URL.Path, "/fs/bulk-read"):
+	if r.URL.Path == "/v1/workspaces/ws_cold_corpus/fs/bulk-read" && r.Method == http.MethodPost {
+		if !c.authorize(w, r) {
+			return
+		}
 		c.handleBulkRead(w, r)
-	case strings.Contains(r.URL.Path, "/fs/tree"):
-		c.handleTree(w, r)
-	case strings.Contains(r.URL.Path, "/fs/events"):
-		http.Error(w, "events not supported", http.StatusNotFound)
-	case strings.Contains(r.URL.Path, "/fs/file"):
-		c.handleReadFile(w, r)
-	default:
-		http.NotFound(w, r)
+		return
 	}
+	if r.URL.Path == "/v1/workspaces/ws_cold_corpus/fs/tree" && r.Method == http.MethodGet {
+		if !c.authorize(w, r) {
+			return
+		}
+		c.handleTree(w, r)
+		return
+	}
+	if r.URL.Path == "/v1/workspaces/ws_cold_corpus/fs/events" && r.Method == http.MethodGet {
+		if !c.authorize(w, r) {
+			return
+		}
+		http.Error(w, "events not supported", http.StatusNotFound)
+		return
+	}
+	if r.URL.Path == "/v1/workspaces/ws_cold_corpus/fs/file" && r.Method == http.MethodGet {
+		if !c.authorize(w, r) {
+			return
+		}
+		c.handleReadFile(w, r)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/v1/workspaces/") {
+		http.Error(w, "unsupported relayfile request", http.StatusMethodNotAllowed)
+		return
+	}
+	http.NotFound(w, r)
+}
+
+func (c *coldCorpusCloud) authorize(w http.ResponseWriter, r *http.Request) bool {
+	if r.Header.Get("Authorization") != "Bearer "+coldCorpusToken {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
+func requireColdCorpusQuery(w http.ResponseWriter, r *http.Request, required map[string]string) bool {
+	for key, expected := range required {
+		if r.URL.Query().Get(key) != expected {
+			http.Error(w, "invalid relayfile query", http.StatusBadRequest)
+			return false
+		}
+	}
+	return true
+}
+
+func validColdCorpusCursor(cursor string, entries []treeEntryJSON) bool {
+	if cursor == "" {
+		return true
+	}
+	for _, entry := range entries {
+		if entry.Path == cursor {
+			return true
+		}
+	}
+	return false
+}
+
+func parseColdCorpusPath(raw string) (string, bool) {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Path != raw || !strings.HasPrefix(raw, coldCorpusRoot+"/") {
+		return "", false
+	}
+	return raw, true
 }
 
 func (c *coldCorpusCloud) handleTree(w http.ResponseWriter, r *http.Request) {
+	if !requireColdCorpusQuery(w, r, map[string]string{
+		"path": coldCorpusRoot, "depth": "3", "excludeMountRuntime": "true",
+	}) {
+		return
+	}
 	entries := coldCorpusFixture().treeEntries
 	cursor := r.URL.Query().Get("cursor")
+	if !validColdCorpusCursor(cursor, entries) {
+		http.Error(w, "invalid relayfile cursor", http.StatusBadRequest)
+		return
+	}
 	start := 0
 	if cursor != "" {
 		for i, entry := range entries {
@@ -239,6 +312,23 @@ func (c *coldCorpusCloud) handleBulkRead(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if len(request.Paths) == 0 || len(request.Paths) > 32 {
+		http.Error(w, "invalid bulk-read paths", http.StatusBadRequest)
+		return
+	}
+	seen := make(map[string]struct{}, len(request.Paths))
+	for _, path := range request.Paths {
+		path, valid := parseColdCorpusPath(path)
+		if !valid {
+			http.Error(w, "invalid bulk-read path", http.StatusBadRequest)
+			return
+		}
+		if _, duplicate := seen[path]; duplicate {
+			http.Error(w, "duplicate bulk-read path", http.StatusBadRequest)
+			return
+		}
+		seen[path] = struct{}{}
+	}
 	byPath := coldCorpusFixture().byPath
 	results := make([]map[string]any, 0, len(request.Paths))
 	for _, path := range request.Paths {
@@ -264,7 +354,12 @@ func (c *coldCorpusCloud) handleBulkRead(w http.ResponseWriter, r *http.Request)
 
 func (c *coldCorpusCloud) handleReadFile(w http.ResponseWriter, r *http.Request) {
 	c.pointReads.Add(1)
-	file, ok := coldCorpusFixture().byPath[r.URL.Query().Get("path")]
+	path, valid := parseColdCorpusPath(r.URL.Query().Get("path"))
+	if !valid {
+		http.Error(w, "invalid file path", http.StatusBadRequest)
+		return
+	}
+	file, ok := coldCorpusFixture().byPath[path]
 	if !ok {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -282,6 +377,8 @@ func (c *coldCorpusCloud) handleReadFile(w http.ResponseWriter, r *http.Request)
 // coldCorpusMountResult captures the measured outcome of one mount process.
 type coldCorpusMountResult struct {
 	label        string
+	startedAt    time.Time
+	finishedAt   time.Time
 	exitCode     int
 	wallMs       int64
 	cpuMs        int64
@@ -337,7 +434,7 @@ func runColdCorpusMount(t *testing.T, label, baseURL, localDir, stateFile string
 		"-log-http-status=true",
 	}
 	cmd := exec.Command(binary, args...)
-	cmd.Env = append(os.Environ(), "RELAYFILE_TOKEN=token-cold-corpus")
+	cmd.Env = append(os.Environ(), "RELAYFILE_TOKEN="+coldCorpusToken)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatalf("%s stdout pipe: %v", label, err)
@@ -346,6 +443,7 @@ func runColdCorpusMount(t *testing.T, label, baseURL, localDir, stateFile string
 	if err != nil {
 		t.Fatalf("%s stderr pipe: %v", label, err)
 	}
+	result := coldCorpusMountResult{label: label, startedAt: time.Now()}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("%s start: %v", label, err)
 	}
@@ -354,8 +452,6 @@ func runColdCorpusMount(t *testing.T, label, baseURL, localDir, stateFile string
 	go func() { data, _ := io.ReadAll(stderr); output <- string(data) }()
 
 	deadline := time.After(coldCorpusMountTimeout)
-	result := coldCorpusMountResult{label: label}
-	started := time.Now()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -368,7 +464,8 @@ func runColdCorpusMount(t *testing.T, label, baseURL, localDir, stateFile string
 		<-done
 		result.exitCode = -1
 	}
-	result.wallMs = time.Since(started).Milliseconds()
+	result.finishedAt = time.Now()
+	result.wallMs = result.finishedAt.Sub(result.startedAt).Milliseconds()
 	result.output = <-output + <-output
 	return result
 }
@@ -447,6 +544,84 @@ func hashFileSHA256(path string) (string, error) {
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
+func TestColdCorpusCloudRejectsMalformedRequestsWithoutMaterializingFixture(t *testing.T) {
+	cloud := newColdCorpusCloud()
+	defer cloud.Close()
+
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		authority  string
+		body       string
+		wantStatus int
+	}{
+		{
+			name:       "missing authorization",
+			method:     http.MethodGet,
+			path:       "/v1/workspaces/ws_cold_corpus/fs/tree?path=" + url.QueryEscape(coldCorpusRoot) + "&depth=3&excludeMountRuntime=true",
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "wrong method",
+			method:     http.MethodPost,
+			path:       "/v1/workspaces/ws_cold_corpus/fs/tree",
+			authority:  coldCorpusToken,
+			wantStatus: http.StatusMethodNotAllowed,
+		},
+		{
+			name:       "missing tree query",
+			method:     http.MethodGet,
+			path:       "/v1/workspaces/ws_cold_corpus/fs/tree",
+			authority:  coldCorpusToken,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "empty bulk request",
+			method:     http.MethodPost,
+			path:       "/v1/workspaces/ws_cold_corpus/fs/bulk-read",
+			authority:  coldCorpusToken,
+			body:       `{"paths":[]}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "invalid bulk path",
+			method:     http.MethodPost,
+			path:       "/v1/workspaces/ws_cold_corpus/fs/bulk-read",
+			authority:  coldCorpusToken,
+			body:       `{"paths":["/outside"]}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "invalid file path",
+			method:     http.MethodGet,
+			path:       "/v1/workspaces/ws_cold_corpus/fs/file?path=%2Foutside",
+			authority:  coldCorpusToken,
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request, err := http.NewRequest(test.method, cloud.URL+test.path, strings.NewReader(test.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.authority != "" {
+				request.Header.Set("Authorization", "Bearer "+test.authority)
+			}
+			response, err := cloud.Client().Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			if response.StatusCode != test.wantStatus {
+				t.Fatalf("status = %d, want %d", response.StatusCode, test.wantStatus)
+			}
+		})
+	}
+}
+
 func verifyColdCorpusResources(t *testing.T, result coldCorpusMountResult) {
 	t.Helper()
 	if result.exitCode != 0 {
@@ -454,6 +629,9 @@ func verifyColdCorpusResources(t *testing.T, result coldCorpusMountResult) {
 	}
 	if result.cpuMs < 0 || result.cpuMs > coldCorpusMaxCPUMs {
 		t.Fatalf("%s CPU %dms is unavailable or exceeds %dms", result.label, result.cpuMs, coldCorpusMaxCPUMs)
+	}
+	if result.wallMs < 0 || result.wallMs > coldCorpusMaxWallMs {
+		t.Fatalf("%s wall %dms is unavailable or exceeds %dms", result.label, result.wallMs, coldCorpusMaxWallMs)
 	}
 	if result.peakRSSBytes < 0 || result.peakRSSBytes > coldCorpusMaxPeakRSSBytes {
 		t.Fatalf("%s peak RSS %d is unavailable or exceeds %d", result.label, result.peakRSSBytes, coldCorpusMaxPeakRSSBytes)
@@ -463,6 +641,39 @@ func verifyColdCorpusResources(t *testing.T, result coldCorpusMountResult) {
 		t.Fatalf("%s logged an overload/reset failure:\n%s", result.label, tailString(result.output, 4000))
 	}
 	t.Logf("%s wall=%dms cpu=%dms peakRSS=%d", result.label, result.wallMs, result.cpuMs, result.peakRSSBytes)
+}
+
+func coldCorpusMountsOverlap(results []coldCorpusMountResult) bool {
+	if len(results) < 2 {
+		return false
+	}
+	overlapStart := results[0].startedAt
+	overlapEnd := results[0].finishedAt
+	for _, result := range results[1:] {
+		if result.startedAt.After(overlapStart) {
+			overlapStart = result.startedAt
+		}
+		if result.finishedAt.Before(overlapEnd) {
+			overlapEnd = result.finishedAt
+		}
+	}
+	return overlapStart.Before(overlapEnd)
+}
+
+func TestColdCorpusMountIntervalsRequireStrictOverlap(t *testing.T) {
+	base := time.Unix(100, 0)
+	if !coldCorpusMountsOverlap([]coldCorpusMountResult{
+		{startedAt: base, finishedAt: base.Add(2 * time.Second)},
+		{startedAt: base.Add(time.Second), finishedAt: base.Add(3 * time.Second)},
+	}) {
+		t.Fatal("overlapping mount intervals were rejected")
+	}
+	if coldCorpusMountsOverlap([]coldCorpusMountResult{
+		{startedAt: base, finishedAt: base.Add(time.Second)},
+		{startedAt: base.Add(time.Second), finishedAt: base.Add(2 * time.Second)},
+	}) {
+		t.Fatal("non-overlapping mount intervals were accepted")
+	}
 }
 
 func tailString(value string, limit int) string {
@@ -492,8 +703,8 @@ func TestColdMountScaleCorpusContract(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows: child rusage CPU/RSS telemetry is unavailable")
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skipf("skipping on %s: child rusage RSS units are not qualified", runtime.GOOS)
 	}
 	if !coldCorpusQualificationEnabled(t) {
 		return
@@ -534,6 +745,9 @@ func TestColdMountScaleCorpusContract(t *testing.T) {
 		}(i)
 	}
 	concurrentWait.Wait()
+	if !coldCorpusMountsOverlap(concurrentResults) {
+		t.Fatalf("concurrent cold mounts did not overlap: %s-%s and %s-%s", concurrentResults[0].startedAt.Format(time.RFC3339Nano), concurrentResults[0].finishedAt.Format(time.RFC3339Nano), concurrentResults[1].startedAt.Format(time.RFC3339Nano), concurrentResults[1].finishedAt.Format(time.RFC3339Nano))
+	}
 	for _, result := range concurrentResults {
 		verifyColdCorpusResources(t, result)
 	}
