@@ -1,0 +1,57 @@
+{
+  "id": "traj_4ntwa9vayb9p",
+  "version": 1,
+  "task": {
+    "title": "Repair PR #479 pre-publish integrity validation",
+    "source": {
+      "system": "plain",
+      "id": "PR-479"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-09-09T00:55:35.562Z",
+  "completedAt": "2026-09-09T00:58:28.631Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-09-09T00:57:10.515Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_4ifb9z859lzq",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-09-09T00:57:10.515Z",
+      "endedAt": "2026-09-09T00:58:28.631Z",
+      "events": [
+        {
+          "ts": 1788915430516,
+          "type": "decision",
+          "content": "Require canonical SHA-512 integrity at the npm pack boundary: Require canonical SHA-512 integrity at the npm pack boundary",
+          "raw": {
+            "question": "Require canonical SHA-512 integrity at the npm pack boundary",
+            "chosen": "Require canonical SHA-512 integrity at the npm pack boundary",
+            "alternatives": [],
+            "reasoning": "A SHA-1-only local record can reach npm publish when the registry version is absent, then fail only during post-publish comparison. Keeping shasum optional preserves npm 11 integrity-only output while ensuring publish identity is canonical before mutation."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Closed PR #479's pre-publish identity gap by requiring canonical SHA-512 npm pack integrity while retaining optional SHA-1 shasums; added a regression proving SHA-1-only local metadata cannot query or publish; focused and full release tests, Prettier, diff check, and TruffleHog passed.",
+    "approach": "Standard approach",
+    "confidence": 0.95
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "3e9406891e9c36706d7e135ceca3f88f5cf67421",
+    "endRef": "3e9406891e9c36706d7e135ceca3f88f5cf67421"
+  }
+}

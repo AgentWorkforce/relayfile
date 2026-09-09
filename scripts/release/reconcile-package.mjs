@@ -119,19 +119,16 @@ export function normalizePackRecord(raw, packageDir) {
     throw new Error(`npm pack output is missing: ${basename(filename)}`);
   const integrity = record.integrity ?? null;
   const shasum = record.shasum ?? null;
-  if (!isOptionalSha512Integrity(integrity)) {
+  if (!isSha512Integrity(integrity)) {
     throw new Error(
-      "npm pack returned malformed SHA-512 integrity; refusing to release",
+      integrity === null
+        ? "npm pack returned no SHA-512 integrity; refusing to release"
+        : "npm pack returned malformed SHA-512 integrity; refusing to release",
     );
   }
   if (!isOptionalSha1Shasum(shasum)) {
     throw new Error(
       "npm pack returned malformed SHA-1 shasum; refusing to release",
-    );
-  }
-  if (integrity === null && shasum === null) {
-    throw new Error(
-      "npm pack returned no integrity or shasum; refusing to release",
     );
   }
   return {

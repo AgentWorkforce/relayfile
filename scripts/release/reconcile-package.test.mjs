@@ -98,6 +98,45 @@ test("reconciliation publishes an absent version and verifies it afterwards", as
   rmSync(dir, { recursive: true, force: true });
 });
 
+test("reconciliation rejects SHA-1-only local pack identity before publishing", async () => {
+  const dir = sandbox();
+  const state = { views: 0, publishes: 0 };
+  const npm = async (command, args, { cwd }) => {
+    assert.equal(command, "npm");
+    if (args[0] === "pack") {
+      const filename = "relayfile-test-1.2.3.tgz";
+      writeFileSync(join(cwd, filename), "immutable package content");
+      return {
+        code: 0,
+        stdout: JSON.stringify([
+          {
+            filename,
+            name: "@relayfile/test",
+            version: "1.2.3",
+            shasum: VALID_SHASUM,
+          },
+        ]),
+        stderr: "",
+      };
+    }
+    if (args[0] === "view") state.views += 1;
+    if (args[0] === "publish") state.publishes += 1;
+    throw new Error(`unexpected npm command: ${args.join(" ")}`);
+  };
+
+  await assert.rejects(
+    reconcilePackage({
+      packageDir: dir,
+      tag: "next",
+      sourceSha: "a".repeat(40),
+      npm,
+    }),
+    /no SHA-512 integrity/,
+  );
+  assert.deepEqual(state, { views: 0, publishes: 0 });
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("post-publish propagation retries an absent registry response", async () => {
   const dir = sandbox();
   const state = { views: 0, publishes: 0 };
