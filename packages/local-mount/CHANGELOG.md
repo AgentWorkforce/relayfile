@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [0.10.57] - 2026-09-09
+
 ### Fixed
 
 - `relayfile-mount --once` now exits nonzero when the initial pull has not completed, preventing a timed-out large bootstrap from being reported as a successful mount.
@@ -708,7 +712,8 @@ Initial release.
 - Directory-only ignore patterns (e.g. `cache/`) match directories without swallowing like-named files.
 - README documenting the mount lifecycle, dotfile semantics, and auto-sync behavior. ([#48])
 
-[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.10.56...HEAD
+[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.10.57...HEAD
+[0.10.57]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.57
 [0.10.56]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.56
 [0.10.55]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.55
 [0.10.54]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.54
