@@ -1,0 +1,61 @@
+{
+  "id": "traj_vi6hsxq2kfs9",
+  "version": 1,
+  "task": {
+    "title": "Make Relayfile PR 477 shutdown retry regression deterministic",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#477"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-09-08T19:13:47.472Z",
+  "completedAt": "2026-09-08T19:14:19.279Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-09-08T19:13:52.573Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_dbo37kv11uyu",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-09-08T19:13:52.573Z",
+      "endedAt": "2026-09-08T19:14:19.279Z",
+      "events": [
+        {
+          "ts": 1788894832573,
+          "type": "decision",
+          "content": "Use fake timers and a local ready-state probe to control the resumable backoff test: Use fake timers and a local ready-state probe to control the resumable backoff test",
+          "raw": {
+            "question": "Use fake timers and a local ready-state probe to control the resumable backoff test",
+            "chosen": "Use fake timers and a local ready-state probe to control the resumable backoff test",
+            "alternatives": [],
+            "reasoning": "This proves stop occurs before retry timer advancement without relying on a real-time 20ms scheduling window or network retry timing."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Made PR 477 once shutdown/retry regression deterministic with scoped fake timers and local readiness state; runtime unchanged. Self-reported and non-gating: focused repetitions, SDK checks, Go checks, diff review, and secret scans were reported to pass; this trajectory contains no captured command/output evidence.",
+    "approach": "Standard approach",
+    "confidence": 0.75
+  },
+  "commits": ["bcb1e652"],
+  "filesChanged": [
+    ".trajectories/index.json",
+    "packages/sdk/typescript/src/mount-launcher.test.ts"
+  ],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "c02ad02381fdab09f0409fab287df68376d7dcef",
+    "endRef": "bcb1e652774d766fef0758bd9557d5afdbbadda5",
+    "traceId": "f816c77c-3ebc-41b8-8aa9-a255c83dee15"
+  }
+}

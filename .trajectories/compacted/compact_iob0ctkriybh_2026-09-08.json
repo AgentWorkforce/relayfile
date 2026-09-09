@@ -1,0 +1,77 @@
+{
+  "id": "compact_iob0ctkriybh",
+  "version": 1,
+  "type": "compacted",
+  "compactedAt": "2026-09-08T16:20:28.920Z",
+  "sourceTrajectories": [
+    "traj_7pk9n83ou91i",
+    "traj_q7vefcyaluc5",
+    "traj_5io1464ycrjc"
+  ],
+  "dateRange": {
+    "start": "2026-09-08T08:30:39.855Z",
+    "end": "2026-09-08T16:20:11.034Z"
+  },
+  "summary": {
+    "totalDecisions": 4,
+    "totalEvents": 6,
+    "uniqueAgents": [
+      "default"
+    ]
+  },
+  "decisionGroups": [
+    {
+      "category": "tooling",
+      "decisions": [
+        {
+          "question": "Use EX_TEMPFAIL 75 only for all-typed resumable once failures and retry within the existing launcher deadline",
+          "chosen": "Use EX_TEMPFAIL 75 only for all-typed resumable once failures and retry within the existing launcher deadline",
+          "reasoning": "The process boundary must distinguish a resumable checkpoint from fatal provider, configuration, daemon, terminal-bootstrap, or mixed-scope failures; the launcher must retain the same local and private state paths without accepting stale public readiness.",
+          "fromTrajectory": "traj_7pk9n83ou91i"
+        },
+        {
+          "question": "Treat --once bootstrap failures as fatal",
+          "chosen": "Treat --once bootstrap failures as fatal",
+          "reasoning": "False-success bug meant --once exited 0 even when bootstrapping timed out; explicit error preserves resumable checkpoint while signaling the incomplete state",
+          "fromTrajectory": "traj_5io1464ycrjc"
+        }
+      ]
+    },
+    {
+      "category": "other",
+      "decisions": [
+        {
+          "question": "Reordered finishInitialBootstrap's pre-loop checks to check the on-disk checkpoint (!state.inProgress) before rootCtx.Err()/lastCycleErr, mirroring the resume loop's existing checkpoint-first precedence",
+          "chosen": "Reordered finishInitialBootstrap's pre-loop checks to check the on-disk checkpoint (!state.inProgress) before rootCtx.Err()/lastCycleErr, mirroring the resume loop's existing checkpoint-first precedence",
+          "reasoning": "A SIGTERM/cancellation landing exactly as a fresh (not alreadyBootstrapped) bootstrap finished in its own first cycle was reported as an incomplete bootstrap even though the persisted checkpoint was genuinely complete, because rootCtx.Err() was checked before the checkpoint state. A real (non-yielded) cycle failure is still reported when the checkpoint reads not-in-progress, since that can mean the cycle failed before any bootstrap started",
+          "fromTrajectory": "traj_q7vefcyaluc5"
+        },
+        {
+          "question": "Represent deadline bootstrap yields with a typed cycle outcome marker",
+          "chosen": "Represent deadline bootstrap yields with a typed cycle outcome marker",
+          "reasoning": "The once resume gate must distinguish an in-progress timeout yield from a fatal cycle error while preserving errors.Is/errors.As through the underlying cause.",
+          "fromTrajectory": "traj_5io1464ycrjc"
+        }
+      ]
+    }
+  ],
+  "keyLearnings": [],
+  "keyFindings": [],
+  "filesAffected": [
+    ".trajectories/index.json",
+    "cmd/relayfile-mount/main.go",
+    "cmd/relayfile-mount/main_test.go",
+    "internal/mountsync/syncer.go",
+    "internal/mountsync/syncer_test.go",
+    "packages/local-mount/CHANGELOG.md",
+    "packages/sdk/typescript/src/mount-launcher.test.ts",
+    "packages/sdk/typescript/src/mount-launcher.ts",
+    "cmd/relayfile-mount/initial_sync_readiness_test.go"
+  ],
+  "commits": [
+    "99ae1187",
+    "51446856",
+    "43c8bb96",
+    "24846ae5"
+  ]
+}

@@ -1,0 +1,58 @@
+{
+  "id": "traj_jcnfpte7ncnb",
+  "version": 1,
+  "task": {
+    "title": "Fix PR 477 shutdown regression unhandled rejection ordering",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#477"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-09-08T19:52:36.316Z",
+  "completedAt": "2026-09-08T19:52:45.712Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-09-08T19:52:36.756Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_du9sb8l94fal",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-09-08T19:52:36.756Z",
+      "endedAt": "2026-09-08T19:52:45.712Z",
+      "events": [
+        {
+          "ts": 1788897156756,
+          "type": "decision",
+          "content": "Attach the ready rejection assertion before advancing the fake backoff timer: Attach the ready rejection assertion before advancing the fake backoff timer",
+          "raw": {
+            "question": "Attach the ready rejection assertion before advancing the fake backoff timer",
+            "chosen": "Attach the ready rejection assertion before advancing the fake backoff timer",
+            "alternatives": [],
+            "reasoning": "The waitForReady promise rejects in the timer continuation; attaching expect afterward can surface an unhandled rejection under strict runners."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Attached the SDK shutdown race rejection matcher before advancing the fake retry timer, eliminating strict-runner unhandled rejection exposure. Self-reported and non-gating: launcher repetitions, SDK checks, Go checks, diff review, and secret scans were reported to pass; this trajectory contains no captured command/output evidence.",
+    "approach": "Standard approach",
+    "confidence": 0.75
+  },
+  "commits": ["c0d9a80e"],
+  "filesChanged": ["packages/sdk/typescript/src/mount-launcher.test.ts"],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "ceaa7c2d177a20f2ac54e7bc7c522b4123e35f9f",
+    "endRef": "c0d9a80e6ca227e90560a2f54a92b964c2716bbb",
+    "traceId": "7d8db4dc-45a1-4492-bd3b-33e5fe1ed972"
+  }
+}

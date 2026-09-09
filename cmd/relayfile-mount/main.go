@@ -34,6 +34,11 @@ const (
 	syncModePullOnly     = "pull-only"
 	syncModeWriteOnly    = "write-only"
 	minMountPollInterval = 5 * time.Second
+	// EX_TEMPFAIL is a stable process-level contract for a --once bootstrap
+	// that stopped at a resumable checkpoint. Callers may rerun the same
+	// command with the same local/state directories; every other mount error
+	// remains a generic failure and must not be retried automatically.
+	initialBootstrapIncompleteExitCode = 75
 )
 
 var errFuseModeUnavailable = errors.New("fuse mode is not available in this build")
@@ -260,8 +265,51 @@ func main() {
 		if errors.Is(err, errFuseModeUnavailable) {
 			log.Fatalf("failed to start %s mount: %v; rerun with --mode=%s", cfg.mode, err, mountModePoll)
 		}
-		log.Fatalf("failed to start %s mount: %v", cfg.mode, err)
+		log.Printf("failed to start %s mount: %v", cfg.mode, err)
+		os.Exit(mountProcessExitCode(cfg, err))
 	}
+}
+
+// mountProcessExitCode preserves the narrow resumable-bootstrap outcome at
+// the process boundary. It deliberately checks both --once and the typed
+// error so provider, configuration, terminal-bootstrap, and daemon failures
+// continue to use the ordinary nonzero exit and are never retryable merely
+// because their text happens to mention bootstrap progress.
+func mountProcessExitCode(cfg mountConfig, err error) int {
+	if cfg.once && onlyInitialBootstrapIncomplete(err) {
+		return initialBootstrapIncompleteExitCode
+	}
+	return 1
+}
+
+// onlyInitialBootstrapIncomplete is true when every branch of a joined or
+// wrapped error is the typed resumable outcome. A scoped run may join one
+// resumable scope with a genuinely fatal sibling; that aggregate must remain
+// fatal instead of being downgraded to EX_TEMPFAIL by errors.As matching just
+// one branch.
+func onlyInitialBootstrapIncomplete(err error) bool {
+	if err == nil {
+		return false
+	}
+	if incomplete, ok := err.(*initialBootstrapIncompleteError); ok {
+		return incomplete.resumable
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		children := joined.Unwrap()
+		if len(children) == 0 {
+			return false
+		}
+		for _, child := range children {
+			if !onlyInitialBootstrapIncomplete(child) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return onlyInitialBootstrapIncomplete(wrapped.Unwrap())
+	}
+	return false
 }
 
 func resolveMountMode(mode string, fuse bool) (string, error) {
@@ -442,14 +490,40 @@ func runScopedPollingMountsWithRunner(
 		wg.Wait()
 		close(errCh)
 	}()
-	var firstErr error
+	// Every sibling's own run() call is independently bounded (rootCtx,
+	// maxOnceBootstrapResumeCycles, onceBootstrapStableCycleLimit), so this
+	// loop always terminates once every goroutine above returns.
+	//
+	// Cancellation is fail-fast by default: any non-nil error cancels the
+	// shared ctx, including a generic initialization/runtime error and every
+	// error observed in daemon mode (--once is not set). The ONLY narrow
+	// exception is cfg.once with an explicitly resumable
+	// *initialBootstrapIncompleteError -- the bounded outcome
+	// finishInitialBootstrap returns when a scope
+	// merely ran out of its own --once resume-cycle ceiling, hit its stall
+	// bound, or observed its own rootCtx cancellation while still in
+	// progress. That specific outcome must not cut short a healthy sibling
+	// still making progress within its own bound; it runs to its own bounded
+	// --once completion exactly as it would standalone. A generic error, a
+	// terminal bootstrap error (mountsync.IsBootstrapTerminalError, e.g.
+	// BootstrapStalledError -- retrying that persisted checkpoint forever
+	// would be pointless, and every sibling scope shares the same wedge
+	// risk), or any error at all outside --once still cancels every sibling.
+	// Every non-nil error, cancelling or not, is still collected and joined
+	// into the aggregate result so `--once` exits nonzero and reports every
+	// scope that failed, not just the first.
+	var errs []error
 	for err := range errCh {
-		if err != nil && firstErr == nil {
-			firstErr = err
+		if err == nil {
+			continue
+		}
+		errs = append(errs, err)
+		suppressSiblingCancellation := cfg.once && onlyInitialBootstrapIncomplete(err)
+		if !suppressSiblingCancellation {
 			cancel()
 		}
 	}
-	return firstErr
+	return errors.Join(errs...)
 }
 
 func logStandaloneMountContentPolicy(scopes []mountscope.Scope) error {
@@ -567,10 +641,12 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 	log.Printf("%s", mountStartupLogLine(cfg))
 	log.Printf("Mirror started at %s. Sync interval %s +/- %.0f%%. Public state: %s", cfg.localDir, cfg.interval.Round(time.Second), cfg.intervalJitter*100, filepath.Join(cfg.localDir, ".relay", "state.json"))
 
-	// lastCycleErr records the most recent cycle failure that `run` swallowed
-	// as nonfatal. The `--once` bootstrap resume loop reads it so it only
-	// continues a traversal that yielded on its file budget, never one that
-	// failed: a failing cycle keeps its historical single-attempt behavior.
+	// lastCycleErr records the most recent cycle outcome that `run` swallowed
+	// as nonfatal. The value carries an explicit marker for a deadline yield
+	// while an in-progress bootstrap checkpoint is persisted; that yield is
+	// healthy and resumable, while every other swallowed error is fatal to the
+	// --once bootstrap attempt. Keeping the marker in the error chain preserves
+	// errors.Is/errors.As for the underlying provider or context error.
 	var lastCycleErr error
 	run := func(reconcile bool) error {
 		ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
@@ -581,21 +657,24 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 		} else {
 			err = syncer.SyncOnce(ctx)
 		}
-		lastCycleErr = err
+		lastCycleErr = nil
 		if err != nil {
 			if mountsync.IsBootstrapTerminalError(err) {
 				// This is an operator-actionable hard stop, not a transient
 				// cycle failure. Returning it terminates this runner (and, for
 				// scoped layouts, cancels sibling runners) instead of letting
 				// the polling ticker retry the same persisted checkpoint forever.
+				lastCycleErr = err
 				return err
 			}
 			if errors.Is(err, context.DeadlineExceeded) {
 				if synced, total, ok := readBootstrapProgress(cfg.localDir); ok {
+					lastCycleErr = &cycleOutcomeError{cause: err, yielded: true}
 					log.Printf("mount bootstrapping: %s (in progress)", formatBootstrapProgress(synced, total))
 					return nil
 				}
 			}
+			lastCycleErr = &cycleOutcomeError{cause: err}
 			log.Printf("mount sync cycle failed: %v", err)
 			return nil
 		}
@@ -603,11 +682,27 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 		return nil
 	}
 
+	// Captured before the cycle below runs: once that cycle executes,
+	// lastSuccessfulReconcileAt may be (re)written and would no longer
+	// distinguish "already fully synced before this process started" from
+	// "just finished as part of this attempt."
+	priorBootstrapComplete := bootstrapAlreadyComplete(cfg.localDir)
+
 	if err := run(true); err != nil {
 		return err
 	}
 	if cfg.once {
-		return finishInitialBootstrap(rootCtx, cfg, run, func() error { return lastCycleErr })
+		privateBootstrapComplete, err := syncer.InitialBootstrapComplete()
+		if err != nil {
+			return fmt.Errorf("inspect authoritative bootstrap state: %w", err)
+		}
+		// The public completion sampled before the cycle is reusable only when
+		// the syncer's authoritative private state still agrees after load-time
+		// mode migrations. In particular, write-only -> mirror/pull-only resets
+		// the private flag before the required backfill. A failure before that
+		// backfill starts may leave the older public view looking complete.
+		priorBootstrapComplete = priorBootstrapComplete && privateBootstrapComplete
+		return finishInitialBootstrap(rootCtx, cfg, run, func() error { return lastCycleErr }, priorBootstrapComplete)
 	}
 
 	var watcher *mountsync.FileWatcher
@@ -869,39 +964,105 @@ const onceBootstrapStableCycleLimit = 3
 //
 // The loop is bounded three ways: rootCtx cancellation (the caller's
 // `timeout`/idle watchdog), a terminal error from the cycle, and a
-// no-progress guard. Cancellation deliberately returns nil so the exit code
-// keeps its historical meaning; the readiness guard downstream still sees the
-// incomplete bootstrap and reports a resumable TEMPFAIL.
-func finishInitialBootstrap(rootCtx context.Context, cfg mountConfig, run func(reconcile bool) error, lastCycleErr func() error) error {
-	if err := lastCycleErr(); err != nil {
-		// The cycle failed rather than yielding on its budget. Retrying here
-		// would turn one transient cloud error into a stall escalation, so
-		// keep `--once`'s historical single-attempt behavior and let the
-		// readiness guard downstream report a resumable TEMPFAIL.
-		return nil
-	}
+// no-progress guard. Every incomplete exit returns a typed error so `--once`
+// cannot report success while the persisted checkpoint still requires work.
+//
+// alreadyBootstrapped reports whether the checkpoint already showed a
+// complete bootstrap (with at least one prior successful reconcile) before
+// the caller's own first cycle ran — see bootstrapAlreadyComplete. It only
+// exempts that first cycle from the lastCycleErr check below when
+// cfg.forceFullRecon is unset: --full-reconcile is an explicit request for a
+// real full-tree reconcile to run and succeed on THIS invocation, and an
+// on-disk checkpoint from some earlier, unrelated completion must not let
+// that cycle's own failure (e.g. a tree/provider request error) go
+// unreported just because bootstrap itself finished at some prior point.
+//
+// When the checkpoint reads as not-in-progress right after that first cycle,
+// the on-disk checkpoint is checked, and takes precedence, before rootCtx or
+// lastCycleErr: it is the fact of record for whether that cycle finished the
+// bootstrap, and a signal or an unrelated error observed only after the
+// cycle already returned and persisted its checkpoint must not turn an
+// on-disk completion into a reported failure. This mirrors the resume loop's
+// own checkpoint-before-cancellation precedence below, and closes the
+// pre-loop counterpart of that race: a SIGTERM/cancellation landing exactly
+// as a fresh (not alreadyBootstrapped) bootstrap finishes in its very first
+// cycle must not be reported as incomplete. A checkpoint that is still
+// in-progress after that first cycle runs the cancellation/failure checks
+// and the resume loop below exactly as before.
+//
+// Within the resume loop, a terminal cycleErr is in turn checked before
+// rootCtx.Err(): a genuinely terminal, operator-actionable failure
+// (mountsync.IsBootstrapTerminalError) must not be demoted to a generic
+// "context cancelled" message just because a SIGTERM/idle-watchdog
+// cancellation happened to land in the same cycle.
+func finishInitialBootstrap(rootCtx context.Context, cfg mountConfig, run func(reconcile bool) error, lastCycleErr func() error, alreadyBootstrapped bool) error {
 	state := readBootstrapResumeState(cfg.localDir)
 	if !state.inProgress {
+		// alreadyBootstrapped exempts this run's own first cycle from the
+		// lastCycleErr check below -- but ONLY when that cycle was allowed
+		// to be a no-op incremental poll. cfg.forceFullRecon is an explicit
+		// operator request for a real full-tree reconcile to run and
+		// succeed; a checkpoint that merely predates this process must not
+		// let --full-reconcile's own cycle failure go unreported just
+		// because bootstrap itself finished at some earlier, unrelated
+		// point in time.
+		if alreadyBootstrapped && !cfg.forceFullRecon {
+			return nil
+		}
+		// Not already complete before this process started, and not in
+		// progress now: either the first cycle needed no bootstrap at all,
+		// or it just finished one. Both are on-disk completions and outrank
+		// a concurrent rootCtx cancellation. A real (non-yielded) cycle
+		// failure is still terminal here, since it can also mean the cycle
+		// failed before any bootstrap got the chance to start.
+		if err := lastCycleErr(); err != nil && !cycleYielded(err) {
+			return newInitialBootstrapIncompleteError(state, "initial cycle failed", err)
+		}
 		return nil
+	}
+	if err := rootCtx.Err(); err != nil {
+		return newResumableInitialBootstrapIncompleteError(state, "context cancelled before bootstrap resumed", err)
+	}
+	if err := lastCycleErr(); err != nil && !cycleYielded(err) {
+		return newInitialBootstrapIncompleteError(state, "initial cycle failed", err)
 	}
 	log.Printf("initial sync: bootstrap incomplete after first cycle (%s); resuming from the persisted checkpoint", formatBootstrapProgress(state.synced, state.total))
 	stableCycles := 0
 	for cycle := 0; cycle < maxOnceBootstrapResumeCycles; cycle++ {
 		if err := rootCtx.Err(); err != nil {
 			log.Printf("initial sync: stopping before bootstrap completed: %v", err)
-			return nil
+			return newResumableInitialBootstrapIncompleteError(state, "context cancelled before bootstrap completed", err)
 		}
-		if err := run(true); err != nil {
-			return err
-		}
-		if err := lastCycleErr(); err != nil {
-			log.Printf("initial sync: stopping after a failed resume cycle: %v", err)
-			return nil
-		}
+		cycleErr := run(true)
+		// The checkpoint is read once, immediately after the cycle returns,
+		// and checked before any cancellation/error branch below: whether
+		// this cycle finished the bootstrap is a fact about the persisted
+		// state, not about a signal that happened to race its return. A
+		// rootCtx cancellation or an unrelated lastCycleErr recorded in the
+		// same cycle that actually finished the tree must not turn a
+		// completed bootstrap into a reported failure.
 		next := readBootstrapResumeState(cfg.localDir)
 		if !next.inProgress {
 			log.Printf("initial sync: bootstrap complete")
 			return nil
+		}
+		// A terminal cycleErr (mountsync.IsBootstrapTerminalError, e.g.
+		// BootstrapStalledError) is checked before rootCtx.Err(): it is the
+		// more specific, operator-actionable fact about this cycle, and a
+		// rootCtx cancellation that happens to land in the same cycle (a
+		// SIGTERM/idle-watchdog racing an independently-detected stall) must
+		// not demote that typed error to a generic "context cancelled"
+		// message and cost callers their errors.As match on the real cause.
+		if cycleErr != nil {
+			return cycleErr
+		}
+		if err := rootCtx.Err(); err != nil {
+			log.Printf("initial sync: stopping before bootstrap completed: %v", err)
+			return newResumableInitialBootstrapIncompleteError(next, "context cancelled before bootstrap completed", err)
+		}
+		if err := lastCycleErr(); err != nil && !cycleYielded(err) {
+			log.Printf("initial sync: stopping after a failed resume cycle: %v", err)
+			return newInitialBootstrapIncompleteError(next, "resume cycle failed", err)
 		}
 		if next.checkpoint != state.checkpoint {
 			state = next
@@ -918,11 +1079,11 @@ func finishInitialBootstrap(rootCtx context.Context, cfg mountConfig, run func(r
 		stableCycles++
 		if stableCycles >= onceBootstrapStableCycleLimit {
 			log.Printf("initial sync: bootstrap checkpoint stopped advancing at %s; leaving it for the next run", formatBootstrapProgress(state.synced, state.total))
-			return nil
+			return newResumableInitialBootstrapIncompleteError(state, "bootstrap checkpoint stopped advancing", nil)
 		}
 	}
 	log.Printf("initial sync: bootstrap still incomplete after %d resume cycles; leaving the checkpoint for the next run", maxOnceBootstrapResumeCycles)
-	return nil
+	return newResumableInitialBootstrapIncompleteError(state, fmt.Sprintf("bootstrap still incomplete after %d resume cycles", maxOnceBootstrapResumeCycles), nil)
 }
 
 // bootstrapResumeState is one read of the public bootstrap block: how far the
@@ -939,6 +1100,79 @@ type bootstrapResumeState struct {
 	synced     int
 	total      int
 	checkpoint string
+}
+
+// cycleOutcomeError keeps the cycle's underlying error available to
+// errors.Is/errors.As while distinguishing a deadline that yielded with a
+// persisted bootstrap checkpoint from a fatal cycle failure. The latter must
+// stop --once; the former must let finishInitialBootstrap resume the cursor.
+type cycleOutcomeError struct {
+	cause   error
+	yielded bool
+}
+
+func (e *cycleOutcomeError) Error() string {
+	if e.cause == nil {
+		return "sync cycle failed"
+	}
+	return e.cause.Error()
+}
+
+func (e *cycleOutcomeError) Unwrap() error {
+	return e.cause
+}
+
+type initialBootstrapIncompleteError struct {
+	state  bootstrapResumeState
+	reason string
+	cause  error
+	// resumable is deliberately explicit. A provider, configuration, or other
+	// cycle failure can leave bootstrap incomplete too, but must remain fatal at
+	// the process boundary rather than becoming an SDK retry signal.
+	resumable bool
+}
+
+func newInitialBootstrapIncompleteError(state bootstrapResumeState, reason string, cause error) error {
+	return newInitialBootstrapIncompleteErrorWithResumable(state, reason, cause, false)
+}
+
+func newResumableInitialBootstrapIncompleteError(state bootstrapResumeState, reason string, cause error) error {
+	return newInitialBootstrapIncompleteErrorWithResumable(state, reason, cause, true)
+}
+
+func newInitialBootstrapIncompleteErrorWithResumable(state bootstrapResumeState, reason string, cause error, resumable bool) error {
+	if reason == "" {
+		reason = "bootstrap incomplete"
+	}
+	return &initialBootstrapIncompleteError{
+		state:     state,
+		reason:    reason,
+		cause:     cause,
+		resumable: resumable,
+	}
+}
+
+func cycleYielded(err error) bool {
+	var outcome *cycleOutcomeError
+	return errors.As(err, &outcome) && outcome.yielded
+}
+
+func (e *initialBootstrapIncompleteError) Error() string {
+	message := "initial bootstrap incomplete"
+	if e.reason != "" {
+		message = message + ": " + e.reason
+	}
+	if e.state.inProgress {
+		message = message + fmt.Sprintf(" (%s)", formatBootstrapProgress(e.state.synced, e.state.total))
+	}
+	if e.cause != nil {
+		message = message + ": " + e.cause.Error()
+	}
+	return message
+}
+
+func (e *initialBootstrapIncompleteError) Unwrap() error {
+	return e.cause
 }
 
 func readBootstrapResumeState(localDir string) bootstrapResumeState {
@@ -974,6 +1208,33 @@ func readBootstrapResumeState(localDir string) bootstrapResumeState {
 			view.Bootstrap.DirectoriesDiscovered,
 		),
 	}
+}
+
+// bootstrapAlreadyComplete reports whether the mountsync public state file
+// already showed a fully materialized bootstrap — no in-progress block, and
+// at least one previously recorded successful reconcile — before the caller
+// runs its own first cycle. Both conditions matter: a brand-new mount with
+// no state file yet also has no bootstrap block, but it has never recorded a
+// successful reconcile either, so it must not be mistaken for "already
+// done." Callers must read this before running any cycle of their own,
+// since a successful cycle rewrites lastSuccessfulReconcileAt and would
+// erase the distinction between "already done" and "just finished now."
+func bootstrapAlreadyComplete(localDir string) bool {
+	if strings.TrimSpace(localDir) == "" {
+		return false
+	}
+	payload, err := os.ReadFile(filepath.Join(localDir, ".relay", "state.json"))
+	if err != nil {
+		return false
+	}
+	var view struct {
+		Bootstrap                 *struct{} `json:"bootstrap"`
+		LastSuccessfulReconcileAt string    `json:"lastSuccessfulReconcileAt"`
+	}
+	if err := json.Unmarshal(payload, &view); err != nil {
+		return false
+	}
+	return view.Bootstrap == nil && strings.TrimSpace(view.LastSuccessfulReconcileAt) != ""
 }
 
 // readBootstrapProgress reads the in-progress bootstrap block from the

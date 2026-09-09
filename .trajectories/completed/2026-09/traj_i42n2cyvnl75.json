@@ -1,0 +1,63 @@
+{
+  "id": "traj_i42n2cyvnl75",
+  "version": 1,
+  "task": {
+    "title": "Fix PR 477 resumable readiness timeout contract",
+    "source": {
+      "system": "plain",
+      "id": "relayfile#477"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-09-08T20:05:48.457Z",
+  "completedAt": "2026-09-08T20:12:17.950Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-09-08T20:12:17.347Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_f40mjrxnbvgx",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-09-08T20:12:17.347Z",
+      "endedAt": "2026-09-08T20:12:17.950Z",
+      "events": [
+        {
+          "ts": 1788898337348,
+          "type": "decision",
+          "content": "Timeout must win over generic early exit for a resumable exit-75 child unless explicit shutdown is already in progress: Timeout must win over generic early exit for a resumable exit-75 child unless explicit shutdown is already in progress",
+          "raw": {
+            "question": "Timeout must win over generic early exit for a resumable exit-75 child unless explicit shutdown is already in progress",
+            "chosen": "Timeout must win over generic early exit for a resumable exit-75 child unless explicit shutdown is already in progress",
+            "alternatives": [],
+            "reasoning": "The public readyTimeoutMs contract requires MountReadyTimeoutError plus stop cleanup once retry budget expires. A concurrent explicit stop retains shutdown's terminal launch-failure precedence, and ordinary non-resumable exits retain their specific launch failure."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Fixed exit-75 deadline handling and eliminated the shutdown-test unhandled-rejection window. Self-reported and non-gating: focused tests were reported to pass 20 repeated runs plus the full launcher test and SDK typecheck; this trajectory contains no captured command/output evidence.",
+    "approach": "Standard approach",
+    "confidence": 0.75
+  },
+  "commits": ["02d76bbc"],
+  "filesChanged": [
+    ".trajectories/completed/2026-09/traj_i42n2cyvnl75.json",
+    ".trajectories/completed/2026-09/traj_i42n2cyvnl75.md",
+    ".trajectories/index.json",
+    "packages/sdk/typescript/src/mount-launcher.test.ts",
+    "packages/sdk/typescript/src/mount-launcher.ts"
+  ],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "7788cbcc0868db34d33cbfe173368d3095b7afbf",
+    "endRef": "02d76bbc010d6d8727ee32214a4a729679a79fbc"
+  }
+}

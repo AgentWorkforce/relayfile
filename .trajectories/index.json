@@ -205,6 +205,27 @@
       "completedAt": "2026-08-27T20:20:27.355Z",
       "path": ".trajectories/completed/2026-08/traj_7n063n1f3wai.json"
     },
+    "traj_7745k45nt2wr": {
+      "title": "Repair PR #477 resumable exit classification",
+      "status": "completed",
+      "startedAt": "2026-09-08T16:34:03.552Z",
+      "completedAt": "2026-09-08T16:42:13.645Z",
+      "path": ".trajectories/completed/2026-09/traj_7745k45nt2wr.json"
+    },
+    "traj_05hwkc0aqw57": {
+      "title": "Address PR 477 shutdown races from current reviews",
+      "status": "completed",
+      "startedAt": "2026-09-08T17:26:03.157Z",
+      "completedAt": "2026-09-08T17:30:16.592Z",
+      "path": ".trajectories/completed/2026-09/traj_05hwkc0aqw57.json"
+    },
+    "traj_vi6hsxq2kfs9": {
+      "title": "Make Relayfile PR 477 shutdown retry regression deterministic",
+      "status": "completed",
+      "startedAt": "2026-09-08T19:13:47.472Z",
+      "completedAt": "2026-09-08T19:14:19.279Z",
+      "path": ".trajectories/completed/2026-09/traj_vi6hsxq2kfs9.json"
+    },
     "traj_y5d5akywgn83": {
       "title": "Historical decisions from an earlier relayfile#478 repair branch",
       "status": "completed",
@@ -267,6 +288,20 @@
       "startedAt": "2026-09-08T18:17:10.022Z",
       "completedAt": "2026-09-08T18:17:10.768Z",
       "path": "/private/tmp/relayfile-acl423-fix-0908/.trajectories/completed/2026-09/traj_f5e9ezrw8o6g.json"
+    },
+    "traj_jcnfpte7ncnb": {
+      "title": "Fix PR 477 shutdown regression unhandled rejection ordering",
+      "status": "completed",
+      "startedAt": "2026-09-08T19:52:36.316Z",
+      "completedAt": "2026-09-08T19:52:45.712Z",
+      "path": ".trajectories/completed/2026-09/traj_jcnfpte7ncnb.json"
+    },
+    "traj_i42n2cyvnl75": {
+      "title": "Fix PR 477 resumable readiness timeout contract",
+      "status": "completed",
+      "startedAt": "2026-09-08T20:05:48.457Z",
+      "completedAt": "2026-09-08T20:12:17.950Z",
+      "path": ".trajectories/completed/2026-09/traj_i42n2cyvnl75.json"
     },
     "traj_9i36a7py61ph": {
       "title": "Historical decisions on release tag and attestation safeguards",

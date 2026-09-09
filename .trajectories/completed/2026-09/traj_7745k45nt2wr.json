@@ -1,0 +1,80 @@
+{
+  "id": "traj_7745k45nt2wr",
+  "version": 1,
+  "task": {
+    "title": "Repair PR #477 resumable exit classification",
+    "source": {
+      "system": "plain",
+      "id": "PR-477"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-09-08T16:34:03.552Z",
+  "completedAt": "2026-09-08T16:42:13.645Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-09-08T16:41:52.794Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_fmo9j1o6omq6",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-09-08T16:41:52.794Z",
+      "endedAt": "2026-09-08T16:42:13.645Z",
+      "events": [
+        {
+          "ts": 1788885712794,
+          "type": "decision",
+          "content": "Mark resumable bootstrap outcomes explicitly so fatal once failures remain non-retryable: Mark resumable bootstrap outcomes explicitly so fatal once failures remain non-retryable",
+          "raw": {
+            "question": "Mark resumable bootstrap outcomes explicitly so fatal once failures remain non-retryable",
+            "chosen": "Mark resumable bootstrap outcomes explicitly so fatal once failures remain non-retryable",
+            "alternatives": [],
+            "reasoning": "The process exit and scoped sibling policy must distinguish bounded checkpoint/cancellation outcomes from provider, configuration, and cycle failures even when errors are wrapped or joined. An explicit marker plus an all-branches predicate preserves diagnostic wrapping while keeping fatal and mixed aggregates at exit 1."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1788885713349,
+          "type": "reflection",
+          "content": "Self-reported and non-gating: focused race tests, Go, SDK launcher, typecheck/build, contract, release, and secrets checks were reported to pass; one Node 22 SDK run was reported at 291/291 and an independent repeat reproduced a known environment-only ErrorEvent baseline failure. This trajectory contains no captured command/output evidence.",
+          "raw": {
+            "focalPoints": [
+              "exit classification",
+              "sibling cancellation",
+              "validation"
+            ],
+            "confidence": 0.75
+          },
+          "significance": "high",
+          "tags": [
+            "focal:exit classification",
+            "focal:sibling cancellation",
+            "focal:validation",
+            "confidence:0.75"
+          ]
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Repaired PR #477 once-mode classification: explicit resumable bootstrap markers now yield EX_TEMPFAIL only for all-resumable error trees; provider/cycle/config failures and mixed joins remain exit 1, and scoped siblings cancel on mixed fatal outcomes. Self-reported and non-gating: regressions and focused/full validation were reported complete, but this trajectory contains no captured command/output evidence.",
+    "approach": "Standard approach",
+    "confidence": 0.75
+  },
+  "commits": ["7eac3b82"],
+  "filesChanged": [
+    "cmd/relayfile-mount/main.go",
+    "cmd/relayfile-mount/main_test.go"
+  ],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "79698eda885819835eda5a7738eb3fe7e5a62c4a",
+    "endRef": "7eac3b82d566873001c6defeff48ec07659e40ca"
+  }
+}

@@ -35,6 +35,11 @@ class FakeChildProcess extends EventEmitter {
   }
 }
 
+function exitFakeChild(child: FakeChildProcess, code: number): void {
+  child.exitCode = code
+  child.emit("exit", code, null)
+}
+
 function createMountEnv(localDir: string, mode: "poll" | "fuse" = "poll") {
   return {
     RELAYFILE_BASE_URL: "https://relayfile.mount.test",
@@ -239,6 +244,240 @@ describe("default mount launcher", () => {
 
       await expect(instance.ready).rejects.toBeInstanceOf(MountReadyTimeoutError)
       expect(child.killSignals).toContain("SIGTERM")
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("restarts only a resumable foreground bootstrap exit on the same mount", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-default-launcher-resume-once-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const first = new FakeChildProcess()
+    const second = new FakeChildProcess()
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response("not ready", { status: 503 }))
+    )
+    const spawnImpl = vi.fn()
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => exitFakeChild(first, 75))
+        return first as never
+      })
+      .mockImplementationOnce(() => {
+        queueMicrotask(async () => {
+          await writeReadyState(localDir)
+          exitFakeChild(second, 0)
+        })
+        return second as never
+      })
+    const launcher = createDefaultMountLauncher({
+      spawnImpl,
+      readyPollIntervalMs: 1
+    })
+
+    try {
+      // A prior run's fresh-looking state must not suppress the retry when
+      // this foreground attempt reports the typed incomplete exit.
+      await writeReadyState(localDir)
+      const instance = await launcher.start({
+        env: createMountEnv(localDir),
+        background: false,
+        readyTimeoutMs: 250
+      })
+
+      await instance.ready
+      expect(spawnImpl).toHaveBeenCalledTimes(2)
+      expect(spawnImpl).toHaveBeenNthCalledWith(
+        2,
+        expect.any(String),
+        ["--once"],
+        expect.objectContaining({
+          cwd: localDir,
+          env: expect.objectContaining({ RELAYFILE_LOCAL_DIR: localDir })
+        })
+      )
+      expect(instance.stopped).toBe(true)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("reports and cleans up a timeout when the readiness budget expires before a resumable retry", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] })
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-default-launcher-resume-timeout-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const child = new FakeChildProcess()
+    const spawnImpl = vi.fn().mockImplementation(() => {
+      queueMicrotask(() => exitFakeChild(child, 75))
+      return child as never
+    })
+    const launcher = createDefaultMountLauncher({
+      spawnImpl,
+      readyPollIntervalMs: 10
+    })
+
+    try {
+      await writeReadyState(localDir)
+      const instance = await launcher.start({
+        env: createMountEnv(localDir),
+        background: false,
+        readyTimeoutMs: 5
+      })
+      const readyFailure = expect(instance.ready).rejects.toBeInstanceOf(
+        MountReadyTimeoutError
+      )
+
+      await vi.advanceTimersByTimeAsync(10)
+
+      await readyFailure
+      expect(spawnImpl).toHaveBeenCalledTimes(1)
+      expect(instance.stopped).toBe(true)
+      await expect(
+        stat(path.join(localDir, ".relay", "mount.pid"))
+      ).rejects.toMatchObject({ code: "ENOENT" })
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("does not resolve foreground readiness after shutdown begins", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-default-launcher-stop-ready-race-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const child = new FakeChildProcess()
+    let resolveProbeStarted!: () => void
+    let resolveProbe!: (response: Response) => void
+    const probeStarted = new Promise<void>((resolve) => {
+      resolveProbeStarted = resolve
+    })
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveProbe = resolve
+            resolveProbeStarted()
+          })
+      )
+    )
+    const spawnImpl = vi.fn().mockReturnValue(child as never)
+    const launcher = createDefaultMountLauncher({
+      spawnImpl,
+      readyPollIntervalMs: 1
+    })
+
+    try {
+      const instance = await launcher.start({
+        env: createMountEnv(localDir),
+        background: false,
+        readyTimeoutMs: 250
+      })
+
+      await probeStarted
+      await instance.stop()
+      resolveProbe(new Response("", { status: 200 }))
+
+      await expect(instance.ready).rejects.toMatchObject({
+        code: "mount_launch_failed"
+      })
+      expect(spawnImpl).toHaveBeenCalledTimes(1)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("does not restart a resumable foreground mount after shutdown begins", async () => {
+    // Keep the retry backoff under test control. A real 20ms delay plus
+    // setImmediate makes this assertion depend on the host event loop: a
+    // loaded runner can advance the timer before stop() gets to run.
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] })
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-default-launcher-stop-resume-race-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const first = new FakeChildProcess()
+    const unexpectedRestart = new FakeChildProcess()
+    const spawnImpl = vi.fn()
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => exitFakeChild(first, 75))
+        return first as never
+      })
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => exitFakeChild(unexpectedRestart, 1))
+        return unexpectedRestart as never
+      })
+    const launcher = createDefaultMountLauncher({
+      spawnImpl,
+      readyPollIntervalMs: 20
+    })
+
+    try {
+      // A ready state keeps the probe local and makes the first exit-75 path
+      // reach its resumable delay without any network or retry timing.
+      await writeReadyState(localDir)
+      const instance = await launcher.start({
+        env: createMountEnv(localDir),
+        background: false,
+        // The controlled backoff crosses this deadline after stop(), proving
+        // explicit shutdown still wins over the resumable-timeout branch.
+        readyTimeoutMs: 5
+      })
+
+      // Let the child exit and waitForReady enter its fake-timer backoff.
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      // Install the rejection handler before stop(): once shutdown marks the
+      // instance as stopping, the ready loop may reject at its next microtask
+      // boundary even before the controlled backoff is advanced.
+      const readyFailure = expect(instance.ready).rejects.toMatchObject({
+        code: "mount_launch_failed"
+      })
+      await instance.stop()
+      // Releasing the backoff after stop() crosses the ready deadline and
+      // proves explicit shutdown wins over both timeout and restart handling.
+      await vi.advanceTimersByTimeAsync(20)
+
+      await readyFailure
+      expect(spawnImpl).toHaveBeenCalledTimes(1)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("does not restart an ordinary foreground mount failure", async () => {
+    const tempRoot = await mkdtemp(
+      path.join(os.tmpdir(), "relayfile-default-launcher-fatal-once-")
+    )
+    const localDir = path.join(tempRoot, "mirror")
+    const child = new FakeChildProcess()
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response("not ready", { status: 503 }))
+    )
+    const spawnImpl = vi.fn().mockImplementation(() => {
+      queueMicrotask(() => exitFakeChild(child, 1))
+      return child as never
+    })
+    const launcher = createDefaultMountLauncher({
+      spawnImpl,
+      readyPollIntervalMs: 1
+    })
+
+    try {
+      const instance = await launcher.start({
+        env: createMountEnv(localDir),
+        background: false,
+        readyTimeoutMs: 50
+      })
+
+      await expect(instance.ready).rejects.toMatchObject({
+        code: "mount_launch_failed"
+      })
+      expect(spawnImpl).toHaveBeenCalledTimes(1)
     } finally {
       await rm(tempRoot, { recursive: true, force: true })
     }
