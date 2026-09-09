@@ -8758,6 +8758,13 @@ func runListen(args []string, stdout io.Writer) error {
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
+	// The websocket library defaults to a 32 KiB read limit; a single large
+	// event (e.g. an issue with a long description/history) exceeds it and
+	// terminates the whole listen loop with "read limited at 32769 bytes".
+	// Match the generous limit the mount consumers use so listen survives
+	// large events.
+	conn.SetReadLimit(8 << 20) // 8 MiB
+
 	typeFilter := strings.TrimSpace(*eventFlag)
 	runCmd := strings.TrimSpace(*runFlag)
 	format := strings.TrimSpace(*formatFlag)
