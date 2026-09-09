@@ -46,9 +46,10 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "node scripts/sync-package-version.mjs && tsc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:bundle:bun": "node scripts/verify-bun-workspace-mount.mjs",
     "test:e2e": "node scripts/setup-e2e.mjs",
     "post-auth-mount:e2e": "node scripts/post-auth-mount-session-e2e.mjs",
     "e2e:post-auth-mount-session": "node scripts/post-auth-mount-session-e2e.mjs",
