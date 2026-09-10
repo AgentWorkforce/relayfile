@@ -3000,6 +3000,7 @@ func TestMountRequiresLocalDirWhenWorkspaceHasNoRecordedMirror(t *testing.T) {
 func TestMountUsesRecordedLocalDirWhenOmitted(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
+	var websocketRequests atomic.Int32
 
 	localDir := t.TempDir()
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -3019,6 +3020,17 @@ func TestMountUsesRecordedLocalDirWhenOmitted(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case "/v1/workspaces/ws_demo/fs/ws":
+			websocketRequests.Add(1)
+			// The real #490 failure is a slow or 429 websocket handshake. The
+			// one-shot CLI must use its budget for polling and never reach it.
+			w.Header().Set("Retry-After", "1")
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(time.Second):
+				http.Error(w, "rate limited", http.StatusTooManyRequests)
+			}
 		case "/v1/workspaces/ws_demo/fs/tree":
 			_, _ = w.Write([]byte(`{"path":"/","entries":[{"path":"/notion/Docs/A.md","type":"file","revision":"rev_1","size":3}],"nextCursor":null}`))
 		case "/v1/workspaces/ws_demo/fs/file":
@@ -3043,8 +3055,11 @@ func TestMountUsesRecordedLocalDirWhenOmitted(t *testing.T) {
 		t.Fatalf("saveCredentials failed: %v", err)
 	}
 
-	if err := run([]string{"mount", "demo", "--server", server.URL, "--token", testJWTWithWorkspace("ws_demo"), "--once", "--websocket=false"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+	if err := run([]string{"mount", "demo", "--server", server.URL, "--token", testJWTWithWorkspace("ws_demo"), "--once", "--timeout=250ms"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
 		t.Fatalf("run mount failed: %v", err)
+	}
+	if got := websocketRequests.Load(); got != 0 {
+		t.Fatalf("one-shot CLI made %d realtime dial(s), want 0", got)
 	}
 	data, err := os.ReadFile(filepath.Join(localDir, "notion", "Docs", "A.md"))
 	if err != nil {

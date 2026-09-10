@@ -573,6 +573,10 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 	if cfg.logHTTPStatus {
 		client.SetHTTPStatusLogger(log.Default())
 	}
+	// A one-shot reconcile has no listener lifetime to maintain. Skipping the
+	// initial realtime dial keeps its entire command deadline available for the
+	// force-poll reconciliation that follows.
+	realtimeEnabled := cfg.websocketEnabled && !cfg.once
 	syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
 		WorkspaceID:               cfg.workspaceID,
 		RemoteRoot:                cfg.remotePath,
@@ -584,7 +588,7 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 		MountKind:                 cfg.mountKind,
 		ValidateState:             true,
 		Scopes:                    cfg.scopes,
-		WebSocket:                 boolPtr(cfg.websocketEnabled),
+		WebSocket:                 boolPtr(realtimeEnabled),
 		RootCtx:                   rootCtx,
 		Logger:                    log.Default(),
 		Mode:                      cfg.mode,

@@ -6,7 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+- Fix `mount --once` so delayed or rate-limited realtime listeners cannot
+  consume the polling/reconciliation deadline (#490).
 
 ## [0.10.56] - 2026-09-08
 
