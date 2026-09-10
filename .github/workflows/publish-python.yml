@@ -46,6 +46,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Set up uv
@@ -66,30 +67,49 @@ jobs:
           # interpolated into the shell script body.
           CUSTOM_VERSION: ${{ github.event.inputs.custom_version }}
           VERSION_TYPE: ${{ github.event.inputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ github.sha }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          OFFLINE_BASELINE: ${{ github.ref != 'refs/heads/main' || github.event.inputs.dry_run == 'true' }}
         run: |
+          set -euo pipefail
           PYPROJECT="pyproject.toml"
 
-          CURRENT_VERSION=$(awk -F '"' '/^version = / { print $2; exit }' "$PYPROJECT")
-          if [ -z "$CURRENT_VERSION" ]; then
-            echo "Unable to read current version from $PYPROJECT"
-            exit 1
+          MANIFEST_VERSION=$(awk -F '"' '/^version = / { print $2; exit }' "$PYPROJECT")
+          BASELINE_INFO=$(node "$GITHUB_WORKSPACE/scripts/release/resolve-python-release-baseline.mjs" \
+            --source-sha "$SOURCE_SHA" \
+            --cwd "$GITHUB_WORKSPACE" \
+            --current-version "$MANIFEST_VERSION" \
+            --workflow-run-id "$WORKFLOW_RUN_ID" \
+            --offline "$OFFLINE_BASELINE" \
+            --repository "$RELEASE_REPOSITORY")
+          CURRENT_VERSION=$(printf '%s\n' "$BASELINE_INFO" | awk -F= '$1 == "baseline_version" { print $2 }')
+          LATEST_TAG=$(printf '%s\n' "$BASELINE_INFO" | awk -F= '$1 == "latest_tag" { print $2 }')
+          RESUMABLE_VERSION=$(printf '%s\n' "$BASELINE_INFO" | awk -F= '$1 == "resumable_version" { print $2 }')
+          test -n "$CURRENT_VERSION"
+          echo "Manifest version: $MANIFEST_VERSION"
+          if [ -n "$LATEST_TAG" ]; then
+            echo "Release baseline: $CURRENT_VERSION ($LATEST_TAG)"
+          else
+            echo "No attested Python release tag found; using the manifest as the initial baseline"
           fi
-          echo "Current version: $CURRENT_VERSION"
 
           bump_semver() {
             local current="$1"
             local kind="$2"
 
-            # PEP 440 release with optional beta prerelease: MAJOR.MINOR.PATCH[bN]
-            if [[ ! "$current" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(b([0-9]+))?$ ]]; then
-              echo "Invalid version (expected MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCHbN): $current" >&2
+            # Canonical PEP 440 release with optional a/b/rc prerelease.
+            if [[ ! "$current" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$ ]]; then
+              echo "Invalid version (expected canonical PEP 440 MAJOR.MINOR.PATCH or prerelease): $current" >&2
               return 1
             fi
 
             local major="${BASH_REMATCH[1]}"
             local minor="${BASH_REMATCH[2]}"
             local patch="${BASH_REMATCH[3]}"
-            local pre_num="${BASH_REMATCH[5]}"
+            local pre_kind="${BASH_REMATCH[5]}"
+            local pre_num="${BASH_REMATCH[6]}"
 
             case "$kind" in
               patch)
@@ -99,16 +119,16 @@ jobs:
               major)
                 major=$((major + 1)); minor=0; patch=0; pre_num="" ;;
               prepatch)
-                patch=$((patch + 1)); pre_num="0" ;;
+                patch=$((patch + 1)); pre_kind="b"; pre_num="0" ;;
               preminor)
-                minor=$((minor + 1)); patch=0; pre_num="0" ;;
+                minor=$((minor + 1)); patch=0; pre_kind="b"; pre_num="0" ;;
               premajor)
-                major=$((major + 1)); minor=0; patch=0; pre_num="0" ;;
+                major=$((major + 1)); minor=0; patch=0; pre_kind="b"; pre_num="0" ;;
               prerelease)
                 if [[ -n "$pre_num" ]]; then
                   pre_num=$((pre_num + 1))
                 else
-                  patch=$((patch + 1)); pre_num="0"
+                  patch=$((patch + 1)); pre_kind="b"; pre_num="0"
                 fi
                 ;;
               *)
@@ -116,17 +136,19 @@ jobs:
                 return 1 ;;
             esac
 
-            # PEP 440 prerelease marker: beta segment is "bN".
             if [ -n "$pre_num" ]; then
-              echo "${major}.${minor}.${patch}b${pre_num}"
+              echo "${major}.${minor}.${patch}${pre_kind}${pre_num}"
             else
               echo "${major}.${minor}.${patch}"
             fi
           }
 
-          if [ -n "$CUSTOM_VERSION" ]; then
-            if [[ ! "$CUSTOM_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(b[0-9]+)?$ ]]; then
-              echo "Invalid custom_version (must be MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCHbN): $CUSTOM_VERSION"
+          if [ -n "$RESUMABLE_VERSION" ]; then
+            NEW_VERSION="$RESUMABLE_VERSION"
+            echo "Reusing completed Python SDK release from workflow run $WORKFLOW_RUN_ID: $NEW_VERSION"
+          elif [ -n "$CUSTOM_VERSION" ]; then
+            if [[ ! "$CUSTOM_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?$ ]]; then
+              echo "Invalid custom_version (must be canonical PEP 440 MAJOR.MINOR.PATCH or prerelease): $CUSTOM_VERSION"
               exit 1
             fi
             NEW_VERSION="$CUSTOM_VERSION"
@@ -135,6 +157,19 @@ jobs:
             NEW_VERSION=$(bump_semver "$CURRENT_VERSION" "$VERSION_TYPE")
             echo "Bumped version: $VERSION_TYPE -> $NEW_VERSION"
           fi
+
+          RELEASE_TAG="sdk-python-v${NEW_VERSION}"
+          RELEASE_RECOVERY=false
+          if git show-ref --verify --quiet "refs/tags/${RELEASE_TAG}"; then
+            node "${GITHUB_WORKSPACE:-.}/scripts/release/resolve-python-release-baseline.mjs" \
+              --verify-tag "$RELEASE_TAG" \
+              --source-sha "$SOURCE_SHA" \
+              --exact-source true \
+              --cwd "$GITHUB_WORKSPACE"
+            RELEASE_RECOVERY=true
+            echo "Recovering Python SDK release ${RELEASE_TAG} reserved by this source commit"
+          fi
+          echo "is_recovery=$RELEASE_RECOVERY" >> "$GITHUB_OUTPUT"
 
           # Update pyproject.toml [project] version (first match only).
           awk -v v="$NEW_VERSION" '
@@ -160,33 +195,86 @@ jobs:
       - name: Check distribution metadata
         run: uvx twine check dist/*
 
-      - name: Publish to PyPI
+      - name: Check PyPI version state
+        id: pypi-state
         if: github.ref == 'refs/heads/main' && github.event.inputs.dry_run != 'true'
+        env:
+          NEW_VERSION: ${{ steps.bump.outputs.new_version }}
+          RELEASE_RECOVERY: ${{ steps.bump.outputs.is_recovery }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4; do
+            STATUS=$(curl --silent --show-error --connect-timeout 5 --max-time 20 \
+              --output /dev/null --write-out '%{http_code}' \
+              "https://pypi.org/pypi/relayfile-sdk/${NEW_VERSION}/json" || true)
+            case "$STATUS" in
+              200)
+                if [ "$RELEASE_RECOVERY" != "true" ]; then
+                  echo "ERROR: relayfile-sdk ${NEW_VERSION} already exists without a same-source tag reservation" >&2
+                  exit 1
+                fi
+                echo "published=true" >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+              404)
+                echo "published=false" >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+              429|5??|000)
+                if [ "$attempt" -eq 4 ]; then
+                  echo "ERROR: PyPI version lookup remained transiently unavailable (HTTP ${STATUS})" >&2
+                  exit 1
+                fi
+                sleep $((attempt * 2))
+                ;;
+              *)
+                echo "ERROR: PyPI version lookup returned unexpected HTTP ${STATUS}" >&2
+                exit 1
+                ;;
+            esac
+          done
+
+      - name: Reserve Python SDK release tag
+        if: github.ref == 'refs/heads/main' && github.event.inputs.dry_run != 'true'
+        working-directory: ${{ github.workspace }}
+        env:
+          NEW_VERSION: ${{ steps.bump.outputs.new_version }}
+          SOURCE_SHA: ${{ github.sha }}
+          RELEASE_RUN_ID: ${{ github.run_id }}
+          RELEASE_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          TAG="sdk-python-v${NEW_VERSION}"
+          TAG_TREE=$(git rev-parse "${SOURCE_SHA}^{tree}")
+          if git show-ref --verify --quiet "refs/tags/${TAG}"; then
+            node "${GITHUB_WORKSPACE:-.}/scripts/release/resolve-python-release-baseline.mjs" \
+              --verify-tag "$TAG" \
+              --source-sha "$SOURCE_SHA" \
+              --exact-source true \
+              --cwd "$GITHUB_WORKSPACE"
+            echo "Python SDK tag ${TAG} is already reserved by this source commit"
+            exit 0
+          fi
+          git tag -a "$TAG" \
+            -m "relayfile Python SDK v${NEW_VERSION}" \
+            -m "source-sha=${SOURCE_SHA}" \
+            -m "tag-tree=${TAG_TREE}" \
+            -m "workflow-run-id=${RELEASE_RUN_ID}" \
+            -m "workflow-run-attempt=${RELEASE_RUN_ATTEMPT}"
+          git push origin "refs/tags/sdk-python-v${NEW_VERSION}:refs/tags/sdk-python-v${NEW_VERSION}"
+
+      - name: Publish to PyPI
+        if: github.ref == 'refs/heads/main' && github.event.inputs.dry_run != 'true' && steps.pypi-state.outputs.published != 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: packages/sdk/python/dist
 
-      - name: Commit and tag
-        if: github.ref == 'refs/heads/main' && github.event.inputs.dry_run != 'true'
-        working-directory: ${{ github.workspace }}
-        run: |
-          NEW_VERSION="${{ steps.bump.outputs.new_version }}"
-
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-
-          git add packages/sdk/python/pyproject.toml packages/sdk/python/uv.lock
-          if ! git diff --staged --quiet; then
-            git commit -m "chore(sdk-python): v${NEW_VERSION}"
-            git push origin HEAD:main
-          fi
-
-          git tag -a "sdk-python-v${NEW_VERSION}" -m "sdk-python v${NEW_VERSION}"
-          git push origin "sdk-python-v${NEW_VERSION}"
-
       - name: Create GitHub Release
         if: github.ref == 'refs/heads/main' && github.event.inputs.dry_run != 'true'
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: sdk-python-v${{ steps.bump.outputs.new_version }}
           name: sdk-python-v${{ steps.bump.outputs.new_version }}
@@ -203,16 +291,28 @@ jobs:
 
       - name: Summary
         if: always()
+        env:
+          RELEASE_DRY_RUN: ${{ github.event.inputs.dry_run }}
+          RELEASE_REF: ${{ github.ref }}
+          RELEASE_RECOVERY: ${{ steps.bump.outputs.is_recovery }}
+          NEW_VERSION: ${{ steps.bump.outputs.new_version }}
+          JOB_STATUS: ${{ job.status }}
         run: |
-          echo "## Python SDK Publish Summary" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Version**: \`${{ steps.bump.outputs.new_version }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Dry Run**: \`${{ github.event.inputs.dry_run }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-            echo "Dry run completed. Built and checked dist, but did not publish or tag." >> "$GITHUB_STEP_SUMMARY"
-          elif [ "${{ github.ref }}" != "refs/heads/main" ]; then
-            echo "Build and checks completed on a non-main ref; publish, tag, and release were skipped." >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "Published to PyPI and created tag \`sdk-python-v${{ steps.bump.outputs.new_version }}\`." >> "$GITHUB_STEP_SUMMARY"
-          fi
+          {
+            echo "## Python SDK Publish Summary"
+            echo ""
+            echo "**Version**: \`${NEW_VERSION}\`"
+            echo "**Dry Run**: \`${RELEASE_DRY_RUN}\`"
+            echo ""
+            if [ "$JOB_STATUS" != "success" ]; then
+              echo "Release failed before completion; inspect the failed workflow step above."
+            elif [ "$RELEASE_DRY_RUN" = "true" ]; then
+              echo "Dry run completed. Built and checked dist, but did not publish or tag."
+            elif [ "$RELEASE_REF" != "refs/heads/main" ]; then
+              echo "Build and checks completed on a non-main ref; publish, tag, and release were skipped."
+            elif [ "$RELEASE_RECOVERY" = "true" ]; then
+              echo "Recovered an existing same-source release tag and PyPI publication."
+            else
+              echo "Published to PyPI and created tag \`sdk-python-v${NEW_VERSION}\`."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
