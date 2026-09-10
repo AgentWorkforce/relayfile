@@ -119,6 +119,32 @@ test("existing-tag verification uses the same provenance contract as baseline di
   }
 });
 
+test("existing-tag recovery rejects a trusted ancestor tag", () => {
+  const { cwd, sourceSha: ancestorSha } = repository();
+  try {
+    writeFileSync(join(cwd, "later.txt"), "later\n");
+    git(cwd, "add", ".");
+    git(cwd, "commit", "-qm", "later source");
+    const sourceSha = git(cwd, "rev-parse", "HEAD");
+    annotatedTag(cwd, "1.2.3", ancestorSha);
+    assert.equal(
+      verifyTrustedPythonReleaseTag({ cwd, tag: "sdk-python-v1.2.3", sourceSha }).commit,
+      ancestorSha,
+    );
+    assert.equal(
+      verifyTrustedPythonReleaseTag({
+        cwd,
+        tag: "sdk-python-v1.2.3",
+        sourceSha,
+        exactSource: true,
+      }),
+      null,
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("draft or incomplete releases are skipped in favor of the newest completed release", () => {
   const { cwd, sourceSha } = repository();
   try {

@@ -104,8 +104,14 @@ function trustedTag(cwd, tag, sourceSha) {
   return { tag, version, commit, metadata };
 }
 
-export function verifyTrustedPythonReleaseTag({ cwd = process.cwd(), tag, sourceSha }) {
-  return trustedTag(cwd, tag, sourceSha);
+export function verifyTrustedPythonReleaseTag({
+  cwd = process.cwd(),
+  tag,
+  sourceSha,
+  exactSource = false,
+}) {
+  const candidate = trustedTag(cwd, tag, sourceSha);
+  return candidate && (!exactSource || candidate.commit === sourceSha) ? candidate : null;
 }
 
 export function findTrustedPythonReleaseTags({ cwd = process.cwd(), sourceSha }) {
@@ -186,6 +192,7 @@ if (process.argv[1]?.endsWith("resolve-python-release-baseline.mjs")) {
         cwd: args.cwd ?? process.cwd(),
         tag: args.verify_tag,
         sourceSha: args.source_sha,
+        exactSource: args.exact_source === "true",
       });
       if (!verified) throw new Error(`Python release tag is not a trusted reservation: ${args.verify_tag}`);
       console.log(`verified_tag=${verified.tag}`);

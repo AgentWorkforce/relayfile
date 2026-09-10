@@ -981,6 +981,11 @@ test("Python release is ephemeral and publishes only an annotated source tag", (
     2,
     "both existing-tag paths must use canonical provenance verification",
   );
+  assert.equal(
+    (PYTHON_WORKFLOW.match(/--exact-source true/g) ?? []).length,
+    2,
+    "both existing-tag paths must require the current source commit",
+  );
   assert.match(PYTHON_WORKFLOW, /JOB_STATUS: \$\{\{ job\.status \}\}/);
   assert.match(
     PYTHON_WORKFLOW,

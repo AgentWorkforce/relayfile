@@ -162,6 +162,7 @@ jobs:
             node "${GITHUB_WORKSPACE:-.}/scripts/release/resolve-python-release-baseline.mjs" \
               --verify-tag "$RELEASE_TAG" \
               --source-sha "$SOURCE_SHA" \
+              --exact-source true \
               --cwd "$GITHUB_WORKSPACE"
             RELEASE_RECOVERY=true
             echo "Recovering Python SDK release ${RELEASE_TAG} reserved by this source commit"
@@ -250,6 +251,7 @@ jobs:
             node "${GITHUB_WORKSPACE:-.}/scripts/release/resolve-python-release-baseline.mjs" \
               --verify-tag "$TAG" \
               --source-sha "$SOURCE_SHA" \
+              --exact-source true \
               --cwd "$GITHUB_WORKSPACE"
             echo "Python SDK tag ${TAG} is already reserved by this source commit"
             exit 0
