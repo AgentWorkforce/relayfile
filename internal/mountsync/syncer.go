@@ -61,6 +61,11 @@ var sensitiveLogQueryValue = regexp.MustCompile(`(?i)([?&](?:token|access_token|
 // version instead of treating the failure as a fatal sync error.
 var ErrSchemaValidation = errors.New("schema validation failed")
 
+// ErrMalformedPagination is returned when an events feed reports a non-empty
+// cursor that does not advance pagination. The mount fails closed instead of
+// retrying the same page until its reconcile context expires.
+var ErrMalformedPagination = errors.New("malformed pagination")
+
 // SchemaValidationError carries the per-file schema-violation message the
 // cloud emits alongside `400 schema_validation_failed`.
 type SchemaValidationError struct {
@@ -314,6 +319,41 @@ func (e *HTTPError) Error() string {
 		return fmt.Sprintf("http %d %s: %s", e.StatusCode, e.Code, e.Message)
 	}
 	return fmt.Sprintf("http %d: %s", e.StatusCode, e.Message)
+}
+
+// MalformedPaginationError reports a server response that cannot make an
+// events pagination walk advance. Cursor values are included so operators can
+// identify the broken response and repair the server or upgrade the backend.
+type MalformedPaginationError struct {
+	Feed       string
+	Cursor     string
+	NextCursor string
+	Reason     string
+}
+
+func (e *MalformedPaginationError) Error() string {
+	if e == nil {
+		return ErrMalformedPagination.Error()
+	}
+	feed := strings.TrimSpace(e.Feed)
+	if feed == "" {
+		feed = "events"
+	}
+	reason := strings.TrimSpace(e.Reason)
+	if reason == "" {
+		reason = "next cursor did not advance"
+	}
+	return fmt.Sprintf(
+		"malformed %s pagination: %s (cursor %q, next cursor %q); server must return a new cursor or null",
+		feed,
+		reason,
+		strings.TrimSpace(e.Cursor),
+		strings.TrimSpace(e.NextCursor),
+	)
+}
+
+func (e *MalformedPaginationError) Is(target error) bool {
+	return target == ErrMalformedPagination
 }
 
 // isCursorExpired is the explicit server recovery contract for an event
@@ -8491,6 +8531,10 @@ func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[strin
 	currentCursor := strings.TrimSpace(cursor)
 	safeCursor := currentCursor
 	madeProgress := false
+	seenCursors := make(map[string]struct{})
+	if currentCursor != "" {
+		seenCursors[currentCursor] = struct{}{}
+	}
 
 	for {
 		pageStartCursor := currentCursor
@@ -8501,6 +8545,26 @@ func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[strin
 				return safeCursor, nil
 			}
 			return safeCursor, err
+		}
+		nextCursor := ""
+		if feed.NextCursor != nil {
+			nextCursor = strings.TrimSpace(*feed.NextCursor)
+		}
+		hasMore := nextCursor != ""
+		if hasMore {
+			reason := "next cursor did not advance"
+			if nextCursor != pageStartCursor {
+				reason = "next cursor repeated a previous page"
+			}
+			if _, seen := seenCursors[nextCursor]; seen {
+				return safeCursor, &MalformedPaginationError{
+					Feed:       "events",
+					Cursor:     pageStartCursor,
+					NextCursor: nextCursor,
+					Reason:     reason,
+				}
+			}
+			seenCursors[nextCursor] = struct{}{}
 		}
 		changed := map[string]FilesystemEvent{}
 		deleted := map[string]struct{}{}
@@ -8563,10 +8627,9 @@ func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[strin
 		if err := s.applyIncrementalChanges(ctx, changed, deleted, conflicted, pageStartCursor, pageCursor, checkpoint); err != nil {
 			return safeCursor, err
 		}
-		hasMore := feed.NextCursor != nil && strings.TrimSpace(*feed.NextCursor) != ""
 		resumeCursor := strings.TrimSpace(pageCursor)
 		if hasMore {
-			resumeCursor = strings.TrimSpace(*feed.NextCursor)
+			resumeCursor = nextCursor
 		}
 		if strings.TrimSpace(pageCursor) != "" {
 			currentCursor = strings.TrimSpace(pageCursor)
@@ -8590,7 +8653,7 @@ func (s *Syncer) pullRemoteIncremental(ctx context.Context, conflicted map[strin
 		if !hasMore {
 			break
 		}
-		currentCursor = strings.TrimSpace(*feed.NextCursor)
+		currentCursor = nextCursor
 		if currentCursor != "" {
 			safeCursor = currentCursor
 		}
@@ -10923,6 +10986,11 @@ func classifyStatusError(err error) *statusError {
 	if errors.As(err, &traversalLimit) {
 		status.Kind = "bootstrap_stalled"
 		status.Code = "bootstrap_traversal_limit"
+		return status
+	}
+	var malformedPagination *MalformedPaginationError
+	if errors.As(err, &malformedPagination) {
+		status.Code = "malformed_pagination"
 		return status
 	}
 	var httpErr *HTTPError

@@ -39,6 +39,10 @@ func boolPtr(value bool) *bool {
 	return &value
 }
 
+func eventCursorPtr(value string) *string {
+	return &value
+}
+
 func markLocalDirtyForTest(t *testing.T, syncer *Syncer, remotePath, localPath string) {
 	t.Helper()
 	snapshot, err := readLocalSnapshot(localPath, true)
@@ -9213,6 +9217,22 @@ type fakeClient struct {
 	checkpointHandbackPreparedAt   string
 }
 
+type scriptedEventFeedClient struct {
+	*fakeClient
+	feeds            []EventFeed
+	requestedCursors []string
+}
+
+func (c *scriptedEventFeedClient) ListEvents(_ context.Context, _, _, cursor string, _ int) (EventFeed, error) {
+	c.requestedCursors = append(c.requestedCursors, cursor)
+	if len(c.feeds) == 0 {
+		return EventFeed{}, errors.New("scripted event feed exhausted")
+	}
+	feed := c.feeds[0]
+	c.feeds = c.feeds[1:]
+	return feed, nil
+}
+
 func (c *fakeClient) IssueCheckpointSeal(ctx context.Context, workspaceID string, request CheckpointSealRequest) (CheckpointSeal, error) {
 	c.checkpointIssueCalls++
 	c.checkpointIssueRequests = append(c.checkpointIssueRequests, request)
@@ -12242,6 +12262,88 @@ func TestPullRemoteIncrementalPathlessReconcileArmsFullPull(t *testing.T) {
 	}
 	if !syncer.forceFullReconcile {
 		t.Fatal("pathless reconciliation event did not request an authoritative pull")
+	}
+}
+
+func TestPullRemoteIncrementalRejectsMalformedPagination(t *testing.T) {
+	tests := []struct {
+		name                string
+		startCursor         string
+		feeds               []EventFeed
+		wantCursor          string
+		wantErrorCursor     string
+		wantErrorNextCursor string
+		wantReason          string
+	}{
+		{
+			name:        "repeated current cursor",
+			startCursor: "evt_000",
+			feeds: []EventFeed{
+				{Events: []FilesystemEvent{{EventID: "evt_001", Type: "sync.reconcile"}}, NextCursor: eventCursorPtr("evt_001")},
+				{Events: []FilesystemEvent{{EventID: "evt_001", Type: "sync.reconcile"}}, NextCursor: eventCursorPtr("evt_001")},
+			},
+			wantCursor:          "evt_001",
+			wantErrorCursor:     "evt_001",
+			wantErrorNextCursor: "evt_001",
+			wantReason:          "next cursor did not advance",
+		},
+		{
+			name:        "cyclic cursors",
+			startCursor: "evt_a",
+			feeds: []EventFeed{
+				{Events: []FilesystemEvent{{EventID: "evt_b", Type: "sync.reconcile"}}, NextCursor: eventCursorPtr("evt_b")},
+				{Events: []FilesystemEvent{{EventID: "evt_c", Type: "sync.reconcile"}}, NextCursor: eventCursorPtr("evt_a")},
+			},
+			wantCursor:          "evt_b",
+			wantErrorCursor:     "evt_b",
+			wantErrorNextCursor: "evt_a",
+			wantReason:          "next cursor repeated a previous page",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &scriptedEventFeedClient{
+				fakeClient: &fakeClient{},
+				feeds:      tc.feeds,
+			}
+			syncer, err := NewSyncer(client, SyncerOptions{
+				WorkspaceID:   "ws_malformed_pagination",
+				RemoteRoot:    "/notion",
+				LocalRoot:     t.TempDir(),
+				StateDir:      t.TempDir(),
+				FullPullEvery: -1,
+				WebSocket:     boolPtr(false),
+			})
+			if err != nil {
+				t.Fatalf("new syncer failed: %v", err)
+			}
+
+			started := time.Now()
+			gotCursor, err := syncer.pullRemoteIncremental(context.Background(), nil, tc.startCursor)
+			if elapsed := time.Since(started); elapsed > time.Second {
+				t.Fatalf("malformed pagination took too long: %s", elapsed)
+			}
+			if gotCursor != tc.wantCursor {
+				t.Fatalf("cursor = %q, want %q", gotCursor, tc.wantCursor)
+			}
+			var paginationErr *MalformedPaginationError
+			if !errors.As(err, &paginationErr) {
+				t.Fatalf("error = %v, want MalformedPaginationError", err)
+			}
+			if !errors.Is(err, ErrMalformedPagination) {
+				t.Fatalf("error = %v, want ErrMalformedPagination", err)
+			}
+			if paginationErr.Cursor != tc.wantErrorCursor || paginationErr.NextCursor != tc.wantErrorNextCursor {
+				t.Fatalf("pagination error cursors = (%q, %q), want (%q, %q)", paginationErr.Cursor, paginationErr.NextCursor, tc.wantErrorCursor, tc.wantErrorNextCursor)
+			}
+			if paginationErr.Reason != tc.wantReason {
+				t.Fatalf("pagination error reason = %q, want %q", paginationErr.Reason, tc.wantReason)
+			}
+			if got := len(client.requestedCursors); got != len(tc.feeds) {
+				t.Fatalf("ListEvents calls = %d, want %d (%#v)", got, len(tc.feeds), client.requestedCursors)
+			}
+		})
 	}
 }
 
