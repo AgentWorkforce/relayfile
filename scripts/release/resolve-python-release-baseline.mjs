@@ -10,10 +10,15 @@ export const PYTHON_RELEASE_TAG_PREFIX = "sdk-python-v";
 // separators are rejected instead of allowing a forged high tag to win.
 const PEP440 = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:(a|b|rc)(0|[1-9]\d*))?$/;
 const SHA = /^[0-9a-f]{40}$/;
+const MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER);
 
 export function parseStrictPep440(value) {
   const match = String(value ?? "").match(PEP440);
   if (!match) return null;
+  const numericParts = [match[1], match[2], match[3], match[5]].filter(
+    (part) => part !== undefined,
+  );
+  if (numericParts.some((part) => BigInt(part) > MAX_SAFE_INTEGER)) return null;
   return {
     raw: match[0],
     major: Number(match[1]),
@@ -99,6 +104,10 @@ function trustedTag(cwd, tag, sourceSha) {
   return { tag, version, commit, metadata };
 }
 
+export function verifyTrustedPythonReleaseTag({ cwd = process.cwd(), tag, sourceSha }) {
+  return trustedTag(cwd, tag, sourceSha);
+}
+
 export function findTrustedPythonReleaseTags({ cwd = process.cwd(), sourceSha }) {
   if (!SHA.test(sourceSha ?? "")) return [];
   const tags = git(cwd, [
@@ -172,6 +181,16 @@ function parseArgs(argv) {
 if (process.argv[1]?.endsWith("resolve-python-release-baseline.mjs")) {
   try {
     const args = parseArgs(process.argv.slice(2));
+    if (args.verify_tag) {
+      const verified = verifyTrustedPythonReleaseTag({
+        cwd: args.cwd ?? process.cwd(),
+        tag: args.verify_tag,
+        sourceSha: args.source_sha,
+      });
+      if (!verified) throw new Error(`Python release tag is not a trusted reservation: ${args.verify_tag}`);
+      console.log(`verified_tag=${verified.tag}`);
+      process.exit(0);
+    }
     const result = resolvePythonReleaseBaseline({
       cwd: args.cwd ?? process.cwd(),
       sourceSha: args.source_sha,

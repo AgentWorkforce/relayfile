@@ -53,6 +53,20 @@ if "$checker" "$indirect" allow-zero >/dev/null 2>&1; then
   exit 1
 fi
 
+quoted_indirect="$fixture_dir/quoted-indirect.yml"
+printf 'run: |\n  %s\n  GIT=git\n  %s\n' "$allowed" '"$GIT" push origin main' > "$quoted_indirect"
+if "$checker" "$quoted_indirect" allow-zero >/dev/null 2>&1; then
+  echo "checker accepted a quoted indirect git push" >&2
+  exit 1
+fi
+
+braced_indirect="$fixture_dir/braced-indirect.yml"
+printf 'run: |\n  %s\n  GIT=git\n  %s\n' "$allowed" '"${GIT}" push origin main' > "$braced_indirect"
+if "$checker" "$braced_indirect" allow-zero >/dev/null 2>&1; then
+  echo "checker accepted a braced indirect git push" >&2
+  exit 1
+fi
+
 no_push="$fixture_dir/no-push.yml"
 printf 'run: echo release\n' > "$no_push"
 "$checker" "$no_push" allow-zero >/dev/null

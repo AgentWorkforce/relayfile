@@ -159,15 +159,10 @@ jobs:
           RELEASE_TAG="sdk-python-v${NEW_VERSION}"
           RELEASE_RECOVERY=false
           if git show-ref --verify --quiet "refs/tags/${RELEASE_TAG}"; then
-            if [ "$(git cat-file -t "refs/tags/${RELEASE_TAG}")" != "tag" ]; then
-              echo "ERROR: ${RELEASE_TAG} exists but is not an annotated tag" >&2
-              exit 1
-            fi
-            TAG_COMMIT=$(git rev-list -n 1 "refs/tags/${RELEASE_TAG}")
-            if [ "$TAG_COMMIT" != "$GITHUB_SHA" ]; then
-              echo "ERROR: ${RELEASE_TAG} exists at ${TAG_COMMIT}, not ${GITHUB_SHA}" >&2
-              exit 1
-            fi
+            node "${GITHUB_WORKSPACE:-.}/scripts/release/resolve-python-release-baseline.mjs" \
+              --verify-tag "$RELEASE_TAG" \
+              --source-sha "$SOURCE_SHA" \
+              --cwd "$GITHUB_WORKSPACE"
             RELEASE_RECOVERY=true
             echo "Recovering Python SDK release ${RELEASE_TAG} reserved by this source commit"
           fi
@@ -252,8 +247,10 @@ jobs:
           TAG="sdk-python-v${NEW_VERSION}"
           TAG_TREE=$(git rev-parse "${SOURCE_SHA}^{tree}")
           if git show-ref --verify --quiet "refs/tags/${TAG}"; then
-            test "$(git cat-file -t "refs/tags/${TAG}")" = "tag"
-            test "$(git rev-list -n 1 "refs/tags/${TAG}")" = "$SOURCE_SHA"
+            node "${GITHUB_WORKSPACE:-.}/scripts/release/resolve-python-release-baseline.mjs" \
+              --verify-tag "$TAG" \
+              --source-sha "$SOURCE_SHA" \
+              --cwd "$GITHUB_WORKSPACE"
             echo "Python SDK tag ${TAG} is already reserved by this source commit"
             exit 0
           fi
@@ -295,6 +292,7 @@ jobs:
           RELEASE_REF: ${{ github.ref }}
           RELEASE_RECOVERY: ${{ steps.bump.outputs.is_recovery }}
           NEW_VERSION: ${{ steps.bump.outputs.new_version }}
+          JOB_STATUS: ${{ job.status }}
         run: |
           {
             echo "## Python SDK Publish Summary"
@@ -302,7 +300,9 @@ jobs:
             echo "**Version**: \`${NEW_VERSION}\`"
             echo "**Dry Run**: \`${RELEASE_DRY_RUN}\`"
             echo ""
-            if [ "$RELEASE_DRY_RUN" = "true" ]; then
+            if [ "$JOB_STATUS" != "success" ]; then
+              echo "Release failed before completion; inspect the failed workflow step above."
+            elif [ "$RELEASE_DRY_RUN" = "true" ]; then
               echo "Dry run completed. Built and checked dist, but did not publish or tag."
             elif [ "$RELEASE_REF" != "refs/heads/main" ]; then
               echo "Build and checks completed on a non-main ref; publish, tag, and release were skipped."

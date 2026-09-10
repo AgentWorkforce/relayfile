@@ -9,6 +9,7 @@ import {
   findTrustedPythonReleaseTags,
   parseStrictPep440,
   resolvePythonReleaseBaseline,
+  verifyTrustedPythonReleaseTag,
 } from "./resolve-python-release-baseline.mjs";
 
 function git(cwd, ...args) {
@@ -47,6 +48,10 @@ test("strict PEP 440 parser and ordering put final after beta", () => {
   assert.equal(parseStrictPep440("1.2.3b1").phase, "b");
   assert.equal(parseStrictPep440("1.2.3b01"), null);
   assert.equal(parseStrictPep440("99.0"), null);
+  assert.equal(parseStrictPep440("9007199254740991.0.0").major, Number.MAX_SAFE_INTEGER);
+  assert.equal(parseStrictPep440("9007199254740992.0.0"), null);
+  assert.equal(parseStrictPep440("1.0.9007199254740992"), null);
+  assert.equal(parseStrictPep440("1.0.0b9007199254740992"), null);
   assert.ok(comparePep440("1.2.3b9", "1.2.3") < 0);
   assert.ok(comparePep440("1.2.3rc1", "1.2.3") < 0);
   assert.ok(comparePep440("1.2.3", "1.2.3b9") > 0);
@@ -91,6 +96,24 @@ test("forged, wrong-target, malformed, and missing-provenance tags are rejected"
 
     const trusted = findTrustedPythonReleaseTags({ cwd, sourceSha });
     assert.deepEqual(trusted.map(({ tag }) => tag), ["sdk-python-v1.2.3"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("existing-tag verification uses the same provenance contract as baseline discovery", () => {
+  const { cwd, sourceSha } = repository();
+  try {
+    annotatedTag(cwd, "1.2.3", sourceSha);
+    assert.equal(
+      verifyTrustedPythonReleaseTag({ cwd, tag: "sdk-python-v1.2.3", sourceSha }).tag,
+      "sdk-python-v1.2.3",
+    );
+    git(cwd, "tag", "-a", "sdk-python-v1.2.4", sourceSha, "-m", "Python SDK v1.2.4");
+    assert.equal(
+      verifyTrustedPythonReleaseTag({ cwd, tag: "sdk-python-v1.2.4", sourceSha }),
+      null,
+    );
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

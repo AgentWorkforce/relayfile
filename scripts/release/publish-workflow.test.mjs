@@ -976,6 +976,16 @@ test("Python release is ephemeral and publishes only an annotated source tag", (
   assert.match(PYTHON_WORKFLOW, /RESUMABLE_VERSION=/);
   assert.match(PYTHON_WORKFLOW, /Reusing completed Python SDK release/);
   assert.match(PYTHON_WORKFLOW, /canonical PEP 440/);
+  assert.equal(
+    (PYTHON_WORKFLOW.match(/--verify-tag "\$(?:RELEASE_TAG|TAG)"/g) ?? []).length,
+    2,
+    "both existing-tag paths must use canonical provenance verification",
+  );
+  assert.match(PYTHON_WORKFLOW, /JOB_STATUS: \$\{\{ job\.status \}\}/);
+  assert.match(
+    PYTHON_WORKFLOW,
+    /if \[ "\$JOB_STATUS" != "success" \]; then[\s\S]*?Release failed before completion[\s\S]*?elif \[ "\$RELEASE_DRY_RUN" = "true" \]/,
+  );
   assert.match(
     PYTHON_WORKFLOW,
     /git tag -a "\$TAG"[\s\S]*source-sha=\$\{SOURCE_SHA\}[\s\S]*tag-tree=\$\{TAG_TREE\}/,

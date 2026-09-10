@@ -50,7 +50,7 @@ if [[ "$workflow_source" =~ (^|[^[:alnum:]_])git[[:space:]]*\\[[:space:]]*push[[
   echo "publish workflow check failed: multiline git push is forbidden" >&2
   exit 1
 fi
-if [[ "$workflow_source" =~ (^|[^[:alnum:]_])\$[A-Za-z_][A-Za-z0-9_]*[[:space:]]+push[[:space:]]+ ]]; then
+if [[ "$workflow_source" =~ (^|[^[:alnum:]_])(\"?\$\{?[A-Za-z_][A-Za-z0-9_]*\}?\"?)[[:space:]]+push[[:space:]]+ ]]; then
   echo "publish workflow check failed: indirect git push is forbidden" >&2
   exit 1
 fi
