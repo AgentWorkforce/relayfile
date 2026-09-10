@@ -7910,6 +7910,10 @@ func runMount(args []string) error {
 		if clientErr != nil {
 			return fmt.Errorf("configure mount request correlation: %w", clientErr)
 		}
+		// --once immediately performs a force-poll reconciliation and then exits,
+		// so it must not spend that command's deadline dialing realtime. Daemon
+		// mounts retain the requested realtime mode.
+		realtimeEnabled := *websocketEnabled && !*once
 		syncer, err := mountsync.NewSyncer(client, mountsync.SyncerOptions{
 			WorkspaceID: workspaceID,
 			RemoteRoot:  scope.RemotePath,
@@ -7924,7 +7928,7 @@ func runMount(args []string) error {
 			StateDir:                  strings.TrimSpace(*stateDir),
 			MountKind:                 strings.TrimSpace(*mountKind),
 			ValidateState:             true,
-			WebSocket:                 boolPtr(*websocketEnabled),
+			WebSocket:                 boolPtr(realtimeEnabled),
 			LowMemory:                 boolPtr(*lowMemory),
 			RootCtx:                   scopeCtx,
 			Logger:                    log.Default(),

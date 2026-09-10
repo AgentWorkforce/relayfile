@@ -755,6 +755,122 @@ func TestRunSinglePollingMountReportsErrorForNormalCycleFailure(t *testing.T) {
 	}
 }
 
+// TestRunSinglePollingMountOnceSkipsRealtimeDial proves the actual mount
+// executable path, rather than SyncOnce, leaves a one-shot command's budget
+// for polling. Reconcile deliberately force-polls, so websocket enablement
+// must be decided before NewSyncer is constructed.
+func TestRunSinglePollingMountOnceSkipsRealtimeDial(t *testing.T) {
+	var websocketRequests atomic.Int32
+	var eventRequests atomic.Int32
+	var changed atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/fs/ws"):
+			websocketRequests.Add(1)
+			// A delayed rate-limited websocket response reproduces #490. A
+			// correct one-shot mount never requests this endpoint.
+			w.Header().Set("Retry-After", "1")
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(time.Second):
+				http.Error(w, "rate limited", http.StatusTooManyRequests)
+			}
+		case strings.Contains(r.URL.Path, "/fs/tree"):
+			_ = json.NewEncoder(w).Encode(mountsync.TreeResponse{Entries: []mountsync.TreeEntry{{Path: "/docs/healthy.md", Type: "file", Revision: "rev_1"}}})
+		case strings.Contains(r.URL.Path, "/fs/bulk-read"):
+			http.Error(w, "unsupported", http.StatusNotImplemented)
+		case strings.Contains(r.URL.Path, "/fs/file"):
+			revision, content := "rev_1", "healthy polling"
+			if changed.Load() {
+				revision, content = "rev_2", "healthy polling update"
+			}
+			_ = json.NewEncoder(w).Encode(mountsync.RemoteFile{Path: "/docs/healthy.md", Revision: revision, ContentType: "text/markdown", Content: content})
+		case strings.Contains(r.URL.Path, "/fs/events"):
+			eventRequests.Add(1)
+			if changed.Load() {
+				_ = json.NewEncoder(w).Encode(mountsync.EventFeed{Events: []mountsync.FilesystemEvent{{EventID: "evt_001", Type: "file.updated", Path: "/docs/healthy.md", Revision: "rev_2"}}})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(mountsync.EventFeed{})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	localDir := t.TempDir()
+	cfg := mountConfig{
+		baseURL:          server.URL,
+		token:            "test-token",
+		workspaceID:      "ws_once_realtime_budget",
+		remotePath:       "/",
+		localDir:         localDir,
+		stateDir:         t.TempDir(),
+		mountKind:        mountsync.MountKindDaemon,
+		syncMode:         syncModeMirror,
+		interval:         time.Hour,
+		timeout:          250 * time.Millisecond,
+		websocketEnabled: true,
+		once:             true,
+	}
+	if err := runSinglePollingMount(context.Background(), cfg); err != nil {
+		t.Fatalf("one-shot mount should poll successfully: %v", err)
+	}
+	statePath := filepath.Join(
+		cfg.stateDir,
+		mountsync.MountStateID(cfg.workspaceID, cfg.remotePath, localDir, cfg.mountKind),
+		"state.json",
+	)
+	// Seed the server-observed cursor from the first completed mirror, then
+	// prove the next one-shot force-poll applies and durably checkpoints the
+	// exact event that arrived while realtime is disabled.
+	stateData, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read initial state: %v", err)
+	}
+	var rawState map[string]any
+	if err := json.Unmarshal(stateData, &rawState); err != nil {
+		t.Fatalf("decode initial state: %v", err)
+	}
+	rawState["eventsCursor"] = "evt_000"
+	stateData, err = json.Marshal(rawState)
+	if err != nil {
+		t.Fatalf("encode seeded state: %v", err)
+	}
+	if err := os.WriteFile(statePath, stateData, 0o600); err != nil {
+		t.Fatalf("seed persisted cursor: %v", err)
+	}
+	changed.Store(true)
+	if err := runSinglePollingMount(context.Background(), cfg); err != nil {
+		t.Fatalf("one-shot polling recovery failed: %v", err)
+	}
+	if got := websocketRequests.Load(); got != 0 {
+		t.Fatalf("one-shot mount made %d realtime dial(s), want 0", got)
+	}
+	data, err := os.ReadFile(filepath.Join(localDir, "docs", "healthy.md"))
+	if err != nil {
+		t.Fatalf("read polled file: %v", err)
+	}
+	if string(data) != "healthy polling update" {
+		t.Fatalf("polled file = %q", data)
+	}
+	var state struct {
+		EventsCursor string `json:"eventsCursor"`
+	}
+	stateData, err = os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read persisted state: %v", err)
+	}
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("decode persisted state: %v", err)
+	}
+	if state.EventsCursor != "evt_001" {
+		t.Fatalf("persisted events cursor = %q, want evt_001 (events requests %d)", state.EventsCursor, eventRequests.Load())
+	}
+}
+
 // TestRunSinglePollingMountKeepsSuccessOnUnrelatedFailureAfterBootstrapComplete
 // is the end-to-end counterpart of
 // TestFinishInitialBootstrapKeepsSuccessAfterPriorCompletion: it exercises the
