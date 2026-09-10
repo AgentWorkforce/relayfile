@@ -130,6 +130,33 @@ func onceMountConfig(t *testing.T, baseURL, localDir string) mountConfig {
 	}
 }
 
+func TestInitialSyncOnceRejectsEmptyUnmaterializedSource(t *testing.T) {
+	root := "/github/repos/acme/project/contents"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/fs/tree"):
+			_ = json.NewEncoder(w).Encode(mountsync.TreeResponse{Path: root, Entries: []mountsync.TreeEntry{}})
+		case strings.Contains(r.URL.Path, "/fs/file") && strings.HasSuffix(r.URL.Query().Get("path"), "/meta.json"):
+			_ = json.NewEncoder(w).Encode(mountsync.RemoteFile{Path: r.URL.Query().Get("path"), Content: `{"default_branch":"main"}`, ContentType: "application/json"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	localDir := t.TempDir()
+	cfg := onceMountConfig(t, server.URL, localDir)
+	cfg.remotePath = root
+	err := runSinglePollingMount(context.Background(), cfg)
+	var emptyTree *mountsync.EmptyRemoteTreeError
+	if !errors.As(err, &emptyTree) || !strings.Contains(err.Error(), "missing headSha") {
+		t.Fatalf("--once should fail with source and manifest evidence: %v", err)
+	}
+	if ready, _ := sandboxInitialSyncGuard(filepath.Join(localDir, ".relay", "state.json")); ready {
+		t.Fatal("empty source mount incorrectly satisfies readiness guard")
+	}
+}
+
 // TestInitialSyncOnceSatisfiesSandboxReadinessGuard is the recreate-then-verify
 // probe for relayfile#455. A workspace larger than one per-cycle bootstrap file
 // budget used to leave `bootstrap` non-null in .relay/state.json while
