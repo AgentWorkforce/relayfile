@@ -1,0 +1,885 @@
+version: '1.1'
+updated: '2026-07-21'
+
+# Relayfile-only catalog. `covers` selectors are checked against the independently
+# enumerated source inventory in scripts/feature-catalog-surfaces.mjs. A selector
+# must match at least one surface, and every surface must match exactly one feature.
+summary:
+  categories: 18
+  features: 122
+  criticality:
+    critical: 82
+    hot: 35
+    standard: 5
+  verify_tiers:
+    '1': 55
+    '2': 27
+    '3': 1
+    '4': 9
+    '5': 19
+    '6': 11
+
+verification:
+  document: .agentworkforce/features/verify/procedures.md
+  categories:
+    cli: cli-discovery-and-lifecycle
+    workspace-auth: workspace-auth-and-scoped-invites
+    integrations: integration-catalog-connect-and-bindings
+    filesystem: filesystem-crud-query-export
+    acl-revisions-forks: acl-revision-and-fork-safety
+    events: events-websocket-and-recovery
+    ingest-digests: provider-ingest-events-and-digests
+    operations-writeback: writeback-retry-dead-letter-and-receipts
+    mount: mirror-mount-bootstrap-outbox-and-fences
+    fuse: fuse-virtual-artifacts-and-invalidation
+    sdk-typescript: typescript-exports-and-client-flow
+    sdk-python: python-exports-parity-and-client-flow
+    core-client-local-mount: package-exports-control-plane-and-local-mount
+    agents: agent-framework-tools-events-and-forwarder
+    server-storage-auth: server-backends-auth-and-ingress
+    hosted-observability: cloud-observer-status-and-alerts
+    release-e2e: packed-artifacts-and-release-smoke
+    proactive-automation: personas-evals-and-guardian
+
+surface_exclusions: []
+
+categories:
+  cli:
+    name: Command-line discovery and local lifecycle
+    description: Public relayfile command leaves, aliases, local process control, and inspection commands.
+    criticality: critical
+    features:
+      - id: cli-help
+        name: Help discovery
+        description: Prints root or command help through the canonical help leaf and both flag aliases.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 1
+        covers: ['cli:relayfile help', 'cli-alias:-h=>help', 'cli-alias:--help=>help']
+      - id: cli-version
+        name: CLI version
+        description: Reports the injected CLI version; the raw Go fallback remains a separately audited release risk.
+        locations: [cmd/relayfile-cli/main.go, packages/cli/scripts/run.js]
+        verify_tier: 1
+        covers: ['cli:relayfile version', 'cli-alias:--version=>version']
+      - id: cli-setup
+        name: Interactive setup
+        description: Configures a local or hosted Relayfile workspace and is the no-argument default command.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 6
+        covers: ['cli:relayfile setup', 'cli-alias:<no-args>=>setup']
+      - id: cli-pull
+        name: Pull remote state
+        description: Performs a bounded one-shot pull into the configured local workspace.
+        locations: [cmd/relayfile-cli/main.go, internal/mountsync]
+        verify_tier: 2
+        covers: ['cli:relayfile pull']
+      - id: cli-mount
+        name: Start mount synchronization
+        description: Starts the mount daemon through mount, start, or on dispatch.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 2
+        covers: ['cli:relayfile mount', 'cli-alias:start=>mount', 'cli-alias:on=>mount']
+      - id: cli-restart
+        name: Restart mount daemon
+        description: Stops a verified Relayfile mount process and starts it again with persisted configuration.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 2
+        covers: ['cli:relayfile restart']
+      - id: cli-supervisor-install
+        name: Install supervisor
+        description: Installs the platform service definition used to supervise a mount daemon.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 6
+        covers: ['cli:relayfile supervisor install']
+      - id: cli-supervisor-uninstall
+        name: Uninstall supervisor
+        description: Removes the Relayfile supervisor through uninstall or remove after process identity checks.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 6
+        covers: ['cli:relayfile supervisor uninstall', 'cli-alias:supervisor remove=>supervisor uninstall']
+      - id: cli-supervisor-status
+        name: Supervisor status
+        description: Reports whether the platform supervisor and its recorded process are healthy.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 1
+        covers: ['cli:relayfile supervisor status']
+      - id: cli-tree
+        name: Tree listing
+        description: Lists remote paths through tree or ls without mounting the workspace.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 1
+        covers: ['cli:relayfile tree', 'cli-alias:ls=>tree']
+      - id: cli-read
+        name: File read
+        description: Reads one remote file through read or cat with normal scope enforcement.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 1
+        covers: ['cli:relayfile read', 'cli-alias:cat=>read']
+      - id: cli-seed
+        name: Seed directory
+        description: Uploads a bounded local directory tree into the selected workspace.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 2
+        covers: ['cli:relayfile seed']
+      - id: cli-export
+        name: Workspace export
+        description: Exports workspace content as JSON, tar, or patch without publishing it.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 1
+        covers: ['cli:relayfile export']
+      - id: cli-status
+        name: Mount and workspace status
+        description: Reports configured workspace, daemon, bootstrap, guard, and provider state.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 1
+        covers: ['cli:relayfile status']
+      - id: cli-stop
+        name: Stop mount daemon
+        description: Stops a verified daemon through stop or off while refusing unrelated reused PIDs.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 2
+        covers: ['cli:relayfile stop', 'cli-alias:off=>stop']
+      - id: cli-logs
+        name: Mount logs
+        description: Reads bounded daemon log output from the configured Relayfile state directory.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 1
+        covers: ['cli:relayfile logs']
+      - id: cli-observer
+        name: File observer launch
+        description: Opens or reports the configured hosted/file-observer view for a workspace.
+        locations: [cmd/relayfile-cli/main.go, packages/file-observer/src]
+        verify_tier: 5
+        covers: ['cli:relayfile observer']
+      - id: cli-listen
+        name: Event listener
+        description: Streams workspace events through listen or watch with reconnect behavior.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 2
+        covers: ['cli:relayfile listen', 'cli-alias:watch=>listen']
+      - id: cli-control-plane-serve
+        name: Local control plane
+        description: Serves the versioned local integration API over a Unix domain socket.
+        locations: [cmd/relayfile-cli/main.go, cmd/relayfile-cli/control_plane.go]
+        verify_tier: 2
+        covers: ['cli:relayfile control-plane serve']
+      - id: cli-dev
+        name: Developer orchestration
+        description: Starts the local developer server and supporting processes without representing a production deployment.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 1
+        covers: ['cli:relayfile dev']
+      - id: cli-runtime-environment
+        name: CLI and cloud environment contract
+        description: Resolves CLI, cloud, control-plane, observer, Relaycast, and delegated credential inputs.
+        locations: [cmd/relayfile-cli/main.go, packages/sdk/typescript/src]
+        verify_tier: 1
+        covers: ['config:env:cli:*']
+
+  workspace-auth:
+    name: Workspace setup and authentication
+    description: Login, workspace lifecycle, delegated credentials, scoped invitations, and local negative auth behavior.
+    criticality: critical
+    features:
+      - id: cli-login
+        name: Login
+        description: Obtains and persists cloud and workspace credentials, with explicit messaging-only handling.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 5
+        covers: ['cli:relayfile login']
+      - id: cli-logout
+        name: Logout
+        description: Removes Relayfile authentication state without deleting workspace content.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 1
+        covers: ['cli:relayfile logout']
+      - id: cli-workspace-create
+        name: Create workspace
+        description: Creates a hosted Relayfile-backed workspace and stores the resulting scoped credentials.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 5
+        covers: ['cli:relayfile workspace create']
+      - id: cli-workspace-join
+        name: Join workspace
+        description: Joins an existing workspace by invitation and persists the minted workspace token.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 5
+        covers: ['cli:relayfile workspace join']
+      - id: cli-workspace-use
+        name: Select workspace
+        description: Selects a previously configured workspace without mutating remote content.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 1
+        covers: ['cli:relayfile workspace use']
+      - id: cli-workspace-list
+        name: List workspaces
+        description: Lists locally known workspaces and the active selection.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 1
+        covers: ['cli:relayfile workspace list']
+      - id: cli-workspace-current
+        name: Current workspace
+        description: Prints the active workspace record used by subsequent commands.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 1
+        covers: ['cli:relayfile workspace current']
+      - id: cli-workspace-status
+        name: Workspace status
+        description: Reports local and hosted status for the selected or explicit workspace.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 5
+        covers: ['cli:relayfile workspace status']
+      - id: cli-workspace-delete
+        name: Delete workspace
+        description: Deletes a hosted workspace only after the explicit --yes destructive fence.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 6
+        covers: ['cli:relayfile workspace delete']
+      - id: workspace-config-schema
+        name: Credential and workspace configuration
+        description: Persists versioned credential and workspace catalog fields used by CLI and setup clients.
+        locations: [cmd/relayfile-cli/main.go, packages/sdk/typescript/src/cli/setup.ts]
+        verify_tier: 1
+        covers: ['config:field:credentials:*', 'config:field:workspace:*']
+      - id: hosted-workspace-control
+        name: Hosted workspace and invite control
+        description: Uses cloud-only create, join, delegated-token, mount-session, and scoped invite paths; these are not local Go routes.
+        locations: [packages/sdk/typescript/src/cli/setup.ts, packages/sdk/python/src/relayfile/setup.py]
+        verify_tier: 5
+        covers: ['implementation:hosted-setup-scoped-invites']
+
+  integrations:
+    name: Integration catalog, connection, and bindings
+    description: Provider discovery, backend selection, connection lifecycle, canonical paths, bindings, and writeback secrets.
+    criticality: hot
+    features:
+      - id: cli-integration-connect
+        name: Connect integration
+        description: Starts a Nango or Composio connection flow for a catalog provider.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 6
+        covers: ['cli:relayfile integration connect']
+      - id: cli-integration-available
+        name: Available integrations
+        description: Lists the cloud catalog or the truthful six-provider fallback through all documented aliases.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 1
+        covers: ['cli:relayfile integration available', 'cli-alias:integration catalog=>integration available', 'cli-alias:integration providers=>integration available']
+      - id: cli-integration-search
+        name: Search integrations
+        description: Searches integration catalog metadata without claiming connection support for every canonical helper.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 1
+        covers: ['cli:relayfile integration search']
+      - id: cli-integration-list
+        name: Connected integrations
+        description: Lists provider connection and synchronization status for the selected workspace.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 5
+        covers: ['cli:relayfile integration list']
+      - id: cli-integration-disconnect
+        name: Disconnect integration
+        description: Disconnects a provider only after the explicit --yes destructive fence.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 6
+        covers: ['cli:relayfile integration disconnect']
+      - id: cli-integration-adopt
+        name: Adopt integration
+        description: Adopts an existing provider connection only after explicit --yes confirmation.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 6
+        covers: ['cli:relayfile integration adopt']
+      - id: cli-integration-metadata
+        name: Integration metadata
+        description: Sets provider metadata, including site selection where required, behind --yes confirmation.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 6
+        covers: ['cli:relayfile integration set-metadata']
+      - id: cli-integration-bind
+        name: Bind integration resource
+        description: Creates or lists local provider-to-resource bindings used by the control plane.
+        locations: [cmd/relayfile-cli/main.go, cmd/relayfile-cli/control_plane.go]
+        verify_tier: 5
+        covers: ['cli:relayfile integration bind']
+      - id: cli-integration-resolve-path
+        name: Resolve provider path
+        description: Resolves provider resources to canonical virtual filesystem paths.
+        locations: [cmd/relayfile-cli/main.go, packages/sdk/typescript/src/provider.ts]
+        verify_tier: 1
+        covers: ['cli:relayfile integration resolve-path']
+      - id: cli-integration-unbind
+        name: Unbind integration resource
+        description: Removes one exact provider resource binding without disconnecting the provider.
+        locations: [cmd/relayfile-cli/main.go, cmd/relayfile-cli/control_plane.go]
+        verify_tier: 5
+        covers: ['cli:relayfile integration unbind']
+      - id: cli-integration-writeback-secret
+        name: Integration writeback secret
+        description: Obtains the scoped secret used for provider writeback delivery.
+        locations: [cmd/relayfile-cli/main.go, cmd/relayfile-cli/control_plane.go]
+        verify_tier: 5
+        covers: ['cli:relayfile integration writeback-secret']
+      - id: control-plane-integrations
+        name: Local integration control-plane API
+        description: Implements provider discovery/status, connect, path resolution, bindings, secrets, and webhook subscription operations over the local socket.
+        locations: [cmd/relayfile-cli/control_plane.go, openapi/relayfile-control-plane-v1.openapi.yaml]
+        verify_tier: 2
+        covers: ['http:control:* /v1/integrations/*', 'schema:control:*']
+      - id: provider-catalog-layers
+        name: Provider catalog and connection layers
+        description: Distinguishes cloud catalog, local fallback, six setup identities, and Nango/Composio backends from canonical path helpers.
+        locations: [cmd/relayfile-cli/main.go, packages/sdk/typescript/src/cli/setup.ts, packages/sdk/python/src/relayfile/setup.py]
+        verify_tier: 5
+        covers: ['provider:catalog-*', 'provider:connect-*', 'provider:setup:*']
+      - id: provider-canonical-paths
+        name: Canonical provider path helpers
+        description: Computes canonical prefixes for seventeen named providers plus generic fallback without claiming live integration support.
+        locations: [packages/sdk/typescript/src/provider.ts, packages/sdk/python/src/relayfile/provider.py]
+        verify_tier: 1
+        covers: ['provider:canonical:*']
+      - id: provider-binding-config
+        name: Provider binding persistence
+        description: Persists exact path, webhook, subscription, and timestamp fields for local bindings.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 1
+        covers: ['config:field:provider-binding:*']
+
+  filesystem:
+    name: Filesystem data plane
+    description: Local authenticated tree, file, bulk, query, export, and bounded GitHub tarball import behavior.
+    criticality: critical
+    features:
+      - id: api-health
+        name: Health endpoint
+        description: Reports local data-plane liveness without workspace data mutation.
+        locations: [internal/httpapi/server.go, openapi/relayfile-v1.openapi.yaml]
+        verify_tier: 1
+        covers: ['http:data:GET /health']
+      - id: api-tree
+        name: Filesystem tree
+        description: Lists normalized workspace paths with pagination and bounded depth.
+        locations: [internal/httpapi/server.go, internal/relayfile]
+        verify_tier: 1
+        covers: ['http:data:GET /v1/workspaces/{workspaceId}/fs/tree']
+      - id: api-file-crud
+        name: File CRUD
+        description: Reads, creates, updates, and actually deletes files with revision and path bounds.
+        locations: [internal/httpapi/server.go, internal/relayfile]
+        verify_tier: 1
+        covers: ['http:data:* /v1/workspaces/{workspaceId}/fs/file']
+      - id: api-bulk-write
+        name: Bulk write
+        description: Applies bounded per-file writes with independent results, revisions, identities, and writeback state.
+        locations: [internal/httpapi/server.go, internal/relayfile]
+        verify_tier: 1
+        covers: ['http:data:POST /v1/workspaces/{workspaceId}/fs/bulk']
+      - id: api-query
+        name: Metadata query
+        description: Queries paths and semantic metadata with cursor pagination.
+        locations: [internal/httpapi/server.go, packages/core/src/query.ts]
+        verify_tier: 1
+        covers: ['http:data:GET /v1/workspaces/{workspaceId}/fs/query']
+      - id: api-export
+        name: Data-plane export
+        description: Exports selected workspace state in JSON, tar, or patch form.
+        locations: [internal/httpapi/server.go, packages/core/src/export.ts]
+        verify_tier: 1
+        covers: ['http:data:GET /v1/workspaces/{workspaceId}/fs/export']
+      - id: api-github-import
+        name: Bounded GitHub tarball import
+        description: Imports uploaded or fetched GitHub tarballs with job status, byte, path, and archive safety bounds.
+        locations: [internal/httpapi/github_tarball.go, internal/httpapi/github_tarball_test.go]
+        verify_tier: 1
+        covers: ['http:data:* /v1/workspaces/{workspaceId}/fs/import/*']
+      - id: data-plane-wire-schemas
+        name: Data-plane wire schemas
+        description: Defines every authoritative OpenAPI request, response, status, operation, ingest, writeback, import, and conflict field.
+        locations: [openapi/relayfile-v1.openapi.yaml]
+        verify_tier: 1
+        covers: ['schema:data:*']
+      - id: filesystem-core-implementation
+        name: Filesystem core semantics
+        description: Implements normalized CRUD, bulk, query, tree, and export semantics shared by server and SDK packages.
+        locations: [internal/relayfile, packages/core/src]
+        verify_tier: 1
+        covers: ['implementation:filesystem-crud-bulk-query-export']
+
+  acl-revisions-forks:
+    name: ACL, revisions, and forks
+    description: Workspace/path authorization, optimistic concurrency, and isolated fork lifecycle safety.
+    criticality: critical
+    features:
+      - id: acl-path-scopes
+        name: Directory ACL and token scopes
+        description: Enforces directory permission markers and scoped RS256 workspace claims for reads and writes.
+        locations: [internal/httpapi/auth.go, packages/core/src/acl.ts]
+        verify_tier: 1
+        covers: ['implementation:acl-directory-markers']
+      - id: revision-if-match
+        name: Optimistic revision fences
+        description: Requires and validates If-Match revisions for create, update, and delete conflicts.
+        locations: [internal/httpapi/server.go, internal/relayfile]
+        verify_tier: 1
+        covers: ['implementation:revision-if-match']
+      - id: api-forks
+        name: Fork overlay lifecycle
+        description: Creates expiring overlays, commits them against the parent revision, or discards them.
+        locations: [internal/httpapi/server.go, packages/core/src/forks.ts]
+        verify_tier: 1
+        covers: ['http:data:* /v1/workspaces/{workspaceId}/forks*', 'implementation:fork-overlay-commit-discard']
+
+  events:
+    name: Events and reactivity
+    description: Cursor event feeds, WebSocket catch-up/live delivery, filtering, reconnect, and polling recovery.
+    criticality: critical
+    features:
+      - id: api-event-feed
+        name: Event feed
+        description: Returns cursor-ordered filesystem events with workspace and path scope filtering.
+        locations: [internal/httpapi/server.go, internal/relayfile]
+        verify_tier: 1
+        covers: ['http:data:GET /v1/workspaces/{workspaceId}/fs/events']
+      - id: api-event-websocket
+        name: Event WebSocket
+        description: Delivers catch-up and live filesystem events with bounded reconnect behavior.
+        locations: [internal/httpapi/server.go, packages/sdk/typescript/src/client.ts]
+        verify_tier: 2
+        covers: ['http:data:GET /v1/workspaces/{workspaceId}/fs/ws']
+      - id: reactive-client-recovery
+        name: Reactive client recovery
+        description: Reconnects, polls when required, coalesces updates, and invalidates read caches without losing the cursor.
+        locations: [packages/sdk/typescript/src/sync.ts, packages/sdk/python/src/relayfile/on_write.py, packages/agents/src]
+        verify_tier: 2
+        covers: ['implementation:events-feed-websocket']
+
+  ingest-digests:
+    name: Provider ingest and digest artifacts
+    description: Generic provider envelope normalization, deduplication, event emission, virtual layouts, and non-recursive digest regeneration.
+    criticality: critical
+    features:
+      - id: api-webhook-ingest
+        name: Internal and workspace ingest
+        description: Accepts signed internal envelopes and scoped workspace ingest with replay, skew, body, and rate limits.
+        locations: [internal/httpapi/server.go, internal/relayfile]
+        verify_tier: 1
+        covers: ['http:data:POST /v1/internal/webhook-envelopes', 'http:data:POST /v1/workspaces/{workspaceId}/webhooks/ingest']
+      - id: generic-provider-ingest
+        name: Generic provider normalization
+        description: Normalizes provider-neutral objects, semantic metadata, content identity, and deduplication before durable writes.
+        locations: [internal/relayfile, packages/core/src/webhooks.ts, packages/sdk/typescript/src/integration-adapter.ts]
+        verify_tier: 1
+        covers: ['provider:generic-ingest', 'implementation:ingest-dedup-semantics']
+      - id: digest-regeneration
+        name: Digest regeneration and events
+        description: Regenerates today and yesterday digests for non-digest mutations, avoids recursion, and emits normal digest-file events.
+        locations: [internal/digest, internal/relayfile, .claude/rules/relayfile-integration-digests.md]
+        verify_tier: 1
+        covers: ['provider:digest:*', 'implementation:digest-regeneration-events']
+      - id: provider-virtual-artifacts
+        name: Provider virtual layout artifacts
+        description: Exposes layout, index, alias, activity summary, schema, and read-only dead-letter artifacts.
+        locations: [internal/schema, internal/mountsync, internal/mountfuse]
+        verify_tier: 2
+        covers: ['provider:virtual:*']
+      - id: github-issue-schema
+        name: Bundled GitHub issue schema
+        description: Ships the one provider content schema bundled by this repository without implying other bundled provider schemas.
+        locations: [schemas/github/issue.schema.json]
+        verify_tier: 1
+        covers: ['provider:schema:*']
+      - id: terminal-state-retention
+        name: Terminal provider state retention
+        description: Retains closed, merged, archived, completed, canceled, and resolved objects as data unless upstream actually deletes them.
+        locations: [internal/relayfile, .claude/rules/relayfile-integration-digests.md]
+        verify_tier: 5
+        covers: ['implementation:terminal-provider-state-retained']
+
+  operations-writeback:
+    name: Operations and writeback recovery
+    description: Durable operation queues, provider receipts, retries, replay, dead letters, stuck cursor recovery, and draft cleanup.
+    criticality: critical
+    features:
+      - id: cli-ops-list
+        name: List operations
+        description: Lists durable operation state with cursor pagination.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 1
+        covers: ['cli:relayfile ops list']
+      - id: cli-ops-replay
+        name: Replay operation
+        description: Requeues one recoverable operation through the normal writeback path.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 2
+        covers: ['cli:relayfile ops replay']
+      - id: cli-writeback-list
+        name: List pending writebacks
+        description: Lists pending external-consumer writeback records without acknowledging them.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 1
+        covers: ['cli:relayfile writeback list']
+      - id: cli-writeback-push
+        name: Push writeback
+        description: Queues a local file create for provider writeback with byte and path bounds.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 5
+        covers: ['cli:relayfile writeback push']
+      - id: cli-writeback-update
+        name: Update writeback
+        description: Queues an update for a canonical provider-backed file.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 5
+        covers: ['cli:relayfile writeback update']
+      - id: cli-writeback-delete
+        name: Delete writeback
+        description: Queues an upstream delete intent while retaining durable tombstone state until confirmed.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 6
+        covers: ['cli:relayfile writeback delete']
+      - id: cli-writeback-status
+        name: Writeback status
+        description: Reports operation attempts, provider result, receipt, and terminal state for one operation.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 1
+        covers: ['cli:relayfile writeback status']
+      - id: cli-writeback-retry
+        name: Retry writeback
+        description: Replays a recoverable failed or dead-lettered writeback operation.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 2
+        covers: ['cli:relayfile writeback retry']
+      - id: cli-writeback-skip-stuck
+        name: Skip stuck cursor
+        description: Explicitly advances past a stuck writeback cursor after operator review.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 6
+        covers: ['cli:relayfile writeback skip-stuck']
+      - id: cli-writeback-sweep-drafts
+        name: Sweep stale drafts
+        description: Reports stale drafts by default and mutates them only with --apply.
+        locations: [cmd/relayfile-cli/main.go]
+        verify_tier: 2
+        covers: ['cli:relayfile writeback sweep-drafts']
+      - id: cli-digest-rebuild
+        name: Rebuild digests
+        description: Rebuilds current digest artifacts through the normal event-emitting store path.
+        locations: [cmd/relayfile-cli/main.go, internal/digest]
+        verify_tier: 2
+        covers: ['cli:relayfile digest rebuild']
+      - id: api-operations
+        name: Operation status and replay API
+        description: Lists, reads, and replays durable operations in workspace and admin scopes.
+        locations: [internal/httpapi/server.go, internal/relayfile]
+        verify_tier: 1
+        covers: ['http:data:* /v1/workspaces/{workspaceId}/ops*']
+      - id: api-writeback
+        name: External writeback API
+        description: Lists pending records, acknowledges provider receipts, and sweeps drafts through bounded endpoints.
+        locations: [internal/httpapi/server.go, internal/relayfile]
+        verify_tier: 2
+        covers: ['http:data:* /v1/workspaces/{workspaceId}/writeback/*']
+      - id: durable-operation-recovery
+        name: Durable operation recovery
+        description: Persists retry/backoff, replay, acknowledgment, dead-letter, and stale-running quarantine behavior.
+        locations: [internal/relayfile]
+        verify_tier: 2
+        covers: ['implementation:operation-retry-replay-dead-letter']
+      - id: provider-writeback-receipts
+        name: Provider writeback receipts
+        description: Records provider results and confirmed receipts, with draft sweep and bounded attempts.
+        locations: [internal/relayfile, packages/sdk/typescript/src/writeback-consumer.ts]
+        verify_tier: 5
+        covers: ['implementation:writeback-receipts-draft-sweep']
+
+  mount:
+    name: Mirror mount durability and fences
+    description: Native mount flags, mirror/write-only synchronization, bootstrap recovery, outbox state, token renewal, and destructive safety fences.
+    criticality: critical
+    features:
+      - id: mount-executable
+        name: Native mount executable
+        description: Runs the independently distributed relayfile-mount binary with explicit workspace, layout, sync, state, timeout, and diagnostic flags.
+        locations: [cmd/relayfile-mount/main.go]
+        verify_tier: 2
+        covers: ['executable:relayfile-mount', 'flag:relayfile-mount:*']
+      - id: mirror-mount-sync
+        name: Mirror and write-only synchronization
+        description: Performs initial, full, and incremental pulls across exact or scoped roots using polling or WebSocket updates.
+        locations: [cmd/relayfile-mount/main.go, internal/mountsync]
+        verify_tier: 2
+        covers: ['implementation:mount-initial-full-incremental']
+      - id: mount-bootstrap-recovery
+        name: Resumable bootstrap
+        description: Persists traversal checkpoints, detects progress-sensitive stalls, resumes safely, and defers first-empty-revision deletion.
+        locations: [internal/mountsync]
+        verify_tier: 2
+        covers: ['implementation:bootstrap-checkpoint-resume']
+      - id: mount-durable-outbox
+        name: Durable outbox and tombstones
+        description: Persists pending, acknowledged, failed, retry, and two-phase delete state independently of pull timeouts.
+        locations: [internal/mountsync]
+        verify_tier: 2
+        covers: ['implementation:durable-outbox-tombstones']
+      - id: mount-destructive-fences
+        name: Mount destructive safety fences
+        description: Blocks delete-ratio storms, mount-root clobber, unsafe rehome, root corruption, PID reuse, and unresolved path collisions.
+        locations: [internal/mountsync, cmd/relayfile-cli/main.go]
+        verify_tier: 2
+        covers: ['implementation:mount-delete-ratio-clobber-rehome-pid-fences']
+      - id: mount-lazy-diagnostics
+        name: Lazy, low-memory, and diagnostics modes
+        description: Supports lazy GitHub hydration, untracked-push refusal, watcher caps, low-memory mode, pprof, memory, and HTTP status logging.
+        locations: [cmd/relayfile-mount/main.go, internal/mountsync]
+        verify_tier: 2
+        covers: ['implementation:lazy-low-memory-diagnostics']
+      - id: mount-runtime-environment
+        name: Mount environment contract
+        description: Resolves mount paths, sync modes, durability thresholds, safety fences, diagnostics, timeouts, and timezone inputs.
+        locations: [cmd/relayfile-mount/main.go, internal/mountsync]
+        verify_tier: 1
+        covers: ['config:env:mount:*', 'config:field:mount-state:*']
+
+  fuse:
+    name: Optional FUSE filesystem
+    description: Privileged optional FUSE mode, cache invalidation, and read-only virtual artifact behavior.
+    criticality: standard
+    features:
+      - id: fuse-live-filesystem
+        name: FUSE mount and invalidation
+        description: Mounts an optional FUSE filesystem with inode/content caches, live invalidation, virtual files, and read-only fences.
+        locations: [internal/mountfuse, cmd/relayfile-mount/main.go]
+        verify_tier: 3
+        covers: ['implementation:fuse-cache-invalidation-virtual-readonly']
+
+  sdk-typescript:
+    name: TypeScript SDK
+    description: Published TypeScript modules, exact parity registry exports, data-plane client, hosted setup, and local control-plane client.
+    criticality: hot
+    features:
+      - id: typescript-sdk-exports
+        name: TypeScript SDK export registry
+        description: Publishes every checked parity symbol, including planned types as exports without claiming unimplemented runtime behavior.
+        locations: [packages/sdk/typescript/src/index.ts, packages/sdk/parity.json]
+        verify_tier: 1
+        covers: ['export:ts-sdk:*']
+      - id: typescript-sdk-subpaths
+        name: TypeScript SDK package subpaths
+        description: Publishes root, CLI, cloud-login, mount, seeder, dist, and package metadata subpaths declared by the package export map.
+        locations: [packages/sdk/typescript/package.json]
+        verify_tier: 4
+        covers: ['package-export:@relayfile/sdk:*']
+      - id: typescript-data-plane-client
+        name: TypeScript data-plane client
+        description: Implements configured retry, change-log, default read-cache/invalidation, file, fork, event, operation, sync, ingest, admin, hosted webhook, and writeback behavior.
+        locations: [packages/sdk/typescript/src/client.ts]
+        verify_tier: 1
+        covers: ['sdk-ts:relayfile-client:*', 'config:ts:sdk:*', 'implementation:ts-client-read-cache']
+      - id: durable-resource-subscriptions
+        name: Durable resource subscription lifecycle
+        description: Defines and exercises owner-scoped create-or-renew, list, cancel, delivery claim, and claim-token acceptance contracts for stable provider resources, including identifier, TTL, capability, and owner-forgery negatives.
+        locations: [openapi/relayfile-v1.openapi.yaml, packages/sdk/typescript/src/client.ts, packages/sdk/typescript/src/types.ts, packages/sdk/typescript/src/client.test.ts, packages/sdk/parity.json]
+        verify_tier: 1
+        covers: ['http:data:POST /v1/workspaces/{workspaceId}/subscriptions', 'http:data:GET /v1/workspaces/{workspaceId}/subscriptions', 'http:data:DELETE /v1/workspaces/{workspaceId}/subscriptions/{subscriptionId}', 'http:data:POST /v1/workspaces/{workspaceId}/subscriptions/deliveries/claim', 'http:data:POST /v1/workspaces/{workspaceId}/subscriptions/deliveries/{deliveryId}/accept']
+      - id: typescript-setup-client
+        name: TypeScript hosted setup client
+        description: Implements login, workspace, mount-session, integration, token, invite, and mounted handle methods against hosted control paths.
+        locations: [packages/sdk/typescript/src/cli/setup.ts]
+        verify_tier: 5
+        covers: ['sdk-ts:setup:*']
+      - id: typescript-control-plane-client
+        name: TypeScript local control-plane client
+        description: Negotiates API versions, auto-starts the daemon when allowed, and calls every local integration control-plane operation.
+        locations: [packages/client/src/client.ts]
+        verify_tier: 2
+        covers: ['sdk-ts:control-plane:*']
+
+  sdk-python:
+    name: Python SDK
+    description: Python root exports, parity classifications, synchronous/asynchronous clients, setup, writeback, and managed on-write subscriptions.
+    criticality: hot
+    features:
+      - id: python-sdk-root-exports
+        name: Python root exports
+        description: Exposes the exact relayfile.__all__ public module surface.
+        locations: [packages/sdk/python/src/relayfile/__init__.py]
+        verify_tier: 1
+        covers: ['export:python-root:*']
+      - id: python-sdk-parity
+        name: Python parity registry
+        description: Tracks implemented, language-specific, and planned parity names without turning planned entries into shipped runtime claims.
+        locations: [packages/sdk/parity.json, packages/sdk/python/src/relayfile]
+        verify_tier: 1
+        covers: ['export:python-parity:*']
+
+  core-client-local-mount:
+    name: Core, control-plane client, and local agent mount packages
+    description: Published package entrypoints for pure core semantics, generated local control-plane types, and one-way local agent mounts.
+    criticality: hot
+    features:
+      - id: core-package-exports
+        name: Core package exports
+        description: Publishes pure file, ACL, semantics, query, tree, event, operation, writeback, webhook, export, deduplication, and fork contracts.
+        locations: [packages/core/package.json, packages/core/src/index.ts]
+        verify_tier: 4
+        covers: ['package-export:@relayfile/core:*', 'config:ts:core:*']
+      - id: control-plane-package-exports
+        name: Control-plane client exports
+        description: Publishes the local client and generated versioned control-plane component, path, and operation types.
+        locations: [packages/client/package.json, packages/client/src/index.ts]
+        verify_tier: 4
+        covers: ['package-export:@relayfile/client:*', 'http:control:* /v1/hello', 'config:ts:client:*']
+      - id: local-mount-package-exports
+        name: Local agent mount exports
+        description: Publishes ignore/readonly population, symlink/copy, warm reattach, final sync, and teardown-safe local mount helpers.
+        locations: [packages/local-mount/package.json, packages/local-mount/src/index.ts]
+        verify_tier: 4
+        covers: ['package-export:@relayfile/local-mount:*', 'implementation:local-agent-mount-final-sync', 'config:ts:local-mount:*']
+
+  agents:
+    name: Agent framework adapters
+    description: Provider-neutral agent connection, reactive event recovery, writeback, Relaycast forwarding, and framework-specific read tools.
+    criticality: hot
+    features:
+      - id: agents-package-exports
+        name: Agent package exports
+        description: Publishes root, Vercel, OpenAI, LangChain, and package metadata entrypoints with optional lexical read-path prefix filters.
+        locations: [packages/agents/package.json, packages/agents/src/index.ts, packages/agents/src/tools]
+        verify_tier: 4
+        covers: ['package-export:@relayfile/agents:*', 'implementation:agent-framework-path-fences']
+      - id: agents-runtime-environment
+        name: Agent and observer environment contract
+        description: Resolves cloud credentials, workspace identity, observer base paths, and browser-visible Relayfile configuration.
+        locations: [packages/agents/src, packages/file-observer/src]
+        verify_tier: 5
+        covers: ['config:env:agents:*', 'config:ts:agents:*']
+
+  server-storage-auth:
+    name: Server, storage, and ingress security
+    description: Production server executable, memory/file/PostgreSQL backends, RS256/HMAC auth, bounds, queues, and sync recovery APIs.
+    criticality: critical
+    features:
+      - id: server-executable
+        name: Relayfile data-plane server
+        description: Runs the environment-configured HTTP service with no application command-line flags.
+        locations: [cmd/relayfile/main.go]
+        verify_tier: 1
+        covers: ['executable:relayfile-server']
+      - id: server-storage-profiles
+        name: Durable storage profiles
+        description: Selects memory, file, or PostgreSQL state and queue backends through explicit custom, local, memory, or production profiles.
+        locations: [cmd/relayfile/main.go, internal/relayfile]
+        verify_tier: 2
+        covers: ['implementation:storage-memory-file-postgres']
+      - id: server-auth-ingress-fences
+        name: Authentication and ingress fences
+        description: Enforces RS256/JWKS workspace scopes plus HMAC signature, replay, timestamp, rate, and request-body bounds for internal ingest.
+        locations: [internal/httpapi/auth.go, internal/httpapi/server.go]
+        verify_tier: 1
+        covers: ['implementation:auth-rs256-hmac-replay-limits']
+      - id: api-sync-recovery
+        name: Sync status and recovery API
+        description: Reports sync, ingress, and dead-letter state and permits scoped refresh, replay, and acknowledgement.
+        locations: [internal/httpapi/server.go, internal/relayfile]
+        verify_tier: 2
+        covers: ['http:data:* /v1/workspaces/{workspaceId}/sync/*']
+      - id: server-runtime-environment
+        name: Server environment contract
+        description: Resolves storage, auth, ingress, queue, retry, concurrency, suppression, coalescing, and body/rate limit settings.
+        locations: [cmd/relayfile/main.go]
+        verify_tier: 1
+        covers: ['config:env:server:*']
+      - id: server-delete-storm-library-fence
+        name: Store delete-storm breaker
+        description: Implements and tests an opt-in StoreOptions delete-storm breaker; the production server entrypoint currently leaves zero disabled.
+        locations: [internal/relayfile/delete_storm.go, internal/relayfile/delete_storm_test.go, cmd/relayfile/main.go]
+        verify_tier: 1
+        covers: ['implementation:server-delete-storm-library-only']
+      - id: server-stale-running-library-fence
+        name: Store stale-running quarantine
+        description: Implements and tests an opt-in StoreOptions stale-running quarantine; the production server entrypoint currently leaves zero disabled.
+        locations: [internal/relayfile/stale_running_test.go, internal/relayfile/store.go, cmd/relayfile/main.go]
+        verify_tier: 1
+        covers: ['implementation:server-stale-running-library-only']
+
+  hosted-observability:
+    name: Hosted paths and observability
+    description: Hosted-only SDK routes, local dashboard/admin status, CLI/mount diagnostics, file observer, and evaluation reports.
+    criticality: hot
+    features:
+      - id: hosted-only-http
+        name: Hosted-only control and change paths
+        description: Exposes retained changes, outbound webhooks, workspace control, mount sessions, and integration control through hosted services, not the local Go server.
+        locations: [packages/sdk/typescript/src/client.ts, packages/sdk/typescript/src/cli/setup.ts]
+        verify_tier: 5
+        covers: ['http:hosted:*']
+      - id: local-dashboard-admin
+        name: Local dashboard and admin APIs
+        description: Serves the HTML dashboard and backend, ingress, sync, envelope replay, and operation replay observability/recovery surfaces.
+        locations: [internal/httpapi/server.go, internal/httpapi/dashboard.go]
+        verify_tier: 1
+        covers: ['http:data:GET /dashboard', 'http:data:* /v1/admin/*']
+      - id: observability-surfaces
+        name: Operator observability surfaces
+        description: Covers dashboard, status, logs, observer, mount state, pprof, memory/HTTP logs, file-observer UI, and evaluation reports.
+        locations: [internal/httpapi, cmd/relayfile-cli/main.go, cmd/relayfile-mount/main.go, packages/file-observer, scripts/evals]
+        verify_tier: 2
+        covers: ['observability:*']
+
+  release-e2e:
+    name: Packaging, end-to-end, and release gates
+    description: Native and package artifact construction, clean-consumer checks, local E2E/conformance, parity, contract, and manual publish boundaries.
+    criticality: hot
+    features:
+      - id: cli-npm-bin
+        name: npm CLI binary
+        description: Publishes the relayfile npm launcher that selects the correct native CLI package.
+        locations: [packages/cli/package.json, packages/cli/scripts/run.js]
+        verify_tier: 4
+        covers: ['package-bin:relayfile:*']
+      - id: native-mount-packages
+        name: Native mount packages
+        description: Publishes Darwin and Linux arm64/x64 relayfile-mount binaries as optional platform packages.
+        locations: [packages/cli/scripts/build-binaries.js, scripts/build-mount-npm-packages.mjs]
+        verify_tier: 4
+        covers: ['package-artifact:@relayfile/mount-*']
+      - id: release-sensitive-automation
+        name: Release-sensitive automation
+        description: Builds, tests, contracts, packs, evaluates, and publishes through the exact checked-in release-sensitive scripts and workflows.
+        locations: [.github/workflows/ci.yml, .github/workflows/publish.yml, scripts/e2e.ts, scripts/conformance.ts]
+        verify_tier: 4
+        covers: ['release:path:*']
+      - id: automation-runtime-environment
+        name: Test, evaluation, and release inputs
+        description: Treats CI, live receiver, PostgreSQL, SDK harness, eval provider, and GitHub release inputs as explicit automation prerequisites.
+        locations: [scripts, .github/workflows]
+        verify_tier: 4
+        covers: ['config:env:automation:*']
+
+  proactive-automation:
+    name: Personas, evaluations, feature workflow, and guardian
+    description: Checked-in verification persona, evaluations, authoritative catalog, tier workflow, and fail-closed hourly feature guardian.
+    criticality: standard
+    features:
+      - id: integration-verifier-persona
+        name: Live integration verifier persona
+        description: Runs an explicitly requested real-provider verification playbook and may mutate disposable provider fixtures; it is not the guardian.
+        locations: [.agentworkforce/workforce/personas/integration-verifier.json]
+        verify_tier: 6
+        covers: ['automation:integration-verifier-persona']
+      - id: relayfile-evaluations
+        name: Relayfile evaluation automation
+        description: Compiles offline cases and optionally uses a configured model provider without treating provider absence as a pass.
+        locations: [.github/workflows/relayfile-evals.yml, scripts/evals]
+        verify_tier: 5
+        covers: ['automation:relayfile-evals']
+      - id: feature-catalog-contract
+        name: Authoritative feature catalog
+        description: Validates manifest v1.1 totals, routes, procedures, paths, tiers, IDs, and complete target-specific public surface coverage.
+        locations: [.agentworkforce/features/manifest.yaml, scripts/validate-feature-catalog.mjs, .agentworkforce/agents/relayfile-feature-guardian/manifest-contract.test.ts]
+        verify_tier: 1
+        covers: ['automation:feature-catalog']
+      - id: relayfile-feature-guardian
+        name: Hourly feature guardian
+        description: Reads the scoped repository clone, advances exact revisioned cycle state, and optionally posts receipt-confirmed idempotent Slack checks.
+        locations: [.agentworkforce/agents/relayfile-feature-guardian/persona.json, .agentworkforce/agents/relayfile-feature-guardian/agent.ts]
+        verify_tier: 1
+        covers: ['automation:feature-guardian']

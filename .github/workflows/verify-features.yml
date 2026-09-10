@@ -1,0 +1,73 @@
+name: Verify feature catalog
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      live_tier:
+        description: Explicit optional live tier
+        type: choice
+        options: ['none', '3', '5', '6']
+        default: 'none'
+      require_live:
+        description: Fail when the selected live tier skips or remains manual
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: astral-sh/setup-uv@v5
+      - run: npm ci
+      - run: npm run features:validate
+      - run: npm run features:test
+      - run: npm run build
+      - run: npm run features:verify -- --tier deterministic
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: feature-verification-evidence
+          path: .workflow-artifacts/verify-features/latest.json
+          if-no-files-found: error
+
+  live-opt-in:
+    if: github.event_name == 'workflow_dispatch' && inputs.live_tier != 'none'
+    needs: deterministic
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: relayfile-feature-live
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Run explicitly selected live tier
+        env:
+          RELAYFILE_LIVE: ${{ secrets.RELAYFILE_LIVE }}
+          RELAYFILE_LIVE_FUSE: ${{ secrets.RELAYFILE_LIVE_FUSE }}
+          RELAYFILE_PROVIDER_LIVE: ${{ secrets.RELAYFILE_PROVIDER_LIVE }}
+          RELAYFILE_CLOUD_API_URL: ${{ secrets.RELAYFILE_CLOUD_API_URL }}
+          RELAYFILE_CLOUD_TOKEN: ${{ secrets.RELAYFILE_CLOUD_TOKEN }}
+          RELAYFILE_WORKSPACE_ID: ${{ secrets.RELAYFILE_WORKSPACE_ID }}
+        run: npm run features:verify -- --tier "${{ inputs.live_tier }}" ${{ inputs.require_live && '--require-live' || '' }}
