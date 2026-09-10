@@ -135,6 +135,7 @@ export function resolvePythonReleaseBaseline({
   currentVersion,
   repository = "AgentWorkforce/relayfile",
   currentRunId,
+  offline = false,
   releaseVerifier = completedRelease,
   verifierEnv = {},
 }) {
@@ -143,7 +144,17 @@ export function resolvePythonReleaseBaseline({
   const candidates = findTrustedPythonReleaseTags({ cwd, sourceSha });
   let latest = null;
   let resumable = null;
+  if (offline) {
+    for (const candidate of candidates.slice().reverse()) {
+      if (currentRunId && candidate.metadata["workflow-run-id"] === String(currentRunId)) {
+        resumable = candidate;
+        break;
+      }
+      latest ??= candidate;
+    }
+  }
   for (const candidate of candidates.slice().reverse()) {
+    if (offline) break;
     // completedRelease returns false only for a canonical 404 (no release).
     // Authentication, transport, and API failures must escape rather than
     // silently selecting an older or manifest-derived version baseline.
@@ -204,6 +215,7 @@ if (process.argv[1]?.endsWith("resolve-python-release-baseline.mjs")) {
       currentVersion: args.current_version,
       repository: args.repository,
       currentRunId: args.workflow_run_id,
+      offline: args.offline === "true",
       verifierEnv: { GH_TOKEN: process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN ?? "" },
     });
     console.log(`baseline_version=${result.baselineVersion}`);

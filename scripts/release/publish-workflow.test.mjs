@@ -1058,3 +1058,80 @@ test("Python tag reservation refuses a checkout that is not the declared source"
     rmSync(cwd, { recursive: true, force: true });
   }
 });
+
+test("Python dry runs and non-main versioning resolve baselines without network access", () => {
+  assert.match(
+    PYTHON_WORKFLOW,
+    /OFFLINE_BASELINE: \$\{\{ github\.ref != 'refs\/heads\/main' \|\| github\.event\.inputs\.dry_run == 'true' \}\}/,
+  );
+  for (const context of [
+    { ref: "refs/heads/main", dryRun: "true" },
+    { ref: "refs/heads/feature", dryRun: "false" },
+  ]) {
+    const dir = mkdtempSync(join(tmpdir(), "relayfile-python-offline-"));
+    const bin = join(dir, "bin");
+    const output = join(dir, "output");
+    const ghCalled = join(dir, "gh-called");
+    try {
+      mkdirSync(join(dir, "scripts/release"), { recursive: true });
+      writeFileSync(
+        join(dir, "scripts/release/resolve-python-release-baseline.mjs"),
+        PYTHON_BASELINE,
+      );
+      writeFileSync(join(dir, "pyproject.toml"), '[project]\nversion = "1.2.3"\n');
+      git(dir, "init", "-q");
+      git(dir, "config", "user.name", "Release Test");
+      git(dir, "config", "user.email", "release-test@example.invalid");
+      git(dir, "add", ".");
+      git(dir, "commit", "-qm", "source");
+      const sourceSha = git(dir, "rev-parse", "HEAD");
+      const tagTree = git(dir, "rev-parse", "HEAD^{tree}");
+      git(
+        dir,
+        "tag",
+        "-a",
+        "sdk-python-v1.2.3",
+        sourceSha,
+        "-m",
+        "Python SDK v1.2.3",
+        "-m",
+        `source-sha=${sourceSha}`,
+        "-m",
+        `tag-tree=${tagTree}`,
+        "-m",
+        "workflow-run-id=123",
+        "-m",
+        "workflow-run-attempt=1",
+      );
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, "gh"),
+        `#!/bin/sh\nprintf called > "$GH_CALLED"\nexit 99\n`,
+      );
+      chmodSync(join(bin, "gh"), 0o755);
+      const result = runBash(extractPythonStepRun("Determine and set version"), {
+        cwd: dir,
+        env: {
+          CUSTOM_VERSION: "",
+          VERSION_TYPE: "patch",
+          SOURCE_SHA: sourceSha,
+          WORKFLOW_RUN_ID: "456",
+          RELEASE_REPOSITORY: "AgentWorkforce/relayfile",
+          OFFLINE_BASELINE: "true",
+          GITHUB_REF: context.ref,
+          GITHUB_EVENT_NAME: context.dryRun,
+          GITHUB_WORKSPACE: dir,
+          GITHUB_OUTPUT: output,
+          GH_CALLED: ghCalled,
+          PATH: `${bin}:${process.env.PATH}`,
+        },
+      });
+      assert.equal(result.status, 0, `${context.ref}/${context.dryRun}: ${result.stdout}`);
+      assert.doesNotMatch(result.stdout, /gh api/);
+      assert.equal(existsSync(ghCalled), false, `${context.ref}/${context.dryRun} invoked gh`);
+      assert.match(readFileSync(output, "utf8"), /new_version=1\.2\.4/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});

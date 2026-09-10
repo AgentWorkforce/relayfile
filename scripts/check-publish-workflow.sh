@@ -26,6 +26,11 @@ while IFS= read -r source_line; do
   # Strip YAML comments only when they begin outside the command text; the
   # workflow's release commands contain no literal '#' arguments.
   line="${line%%[[:space:]]#*}"
+  folded_run_regex='^run:[[:space:]]*>[+-]?[[:space:]]*$'
+  if [[ "$line" =~ $folded_run_regex ]]; then
+    echo "publish workflow check failed: folded run scalars are forbidden" >&2
+    exit 1
+  fi
   if [[ "$line" =~ (^|[^[:alnum:]_])git[[:space:]]+push[[:space:]]+ ]]; then
     is_allowed=false
     for allowed in "${allowed_tag_pushes[@]}"; do
@@ -52,6 +57,10 @@ if [[ "$workflow_source" =~ (^|[^[:alnum:]_])git[[:space:]]*\\[[:space:]]*push[[
 fi
 if [[ "$workflow_source" =~ (^|[^[:alnum:]_])(\"?\$\{?[A-Za-z_][A-Za-z0-9_]*\}?\"?)[[:space:]]+push[[:space:]]+ ]]; then
   echo "publish workflow check failed: indirect git push is forbidden" >&2
+  exit 1
+fi
+if [[ "$workflow_source" == *'"git" push '* || "$workflow_source" == *"'git' push "* ]]; then
+  echo "publish workflow check failed: quoted git push is forbidden" >&2
   exit 1
 fi
 

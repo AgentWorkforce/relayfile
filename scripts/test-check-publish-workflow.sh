@@ -38,11 +38,20 @@ assert_rejected subshell '(git push origin main)'
 assert_rejected backticks 'echo `git push origin main`'
 assert_rejected grouping '{ git push origin main; }'
 assert_rejected redirect '>out git push origin main'
+assert_rejected quoted-literal '"git" push origin main'
+assert_rejected single-quoted-literal "'git' push origin main"
 
 multiline="$fixture_dir/multiline.yml"
 printf 'run: |\n  git \\\n  push origin main\n' > "$multiline"
 if "$checker" "$multiline" allow-zero >/dev/null 2>&1; then
   echo "checker accepted a multiline git push" >&2
+  exit 1
+fi
+
+folded="$fixture_dir/folded.yml"
+printf 'run: >\n  git\n  push origin main\n' > "$folded"
+if "$checker" "$folded" allow-zero >/dev/null 2>&1; then
+  echo "checker accepted a YAML folded git push" >&2
   exit 1
 fi
 

@@ -71,6 +71,7 @@ jobs:
           SOURCE_SHA: ${{ github.sha }}
           WORKFLOW_RUN_ID: ${{ github.run_id }}
           RELEASE_REPOSITORY: ${{ github.repository }}
+          OFFLINE_BASELINE: ${{ github.ref != 'refs/heads/main' || github.event.inputs.dry_run == 'true' }}
         run: |
           set -euo pipefail
           PYPROJECT="pyproject.toml"
@@ -81,6 +82,7 @@ jobs:
             --cwd "$GITHUB_WORKSPACE" \
             --current-version "$MANIFEST_VERSION" \
             --workflow-run-id "$WORKFLOW_RUN_ID" \
+            --offline "$OFFLINE_BASELINE" \
             --repository "$RELEASE_REPOSITORY")
           CURRENT_VERSION=$(printf '%s\n' "$BASELINE_INFO" | awk -F= '$1 == "baseline_version" { print $2 }')
           LATEST_TAG=$(printf '%s\n' "$BASELINE_INFO" | awk -F= '$1 == "latest_tag" { print $2 }')
