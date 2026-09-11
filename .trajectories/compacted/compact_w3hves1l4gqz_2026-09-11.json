@@ -1,0 +1,37 @@
+{
+  "id": "compact_w3hves1l4gqz",
+  "version": 1,
+  "type": "compacted",
+  "compactedAt": "2026-09-11T18:43:28.463Z",
+  "sourceTrajectories": [
+    "traj_w4hhj94v9pur"
+  ],
+  "dateRange": {
+    "start": "2026-09-11T18:39:31.769Z",
+    "end": "2026-09-11T18:42:56.223Z"
+  },
+  "summary": {
+    "totalDecisions": 1,
+    "totalEvents": 1,
+    "uniqueAgents": [
+      "default"
+    ]
+  },
+  "decisionGroups": [
+    {
+      "category": "api",
+      "decisions": [
+        {
+          "question": "Keep server Retry-After separate from the exponential retry cap",
+          "chosen": "Keep server Retry-After separate from the exponential retry cap",
+          "reasoning": "The real pinned SDK schedules a five-second header at two seconds. Current source fixes body hints only. Honor headers up to the existing internal wait budget; surface longer delays with metadata rather than retry early. Local injected-response proof does not attribute live Durable Object storage load.",
+          "fromTrajectory": "traj_w4hhj94v9pur"
+        }
+      ]
+    }
+  ],
+  "keyLearnings": [],
+  "keyFindings": [],
+  "filesAffected": [],
+  "commits": []
+}

@@ -200,12 +200,9 @@ const DEFAULT_RETRY_OPTIONS: NormalizedRetryOptions = {
 };
 
 /**
- * Hard ceiling for a *server-advertised* retry delay (a 429 body's
- * `details.retryAfterSeconds`). `maxDelayMs` bounds our OWN exponential
- * backoff; an explicit server instruction ("retry after N seconds") is honored
- * above that cap — truncating it just retries into the same overloaded resource
- * and burns the retry budget — but is still bounded here so a pathological or
- * hostile value cannot stall the client indefinitely.
+ * Maximum time the SDK waits internally for server-directed backpressure.
+ * Longer delays surface the original error for the caller to schedule; they
+ * must never be shortened into a retry before the server permits it.
  */
 const RETRY_AFTER_MAX_MS = 30_000;
 
@@ -2784,19 +2781,14 @@ export class RelayFileClient {
       }
 
       const payload = await this.readPayload(response);
-      if (this.shouldRetryStatus(response.status, retries, params.signal)) {
+      // An explicit header takes precedence. Body hints are a 429-only
+      // contract; a 5xx body still uses ordinary exponential backoff.
+      const advertisedDelayMs = this.parseRetryAfterMs(response.headers.get("retry-after"))
+        ?? this.parseRetryAfterSecondsFromBody(response.status === 429 ? payload : undefined);
+      if (this.shouldRetryStatus(response.status, retries, params.signal)
+        && (advertisedDelayMs === null || advertisedDelayMs <= RETRY_AFTER_MAX_MS)) {
         retries += 1;
-        await this.sleep(
-          this.computeRetryDelayMs(
-            retries,
-            response.headers.get("retry-after"),
-            // `details.retryAfterSeconds` is a 429-only backpressure signal
-            // (`workspace_busy` / `queue_full`). Only consult the body on a 429
-            // so a 5xx body can never bypass `maxDelayMs` via this path.
-            response.status === 429 ? payload : undefined,
-          ),
-          params.signal,
-        );
+        await this.sleep(this.computeRetryDelayMs(retries, advertisedDelayMs), params.signal);
         continue;
       }
 
@@ -2824,30 +2816,10 @@ export class RelayFileClient {
     return retries < this.retryOptions.maxRetries;
   }
 
-  private computeRetryDelayMs(
-    retryAttempt: number,
-    retryAfterHeader: string | null,
-    payload?: unknown,
-  ): number {
-    // A server-advertised `Retry-After` HEADER is the standard, explicit
-    // signal and takes precedence: parse it first and leave its handling
-    // unchanged (bounded by our own `maxDelayMs`). Only when the header is
-    // absent or unparseable do we consult the body below, so a body hint never
-    // silently overrides a shorter, explicit header the server already sent.
-    const retryAfterMs = this.parseRetryAfterMs(retryAfterHeader);
-    if (retryAfterMs !== null) {
-      return Math.min(this.retryOptions.maxDelayMs, retryAfterMs);
-    }
-    // With no usable header, a 429 body can still advertise an explicit
-    // backpressure delay as `details.retryAfterSeconds` (e.g. `workspace_busy`
-    // when the workspace durable object is overloaded, or `queue_full`). Honor
-    // it as an instruction, bounded only by RETRY_AFTER_MAX_MS — NOT truncated
-    // to `maxDelayMs`, which governs our own exponential backoff. Truncating it
-    // (maxDelayMs defaults to 2s vs. a typical 5s advertised delay) retries
-    // into the still-busy resource and exhausts the retry budget.
-    const advertisedMs = this.parseRetryAfterSecondsFromBody(payload);
-    if (advertisedMs !== null) {
-      return Math.max(0, Math.min(RETRY_AFTER_MAX_MS, advertisedMs));
+  private computeRetryDelayMs(retryAttempt: number, advertisedDelayMs: number | null): number {
+    // maxDelayMs limits our own backoff, never a server-advertised delay.
+    if (advertisedDelayMs !== null) {
+      return advertisedDelayMs;
     }
     const backoff = this.retryOptions.baseDelayMs * Math.pow(2, Math.max(0, retryAttempt - 1));
     const capped = Math.min(this.retryOptions.maxDelayMs, backoff);
@@ -2936,7 +2908,16 @@ export class RelayFileClient {
       currentContentPreview?: string;
       conflicts?: MergeConflictDetail[];
     };
-    const details = normalizeErrorDetails(rawData, data.details);
+    let details = normalizeErrorDetails(rawData, data.details);
+    // A long server delay is delegated to the caller. Preserve its header
+    // even when the response body has no retry hint, so that caller can
+    // schedule recovery without probing the workspace early.
+    const retryAfterMs = status === 429 || status >= 500
+      ? this.parseRetryAfterMs(headers.get("retry-after"))
+      : null;
+    if (retryAfterMs !== null) {
+      details = { ...details, retryAfterSeconds: retryAfterMs / 1000 };
+    }
 
     if (status === 409 && data.code === "merge_conflict") {
       const currentRevision = typeof data.currentRevision === "string"

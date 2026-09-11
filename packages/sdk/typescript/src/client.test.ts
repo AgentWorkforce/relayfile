@@ -3064,6 +3064,66 @@ describe("RelayFileClient — retry", () => {
     }
   });
 
+  it.each(["seconds", "date"])("does not truncate a Retry-After %s header to the local retry cap", async (format) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-11T12:00:00Z"));
+    try {
+      const retryAfter = format === "date" ? new Date(Date.now() + 5000).toUTCString() : "5";
+      const f = vi.fn()
+        .mockResolvedValueOnce(Response.json({ code: "workspace_busy" }, {
+          status: 429, headers: { "Retry-After": retryAfter },
+        }))
+        .mockResolvedValueOnce(Response.json({ path: "/", entries: [], nextCursor: null }));
+      const client = new RelayFileClient({ token: "fixture", fetchImpl: f });
+      const result = client.listTree("ws_1");
+      await vi.advanceTimersByTimeAsync(4999);
+      expect(f).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect((await result).entries).toEqual([]);
+      expect(f).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["header", "body"])("surfaces a long %s Retry-After instead of retrying before it permits", async (source) => {
+    vi.useFakeTimers();
+    try {
+      const f = vi.fn().mockImplementation(async () => Response.json({
+        code: "workspace_busy", message: "busy",
+        details: { ...(source === "body" ? { retryAfterSeconds: 120 } : {}), reason: "durable_object_overloaded" },
+      }, { status: 429, headers: source === "header" ? { "Retry-After": "120" } : {} }));
+      const client = new RelayFileClient({ token: "fixture", fetchImpl: f });
+      const result = client.listTree("ws_1").catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f).toHaveBeenCalledTimes(1);
+      expect(await result).toMatchObject({ status: 429, details: { retryAfterSeconds: 120 } });
+      await vi.advanceTimersByTimeAsync(120000);
+      expect(f).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels an advertised retry wait without issuing another request", async () => {
+    vi.useFakeTimers();
+    try {
+      const f = vi.fn().mockImplementation(async () => Response.json({ code: "workspace_busy" }, {
+        status: 429, headers: { "Retry-After": "5" },
+      }));
+      const controller = new AbortController();
+      const client = new RelayFileClient({ token: "fixture", fetchImpl: f });
+      const result = client.listTree("ws_1", { signal: controller.signal }).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(1000);
+      controller.abort();
+      expect(await result).toMatchObject({ name: "AbortError" });
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(f).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("prefers the Retry-After header over a body retryAfterSeconds when both are present", async () => {
     vi.useFakeTimers();
     try {
