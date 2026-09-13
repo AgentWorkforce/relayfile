@@ -13,19 +13,20 @@ import (
 )
 
 type fileEventMessage struct {
-	EventID       string `json:"eventId,omitempty"`
-	Type          string `json:"type"`
-	Path          string `json:"path,omitempty"`
-	Revision      string `json:"revision,omitempty"`
-	ContentHash   string `json:"contentHash,omitempty"`
-	ContentType   string `json:"contentType,omitempty"`
-	Content       string `json:"content,omitempty"`
-	Encoding      string `json:"encoding,omitempty"`
-	InlineContent bool   `json:"inlineContent,omitempty"`
-	Origin        string `json:"origin,omitempty"`
-	Provider      string `json:"provider,omitempty"`
-	CorrelationID string `json:"correlationId,omitempty"`
-	Timestamp     string `json:"timestamp,omitempty"`
+	EventID       string                      `json:"eventId,omitempty"`
+	Type          string                      `json:"type"`
+	Path          string                      `json:"path,omitempty"`
+	Revision      string                      `json:"revision,omitempty"`
+	ContentHash   string                      `json:"contentHash,omitempty"`
+	ContentType   string                      `json:"contentType,omitempty"`
+	Content       string                      `json:"content,omitempty"`
+	Encoding      string                      `json:"encoding,omitempty"`
+	InlineContent bool                        `json:"inlineContent,omitempty"`
+	Origin        string                      `json:"origin,omitempty"`
+	Provider      string                      `json:"provider,omitempty"`
+	CorrelationID string                      `json:"correlationId,omitempty"`
+	Timestamp     string                      `json:"timestamp,omitempty"`
+	TypeMetadata  *relayfile.FileTypeMetadata `json:"typeMetadata,omitempty"`
 }
 
 // Keep live messages comfortably below common reverse-proxy WebSocket frame
@@ -299,6 +300,7 @@ func (s *Server) writeWebSocketEvent(ctx context.Context, conn *websocket.Conn, 
 		Provider:      event.Provider,
 		CorrelationID: event.CorrelationID,
 		Timestamp:     event.Timestamp,
+		TypeMetadata:  event.TypeMetadata,
 	}
 	if event.Type == "file.created" || event.Type == "file.updated" {
 		if file, err := s.store.ReadFile(workspaceID, event.Path); err == nil &&

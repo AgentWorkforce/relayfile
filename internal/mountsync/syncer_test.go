@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -2902,7 +2904,7 @@ func TestPullRemoteFullGithubWorkingTreeTarSeedsAndStoresCursor(t *testing.T) {
 					Path:        sentinelPath,
 					Revision:    "rev_1",
 					ContentType: "application/json",
-					Content:     `{"headSha":"` + headSHA + `","defaultBranch":"main"}`,
+					Content:     `{"headSha":"` + headSHA + `","defaultBranch":"main","sourceProfile":"complete-v1","filesExpected":2}`,
 				},
 				readmeRemote: {
 					Path:        readmeRemote,
@@ -2946,6 +2948,9 @@ func TestPullRemoteFullGithubWorkingTreeTarSeedsAndStoresCursor(t *testing.T) {
 	if client.tarCalls != 1 {
 		t.Fatalf("expected github tar export to be used once, got %d", client.tarCalls)
 	}
+	if client.lastTarSeed.SourceProfile != "complete-v1" {
+		t.Fatalf("expected complete source profile on tar export, got %q", client.lastTarSeed.SourceProfile)
+	}
 	gotReadme, err := os.ReadFile(filepath.Join(localDir, "README.md"))
 	if err != nil {
 		t.Fatalf("read seeded README: %v", err)
@@ -2968,6 +2973,133 @@ func TestPullRemoteFullGithubWorkingTreeTarSeedsAndStoresCursor(t *testing.T) {
 	if got := syncer.localRelativeToRemotePath("src/app.ts"); got != appRemote {
 		t.Fatalf("local write path should map back to content object with head sha: got %q want %q", got, appRemote)
 	}
+
+	client.files[sentinelPath] = RemoteFile{
+		Path:        sentinelPath,
+		Revision:    "rev_4",
+		ContentType: "application/json",
+		Content:     `{"headSha":"` + headSHA + `","defaultBranch":"main","sourceProfile":"complete-v1","filesExpected":3}`,
+	}
+	mismatchDir := t.TempDir()
+	mismatchSyncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:   "ws_tar_seed_count_mismatch",
+		RemoteRoot:    contentsRoot,
+		LocalRoot:     mismatchDir,
+		StateFile:     filepath.Join(mismatchDir, ".relayfile-mount-state.json"),
+		WebSocket:     boolPtr(false),
+		FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer for count mismatch failed: %v", err)
+	}
+	err = mismatchSyncer.Reconcile(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "tree listed 2 entries, clone manifest expected 3") {
+		t.Fatalf("expected strict clone manifest count mismatch, got %v", err)
+	}
+	if client.tarCalls != 1 {
+		t.Fatalf("count mismatch must fail before tar export; got %d total tar calls", client.tarCalls)
+	}
+}
+
+type unsupportedGithubTreeClient struct{ *fakeClient }
+
+func (c *unsupportedGithubTreeClient) ListTree(context.Context, string, string, int, string) (TreeResponse, error) {
+	return TreeResponse{Entries: []TreeEntry{{Path: "/github/repos/o/r/contents/device", Type: "fifo"}}}, nil
+}
+
+func TestGithubWorkingTreeSnapshotRejectsUnsupportedCompleteEntry(t *testing.T) {
+	localDir := t.TempDir()
+	client := &unsupportedGithubTreeClient{fakeClient: &fakeClient{}}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_unsupported_tree", RemoteRoot: "/github/repos/o/r/contents",
+		LocalRoot: localDir, StateFile: filepath.Join(localDir, ".state.json"), WebSocket: boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+	_, _, err = syncer.githubWorkingTreeSnapshot(context.Background(), bootstrapProgress{}, true)
+	if err == nil || !strings.Contains(err.Error(), `unsupported entry type "fifo"`) {
+		t.Fatalf("unsupported complete-v1 entry error = %v", err)
+	}
+}
+
+func TestGithubWorkingTreeTarSeedPreservesSymlinkAndExecutableMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires developer mode or elevated privileges on Windows")
+	}
+	localDir := t.TempDir()
+	contentsRoot := "/github/repos/AgentWorkforce/cloud/contents"
+	headSHA := "head-metadata"
+	runBody := []byte("#!/bin/sh\n")
+	runRemote := contentsRoot + "/bin/run@" + headSHA + ".json"
+	linkRemote := contentsRoot + "/current@" + headSHA + ".json"
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_tar_metadata",
+		RemoteRoot:  contentsRoot,
+		LocalRoot:   localDir,
+		StateFile:   filepath.Join(localDir, ".relayfile-mount-state.json"),
+		WebSocket:   boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+	syncer.githubWorkingTree.HeadSHA = headSHA
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := tw.WriteHeader(&tar.Header{
+		Name: "bin/run", Mode: 0o755, Size: int64(len(runBody)), Typeflag: tar.TypeReg,
+	}); err != nil {
+		t.Fatalf("write executable header: %v", err)
+	}
+	if _, err := tw.Write(runBody); err != nil {
+		t.Fatalf("write executable body: %v", err)
+	}
+	if err := tw.WriteHeader(&tar.Header{
+		Name: "current", Mode: 0o777, Typeflag: tar.TypeSymlink, Linkname: "bin/run",
+	}); err != nil {
+		t.Fatalf("write symlink header: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	remotePaths, err := syncer.applyGithubWorkingTreeTarSeed(
+		GithubWorkingTreeTar{
+			Body: io.NopCloser(bytes.NewReader(buf.Bytes())), ContentType: "application/x-tar",
+		},
+		map[string]githubTreeFile{
+			"bin/run": {
+				RemotePath: runRemote, Revision: "rev_1", ContentHash: hashBytes(runBody),
+				Type: remoteTypeFile, Mode: 0o755,
+			},
+			"current": {
+				RemotePath: linkRemote, Revision: "rev_2", ContentHash: hashBytes([]byte("bin/run")),
+				Type: remoteTypeSymlink, Target: "bin/run", Mode: 0o777,
+			},
+		},
+		nil,
+		bootstrapProgress{},
+	)
+	if err != nil {
+		t.Fatalf("apply tar seed: %v", err)
+	}
+	if len(remotePaths) != 2 {
+		t.Fatalf("expected 2 materialized paths, got %d", len(remotePaths))
+	}
+	info, err := os.Stat(filepath.Join(localDir, "bin", "run"))
+	if err != nil {
+		t.Fatalf("stat executable: %v", err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("expected executable mode 0755, got %04o", info.Mode().Perm())
+	}
+	if target, err := os.Readlink(filepath.Join(localDir, "current")); err != nil || target != "bin/run" {
+		t.Fatalf("expected current -> bin/run, target=%q err=%v", target, err)
+	}
+	if tracked := syncer.state.Files[linkRemote]; tracked.Type != remoteTypeSymlink || tracked.Target != "bin/run" {
+		t.Fatalf("unexpected tracked symlink state: %+v", tracked)
+	}
 }
 
 func TestParseGithubCloneManifestAcceptsSnakeCaseCursor(t *testing.T) {
@@ -2975,7 +3107,9 @@ func TestParseGithubCloneManifestAcceptsSnakeCaseCursor(t *testing.T) {
 		"head_sha": "head123",
 		"default_branch": "main",
 		"events_cursor": "evt_cursor",
-		"event_id": "evt_id"
+		"event_id": "evt_id",
+		"source_profile": "complete-v1",
+		"files_expected": 42
 	}`))
 	if !ok {
 		t.Fatalf("expected snake_case clone manifest to parse")
@@ -2988,6 +3122,12 @@ func TestParseGithubCloneManifestAcceptsSnakeCaseCursor(t *testing.T) {
 	}
 	if manifest.EventID != "evt_id" {
 		t.Fatalf("unexpected event id %q", manifest.EventID)
+	}
+	if manifest.SourceProfile != "complete-v1" {
+		t.Fatalf("unexpected source profile %q", manifest.SourceProfile)
+	}
+	if manifest.FilesExpected == nil || *manifest.FilesExpected != 42 {
+		t.Fatalf("unexpected files expected %#v", manifest.FilesExpected)
 	}
 }
 
@@ -5842,6 +5982,54 @@ func TestFreshProcessDriftRecoverySkipsReadOnlyFiles(t *testing.T) {
 	}
 }
 
+func TestReadOnlySymlinkReplacementCannotOverwriteOutsideMount(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink privileges are unavailable in the Windows test environment")
+	}
+	localDir := t.TempDir()
+	outsideDir := t.TempDir()
+	outsidePath := filepath.Join(outsideDir, "victim.txt")
+	if err := os.WriteFile(outsidePath, []byte("outside"), 0o644); err != nil {
+		t.Fatalf("seed outside file: %v", err)
+	}
+	remotePath := "/notion/readonly.txt"
+	client := &fakeClient{files: map[string]RemoteFile{
+		remotePath: {Path: remotePath, Revision: "rev_1", ContentType: "text/plain", Content: "server"},
+	}}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:   "ws_readonly_symlink_replace",
+		RemoteRoot:    "/notion",
+		LocalRoot:     localDir,
+		Scopes:        []string{"fs:read"},
+		FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial pull: %v", err)
+	}
+	localPath := filepath.Join(localDir, "readonly.txt")
+	if err := os.Chmod(localPath, 0o644); err != nil {
+		t.Fatalf("make local path writable: %v", err)
+	}
+	if err := os.Remove(localPath); err != nil {
+		t.Fatalf("remove local path: %v", err)
+	}
+	if err := os.Symlink(outsidePath, localPath); err != nil {
+		t.Fatalf("replace with symlink: %v", err)
+	}
+	if err := syncer.PushLocalAndFlushOnce(context.Background()); err != nil {
+		t.Fatalf("readonly restore: %v", err)
+	}
+	if got, err := os.ReadFile(outsidePath); err != nil || string(got) != "outside" {
+		t.Fatalf("outside target was modified: content=%q err=%v", got, err)
+	}
+	if got, err := os.ReadFile(localPath); err != nil || string(got) != "server" {
+		t.Fatalf("readonly path was not restored safely: content=%q err=%v", got, err)
+	}
+}
+
 func TestRestartRecoversTrackedHashDriftWrittenWhileOffline(t *testing.T) {
 	client := &fakeClient{
 		files: map[string]RemoteFile{
@@ -7660,6 +7848,51 @@ func TestApplyRemoteFile_QuarantinesPathCollision(t *testing.T) {
 	}
 }
 
+func TestApplyRemoteFileQuarantinesAncestorSwapDuringLocalRead(t *testing.T) {
+	localDir := t.TempDir()
+	parent := filepath.Join(localDir, "parent")
+	if err := os.Mkdir(parent, 0o755); err != nil {
+		t.Fatalf("create parent fixture: %v", err)
+	}
+	localPath := filepath.Join(parent, "child.txt")
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_remote_apply_ancestor_swap",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	syncer.readLocalSnapshotFn = func(path string, includeContent bool) (localSnapshot, error) {
+		if path != localPath || !includeContent {
+			return readLocalSnapshot(path, includeContent)
+		}
+		if removeErr := os.Remove(parent); removeErr != nil {
+			t.Fatalf("remove parent during read: %v", removeErr)
+		}
+		if writeErr := os.WriteFile(parent, []byte("replacement"), 0o644); writeErr != nil {
+			t.Fatalf("replace parent during read: %v", writeErr)
+		}
+		return localSnapshot{}, syscall.ENOTDIR
+	}
+
+	remotePath := "/parent/child.txt"
+	if err := syncer.applyRemoteFile(remotePath, RemoteFile{
+		Path: remotePath, Revision: "rev_1", Type: remoteTypeFile, Mode: 0o644, Content: "remote",
+	}, nil); err != nil {
+		t.Fatalf("ancestor swap should quarantine, got: %v", err)
+	}
+	if got := syncer.state.Counters.PathCollisionQuarantined; got != 1 {
+		t.Fatalf("path collisions quarantined = %d, want 1", got)
+	}
+	if info, statErr := os.Stat(parent); statErr != nil || !info.Mode().IsRegular() {
+		t.Fatalf("replacement ancestor changed: info=%v err=%v", info, statErr)
+	}
+	if _, tracked := syncer.state.Files[remotePath]; tracked {
+		t.Fatal("quarantined descendant was recorded as materialized")
+	}
+}
+
 func TestApplyRemoteFile_NestedIndexAndLayout(t *testing.T) {
 	t.Parallel()
 
@@ -8245,7 +8478,7 @@ func TestApplyWebSocketEvent_DirectoryCreatedTriggersProviderLayout(t *testing.T
 	}
 }
 
-func TestScanLocalFilesSkipsSymlinkedDirectories(t *testing.T) {
+func TestScanLocalFilesIncludesSymlinkedDirectoriesAsLinks(t *testing.T) {
 	t.Parallel()
 
 	localDir := t.TempDir()
@@ -8279,8 +8512,12 @@ func TestScanLocalFilesSkipsSymlinkedDirectories(t *testing.T) {
 	if got := files["/note.md"]; len(got.RawContent) != 0 || got.WireContent != "" {
 		t.Fatalf("expected scanLocalFiles to defer content reads, got raw=%d wire=%q", len(got.RawContent), got.WireContent)
 	}
-	if _, ok := files["/node_modules_link"]; ok {
-		t.Fatalf("expected symlinked directory to be skipped")
+	link, ok := files["/node_modules_link"]
+	if !ok {
+		t.Fatalf("expected symlinked directory to be scanned as a link")
+	}
+	if link.Type != remoteTypeSymlink || link.Target != targetDir {
+		t.Fatalf("symlink snapshot = type %q target %q, want link to %q", link.Type, link.Target, targetDir)
 	}
 }
 
@@ -9312,6 +9549,7 @@ type fakeExportClient struct {
 	*fakeClient
 	exportCalls   int
 	tarCalls      int
+	lastTarSeed   GithubWorkingTreeSeedRequest
 	tarFiles      map[string][]byte
 	tarErr        error
 	readFileCalls int
@@ -9448,8 +9686,8 @@ func (c *fakeExportClient) ReadFile(ctx context.Context, workspaceID, path strin
 func (c *fakeExportClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID string, seed GithubWorkingTreeSeedRequest) (GithubWorkingTreeTar, error) {
 	_ = ctx
 	_ = workspaceID
-	_ = seed
 	c.tarCalls++
+	c.lastTarSeed = seed
 	if c.tarErr != nil {
 		return GithubWorkingTreeTar{}, c.tarErr
 	}
@@ -13223,6 +13461,223 @@ func TestInitialTreeBootstrapYieldsAtFileBudgetAndResumes(t *testing.T) {
 	}
 	if syncer.state.LastFullPullAt != "" {
 		t.Fatalf("resumed non-authoritative traversal stamped lastFullPullAt %q", syncer.state.LastFullPullAt)
+	}
+}
+
+func TestCompleteGithubTreeStrictCountResumesWithManifestDenominator(t *testing.T) {
+	files := make(map[string]RemoteFile, 5)
+	for i := 0; i < 5; i++ {
+		path := fmt.Sprintf("/github/repos/acme/repo/contents/%d.txt", i)
+		files[path] = RemoteFile{Path: path, Revision: fmt.Sprintf("rev_%d", i), Content: fmt.Sprintf("%d", i)}
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(&pagedTreeClient{fakeClient: &fakeClient{files: files}, pageSize: 5, totalFiles: 1}, SyncerOptions{
+		WorkspaceID:               "ws_complete_strict_resume",
+		RemoteRoot:                "/github/repos/acme/repo/contents",
+		LocalRoot:                 localDir,
+		BootstrapMaxFilesPerCycle: 2,
+		FullPullEvery:             -1,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	expected := 5
+	syncer.githubWorkingTree = &githubWorkingTreeMount{}
+	syncer.state.GithubWorkingTreeSourceProfile = "complete-v1"
+	syncer.state.GithubWorkingTreeFilesExpected = &expected
+	if err := syncer.pullRemoteFullTree(context.Background(), nil, bootstrapProgress{}); err != nil {
+		t.Fatalf("first strict cycle: %v", err)
+	}
+	if syncer.state.BootstrapStrictFilesSeen != 2 {
+		t.Fatalf("first strict count=%d, want 2", syncer.state.BootstrapStrictFilesSeen)
+	}
+	// An old/non-strict progress denominator must not replace the verified
+	// complete-v1 manifest count when the traversal resumes.
+	syncer.state.BootstrapFilesTotal = 1
+	if err := syncer.pullRemoteFullTree(context.Background(), nil, bootstrapProgress{}); err != nil {
+		t.Fatalf("second strict cycle: %v", err)
+	}
+	if syncer.state.BootstrapStrictFilesSeen != 4 {
+		t.Fatalf("second strict count=%d, want 4", syncer.state.BootstrapStrictFilesSeen)
+	}
+	if err := syncer.pullRemoteFullTree(context.Background(), nil, bootstrapProgress{}); err != nil {
+		t.Fatalf("final strict cycle: %v", err)
+	}
+	if !syncer.state.BootstrapComplete {
+		t.Fatal("strict traversal did not complete")
+	}
+}
+
+func TestJSONEscapedStringSizeMatchesEncodingJSON(t *testing.T) {
+	data := []byte("line\n\r\t\"\\<>&\u2028")
+	encoded, err := json.Marshal(string(data))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want := int64(len(encoded) - 2) // exclude the surrounding JSON quotes
+	if got := jsonEscapedStringSize(data); got != want {
+		t.Fatalf("escaped size=%d, want %d for JSON %q", got, want, encoded)
+	}
+}
+
+func TestLocalSnapshotMatchesTrackedIncludesFilesystemMetadata(t *testing.T) {
+	base := localSnapshot{Hash: "same", Type: remoteTypeFile, Mode: 0o644}
+	tracked := trackedFile{Hash: "same", Type: remoteTypeFile, Mode: 0o644}
+	if !localSnapshotMatchesTracked(base, tracked) {
+		t.Fatal("identical file snapshot did not match tracked state")
+	}
+	modeOnly := base
+	modeOnly.Mode = 0o755
+	if localSnapshotMatchesTracked(modeOnly, tracked) {
+		t.Fatal("mode-only change was treated as clean")
+	}
+	symlink := base
+	symlink.Type = remoteTypeSymlink
+	symlink.Target = "same"
+	if localSnapshotMatchesTracked(symlink, tracked) {
+		t.Fatal("equal-hash type change was treated as clean")
+	}
+	readonlyExecutable := base
+	readonlyExecutable.Mode = 0o555
+	trackedExecutable := tracked
+	trackedExecutable.Mode = 0o755
+	if !localSnapshotMatchesReadonlyTracked(readonlyExecutable, trackedExecutable) {
+		t.Fatal("read-only executable mode was treated as modified")
+	}
+	readonlyExecutable.Mode = 0o444
+	if localSnapshotMatchesReadonlyTracked(readonlyExecutable, trackedExecutable) {
+		t.Fatal("missing executable bits were treated as clean")
+	}
+}
+
+func TestReadonlyExecutableStaysCleanAndExecutableAcrossPushScan(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits are not enforced on Windows")
+	}
+	remotePath := "/repo/tool.sh"
+	client := &fakeClient{files: map[string]RemoteFile{
+		remotePath: {
+			Path:        remotePath,
+			Revision:    "rev_1",
+			ContentType: "text/x-shellscript",
+			Content:     "#!/bin/sh\nexit 0\n",
+			Mode:        0o755,
+		},
+	}}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:   "ws_readonly_executable",
+		RemoteRoot:    "/repo",
+		LocalRoot:     localDir,
+		Scopes:        []string{"relayfile:fs:read:/repo/tool.sh"},
+		FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+	localPath := filepath.Join(localDir, "tool.sh")
+	info, err := os.Stat(localPath)
+	if err != nil {
+		t.Fatalf("stat executable: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o555 {
+		t.Fatalf("initial read-only executable mode = %04o, want 0555", got)
+	}
+	readsBefore := client.readFileCalls
+	if _, err := syncer.pushLocal(context.Background()); err != nil {
+		t.Fatalf("clean read-only push scan: %v", err)
+	}
+	if client.readFileCalls != readsBefore {
+		t.Fatalf("clean read-only executable was re-read from remote: before=%d after=%d", readsBefore, client.readFileCalls)
+	}
+	info, err = os.Stat(localPath)
+	if err != nil {
+		t.Fatalf("stat executable after push scan: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o555 {
+		t.Fatalf("read-only executable mode after push scan = %04o, want 0555", got)
+	}
+}
+
+func TestApplyRemoteFilePreservesExistingFileWhenLocalReadFails(t *testing.T) {
+	localDir := t.TempDir()
+	localPath := filepath.Join(localDir, "notes.md")
+	localContent := []byte("local edit\n")
+	if err := os.WriteFile(localPath, localContent, 0o644); err != nil {
+		t.Fatalf("write local fixture: %v", err)
+	}
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_remote_apply_read_failure",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	remotePath := "/notes.md"
+	syncer.state.Files[remotePath] = trackedFile{
+		Revision: "rev_base",
+		Type:     remoteTypeFile,
+		Mode:     0o644,
+		Hash:     hashString("base\n"),
+	}
+	syncer.readLocalSnapshotFn = func(path string, includeContent bool) (localSnapshot, error) {
+		if path == localPath && includeContent {
+			return localSnapshot{}, fs.ErrPermission
+		}
+		return readLocalSnapshot(path, includeContent)
+	}
+
+	err = syncer.applyRemoteFile(remotePath, RemoteFile{
+		Path:     remotePath,
+		Revision: "rev_remote",
+		Type:     remoteTypeFile,
+		Mode:     0o644,
+		Content:  "remote edit\n",
+	}, nil)
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("remote apply error = %v, want permission failure", err)
+	}
+	if got, readErr := os.ReadFile(localPath); readErr != nil || !bytes.Equal(got, localContent) {
+		t.Fatalf("local file after failed read = %q, err=%v; want preserved", got, readErr)
+	}
+	if got := syncer.state.Files[remotePath].Revision; got != "rev_base" {
+		t.Fatalf("tracked revision advanced to %q after failed local read", got)
+	}
+}
+
+func TestRefreshShadowContentSkipsSymlinkSnapshots(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink behavior differs on Windows")
+	}
+	localDir := t.TempDir()
+	localPath := filepath.Join(localDir, "notes.md")
+	if err := os.Symlink("target.md", localPath); err != nil {
+		t.Fatalf("create symlink fixture: %v", err)
+	}
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_shadow_symlink",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	remotePath := "/notes.md"
+	syncer.state.Files[remotePath] = trackedFile{
+		Revision: "rev_symlink",
+		Type:     remoteTypeSymlink,
+		Target:   "target.md",
+		Mode:     0o777,
+		Hash:     hashString("target.md"),
+	}
+
+	syncer.refreshShadowContentFromDisk(remotePath, "rev_symlink", localPath)
+	if content, ok := syncer.readShadowContent(remotePath, "rev_symlink"); ok {
+		t.Fatalf("symlink snapshot created a shadow merge base: %q", content)
 	}
 }
 

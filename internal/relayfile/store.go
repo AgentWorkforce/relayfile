@@ -66,6 +66,8 @@ func (e *ParentMovedError) Is(target error) bool {
 type TreeEntry struct {
 	Path             string `json:"path"`
 	Type             string `json:"type"`
+	Target           string `json:"target,omitempty"`
+	Mode             uint32 `json:"mode,omitempty"`
 	Revision         string `json:"revision"`
 	ContentHash      string `json:"contentHash,omitempty"`
 	Provider         string `json:"provider,omitempty"`
@@ -98,6 +100,9 @@ type FileSemantics struct {
 
 type File struct {
 	Path             string        `json:"path"`
+	Type             string        `json:"type,omitempty"`
+	Target           string        `json:"target,omitempty"`
+	Mode             uint32        `json:"mode,omitempty"`
 	Revision         string        `json:"revision"`
 	ContentHash      string        `json:"contentHash,omitempty"`
 	ContentType      string        `json:"contentType"`
@@ -107,6 +112,15 @@ type File struct {
 	ProviderObjectID string        `json:"providerObjectId,omitempty"`
 	LastEditedAt     string        `json:"lastEditedAt,omitempty"`
 	Semantics        FileSemantics `json:"semantics,omitempty"`
+}
+
+// FileTypeMetadata is the filesystem identity carried with a file event.  It
+// is deliberately kept separate from content so clients can materialize
+// symlinks and executable modes without guessing from the payload.
+type FileTypeMetadata struct {
+	Type   string `json:"type,omitempty"`
+	Target string `json:"target,omitempty"`
+	Mode   uint32 `json:"mode,omitempty"`
 }
 
 type ForkHandle struct {
@@ -175,15 +189,16 @@ type forkState struct {
 }
 
 type Event struct {
-	EventID       string `json:"eventId"`
-	Type          string `json:"type"`
-	Path          string `json:"path"`
-	Revision      string `json:"revision"`
-	ContentHash   string `json:"contentHash,omitempty"`
-	Origin        string `json:"origin"`
-	Provider      string `json:"provider,omitempty"`
-	CorrelationID string `json:"correlationId"`
-	Timestamp     string `json:"timestamp"`
+	EventID       string            `json:"eventId"`
+	Type          string            `json:"type"`
+	Path          string            `json:"path"`
+	Revision      string            `json:"revision"`
+	ContentHash   string            `json:"contentHash,omitempty"`
+	Origin        string            `json:"origin"`
+	Provider      string            `json:"provider,omitempty"`
+	CorrelationID string            `json:"correlationId"`
+	Timestamp     string            `json:"timestamp"`
+	TypeMetadata  *FileTypeMetadata `json:"typeMetadata,omitempty"`
 	// ACLPermissions is an internal snapshot used to keep delete and rename
 	// events subject to the permissions that governed the file revision. It is
 	// deliberately excluded from the public event payload.
@@ -202,6 +217,9 @@ type WriteRequest struct {
 	ContentType   string
 	Content       string
 	Encoding      string
+	Type          string
+	Target        string
+	Mode          uint32
 	Semantics     FileSemantics
 	CorrelationID string
 }
@@ -225,6 +243,9 @@ func cloneContentIdentity(identity *ContentIdentity) *ContentIdentity {
 
 type BulkWriteFile struct {
 	Path            string           `json:"path"`
+	Type            string           `json:"type,omitempty"`
+	Target          string           `json:"target,omitempty"`
+	Mode            uint32           `json:"mode,omitempty"`
 	ContentType     string           `json:"contentType"`
 	Content         string           `json:"content"`
 	Encoding        string           `json:"encoding"`
@@ -1275,6 +1296,11 @@ func (s *Store) WriteFile(req WriteRequest) (WriteResult, error) {
 	}
 
 	existing, exists := ws.Files[path]
+	metadata, metadataErr := normalizeWriteTypeMetadata(req, existing, exists, encoding)
+	if metadataErr != nil {
+		s.mu.Unlock()
+		return WriteResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, metadataErr)
+	}
 	if !exists {
 		if req.IfMatch != "0" && req.IfMatch != "*" {
 			s.mu.Unlock()
@@ -1289,6 +1315,9 @@ func (s *Store) WriteFile(req WriteRequest) (WriteResult, error) {
 			ContentType:  contentType,
 			Content:      req.Content,
 			Encoding:     encoding,
+			Type:         metadata.Type,
+			Target:       metadata.Target,
+			Mode:         metadata.Mode,
 			Provider:     provider,
 			LastEditedAt: now,
 			Semantics:    semantics,
@@ -1315,6 +1344,9 @@ func (s *Store) WriteFile(req WriteRequest) (WriteResult, error) {
 	existing.ContentType = contentType
 	existing.Content = req.Content
 	existing.Encoding = encoding
+	existing.Type = metadata.Type
+	existing.Target = metadata.Target
+	existing.Mode = metadata.Mode
 	existing.ContentHash = contentHashForEncodedContent(req.Content, encoding)
 	existing.LastEditedAt = now
 	if !isZeroSemantics(semantics) {
@@ -1389,6 +1421,11 @@ func (s *Store) BulkWrite(workspaceID string, files []BulkWriteFile) (int, []Bul
 			continue
 		}
 		existingFile, existed := ws.Files[path]
+		metadata, metadataErr := normalizeBulkWriteTypeMetadata(input, existingFile, existed, encoding)
+		if metadataErr != nil {
+			errorsOut = append(errorsOut, BulkWriteError{Path: path, Code: "invalid_type", Message: metadataErr.Error()})
+			continue
+		}
 		ifMatch := strings.TrimSpace(input.IfMatch)
 		if ifMatch != "" {
 			if !existed {
@@ -1420,6 +1457,9 @@ func (s *Store) BulkWrite(workspaceID string, files []BulkWriteFile) (int, []Bul
 		file.Content = input.Content
 		file.Encoding = encoding
 		file.ContentHash = contentHashForEncodedContent(input.Content, encoding)
+		file.Type = metadata.Type
+		file.Target = metadata.Target
+		file.Mode = metadata.Mode
 		if file.Provider == "" {
 			file.Provider = inferProviderFromPath(path)
 		}
@@ -1454,6 +1494,59 @@ func (s *Store) BulkWrite(workspaceID string, files []BulkWriteFile) (int, []Bul
 		s.enqueueWriteback(queued.task)
 	}
 	return written, results, errorsOut
+}
+
+func normalizeBulkWriteTypeMetadata(input BulkWriteFile, existing File, exists bool, encoding string) (FileTypeMetadata, error) {
+	mode := input.Mode
+	typeName := strings.ToLower(strings.TrimSpace(input.Type))
+	if typeName == "" {
+		typeName = "file"
+	}
+	// Older bulk clients omitted mode. Preserve executable bits on an
+	// existing regular file rather than interpreting the omitted uint32 as an
+	// explicit request to clear them.
+	if mode == 0 && exists && typeName == "file" && !strings.EqualFold(strings.TrimSpace(existing.Type), "symlink") {
+		mode = existing.Mode
+	}
+	return normalizeTypeMetadata(input.Type, input.Target, mode, encoding, input.Content)
+}
+
+func normalizeWriteTypeMetadata(input WriteRequest, existing File, exists bool, encoding string) (FileTypeMetadata, error) {
+	mode := input.Mode
+	// A legacy singular PUT has no mode field. Preserve an existing regular
+	// file's executable bits in that case, while an omitted type deliberately
+	// means a regular file so stale symlink identity cannot survive a PUT.
+	if mode == 0 && exists && existing.Type != "symlink" {
+		mode = existing.Mode
+	}
+	return normalizeTypeMetadata(input.Type, input.Target, mode, encoding, input.Content)
+}
+
+func normalizeTypeMetadata(rawType, target string, mode uint32, rawEncoding, content string) (FileTypeMetadata, error) {
+	typeName := strings.ToLower(strings.TrimSpace(rawType))
+	if typeName == "" {
+		typeName = "file"
+	}
+	switch typeName {
+	case "file":
+		if strings.TrimSpace(target) != "" {
+			return FileTypeMetadata{}, errors.New("regular files cannot carry a symlink target")
+		}
+		return FileTypeMetadata{Type: "file", Mode: mode}, nil
+	case "symlink":
+		if strings.TrimSpace(target) == "" {
+			return FileTypeMetadata{}, errors.New("symlink target is required")
+		}
+		if rawEncoding != "" && !strings.EqualFold(strings.TrimSpace(rawEncoding), "utf-8") {
+			return FileTypeMetadata{}, errors.New("symlink content must use utf-8 encoding")
+		}
+		if content != target {
+			return FileTypeMetadata{}, errors.New("symlink content must equal target")
+		}
+		return FileTypeMetadata{Type: "symlink", Target: target, Mode: mode}, nil
+	default:
+		return FileTypeMetadata{}, fmt.Errorf("unsupported file type %q", rawType)
+	}
 }
 
 func findOperationByContentIdentityLocked(ws *workspaceState, identity *ContentIdentity, now time.Time) (OperationStatus, bool) {
@@ -1923,6 +2016,10 @@ func (s *Store) WriteForkFile(req WriteRequest, forkID string) (WriteResult, err
 	}
 	path := normalizePath(req.Path)
 	existing, exists := s.readForkFileLocked(fork, path)
+	metadata, metadataErr := normalizeWriteTypeMetadata(req, existing, exists, encoding)
+	if metadataErr != nil {
+		return WriteResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, metadataErr)
+	}
 	var resolvedBaseRevision *string
 	if exists && req.IfMatch != "*" && req.IfMatch != existing.Revision {
 		// The fork's own overlay revision didn't match. If this path was
@@ -1966,6 +2063,9 @@ func (s *Store) WriteForkFile(req WriteRequest, forkID string) (WriteResult, err
 		ContentType:   req.ContentType,
 		Content:       req.Content,
 		Encoding:      encoding,
+		Type:          metadata.Type,
+		Target:        metadata.Target,
+		Mode:          metadata.Mode,
 		Semantics:     req.Semantics,
 		CorrelationID: req.CorrelationID,
 	}, existing, exists, resolvedBaseRevision)
@@ -2025,6 +2125,11 @@ func (s *Store) BulkWriteFork(workspaceID, forkID string, files []BulkWriteFile)
 			continue
 		}
 		existing, exists := s.readForkFileLocked(fork, path)
+		metadata, metadataErr := normalizeBulkWriteTypeMetadata(input, existing, exists, encoding)
+		if metadataErr != nil {
+			errorsOut = append(errorsOut, BulkWriteError{Path: path, Code: "invalid_type", Message: metadataErr.Error()})
+			continue
+		}
 		ifMatch := strings.TrimSpace(input.IfMatch)
 		if ifMatch != "" {
 			if !exists {
@@ -2055,7 +2160,16 @@ func (s *Store) BulkWriteFork(workspaceID, forkID string, files []BulkWriteFile)
 			ContentType: input.ContentType,
 			Content:     input.Content,
 			Encoding:    encoding,
+			Type:        metadata.Type,
+			Target:      metadata.Target,
+			Mode:        metadata.Mode,
 		}, existing, exists, nil)
+		if entry, ok := fork.Overlay[path]; ok && entry.File != nil {
+			entry.File.Type = metadata.Type
+			entry.File.Target = metadata.Target
+			entry.File.Mode = metadata.Mode
+			fork.Overlay[path] = entry
+		}
 		contentType := strings.TrimSpace(input.ContentType)
 		if contentType == "" {
 			contentType = "text/markdown"
@@ -3806,6 +3920,9 @@ func (s *Store) recordWriteWithContentIdentityAndACLPermissionsLocked(ws *worksp
 		CorrelationID: correlationID,
 		Timestamp:     nowTS,
 	}
+	if file, ok := ws.Files[path]; ok && eventType != "file.deleted" {
+		event.TypeMetadata = &FileTypeMetadata{Type: file.Type, Target: file.Target, Mode: file.Mode}
+	}
 	if strings.HasPrefix(eventType, "file.") {
 		if !snapshotACL {
 			aclPermissions = resolvePermissionsFromFiles(ws.Files, path, eventType != "file.deleted")
@@ -4469,6 +4586,7 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 		CorrelationID: correlationID,
 		Timestamp:     now,
 	}
+	event.TypeMetadata = &FileTypeMetadata{Type: file.Type, Target: file.Target, Mode: file.Mode}
 	event.ACLPermissions = snapshotACLPermissions(resolvePermissionsFromFiles(ws.Files, path, true))
 	s.appendWorkspaceEventLocked(workspaceID, ws, event)
 }
@@ -5054,6 +5172,9 @@ func (s *Store) writeForkOverlayLocked(fork *forkState, req WriteRequest, existi
 		ContentType:  contentType,
 		Content:      req.Content,
 		Encoding:     req.Encoding,
+		Type:         req.Type,
+		Target:       req.Target,
+		Mode:         req.Mode,
 		Provider:     provider,
 		LastEditedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Semantics:    semantics,
@@ -5184,8 +5305,15 @@ func listTreeFromEntries(iterate func(func(string, File)), path string, depth in
 			}
 			if level == len(parts) {
 				entryMap[child] = TreeEntry{
-					Path:             child,
-					Type:             "file",
+					Path: child,
+					Type: func() string {
+						if strings.TrimSpace(file.Type) == "" {
+							return "file"
+						}
+						return file.Type
+					}(),
+					Target:           file.Target,
+					Mode:             file.Mode,
 					Revision:         file.Revision,
 					ContentHash:      storedContentHashForFile(file),
 					Provider:         file.Provider,

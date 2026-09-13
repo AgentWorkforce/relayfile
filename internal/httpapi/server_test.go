@@ -39,6 +39,28 @@ func TestAuthRequired(t *testing.T) {
 	}
 }
 
+func TestHealthAdvertisesSymlinkCapability(t *testing.T) {
+	server := NewServer(relayfile.NewStore())
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("health status = %d", rec.Code)
+	}
+	var payload struct {
+		Features []string `json:"features"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode health: %v", err)
+	}
+	for _, feature := range payload.Features {
+		if feature == "symlink-v1" {
+			return
+		}
+	}
+	t.Fatalf("health features = %v, want symlink-v1", payload.Features)
+}
+
 func TestDashboardRoute(t *testing.T) {
 	server := NewServer(relayfile.NewStore())
 	resp := doRequest(t, server, request{
@@ -160,6 +182,153 @@ func TestFileEventsWebSocketCatchUpAndPingPong(t *testing.T) {
 	}
 	if live["inlineContent"] != true || live["content"] != "# two" {
 		t.Fatalf("live event did not inline current file content: %+v", live)
+	}
+}
+
+func TestFileEventsWebSocketEnvelopeCarriesTypeMetadata(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	const workspaceID = "ws_socket_metadata"
+	if _, _, errs := store.BulkWrite(workspaceID, []relayfile.BulkWriteFile{{
+		Path: "/seed", Type: "file", Mode: 0o755, ContentType: "text/plain", Content: "seed",
+	}}); len(errs) != 0 {
+		t.Fatalf("seed writes failed: %v", errs)
+	}
+	server := httptest.NewServer(NewServer(store))
+	defer server.Close()
+	token := mustTestJWT(t, "dev-secret", workspaceID, "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+"/v1/workspaces/"+workspaceID+"/fs/ws?token="+token, nil)
+	if err != nil {
+		t.Fatalf("websocket dial failed: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	var seedEvent map[string]any
+	if err := wsjson.Read(ctx, conn, &seedEvent); err != nil {
+		t.Fatalf("read seed event failed: %v", err)
+	}
+	if _, err := store.WriteFile(relayfile.WriteRequest{WorkspaceID: workspaceID, Path: "/link", IfMatch: "0", Type: "symlink", Target: "bin/run", Mode: 0o777, ContentType: "application/x-symlink", Content: "bin/run", Encoding: "utf-8"}); err != nil {
+		t.Fatalf("write symlink failed: %v", err)
+	}
+	var message map[string]any
+	if err := wsjson.Read(ctx, conn, &message); err != nil {
+		t.Fatalf("read event failed: %v", err)
+	}
+	metadata, ok := message["typeMetadata"].(map[string]any)
+	if !ok || metadata["type"] != "symlink" || metadata["target"] != "bin/run" || metadata["mode"] != float64(0o777) {
+		t.Fatalf("websocket metadata = %#v, full message=%#v", message["typeMetadata"], message)
+	}
+}
+
+func TestGithubWorkingTreeTarExportFiltersAndPreservesMetadata(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	const workspaceID, prefix, sha = "ws_tar_metadata", "/github/repos/acme/repo/contents", "abc123"
+	_, _, errs := store.BulkWrite(workspaceID, []relayfile.BulkWriteFile{
+		{Path: prefix + "/dir%20name/README.md@" + sha + ".json", Type: "file", Mode: 0o755, ContentType: "text/plain", Content: "hello"},
+		{Path: prefix + "/link@" + sha + ".json", Type: "symlink", Target: "README.md", Mode: 0o777, ContentType: "application/x-symlink", Content: "README.md", Encoding: "utf-8"},
+		{Path: prefix + "/.git/config@" + sha + ".json", Type: "file", ContentType: "text/plain", Content: "secret"},
+		{Path: prefix + "/.git%2Fhooks/pre-commit@" + sha + ".json", Type: "file", ContentType: "text/plain", Content: "secret"},
+		{Path: prefix + "/.github/workflows/ci@" + sha + ".json", Type: "file", ContentType: "text/plain", Content: "name: ci"},
+		{Path: "/other/file@" + sha + ".json", Type: "file", ContentType: "text/plain", Content: "outside"},
+	})
+	if len(errs) != 0 {
+		t.Fatalf("seed writes failed: %v", errs)
+	}
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", workspaceID, "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+	req := httptest.NewRequest(http.MethodGet, "/v1/workspaces/"+workspaceID+"/fs/export?format=tar&decode=github-working-tree&pathPrefix="+url.QueryEscape(prefix)+"&headSha="+sha, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Correlation-Id", "corr_tar_metadata")
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("export status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	gz, err := gzip.NewReader(bytes.NewReader(recorder.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("gzip: %v", err)
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	seen := map[string]*tar.Header{}
+	for {
+		header, nextErr := tr.Next()
+		if nextErr == io.EOF {
+			break
+		}
+		if nextErr != nil {
+			t.Fatalf("tar: %v", nextErr)
+		}
+		copyHeader := *header
+		seen[header.Name] = &copyHeader
+	}
+	if len(seen) != 3 || seen["dir name/README.md"] == nil || seen["link"] == nil || seen[".github/workflows/ci"] == nil {
+		t.Fatalf("tar entries=%v", seen)
+	}
+	if seen["dir name/README.md"].Mode&0o777 != 0o755 || seen["link"].Typeflag != tar.TypeSymlink || seen["link"].Linkname != "README.md" {
+		t.Fatalf("metadata not preserved: readme=%+v link=%+v", seen["dir name/README.md"], seen["link"])
+	}
+}
+
+func TestSingularPutClearsStaleSymlinkMetadata(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	const workspaceID, filePath = "ws_put_metadata_http", "/current"
+	_, _, errs := store.BulkWrite(workspaceID, []relayfile.BulkWriteFile{{
+		Path: filePath, Type: "symlink", Target: "old", Mode: 0o777,
+		ContentType: "application/x-symlink", Content: "old", Encoding: "utf-8",
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("seed writes failed: %v", errs)
+	}
+	file, err := store.ReadFile(workspaceID, filePath)
+	if err != nil {
+		t.Fatalf("read seed: %v", err)
+	}
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", workspaceID, "Worker1", []string{"fs:write"}, time.Now().Add(time.Hour))
+	resp := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=" + url.QueryEscape(filePath),
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_put_metadata",
+			"If-Match":         file.Revision,
+		},
+		body: map[string]any{"contentType": "text/plain", "content": "regular"},
+	})
+	if resp.Code != http.StatusOK && resp.Code != http.StatusAccepted {
+		t.Fatalf("PUT status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	updated, err := store.ReadFile(workspaceID, filePath)
+	if err != nil {
+		t.Fatalf("read updated file: %v", err)
+	}
+	if updated.Type != "file" || updated.Target != "" || updated.Content != "regular" {
+		t.Fatalf("stale metadata after PUT: %+v", updated)
+	}
+}
+
+func TestSingularPutInvalidTypeMetadataReturnsBadRequest(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	const workspaceID, filePath = "ws_put_invalid_metadata", "/current"
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", workspaceID, "Worker1", []string{"fs:write"}, time.Now().Add(time.Hour))
+	resp := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=" + url.QueryEscape(filePath),
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_put_invalid_metadata",
+			"If-Match":         "0",
+		},
+		body: map[string]any{"type": "symlink", "content": "target", "encoding": "base64"},
+	})
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("invalid symlink metadata status=%d body=%s", resp.Code, resp.Body.String())
 	}
 }
 
@@ -3468,6 +3637,135 @@ func TestExportEnforcesPathScopedMountGrant(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGithubWorkingTreeExportUsesPathPrefixScopeAndRawTar(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	const workspaceID = "ws_export_github_scope"
+	const prefix = "/github/repos/acme/repo/contents"
+	const sha = "abc123"
+	if written, _, errs := store.BulkWrite(workspaceID, []relayfile.BulkWriteFile{
+		{Path: prefix + "/README.md@" + sha + ".json", ContentType: "text/plain", Content: "hello"},
+		{Path: prefix + "/src/app.ts@" + sha + ".json", ContentType: "text/plain", Content: "export const ok = true;\n"},
+		{Path: prefix + "/link@" + sha + ".json", Type: "symlink", Target: "README.md", Mode: 0o777, ContentType: "application/x-symlink", Content: "README.md", Encoding: "utf-8"},
+		{Path: prefix + "/.git%2Fconfig@" + sha + ".json", ContentType: "text/plain", Content: "secret"},
+	}); written != 4 || len(errs) != 0 {
+		t.Fatalf("seed bulk write failed: written=%d errs=%+v", written, errs)
+	}
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", workspaceID, "MountSync", []string{
+		"fs:read",
+		"workspace:mount-sponsor:read:" + prefix + "/**",
+	}, time.Now().Add(time.Hour))
+	req := httptest.NewRequest(http.MethodGet, "/v1/workspaces/"+workspaceID+"/fs/export?format=tar&decode=github-working-tree&pathPrefix="+url.QueryEscape(prefix)+"&headSha="+sha+"&gzip=0", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Correlation-Id", "corr_export_github_scope")
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("export status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "application/x-tar" {
+		t.Fatalf("raw export content type=%q", got)
+	}
+	tr := tar.NewReader(bytes.NewReader(recorder.Body.Bytes()))
+	entries := map[string]struct {
+		content  []byte
+		linkname string
+		typeflag byte
+		mode     int64
+	}{}
+	for {
+		header, nextErr := tr.Next()
+		if nextErr == io.EOF {
+			break
+		}
+		if nextErr != nil {
+			t.Fatalf("read raw tar header: %v", nextErr)
+		}
+		content, readErr := io.ReadAll(tr)
+		if readErr != nil {
+			t.Fatalf("read raw tar entry %q: %v", header.Name, readErr)
+		}
+		entries[header.Name] = struct {
+			content  []byte
+			linkname string
+			typeflag byte
+			mode     int64
+		}{content: content, linkname: header.Linkname, typeflag: header.Typeflag, mode: header.Mode}
+	}
+	if len(entries) != 3 {
+		t.Fatalf("raw tar entries=%v, want README, app, and symlink", entries)
+	}
+	for _, name := range []string{"README.md", "src/app.ts", "link"} {
+		if _, ok := entries[name]; !ok {
+			t.Fatalf("raw tar missing expected entry %q: %v", name, entries)
+		}
+	}
+	if _, filtered := entries[".git/config"]; filtered {
+		t.Fatal("raw tar included decoded .git entry")
+	}
+	if got := string(entries["README.md"].content); got != "hello" {
+		t.Fatalf("README content=%q", got)
+	}
+	if got := string(entries["src/app.ts"].content); got != "export const ok = true;\n" {
+		t.Fatalf("app content=%q", got)
+	}
+	if entries["link"].typeflag != tar.TypeSymlink || entries["link"].linkname != "README.md" || entries["link"].mode != 0o777 || len(entries["link"].content) != 0 {
+		t.Fatalf("symlink entry=%+v", entries["link"])
+	}
+	rawBody := recorder.Body.Bytes()
+	if len(rawBody) < 1024 || !bytes.Equal(rawBody[len(rawBody)-1024:], make([]byte, 1024)) {
+		t.Fatal("raw tar stream is missing its two zero termination blocks")
+	}
+}
+
+func TestExportFailsClosedAtConfiguredFileAndByteBounds(t *testing.T) {
+	t.Run("file count", func(t *testing.T) {
+		store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+		t.Cleanup(store.Close)
+		if written, _, errs := store.BulkWrite("ws_export_count_limit", []relayfile.BulkWriteFile{
+			{Path: "/one", ContentType: "text/plain", Content: "1"},
+			{Path: "/two", ContentType: "text/plain", Content: "2"},
+		}); written != 2 || len(errs) != 0 {
+			t.Fatalf("seed bulk write failed: written=%d errs=%+v", written, errs)
+		}
+		server := mustNewServerWithConfig(t, store, ServerConfig{MaxExportFiles: 1})
+		token := mustTestJWT(t, "dev-secret", "ws_export_count_limit", "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+		resp := doRequest(t, server, request{method: http.MethodGet, path: "/v1/workspaces/ws_export_count_limit/fs/export?format=json", headers: map[string]string{"Authorization": "Bearer " + token, "X-Correlation-Id": "corr_export_count_limit"}})
+		if resp.Code != http.StatusRequestEntityTooLarge || !strings.Contains(resp.Body.String(), "export_too_large") {
+			t.Fatalf("count bound response=%d body=%s", resp.Code, resp.Body.String())
+		}
+	})
+
+	t.Run("decoded and tar bytes", func(t *testing.T) {
+		store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+		t.Cleanup(store.Close)
+		if written, _, errs := store.BulkWrite("ws_export_byte_limit", []relayfile.BulkWriteFile{{Path: "/large", ContentType: "text/plain", Content: strings.Repeat("x", 32)}}); written != 1 || len(errs) != 0 {
+			t.Fatalf("seed bulk write failed: written=%d errs=%+v", written, errs)
+		}
+		server := mustNewServerWithConfig(t, store, ServerConfig{MaxExportDecodedBytes: 16, MaxExportTarBodyBytes: 4096})
+		token := mustTestJWT(t, "dev-secret", "ws_export_byte_limit", "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+		resp := doRequest(t, server, request{method: http.MethodGet, path: "/v1/workspaces/ws_export_byte_limit/fs/export?format=tar&gzip=0", headers: map[string]string{"Authorization": "Bearer " + token, "X-Correlation-Id": "corr_export_byte_limit"}})
+		if resp.Code != http.StatusRequestEntityTooLarge || !strings.Contains(resp.Body.String(), "export_too_large") {
+			t.Fatalf("decoded bound response=%d body=%s", resp.Code, resp.Body.String())
+		}
+	})
+
+	t.Run("tar body", func(t *testing.T) {
+		store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+		t.Cleanup(store.Close)
+		if written, _, errs := store.BulkWrite("ws_export_tar_limit", []relayfile.BulkWriteFile{{Path: "/file", ContentType: "text/plain", Content: "small"}}); written != 1 || len(errs) != 0 {
+			t.Fatalf("seed bulk write failed: written=%d errs=%+v", written, errs)
+		}
+		server := mustNewServerWithConfig(t, store, ServerConfig{MaxExportDecodedBytes: 1024, MaxExportTarBodyBytes: 1024})
+		token := mustTestJWT(t, "dev-secret", "ws_export_tar_limit", "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+		resp := doRequest(t, server, request{method: http.MethodGet, path: "/v1/workspaces/ws_export_tar_limit/fs/export?format=tar&gzip=0", headers: map[string]string{"Authorization": "Bearer " + token, "X-Correlation-Id": "corr_export_tar_limit"}})
+		if resp.Code != http.StatusRequestEntityTooLarge || !strings.Contains(resp.Body.String(), "export_too_large") {
+			t.Fatalf("tar bound response=%d body=%s", resp.Code, resp.Body.String())
+		}
+	})
 }
 
 func TestExportTar(t *testing.T) {

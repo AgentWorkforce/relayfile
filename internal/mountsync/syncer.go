@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net"
 	"net/http"
@@ -65,6 +66,17 @@ var ErrSchemaValidation = errors.New("schema validation failed")
 // cursor that does not advance pagination. The mount fails closed instead of
 // retrying the same page until its reconcile context expires.
 var ErrMalformedPagination = errors.New("malformed pagination")
+
+// ErrSymlinkUnsupported is returned before a local symlink is uploaded when
+// the remote endpoint has not explicitly advertised the symlink-v1 contract.
+// This prevents older servers from silently treating the link as an empty
+// regular file after ignoring the additive type/target fields.
+var ErrSymlinkUnsupported = errors.New("relayfile server does not support symlink-v1")
+
+const (
+	remoteTypeFile    = "file"
+	remoteTypeSymlink = "symlink"
+)
 
 // SchemaValidationError carries the per-file schema-violation message the
 // cloud emits alongside `400 schema_validation_failed`.
@@ -185,9 +197,11 @@ const (
 	// unbounded response surface. The decoded aggregate stays below 32 MiB and
 	// the JSON envelope is capped separately because base64 and JSON escaping
 	// can make the wire body larger than the decoded files.
-	defaultBulkReadMaxFiles               = 32
-	defaultBulkReadMaxBytes         int64 = 32 << 20
-	defaultBulkReadMaxWireBytes     int64 = 64 << 20
+	defaultBulkReadMaxFiles       = 32
+	defaultBulkReadMaxBytes int64 = 32 << 20
+	// Base64 expands binary content by 4/3. Keep enough wire headroom for an
+	// exact 64 MiB decoded file plus JSON framing.
+	defaultBulkReadMaxWireBytes     int64 = 96 << 20
 	defaultBulkReadMaxPathBytes           = 4096
 	defaultBulkReadMaxPathsBytes          = 32 << 10
 	defaultBulkReadMaxRequestBytes  int64 = 64 << 10
@@ -464,6 +478,8 @@ func IsBootstrapTerminalError(err error) bool {
 type TreeEntry struct {
 	Path        string `json:"path"`
 	Type        string `json:"type"`
+	Target      string `json:"target,omitempty"`
+	Mode        uint32 `json:"mode,omitempty"`
 	Revision    string `json:"revision"`
 	ContentHash string `json:"contentHash,omitempty"`
 	Size        int64  `json:"size,omitempty"`
@@ -478,13 +494,20 @@ type TreeResponse struct {
 }
 
 type FilesystemEvent struct {
-	EventID     string `json:"eventId"`
-	Type        string `json:"type"`
-	Path        string `json:"path"`
-	Revision    string `json:"revision"`
-	ContentHash string `json:"contentHash,omitempty"`
-	Provider    string `json:"provider,omitempty"`
-	Timestamp   string `json:"timestamp,omitempty"`
+	EventID      string             `json:"eventId"`
+	Type         string             `json:"type"`
+	Path         string             `json:"path"`
+	Revision     string             `json:"revision"`
+	ContentHash  string             `json:"contentHash,omitempty"`
+	Provider     string             `json:"provider,omitempty"`
+	Timestamp    string             `json:"timestamp,omitempty"`
+	TypeMetadata *entryTypeMetadata `json:"typeMetadata,omitempty"`
+}
+
+type entryTypeMetadata struct {
+	Type   string `json:"type,omitempty"`
+	Target string `json:"target,omitempty"`
+	Mode   uint32 `json:"mode,omitempty"`
 }
 
 type EventFeed struct {
@@ -494,6 +517,9 @@ type EventFeed struct {
 
 type RemoteFile struct {
 	Path        string `json:"path"`
+	Type        string `json:"type,omitempty"`
+	Target      string `json:"target,omitempty"`
+	Mode        uint32 `json:"mode,omitempty"`
 	Revision    string `json:"revision"`
 	ContentType string `json:"contentType"`
 	Content     string `json:"content"`
@@ -509,6 +535,9 @@ type BulkReadFileError struct {
 
 type BulkReadFileResult struct {
 	Path        string             `json:"path"`
+	Type        string             `json:"type,omitempty"`
+	Target      string             `json:"target,omitempty"`
+	Mode        uint32             `json:"mode,omitempty"`
 	Revision    string             `json:"revision,omitempty"`
 	ContentType string             `json:"contentType,omitempty"`
 	Content     string             `json:"content,omitempty"`
@@ -603,6 +632,13 @@ type bulkReadClient interface {
 	ReadFilesBulk(ctx context.Context, workspaceID string, paths []string) (BulkReadResponse, error)
 }
 
+// symlinkCapabilityClient is optional for legacy in-process clients. The HTTP
+// client implements it by checking the server feature advertisement. A client
+// that cannot prove support is rejected before a local symlink is dispatched.
+type symlinkCapabilityClient interface {
+	EnsureSymlinkSupport(ctx context.Context) error
+}
+
 type checkpointSealClient interface {
 	IssueCheckpointSeal(ctx context.Context, workspaceID string, request CheckpointSealRequest) (CheckpointSeal, error)
 }
@@ -664,11 +700,12 @@ type githubWorkingTreeTarClient interface {
 }
 
 type GithubWorkingTreeSeedRequest struct {
-	Owner      string
-	Repo       string
-	PathPrefix string
-	HeadSHA    string
-	Gzip       bool
+	Owner         string
+	Repo          string
+	PathPrefix    string
+	HeadSHA       string
+	SourceProfile string
+	Gzip          bool
 }
 
 type GithubWorkingTreeTar struct {
@@ -806,6 +843,25 @@ func (c *HTTPClient) correlationIDForRequest() string {
 	return correlationID()
 }
 
+// EnsureSymlinkSupport is an explicit compatibility gate. The health response
+// must advertise "symlink-v1" before the mount sends a local link. Older
+// servers return only {"status":"ok"}; treating that as unsupported avoids
+// silently flattening the link into a regular file.
+func (c *HTTPClient) EnsureSymlinkSupport(ctx context.Context) error {
+	var health struct {
+		Features []string `json:"features"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, "/health", nil, nil, &health); err != nil {
+		return err
+	}
+	for _, feature := range health.Features {
+		if strings.EqualFold(strings.TrimSpace(feature), "symlink-v1") {
+			return nil
+		}
+	}
+	return ErrSymlinkUnsupported
+}
+
 func (c *HTTPClient) SetHTTPStatusLogger(logger Logger) {
 	c.httpStatusLogMu.Lock()
 	defer c.httpStatusLogMu.Unlock()
@@ -903,7 +959,9 @@ func (c *HTTPClient) ReadFile(ctx context.Context, workspaceID, path string) (Re
 	q := url.Values{}
 	q.Set("path", normalizeRemotePath(path))
 	var out RemoteFile
-	err := c.doJSON(ctx, http.MethodGet, fmt.Sprintf("/v1/workspaces/%s/fs/file?%s", url.PathEscape(workspaceID), q.Encode()), nil, nil, &out)
+	// Binary files are base64 encoded on the JSON wire, so a 64 MiB decoded
+	// payload needs more than the ordinary 64 MiB response budget.
+	err := c.doJSONWithLimit(ctx, http.MethodGet, fmt.Sprintf("/v1/workspaces/%s/fs/file?%s", url.PathEscape(workspaceID), q.Encode()), nil, nil, &out, 96<<20, false)
 	return out, err
 }
 
@@ -1053,6 +1111,9 @@ func (c *HTTPClient) WriteFilesBulk(ctx context.Context, workspaceID string, fil
 	}{
 		Files: files,
 	}
+	if wireBytes := bulkWriteRequestSize(files); maxWritebackBatchBytes() > 0 && wireBytes > maxWritebackBatchBytes() {
+		return BulkWriteResponse{}, fmt.Errorf("bulk write request exceeds %d wire bytes (got %d)", maxWritebackBatchBytes(), wireBytes)
+	}
 	var out BulkWriteResponse
 	err := c.doJSON(ctx, http.MethodPost, fmt.Sprintf("/v1/workspaces/%s/fs/bulk", url.PathEscape(workspaceID)), nil, body, &out)
 	return out, err
@@ -1134,6 +1195,9 @@ func (c *HTTPClient) ExportFiles(ctx context.Context, workspaceID, path string) 
 	q.Set("path", normalizeRemotePath(path))
 	var out []struct {
 		Path        string `json:"path"`
+		Type        string `json:"type"`
+		Target      string `json:"target"`
+		Mode        uint32 `json:"mode"`
 		Revision    string `json:"revision"`
 		ContentType string `json:"contentType"`
 		Content     string `json:"content"`
@@ -1151,6 +1215,9 @@ func (c *HTTPClient) ExportFiles(ctx context.Context, workspaceID, path string) 
 		}
 		files = append(files, RemoteFile{
 			Path:        remotePath,
+			Type:        strings.TrimSpace(file.Type),
+			Target:      file.Target,
+			Mode:        file.Mode,
 			Revision:    file.Revision,
 			ContentType: file.ContentType,
 			Content:     file.Content,
@@ -1166,6 +1233,9 @@ func (c *HTTPClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID
 	q.Set("decode", "github-working-tree")
 	q.Set("pathPrefix", normalizeRemotePath(seed.PathPrefix))
 	q.Set("headSha", strings.TrimSpace(seed.HeadSHA))
+	if sourceProfile := strings.TrimSpace(seed.SourceProfile); sourceProfile != "" {
+		q.Set("sourceProfile", sourceProfile)
+	}
 	if !seed.Gzip {
 		q.Set("gzip", "0")
 	}
@@ -1885,7 +1955,7 @@ func (s *Syncer) readLocalSnapshot(path string, includeContent bool) (localSnaps
 	if s.readLocalSnapshotFn != nil {
 		return s.readLocalSnapshotFn(path, includeContent)
 	}
-	return readLocalSnapshot(path, includeContent)
+	return readLocalSnapshotLimitedUnderRoot(s.localRoot, path, includeContent, maxWritebackBytes())
 }
 
 type mountState struct {
@@ -1926,7 +1996,12 @@ type mountState struct {
 	// BootstrapCursor and resets whenever either advances.
 	BootstrapPageOffset  int `json:"bootstrapPageOffset,omitempty"`
 	BootstrapFilesSynced int `json:"bootstrapFilesSynced,omitempty"`
-	BootstrapFilesTotal  int `json:"bootstrapFilesTotal,omitempty"`
+	// BootstrapStrictFilesSeen is the durable count of materializable files
+	// enumerated for a strict complete-v1 GitHub traversal. It is separate
+	// from FilesSynced because denied, skipped, and already-materialized files
+	// do not all advance that progress counter in the same way.
+	BootstrapStrictFilesSeen int `json:"bootstrapStrictFilesSeen,omitempty"`
+	BootstrapFilesTotal      int `json:"bootstrapFilesTotal,omitempty"`
 	// BootstrapFilesTotalUnavailable is persisted once traversal prunes a
 	// reserved runtime subtree. The server's total includes those descendants,
 	// but the mount intentionally never enumerates them, so retaining that
@@ -1954,9 +2029,11 @@ type mountState struct {
 	// SkippedMaterializations durably retains per-path local apply failures
 	// after the traversal cursor advances. Later cycles retry these paths
 	// directly, so skip-and-continue cannot turn into silent mirror data loss.
-	SkippedMaterializations  map[string]skippedMaterialization `json:"skippedMaterializations,omitempty"`
-	SyncMode                 string                            `json:"syncMode,omitempty"`
-	GithubWorkingTreeHeadSHA string                            `json:"githubWorkingTreeHeadSha,omitempty"`
+	SkippedMaterializations        map[string]skippedMaterialization `json:"skippedMaterializations,omitempty"`
+	SyncMode                       string                            `json:"syncMode,omitempty"`
+	GithubWorkingTreeHeadSHA       string                            `json:"githubWorkingTreeHeadSha,omitempty"`
+	GithubWorkingTreeSourceProfile string                            `json:"githubWorkingTreeSourceProfile,omitempty"`
+	GithubWorkingTreeFilesExpected *int                              `json:"githubWorkingTreeFilesExpected,omitempty"`
 	// IncrementalReadNotReadySince records first-seen timestamps for
 	// incremental create/update events whose remote content was not readable
 	// yet. The daemon retries these without advancing EventsCursor until the
@@ -2111,6 +2188,9 @@ type trackedFile struct {
 	Revision    string `json:"revision"`
 	ContentType string `json:"contentType"`
 	Encoding    string `json:"encoding,omitempty"`
+	Type        string `json:"type,omitempty"`
+	Target      string `json:"target,omitempty"`
+	Mode        uint32 `json:"mode,omitempty"`
 	Hash        string `json:"hash"`
 	Dirty       bool   `json:"dirty,omitempty"`
 	// LocalRelativePath preserves the identity of a valid user-created local
@@ -2150,6 +2230,9 @@ type localSnapshot struct {
 	WireContent   string
 	ContentType   string
 	Encoding      string
+	Type          string
+	Target        string
+	Mode          uint32
 	Hash          string
 	LocalPath     string
 	SkipWriteback bool
@@ -2164,16 +2247,17 @@ type pendingBulkWrite struct {
 }
 
 type websocketEvent struct {
-	EventID       string `json:"eventId,omitempty"`
-	Type          string `json:"type"`
-	Path          string `json:"path,omitempty"`
-	Revision      string `json:"revision,omitempty"`
-	ContentHash   string `json:"contentHash,omitempty"`
-	ContentType   string `json:"contentType,omitempty"`
-	Content       string `json:"content,omitempty"`
-	Encoding      string `json:"encoding,omitempty"`
-	InlineContent bool   `json:"inlineContent,omitempty"`
-	Timestamp     string `json:"timestamp,omitempty"`
+	EventID       string             `json:"eventId,omitempty"`
+	Type          string             `json:"type"`
+	Path          string             `json:"path,omitempty"`
+	Revision      string             `json:"revision,omitempty"`
+	ContentHash   string             `json:"contentHash,omitempty"`
+	ContentType   string             `json:"contentType,omitempty"`
+	Content       string             `json:"content,omitempty"`
+	Encoding      string             `json:"encoding,omitempty"`
+	InlineContent bool               `json:"inlineContent,omitempty"`
+	Timestamp     string             `json:"timestamp,omitempty"`
+	TypeMetadata  *entryTypeMetadata `json:"typeMetadata,omitempty"`
 }
 
 type statusError struct {
@@ -3609,13 +3693,21 @@ func (s *Syncer) handleLocalChanges(ctx context.Context, changes []LocalChange, 
 					continue
 				}
 			}
-			localPath := filepath.Join(s.localDir, filepath.FromSlash(relativePath))
-			info, statErr := os.Stat(localPath)
+			localPath, pathErr := safeLocalPath(s.localRoot, relativePath)
+			if pathErr != nil {
+				return pathErr
+			}
+			info, statErr := os.Lstat(localPath)
 			if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 				return statErr
 			}
 			fileExists := statErr == nil && !info.IsDir()
 			if statErr == nil && info.IsDir() {
+				continue
+			}
+			if max := maxWritebackBytes(); max > 0 && fileExists && info.Mode().IsRegular() && info.Size() > max {
+				s.logf("skipping oversized local file %s (%d bytes > %d byte writeback cap); not enqueued", localPath, info.Size(), max)
+				s.state.Counters.SkippedOversizeWriteback++
 				continue
 			}
 
@@ -3639,7 +3731,7 @@ func (s *Syncer) handleLocalChanges(ctx context.Context, changes []LocalChange, 
 				continue
 			}
 
-			snapshot, err := readLocalSnapshot(localPath, true)
+			snapshot, err := s.readLocalSnapshot(localPath, true)
 			if err != nil {
 				if errors.Is(err, os.ErrNotExist) {
 					if err := s.pushSingleDelete(ctx, remotePath, localPath); err != nil {
@@ -3675,7 +3767,7 @@ func (s *Syncer) handleLocalChanges(ctx context.Context, changes []LocalChange, 
 }
 
 func (s *Syncer) handleLocalWriteOrCreate(ctx context.Context, remotePath, localPath string) error {
-	snapshot, err := readLocalSnapshot(localPath, true)
+	snapshot, err := s.readLocalSnapshot(localPath, true)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return s.pushSingleDelete(ctx, remotePath, localPath)
@@ -3734,15 +3826,20 @@ func (s *Syncer) preparePendingBulkWrite(
 		if snapshot.Hash != tracked.Hash && tracked.Hash != "" {
 			return nil, s.revertReadonlyFile(ctx, remotePath, localPath, tracked, snapshot.ContentType)
 		}
-		if err := s.applyLocalPermissions(localPath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := s.applyLocalPermissionsForMode(localPath, false, tracked.Mode); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, err
 		}
 		tracked.Dirty = false
 		s.state.Files[remotePath] = tracked
 		return nil, nil
 	}
+	if isSymlinkType(snapshot.Type) {
+		if err := validateSymlinkTarget(s.localRoot, localPath, snapshot.Target); err != nil {
+			return nil, fmt.Errorf("refusing local symlink %s: %w", remotePath, err)
+		}
+	}
 
-	if exists && !tracked.Dirty && tracked.Hash == snapshot.Hash {
+	if exists && !tracked.Dirty && localSnapshotMatchesTracked(snapshot, tracked) {
 		if tracked.ContentType == "" {
 			tracked.ContentType = snapshot.ContentType
 		}
@@ -3770,7 +3867,10 @@ func (s *Syncer) preparePendingBulkWrite(
 			return nil, outboxErr
 		}
 		for _, record := range pendingRecords {
-			if record.Hash == snapshot.Hash {
+			if record.Hash == snapshot.Hash &&
+				normalizeRemoteType(record.Type) == normalizeRemoteType(snapshot.Type) &&
+				record.Target == snapshot.Target &&
+				record.Mode == snapshot.Mode {
 				return nil, nil
 			}
 		}
@@ -3785,6 +3885,9 @@ func (s *Syncer) preparePendingBulkWrite(
 				tracked.Revision = remoteFile.Revision
 				tracked.ContentType = contentType
 				tracked.Encoding = normalizeEncoding(remoteFile.Encoding)
+				tracked.Type = normalizeRemoteType(remoteFile.Type)
+				tracked.Target = remoteFile.Target
+				tracked.Mode = remoteFile.Mode
 				tracked.Hash = snapshot.Hash
 				tracked.Dirty = false
 				s.state.Files[remotePath] = tracked
@@ -3795,6 +3898,9 @@ func (s *Syncer) preparePendingBulkWrite(
 
 	tracked.ContentType = snapshot.ContentType
 	tracked.Encoding = normalizeEncoding(snapshot.Encoding)
+	tracked.Type = normalizeRemoteType(snapshot.Type)
+	tracked.Target = snapshot.Target
+	tracked.Mode = snapshot.Mode
 	tracked.Hash = snapshot.Hash
 	tracked.Dirty = true
 	tracked.DeletePending = false
@@ -3811,6 +3917,30 @@ func (s *Syncer) preparePendingBulkWrite(
 		tracked:    tracked,
 		exists:     exists,
 	}, nil
+}
+
+func localSnapshotMatchesTracked(snapshot localSnapshot, tracked trackedFile) bool {
+	if tracked.Hash != snapshot.Hash || normalizeRemoteType(tracked.Type) != normalizeRemoteType(snapshot.Type) {
+		return false
+	}
+	if isSymlinkType(snapshot.Type) && tracked.Target != snapshot.Target {
+		return false
+	}
+	// Mode was absent from legacy state. Keep those records stable until a
+	// server has returned mode metadata, while allowing a new executable bit
+	// to be uploaded once the mode-aware contract is in use.
+	return tracked.Mode == 0 || tracked.Mode == snapshot.Mode
+}
+
+func localSnapshotMatchesReadonlyTracked(snapshot localSnapshot, tracked trackedFile) bool {
+	// Read-only materialization deliberately clears the write bits while
+	// preserving all other Git mode information, including executability.
+	// Compare against that effective on-disk mode or every clean read-only
+	// executable looks locally modified on every reconciliation cycle.
+	if tracked.Mode != 0 && !isSymlinkType(snapshot.Type) {
+		tracked.Mode &^= 0o222
+	}
+	return localSnapshotMatchesTracked(snapshot, tracked)
 }
 
 func (s *Syncer) flushPendingBulkWrites(ctx context.Context, pending []pendingBulkWrite, conflicted map[string]struct{}) error {
@@ -3965,6 +4095,23 @@ func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRec
 	}
 
 	files := outboxRecordsAsBulkFiles(uploadRecords)
+	if hasSymlinkBulkWrite(files) {
+		capabilityClient, ok := s.client.(symlinkCapabilityClient)
+		if !ok {
+			return fmt.Errorf("%w: client did not advertise a capability check", ErrSymlinkUnsupported)
+		}
+		if err := capabilityClient.EnsureSymlinkSupport(ctx); err != nil {
+			for _, record := range uploadRecords {
+				if incErr := s.incrementOutboxAttempt(record, err); incErr != nil && firstErr == nil {
+					firstErr = incErr
+				}
+			}
+			if firstErr != nil {
+				return firstErr
+			}
+			return err
+		}
+	}
 	var response BulkWriteResponse
 	var err error
 	if unlockDuringUpload {
@@ -4329,6 +4476,9 @@ func outboxRecordsAsBulkFiles(records []outboxRecord) []BulkWriteFile {
 	for _, record := range records {
 		files = append(files, BulkWriteFile{
 			Path:            record.RemotePath,
+			Type:            normalizeRemoteType(record.Type),
+			Target:          record.Target,
+			Mode:            record.Mode,
 			ContentType:     record.ContentType,
 			Content:         record.Content,
 			Encoding:        record.Encoding,
@@ -4364,6 +4514,9 @@ func bulkWriteFilesForPending(workspaceID string, pending []pendingBulkWrite) []
 	for _, pendingWrite := range pending {
 		files = append(files, BulkWriteFile{
 			Path:            pendingWrite.remotePath,
+			Type:            normalizeRemoteType(pendingWrite.snapshot.Type),
+			Target:          pendingWrite.snapshot.Target,
+			Mode:            pendingWrite.snapshot.Mode,
 			ContentType:     pendingWrite.snapshot.ContentType,
 			Content:         pendingWrite.snapshot.WireContent,
 			Encoding:        pendingWrite.snapshot.Encoding,
@@ -4371,6 +4524,15 @@ func bulkWriteFilesForPending(workspaceID string, pending []pendingBulkWrite) []
 		})
 	}
 	return files
+}
+
+func hasSymlinkBulkWrite(files []BulkWriteFile) bool {
+	for _, file := range files {
+		if isSymlinkType(file.Type) {
+			return true
+		}
+	}
+	return false
 }
 
 func mountWritebackCreateDraftContentIdentity(workspaceID, normalizedRemotePath, contentHash string) *ContentIdentity {
@@ -4461,6 +4623,11 @@ func (s *Syncer) reconcileBulkWrite(ctx context.Context, pendingWrite pendingBul
 		if contentType == "" {
 			contentType = strings.TrimSpace(remoteFile.ContentType)
 		}
+		if remoteFile.Type != "" {
+			pendingWrite.snapshot.Type = normalizeRemoteType(remoteFile.Type)
+			pendingWrite.snapshot.Target = remoteFile.Target
+			pendingWrite.snapshot.Mode = remoteFile.Mode
+		}
 	}
 	// The realtime watcher path deliberately releases s.mu while the bulk POST
 	// is in flight. A later WebSocket revision can therefore be applied before
@@ -4476,6 +4643,9 @@ func (s *Syncer) reconcileBulkWrite(ctx context.Context, pendingWrite pendingBul
 		Revision:          revision,
 		ContentType:       tracked.ContentType,
 		Encoding:          normalizeEncoding(pendingWrite.snapshot.Encoding),
+		Type:              normalizeRemoteType(pendingWrite.snapshot.Type),
+		Target:            pendingWrite.snapshot.Target,
+		Mode:              pendingWrite.snapshot.Mode,
 		Hash:              pendingWrite.snapshot.Hash,
 		Dirty:             false,
 		LocalRelativePath: tracked.LocalRelativePath,
@@ -4637,17 +4807,29 @@ func (s *Syncer) materializeConflict(ctx context.Context, remotePath, localPath 
 	if decodeErr != nil {
 		return decodeErr
 	}
+	remoteFile.Type = normalizeRemoteType(remoteFile.Type)
+	if isSymlinkType(remoteFile.Type) {
+		if err := validateSymlinkTarget(s.localRoot, localPath, remoteFile.Target); err != nil {
+			return err
+		}
+	}
 	if err := s.assertNotMountRoot(localPath); err != nil {
 		s.logf("skipping conflict materialization for %s: %v", remotePath, err)
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+	if err := ensureSecureParentDirectory(s.localRoot, localPath); err != nil {
 		return err
 	}
-	if err := writeFileAtomic(localPath, remoteBytes, 0o644); err != nil {
-		return err
+	var writeErr error
+	if isSymlinkType(remoteFile.Type) {
+		writeErr = writeSymlinkAtomicSecure(s.localRoot, localPath, remoteFile.Target)
+	} else {
+		writeErr = writeFileAtomicSecure(s.localRoot, localPath, remoteBytes, 0o644)
 	}
-	if err := s.applyLocalPermissions(localPath, s.canWritePath(remotePath)); err != nil {
+	if writeErr != nil {
+		return writeErr
+	}
+	if err := s.applyLocalPermissionsForMode(localPath, s.canWritePath(remotePath), remoteFile.Mode); err != nil {
 		return err
 	}
 
@@ -4659,6 +4841,9 @@ func (s *Syncer) materializeConflict(ctx context.Context, remotePath, localPath 
 		Revision:          remoteFile.Revision,
 		ContentType:       contentType,
 		Encoding:          normalizeEncoding(remoteFile.Encoding),
+		Type:              remoteFile.Type,
+		Target:            remoteFile.Target,
+		Mode:              remoteFile.Mode,
 		Hash:              hashBytes(remoteBytes),
 		LocalRelativePath: tracked.LocalRelativePath,
 		ReadOnly:          !s.canWritePath(remotePath),
@@ -4709,6 +4894,12 @@ func (s *Syncer) attemptMountRolloutMerge(ctx context.Context, remotePath, local
 		s.logf("mount rollout: merge for %s applied (revision %s) but readback failed (%v), falling back to conflict handling", remotePath, result.TargetRevision, readErr)
 		return false
 	}
+	if isSymlinkType(remoteFile.Type) {
+		// A successful text merge cannot produce a symlink. Defer to the
+		// ordinary conflict path so the remote link is materialized with its
+		// target metadata instead of being flattened into a regular file.
+		return false
+	}
 	remoteBytes, decodeErr := decodeRemoteFileContent(remoteFile)
 	if decodeErr != nil {
 		s.logf("mount rollout: merge for %s applied but readback content was undecodable (%v), falling back to conflict handling", remotePath, decodeErr)
@@ -4718,15 +4909,15 @@ func (s *Syncer) attemptMountRolloutMerge(ctx context.Context, remotePath, local
 		s.logf("skipping merge materialization for %s: %v", remotePath, err)
 		return false
 	}
-	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+	if err := ensureSecureParentDirectory(s.localRoot, localPath); err != nil {
 		s.logf("mount rollout: merge for %s applied but local write failed (%v), falling back to conflict handling", remotePath, err)
 		return false
 	}
-	if err := writeFileAtomic(localPath, remoteBytes, 0o644); err != nil {
+	if err := writeFileAtomicSecure(s.localRoot, localPath, remoteBytes, 0o644); err != nil {
 		s.logf("mount rollout: merge for %s applied but local write failed (%v), falling back to conflict handling", remotePath, err)
 		return false
 	}
-	if err := s.applyLocalPermissions(localPath, s.canWritePath(remotePath)); err != nil {
+	if err := s.applyLocalPermissionsForMode(localPath, s.canWritePath(remotePath), remoteFile.Mode); err != nil {
 		s.logf("mount rollout: merge for %s applied but permission apply failed (%v), falling back to conflict handling", remotePath, err)
 		return false
 	}
@@ -4781,7 +4972,7 @@ func (s *Syncer) materializeSchemaInvalid(
 		// No prior remote version to restore — typical for a CREATE that
 		// violated the schema. Remove the local file and stop tracking
 		// it so the next reconcile does not re-push.
-		_ = os.Remove(localPath)
+		_ = removeLocalNoFollow(s.localRoot, localPath)
 		delete(s.state.Files, remotePath)
 		s.logf("schema validation failed at %s (%s); local saved at %s; no prior remote version to restore",
 			remotePath, violationDescription, artifactPath)
@@ -4792,17 +4983,29 @@ func (s *Syncer) materializeSchemaInvalid(
 	if decodeErr != nil {
 		return decodeErr
 	}
+	remoteFile.Type = normalizeRemoteType(remoteFile.Type)
+	if isSymlinkType(remoteFile.Type) {
+		if err := validateSymlinkTarget(s.localRoot, localPath, remoteFile.Target); err != nil {
+			return err
+		}
+	}
 	if err := s.assertNotMountRoot(localPath); err != nil {
 		s.logf("skipping schema-invalid materialization for %s: %v", remotePath, err)
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+	if err := ensureSecureParentDirectory(s.localRoot, localPath); err != nil {
 		return err
 	}
-	if err := writeFileAtomic(localPath, remoteBytes, 0o644); err != nil {
-		return err
+	var writeErr error
+	if isSymlinkType(remoteFile.Type) {
+		writeErr = writeSymlinkAtomicSecure(s.localRoot, localPath, remoteFile.Target)
+	} else {
+		writeErr = writeFileAtomicSecure(s.localRoot, localPath, remoteBytes, 0o644)
 	}
-	if err := s.applyLocalPermissions(localPath, s.canWritePath(remotePath)); err != nil {
+	if writeErr != nil {
+		return writeErr
+	}
+	if err := s.applyLocalPermissionsForMode(localPath, s.canWritePath(remotePath), remoteFile.Mode); err != nil {
 		return err
 	}
 
@@ -4814,6 +5017,9 @@ func (s *Syncer) materializeSchemaInvalid(
 		Revision:          remoteFile.Revision,
 		ContentType:       contentType,
 		Encoding:          normalizeEncoding(remoteFile.Encoding),
+		Type:              remoteFile.Type,
+		Target:            remoteFile.Target,
+		Mode:              remoteFile.Mode,
 		Hash:              hashBytes(remoteBytes),
 		LocalRelativePath: tracked.LocalRelativePath,
 		ReadOnly:          !s.canWritePath(remotePath),
@@ -4882,6 +5088,12 @@ func (s *Syncer) revertReadonlyFile(ctx context.Context, remotePath, localPath s
 	}
 	remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
 	if readErr == nil {
+		remoteFile.Type = normalizeRemoteType(remoteFile.Type)
+		if isSymlinkType(remoteFile.Type) {
+			if err := validateSymlinkTarget(s.localRoot, localPath, remoteFile.Target); err != nil {
+				return err
+			}
+		}
 		remoteBytes, decodeErr := decodeRemoteFileContent(remoteFile)
 		if decodeErr != nil {
 			return decodeErr
@@ -4893,22 +5105,31 @@ func (s *Syncer) revertReadonlyFile(ctx context.Context, remotePath, localPath s
 				contentType = detectContentType(localPath)
 			}
 		}
-		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		if err := ensureSecureParentDirectory(s.localRoot, localPath); err != nil {
 			return err
 		}
-		if err := writeFileAtomic(localPath, remoteBytes, 0o444); err != nil {
-			return err
+		var writeErr error
+		if isSymlinkType(remoteFile.Type) {
+			writeErr = writeSymlinkAtomicSecure(s.localRoot, localPath, remoteFile.Target)
+		} else {
+			writeErr = writeFileAtomicSecure(s.localRoot, localPath, remoteBytes, 0o444)
 		}
-		if err := os.Chmod(localPath, 0o444); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if writeErr != nil {
+			return writeErr
+		}
+		if err := s.applyLocalPermissionsForMode(localPath, false, remoteFile.Mode); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 		tracked.Revision = remoteFile.Revision
 		tracked.ContentType = contentType
 		tracked.Encoding = normalizeEncoding(remoteFile.Encoding)
+		tracked.Type = remoteFile.Type
+		tracked.Target = remoteFile.Target
+		tracked.Mode = remoteFile.Mode
 		tracked.Hash = hashBytes(remoteBytes)
 		s.logDenial("WRITE_REVERTED", remotePath, "file is read-only; content reverted to server version")
 	} else {
-		if err := s.applyLocalPermissions(localPath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := s.applyLocalPermissionsForMode(localPath, false, tracked.Mode); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 		if tracked.ContentType == "" {
@@ -5483,6 +5704,11 @@ func (s *Syncer) applyWebSocketEventWithPersistence(ctx context.Context, event w
 				Content:     event.Content,
 				Encoding:    strings.TrimSpace(event.Encoding),
 				ContentHash: strings.TrimSpace(event.ContentHash),
+			}
+			if event.TypeMetadata != nil {
+				file.Type = normalizeRemoteType(event.TypeMetadata.Type)
+				file.Target = event.TypeMetadata.Target
+				file.Mode = event.TypeMetadata.Mode
 			}
 			content, err := decodeRemoteFileContent(file)
 			if err != nil {
@@ -6361,6 +6587,8 @@ type githubCloneManifest struct {
 	DefaultBranch string
 	EventsCursor  string
 	EventID       string
+	SourceProfile string
+	FilesExpected *int
 	Path          string
 }
 
@@ -6386,6 +6614,16 @@ func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubW
 	}
 	s.githubWorkingTree.HeadSHA = headSHA
 	s.state.GithubWorkingTreeHeadSHA = headSHA
+	s.state.GithubWorkingTreeSourceProfile = strings.TrimSpace(manifest.SourceProfile)
+	if strings.EqualFold(strings.TrimSpace(manifest.SourceProfile), "complete-v1") {
+		if manifest.FilesExpected == nil || *manifest.FilesExpected < 0 {
+			return true, fmt.Errorf("complete-v1 clone manifest must declare a non-negative filesExpected count")
+		}
+		expected := *manifest.FilesExpected
+		s.state.GithubWorkingTreeFilesExpected = &expected
+	} else {
+		s.state.GithubWorkingTreeFilesExpected = nil
+	}
 
 	cursor := strings.TrimSpace(manifest.EventsCursor)
 	if cursor == "" {
@@ -6408,24 +6646,25 @@ func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubW
 	var tree map[string]githubTreeFile
 	var maxObservedRevision string
 	s.runFullPullIO(func() {
-		tree, maxObservedRevision, err = s.githubWorkingTreeSnapshot(ctx, prog)
+		tree, maxObservedRevision, err = s.githubWorkingTreeSnapshot(ctx, prog, strings.EqualFold(strings.TrimSpace(manifest.SourceProfile), "complete-v1"))
 	})
 	if err != nil {
 		s.logf("github tar seed unavailable: tree verification snapshot failed: %v", err)
 		return false, err
 	}
-	if len(tree) == 0 {
-		return false, nil
+	if manifest.FilesExpected != nil && len(tree) != *manifest.FilesExpected {
+		return true, fmt.Errorf("github tar seed verification failed: tree listed %d entries, clone manifest expected %d", len(tree), *manifest.FilesExpected)
 	}
 
 	var tarBody GithubWorkingTreeTar
 	s.runFullPullIO(func() {
 		tarBody, err = client.ExportGithubWorkingTreeTar(ctx, s.workspace, GithubWorkingTreeSeedRequest{
-			Owner:      s.githubWorkingTree.Owner,
-			Repo:       s.githubWorkingTree.Repo,
-			PathPrefix: s.githubWorkingTree.ContentsRoot,
-			HeadSHA:    headSHA,
-			Gzip:       false,
+			Owner:         s.githubWorkingTree.Owner,
+			Repo:          s.githubWorkingTree.Repo,
+			PathPrefix:    s.githubWorkingTree.ContentsRoot,
+			HeadSHA:       headSHA,
+			SourceProfile: manifest.SourceProfile,
+			Gzip:          false,
 		})
 	})
 	if err != nil {
@@ -6440,7 +6679,7 @@ func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubW
 	}()
 	s.recordCloudSuccess()
 
-	remotePaths, err := s.applyGithubWorkingTreeTarSeed(tarBody, tree, conflicted, prog)
+	remotePaths, err := s.applyGithubWorkingTreeTarSeedStrict(tarBody, tree, conflicted, prog, strings.EqualFold(strings.TrimSpace(manifest.SourceProfile), "complete-v1"))
 	if err != nil {
 		return true, err
 	}
@@ -6516,6 +6755,7 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 	})
 	if !s.state.BootstrapComplete {
 		s.state.BootstrapFilesSynced = 0
+		s.state.BootstrapStrictFilesSeen = 0
 		if s.lazyRepos {
 			// The export total includes intentionally-unhydrated GitHub repo
 			// contents, so it is not a valid materialization denominator.
@@ -6634,11 +6874,39 @@ func parseGithubCloneManifest(payload []byte) (githubCloneManifest, bool) {
 		}
 		return ""
 	}
+	readInt := func(keys ...string) *int {
+		for _, key := range keys {
+			value, ok := raw[key]
+			if !ok || value == nil {
+				continue
+			}
+			var parsed int
+			switch typed := value.(type) {
+			case float64:
+				if typed < 0 || typed != math.Trunc(typed) || typed > float64(^uint(0)>>1) {
+					continue
+				}
+				parsed = int(typed)
+			case string:
+				candidate, err := strconv.Atoi(strings.TrimSpace(typed))
+				if err != nil || candidate < 0 {
+					continue
+				}
+				parsed = candidate
+			default:
+				continue
+			}
+			return &parsed
+		}
+		return nil
+	}
 	manifest := githubCloneManifest{
 		HeadSHA:       read("headSha", "headSHA", "head_sha"),
 		DefaultBranch: read("defaultBranch", "default_branch"),
 		EventsCursor:  read("eventsCursor", "events_cursor", "eventCursor", "event_cursor", "fsEventsCursor", "fs_events_cursor", "cursor"),
 		EventID:       read("eventId", "eventID", "event_id"),
+		SourceProfile: read("sourceProfile", "source_profile"),
+		FilesExpected: readInt("filesExpected", "files_expected"),
 	}
 	return manifest, manifest.HeadSHA != ""
 }
@@ -6673,9 +6941,13 @@ type githubTreeFile struct {
 	Revision    string
 	ContentHash string
 	Encoding    string
+	Size        int64
+	Type        string
+	Target      string
+	Mode        uint32
 }
 
-func (s *Syncer) githubWorkingTreeSnapshot(ctx context.Context, prog bootstrapProgress) (map[string]githubTreeFile, string, error) {
+func (s *Syncer) githubWorkingTreeSnapshot(ctx context.Context, prog bootstrapProgress, strictComplete bool) (map[string]githubTreeFile, string, error) {
 	files := map[string]githubTreeFile{}
 	cursor := ""
 	maxObservedRevision := ""
@@ -6687,7 +6959,10 @@ func (s *Syncer) githubWorkingTreeSnapshot(ctx context.Context, prog bootstrapPr
 		s.recordCloudSuccess()
 		prog.touch()
 		for _, entry := range page.Entries {
-			if entry.Type != "file" {
+			if !isMaterializableTreeEntryType(entry.Type) {
+				if strictComplete && entry.Type != "dir" {
+					return nil, "", fmt.Errorf("complete-v1 github tree contains unsupported entry type %q at %s", entry.Type, entry.Path)
+				}
 				continue
 			}
 			if revisionAdvances(maxObservedRevision, entry.Revision) {
@@ -6709,6 +6984,10 @@ func (s *Syncer) githubWorkingTreeSnapshot(ctx context.Context, prog bootstrapPr
 				Revision:    entry.Revision,
 				ContentHash: contentHash,
 				Encoding:    normalizeEncoding(entry.Encoding),
+				Size:        entry.Size,
+				Type:        normalizeRemoteType(entry.Type),
+				Target:      entry.Target,
+				Mode:        entry.Mode,
 			}
 		}
 		if page.NextCursor == nil || strings.TrimSpace(*page.NextCursor) == "" {
@@ -6720,6 +6999,10 @@ func (s *Syncer) githubWorkingTreeSnapshot(ctx context.Context, prog bootstrapPr
 }
 
 func (s *Syncer) applyGithubWorkingTreeTarSeed(tarBody GithubWorkingTreeTar, tree map[string]githubTreeFile, conflicted map[string]struct{}, prog bootstrapProgress) (map[string]struct{}, error) {
+	return s.applyGithubWorkingTreeTarSeedStrict(tarBody, tree, conflicted, prog, false)
+}
+
+func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTar, tree map[string]githubTreeFile, conflicted map[string]struct{}, prog bootstrapProgress, strictComplete bool) (map[string]struct{}, error) {
 	reader := io.Reader(tarBody.Body)
 	buffered := bufio.NewReader(reader)
 	if strings.Contains(strings.ToLower(tarBody.ContentType), "gzip") {
@@ -6754,10 +7037,15 @@ func (s *Syncer) applyGithubWorkingTreeTarSeed(tarBody GithubWorkingTreeTar, tre
 		if header == nil || header.FileInfo().IsDir() {
 			continue
 		}
-		if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA {
+		isRegular := header.Typeflag == tar.TypeReg || header.Typeflag == tar.TypeRegA
+		isSymlink := header.Typeflag == tar.TypeSymlink
+		if !isRegular && !isSymlink {
+			if strictComplete && !header.FileInfo().IsDir() {
+				return nil, fmt.Errorf("complete-v1 github tar seed contains unsupported entry type %d at %s", header.Typeflag, header.Name)
+			}
 			continue
 		}
-		rel := filepath.ToSlash(filepath.Clean(strings.TrimSpace(header.Name)))
+		rel := path.Clean(strings.ReplaceAll(header.Name, "\\", "/"))
 		rel = strings.TrimPrefix(rel, "/")
 		if rel == "" || rel == "." || strings.HasPrefix(rel, "../") || strings.Contains(rel, "/../") {
 			return nil, fmt.Errorf("github tar seed contains unsafe path %q", header.Name)
@@ -6770,6 +7058,9 @@ func (s *Syncer) applyGithubWorkingTreeTarSeed(tarBody GithubWorkingTreeTar, tre
 		if !ok {
 			return nil, fmt.Errorf("github tar seed contains unexpected file %s", rel)
 		}
+		if isSymlink != isSymlinkType(meta.Type) {
+			return nil, fmt.Errorf("github tar seed entry type mismatch for %s", rel)
+		}
 		if conflicted != nil {
 			if _, skip := conflicted[meta.RemotePath]; skip {
 				remotePaths[meta.RemotePath] = struct{}{}
@@ -6777,11 +7068,24 @@ func (s *Syncer) applyGithubWorkingTreeTarSeed(tarBody GithubWorkingTreeTar, tre
 			}
 		}
 		var data []byte
-		s.runFullPullIO(func() {
-			data, err = io.ReadAll(tr)
-		})
-		if err != nil {
-			return nil, err
+		if isSymlink {
+			data = []byte(header.Linkname)
+		} else {
+			if header.Size < 0 {
+				return nil, fmt.Errorf("github tar seed contains invalid negative size for %s", rel)
+			}
+			if max := maxWritebackBytes(); max > 0 && header.Size > max {
+				return nil, fmt.Errorf("github tar seed file %s is %d bytes, exceeds %d byte writeback limit", rel, header.Size, max)
+			}
+			s.runFullPullIO(func() {
+				data, err = io.ReadAll(io.LimitReader(tr, header.Size+1))
+			})
+			if err != nil {
+				return nil, err
+			}
+			if int64(len(data)) != header.Size {
+				return nil, fmt.Errorf("github tar seed truncated file %s: read=%d header=%d", rel, len(data), header.Size)
+			}
 		}
 		hash := hashBytes(data)
 		if hash != meta.ContentHash {
@@ -6807,10 +7111,21 @@ func (s *Syncer) applyGithubWorkingTreeTarSeed(tarBody GithubWorkingTreeTar, tre
 		if err := s.assertNotMountRoot(localPath); err != nil {
 			return nil, err
 		}
+		if isSymlink {
+			if header.Linkname != meta.Target {
+				return nil, fmt.Errorf("github tar seed symlink target mismatch for %s", rel)
+			}
+			if max := maxWritebackBytes(); max > 0 && int64(len(header.Linkname)) > max {
+				return nil, fmt.Errorf("github tar seed symlink %s target exceeds %d byte writeback limit", rel, max)
+			}
+			if err := validateSymlinkTarget(s.localRoot, localPath, header.Linkname); err != nil {
+				return nil, fmt.Errorf("github tar seed contains unsafe symlink %s: %w", rel, err)
+			}
+		}
 		tracked := s.state.Files[meta.RemotePath]
 		canWrite := s.canWritePath(meta.RemotePath)
 		if tracked.Dirty {
-			if err := s.applyLocalPermissions(localPath, canWrite); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err := s.applyLocalPermissionsForMode(localPath, canWrite, tracked.Mode); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return nil, err
 			}
 			tracked.ReadOnly = !canWrite
@@ -6818,19 +7133,29 @@ func (s *Syncer) applyGithubWorkingTreeTarSeed(tarBody GithubWorkingTreeTar, tre
 			remotePaths[meta.RemotePath] = struct{}{}
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		if err := ensureSecureParentDirectory(s.localRoot, localPath); err != nil {
 			return nil, err
 		}
 		shouldWrite := true
-		if current, err := os.ReadFile(localPath); err == nil && hashBytes(current) == hash {
+		if isSymlink {
+			if current, readErr := readLocalSymlinkNoFollow(s.localRoot, localPath, maxWritebackBytes()); readErr == nil && current == header.Linkname {
+				shouldWrite = false
+			}
+		} else if current, readErr := s.readLocalSnapshot(localPath, true); readErr == nil && current.Type == remoteTypeFile && current.Hash == hash {
 			shouldWrite = false
 		}
 		if shouldWrite {
-			if err := writeFileAtomic(localPath, data, 0o644); err != nil {
-				return nil, err
+			var writeErr error
+			if isSymlink {
+				writeErr = writeSymlinkAtomicSecure(s.localRoot, localPath, header.Linkname)
+			} else {
+				writeErr = writeFileAtomicSecure(s.localRoot, localPath, data, os.FileMode(meta.Mode&0o777))
+			}
+			if writeErr != nil {
+				return nil, writeErr
 			}
 		}
-		if err := s.applyLocalPermissions(localPath, canWrite); err != nil {
+		if err := s.applyLocalPermissionsForMode(localPath, canWrite, meta.Mode); err != nil {
 			return nil, err
 		}
 		contentType := detectContentType(localPath)
@@ -6838,6 +7163,9 @@ func (s *Syncer) applyGithubWorkingTreeTarSeed(tarBody GithubWorkingTreeTar, tre
 			Revision:    meta.Revision,
 			ContentType: contentType,
 			Encoding:    meta.Encoding,
+			Type:        meta.Type,
+			Target:      meta.Target,
+			Mode:        meta.Mode,
 			Hash:        hash,
 			Dirty:       false,
 			Denied:      false,
@@ -6963,12 +7291,20 @@ func (s *Syncer) markBootstrapTotalUnavailable(runtimeRoot string) {
 }
 
 func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]struct{}, prog bootstrapProgress) (returnErr error) {
+	strictCompleteGithubSource := s.githubWorkingTree != nil && strings.EqualFold(strings.TrimSpace(s.state.GithubWorkingTreeSourceProfile), "complete-v1")
 	maxDirectories := s.bootstrapMaxDirectories
 	if maxDirectories <= 0 {
 		maxDirectories = defaultBootstrapMaxDirectories
 	}
 	metrics := fullTreeTraversalMetrics{startedAt: time.Now()}
 	expectedFiles := 0
+	strictFilesSeen := 0
+	if strictCompleteGithubSource {
+		if s.state.GithubWorkingTreeFilesExpected == nil || *s.state.GithubWorkingTreeFilesExpected < 0 {
+			return fmt.Errorf("complete-v1 source is missing a verified filesExpected count")
+		}
+		expectedFiles = *s.state.GithubWorkingTreeFilesExpected
+	}
 	defer func() {
 		s.logf(
 			"mount full-tree traversal summary remote_root=%q list_calls=%d entries_seen=%d files_seen=%d directories_seen=%d bytes_seen=%d runtime_entries_seen=%d runtime_subtrees_pruned=%d traversal_complete=%t traversal_failed=%t duration_ms=%d",
@@ -7014,7 +7350,16 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			// omit totalFiles). Keep it across retries and daemon restarts so an
 			// empty-tree failure cannot become successful on the next cycle.
 			// Fresh traversals must not inherit a historical bootstrap total.
-			expectedFiles = s.state.BootstrapFilesTotal
+			if !strictCompleteGithubSource {
+				expectedFiles = s.state.BootstrapFilesTotal
+			}
+			strictFilesSeen = s.state.BootstrapStrictFilesSeen
+			if strictCompleteGithubSource && strictFilesSeen == 0 && s.state.BootstrapFilesSynced > 0 {
+				// Older checkpoints predate the strict counter. Their synced
+				// count is a safe lower-bound compatibility signal; any denied
+				// or otherwise uncounted entry still fails closed below.
+				strictFilesSeen = s.state.BootstrapFilesSynced
+			}
 			s.logf("resuming bootstrap bounded-tree pull at %s from persisted cursor and page offset %d (%d directories pending, %d files already synced)", directories[0], pageOffset, len(directories), s.state.BootstrapFilesSynced)
 		}
 	} else if !s.state.BootstrapComplete && strings.TrimSpace(s.state.BootstrapCursor) != "" {
@@ -7120,6 +7465,22 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 					cursor = ""
 					pageOffset = 0
 					pageLoaded = false
+					if strictCompleteGithubSource {
+						// The complete-v1 count is an exact traversal invariant. A
+						// rejected cursor makes it impossible to know how much of the
+						// current directory is already represented by the persisted
+						// global count, so restart the entire frontier and its counters.
+						// Replaying from the root is safe through the local-hash fast
+						// path and avoids double-counting the page prefix.
+						directories = []string{s.remoteRoot}
+						queuedDirectories = map[string]struct{}{s.remoteRoot: {}}
+						strictFilesSeen = 0
+						filesThisTraversal = 0
+						s.state.BootstrapStrictFilesSeen = 0
+						s.state.BootstrapFilesSynced = 0
+						s.state.BootstrapDirectoriesDiscovered = 1
+						s.state.BootstrapBlockedPath = ""
+					}
 					// Replaying the current directory and its local-hash fast path is
 					// idempotent. It is not safe to grant snapshot-delete authority to
 					// this recovery traversal because it began from a persisted frontier.
@@ -7155,7 +7516,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 					}
 				}
 			}
-			if currentDirectory == s.remoteRoot && !s.lazyRepos && !s.state.BootstrapFilesTotalUnavailable && page.TotalFiles > 0 {
+			if currentDirectory == s.remoteRoot && !strictCompleteGithubSource && !s.lazyRepos && !s.state.BootstrapFilesTotalUnavailable && page.TotalFiles > 0 {
 				expectedFiles = page.TotalFiles
 				// totalFiles is stable across server pagination and counts the full
 				// caller-visible subtree, not just this page. Persist it on the root
@@ -7194,7 +7555,10 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			}
 		}
 		for i := entryStart; i < len(page.Entries); i++ {
-			if page.Entries[i].Type != "file" {
+			if !isMaterializableTreeEntryType(page.Entries[i].Type) {
+				if strictCompleteGithubSource && page.Entries[i].Type != "dir" {
+					return fmt.Errorf("complete-v1 github tree contains unsupported entry type %q at %s", page.Entries[i].Type, page.Entries[i].Path)
+				}
 				continue
 			}
 			if remainingFileBudget >= 0 && fileEntriesThisChunk >= remainingFileBudget {
@@ -7209,12 +7573,13 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		}
 		pageComplete := entryEnd == len(page.Entries)
 		filesThisPage := 0
+		strictFilesThisChunk := 0
 		readJobs := make([]bootstrapReadJob, 0, entryEnd-entryStart)
 		for _, entry := range page.Entries[entryStart:entryEnd] {
 			remotePath := normalizeRemotePath(entry.Path)
 			metrics.entriesSeen++
 			switch entry.Type {
-			case "file":
+			case "file", "symlink":
 				metrics.filesSeen++
 				if entry.Size > 0 {
 					metrics.bytesSeen += entry.Size
@@ -7229,6 +7594,9 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			}
 			if !isUnderRemoteRoot(s.remoteRoot, remotePath) {
 				continue
+			}
+			if strictCompleteGithubSource && (entry.Type == remoteTypeFile || entry.Type == remoteTypeSymlink) && runtimeRoot == "" {
+				strictFilesThisChunk++
 			}
 			if runtimeRoot != "" {
 				if _, pruned := prunedRuntimeRoots[runtimeRoot]; !pruned {
@@ -7264,7 +7632,10 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 				}
 				continue
 			}
-			if entry.Type != "file" {
+			if !isMaterializableTreeEntryType(entry.Type) {
+				if strictCompleteGithubSource {
+					return fmt.Errorf("complete-v1 github tree contains unsupported entry type %q at %s", entry.Type, entry.Path)
+				}
 				continue
 			}
 			if revisionAdvances(maxObservedRevision, entry.Revision) {
@@ -7385,6 +7756,10 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			}
 			break
 		}
+		strictFilesSeen += strictFilesThisChunk
+		if strictCompleteGithubSource {
+			s.state.BootstrapStrictFilesSeen = strictFilesSeen
+		}
 		pageOffset = entryEnd
 		filesThisTraversal += fileEntriesThisChunk
 		if !pageComplete {
@@ -7448,7 +7823,10 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 	// positive server total independently proves an empty listing is incomplete.
 	// A resumed final page may legitimately contain no files after earlier
 	// cycles mirrored the prefix, and pruned/lazy totals are not comparable.
-	if len(remotePaths) == 0 && (startedFromEmpty || s.state.BootstrapFilesSynced == 0) && !s.lazyRepos {
+	if strictCompleteGithubSource && strictFilesSeen != expectedFiles {
+		return fmt.Errorf("complete-v1 github tree verification failed: listed %d files, manifest expected %d", strictFilesSeen, expectedFiles)
+	}
+	if len(remotePaths) == 0 && (startedFromEmpty || s.state.BootstrapFilesSynced == 0) && !s.lazyRepos && !(strictCompleteGithubSource && expectedFiles == 0) {
 		if s.state.BootstrapFilesTotalUnavailable {
 			expectedFiles = 0
 		}
@@ -7551,7 +7929,7 @@ func (s *Syncer) trySkipBootstrapRead(remotePath string, entry TreeEntry) (bool,
 		s.logf("skipping local hash probe for %s: %v", remotePath, err)
 		return false, nil
 	}
-	snapshot, err := readLocalSnapshot(localPath, false)
+	snapshot, err := s.readLocalSnapshot(localPath, false)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return false, nil
@@ -7559,11 +7937,13 @@ func (s *Syncer) trySkipBootstrapRead(remotePath string, entry TreeEntry) (bool,
 		s.logf("local hash probe failed for %s (%s): %v", remotePath, localPath, err)
 		return false, nil
 	}
-	if snapshot.Hash != entry.ContentHash {
+	if snapshot.Hash != entry.ContentHash || normalizeRemoteType(snapshot.Type) != normalizeRemoteType(entry.Type) ||
+		(isSymlinkType(entry.Type) && snapshot.Target != entry.Target) ||
+		(entry.Mode != 0 && snapshot.Mode != entry.Mode) {
 		return false, nil
 	}
 	canWrite := s.canWritePath(remotePath)
-	if err := s.applyLocalPermissions(localPath, canWrite); err != nil {
+	if err := s.applyLocalPermissionsForMode(localPath, canWrite, entry.Mode); err != nil {
 		if s.skipPathLocalMaterializationError(remotePath, "permission update", err) {
 			return true, nil
 		}
@@ -7572,6 +7952,9 @@ func (s *Syncer) trySkipBootstrapRead(remotePath string, entry TreeEntry) (bool,
 	s.state.Files[remotePath] = trackedFile{
 		Revision:          entry.Revision,
 		ContentType:       snapshot.ContentType,
+		Type:              normalizeRemoteType(entry.Type),
+		Target:            entry.Target,
+		Mode:              entry.Mode,
 		Hash:              snapshot.Hash,
 		Dirty:             false,
 		LocalRelativePath: tracked.LocalRelativePath,
@@ -7686,6 +8069,9 @@ func (s *Syncer) readBootstrapFilesBulkEach(ctx context.Context, client bulkRead
 				RemotePath: job.RemotePath,
 				File: RemoteFile{
 					Path:        result.Path,
+					Type:        result.Type,
+					Target:      result.Target,
+					Mode:        result.Mode,
 					Revision:    result.Revision,
 					ContentType: result.ContentType,
 					Content:     result.Content,
@@ -7908,6 +8294,7 @@ func (s *Syncer) markBootstrapComplete() {
 	s.state.BootstrapPageOffset = 0
 	s.state.BootstrapStartedAt = ""
 	s.state.BootstrapFilesSynced = 0
+	s.state.BootstrapStrictFilesSeen = 0
 	s.state.BootstrapFilesTotal = 0
 	s.state.BootstrapFilesTotalUnavailable = false
 	s.state.BootstrapStallCycles = 0
@@ -8086,16 +8473,15 @@ func (s *Syncer) recordCloudSuccess() {
 	s.circuit.RecordSuccess()
 }
 
-// defaultMaxWritebackBytes caps the size of a local file eligible for
-// writeback. The clobber incident involved an ~11MB file renamed over the
-// mount root; 8MB is a generous text/document ceiling that keeps such
-// pathological payloads out of the sync pipeline by default.
-const defaultMaxWritebackBytes int64 = 8 << 20
+// defaultMaxWritebackBytes caps the decoded size of a local file eligible for
+// writeback. The live repository contract supports binaries through 64 MiB;
+// request chunking below accounts for base64/JSON expansion on the wire.
+const defaultMaxWritebackBytes int64 = 64 << 20
 
 // defaultMaxWritebackBatchBytes caps the serialized /fs/bulk request body.
-// The cloud rejects requests above roughly 10 MiB; 8 MiB leaves room for
-// transport and schema overhead while still batching normal writebacks.
-const defaultMaxWritebackBatchBytes int64 = 8 << 20
+// A single 64 MiB binary expands to about 85 MiB as base64, so leave JSON
+// framing headroom while keeping batches bounded.
+const defaultMaxWritebackBatchBytes int64 = 96 << 20
 
 // maxWritebackBytes returns the writeback body size cap in bytes.
 // Configurable via RELAYFILE_MAX_WRITEBACK_BYTES (positive integer).
@@ -8950,7 +9336,7 @@ func (s *Syncer) trySkipIncrementalRead(remotePath string, event FilesystemEvent
 		s.logf("skipping local hash probe for %s: %v", remotePath, err)
 		return false, nil
 	}
-	snapshot, err := readLocalSnapshot(localPath, false)
+	snapshot, err := s.readLocalSnapshot(localPath, false)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return false, nil
@@ -8962,7 +9348,20 @@ func (s *Syncer) trySkipIncrementalRead(remotePath string, event FilesystemEvent
 		return false, nil
 	}
 	canWrite := s.canWritePath(remotePath)
-	if err := s.applyLocalPermissions(localPath, canWrite); err != nil {
+	desiredType := normalizeRemoteType(tracked.Type)
+	desiredTarget := tracked.Target
+	desiredMode := tracked.Mode
+	if event.TypeMetadata != nil {
+		desiredType = normalizeRemoteType(event.TypeMetadata.Type)
+		desiredTarget = event.TypeMetadata.Target
+		desiredMode = event.TypeMetadata.Mode
+	}
+	if normalizeRemoteType(snapshot.Type) != desiredType ||
+		(isSymlinkType(desiredType) && snapshot.Target != desiredTarget) ||
+		(desiredMode != 0 && snapshot.Mode != desiredMode) {
+		return false, nil
+	}
+	if err := s.applyLocalPermissionsForMode(localPath, canWrite, desiredMode); err != nil {
 		return false, err
 	}
 	revision := strings.TrimSpace(event.Revision)
@@ -8972,6 +9371,9 @@ func (s *Syncer) trySkipIncrementalRead(remotePath string, event FilesystemEvent
 	s.state.Files[remotePath] = trackedFile{
 		Revision:          revision,
 		ContentType:       snapshot.ContentType,
+		Type:              desiredType,
+		Target:            desiredTarget,
+		Mode:              desiredMode,
 		Hash:              snapshot.Hash,
 		Dirty:             false,
 		LocalRelativePath: tracked.LocalRelativePath,
@@ -9155,13 +9557,29 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	if err != nil {
 		return nil
 	}
+	if err := ensureNoSymlinkParents(s.localRoot, localPath); err != nil {
+		return fmt.Errorf("refusing materialization under symlinked parent: %w", err)
+	}
 	if s.excludeInfrastructureLocalPath(localPath, remotePath, conflicted) {
 		return nil
 	}
-	remoteBytes, err := decodeRemoteFileContent(file)
-	if err != nil {
-		return err
+	file.Type = normalizeRemoteType(file.Type)
+	var remoteBytes []byte
+	if file.Type == remoteTypeSymlink {
+		if err := validateSymlinkTarget(s.localRoot, localPath, file.Target); err != nil {
+			return fmt.Errorf("refusing remote symlink %s: %w", remotePath, err)
+		}
+	} else {
+		var decodeErr error
+		remoteBytes, decodeErr = decodeRemoteFileContent(file)
+		if decodeErr != nil {
+			return decodeErr
+		}
 	}
+	if file.Type == remoteTypeSymlink {
+		remoteBytes = []byte(file.Target)
+	}
+	remoteHash := hashBytes(remoteBytes)
 	tracked, trackedExists := s.state.Files[remotePath]
 	canWrite := s.canWritePath(remotePath)
 	tracked.ReadOnly = !canWrite
@@ -9187,7 +9605,7 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 			s.logf("skipping remote file %s: %v", remotePath, err)
 			return nil
 		}
-		if err := s.applyLocalPermissions(localPath, canWrite); err != nil {
+		if err := s.applyLocalPermissionsForMode(localPath, canWrite, tracked.Mode); err != nil {
 			if s.skipPathLocalMaterializationError(remotePath, "permission update", err) {
 				return nil
 			}
@@ -9208,7 +9626,7 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	// Virtual <provider>/.layout.md manifests are registered from snapshots by
 	// materializeProviderLayouts; remote-supplied .layout.md payloads still
 	// pass through to disk unchanged.
-	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+	if err := ensureSecureParentDirectory(s.localRoot, localPath); err != nil {
 		if isRemotePathCollision(err) {
 			s.quarantineRemotePath(remotePath, "cannot create parent directory", err)
 			return nil
@@ -9218,10 +9636,15 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 		}
 		return err
 	}
-	remoteHash := hashBytes(remoteBytes)
 	shouldWrite := true
-	if current, err := os.ReadFile(localPath); err == nil {
-		localHash := hashBytes(current)
+	if file.Type == remoteTypeSymlink {
+		currentTarget, readlinkErr := readLocalSymlinkNoFollow(s.localRoot, localPath, maxWritebackBytes())
+		if readlinkErr == nil && normalizeRemoteType(tracked.Type) == remoteTypeSymlink && currentTarget == file.Target && tracked.Mode == file.Mode {
+			shouldWrite = false
+		}
+	} else if currentSnapshot, readErr := s.readLocalSnapshot(localPath, true); readErr == nil && currentSnapshot.Type == remoteTypeFile {
+		current := currentSnapshot.RawContent
+		localHash := currentSnapshot.Hash
 		if localHash == remoteHash {
 			shouldWrite = false
 		} else {
@@ -9263,20 +9686,53 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 				s.logf("conflict at %s before remote apply; debounced local edit saved at %s", remotePath, artifactPath)
 			}
 		}
-	}
-	if shouldWrite {
-		if err := writeFileAtomic(localPath, remoteBytes, 0o644); err != nil {
-			if isRemotePathCollision(err) {
-				s.quarantineRemotePath(remotePath, "cannot write file (target is a directory)", err)
+	} else if readErr != nil && errors.Is(readErr, errLocalSnapshotTooLarge) {
+		// A bounded local read must never turn an oversized local edit into a
+		// remote overwrite during pull. Preserve it as dirty; the scan phase
+		// will mark it writeback-skipped and surface the size cap.
+		tracked.Dirty = true
+		s.state.Files[remotePath] = tracked
+		s.logf("preserving oversized local file %s during remote apply: %v", remotePath, readErr)
+		return nil
+	} else if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		// A failed read of an existing local file is not evidence that it is
+		// safe to replace. Preserve it and retry once the path is readable.
+		// Directories are the deliberate exception: the secure atomic writer
+		// below rejects that type collision and records it in quarantine.
+		info, statErr := os.Lstat(localPath)
+		if statErr == nil && !info.IsDir() {
+			return fmt.Errorf("read existing local path before remote apply: %w", readErr)
+		}
+		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+			if isRemotePathCollision(statErr) {
+				s.quarantineRemotePath(remotePath, "local read preflight path collision", statErr)
 				return nil
 			}
-			if s.skipPathLocalMaterializationError(remotePath, "atomic write", err) {
+			if s.skipPathLocalMaterializationError(remotePath, "local read preflight", statErr) {
 				return nil
 			}
-			return err
+			return fmt.Errorf("inspect unreadable local path before remote apply: %w", statErr)
 		}
 	}
-	if err := s.applyLocalPermissions(localPath, canWrite); err != nil {
+	if shouldWrite {
+		var writeErr error
+		if file.Type == remoteTypeSymlink {
+			writeErr = writeSymlinkAtomicSecure(s.localRoot, localPath, file.Target)
+		} else {
+			writeErr = writeFileAtomicSecure(s.localRoot, localPath, remoteBytes, 0o644)
+		}
+		if writeErr != nil {
+			if isRemotePathCollision(writeErr) {
+				s.quarantineRemotePath(remotePath, "cannot materialize remote entry (path collision)", writeErr)
+				return nil
+			}
+			if s.skipPathLocalMaterializationError(remotePath, "atomic materialization", writeErr) {
+				return nil
+			}
+			return writeErr
+		}
+	}
+	if err := s.applyLocalPermissionsForMode(localPath, canWrite, file.Mode); err != nil {
 		if s.skipPathLocalMaterializationError(remotePath, "permission update", err) {
 			return nil
 		}
@@ -9291,6 +9747,9 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 		Revision:          file.Revision,
 		ContentType:       contentType,
 		Encoding:          normalizeEncoding(file.Encoding),
+		Type:              file.Type,
+		Target:            file.Target,
+		Mode:              file.Mode,
 		Hash:              remoteHash,
 		Dirty:             false,
 		LocalRelativePath: tracked.LocalRelativePath,
@@ -9355,10 +9814,27 @@ func (s *Syncer) isActiveMountRuntimeLocalPath(localPath string) bool {
 }
 
 func (s *Syncer) applyLocalPermissions(localPath string, canWrite bool) error {
-	if canWrite {
-		return os.Chmod(localPath, 0o644)
+	return s.applyLocalPermissionsForMode(localPath, canWrite, 0)
+}
+
+func (s *Syncer) applyLocalPermissionsForMode(localPath string, canWrite bool, remoteMode uint32) error {
+	info, err := os.Lstat(localPath)
+	if err != nil {
+		return err
 	}
-	return os.Chmod(localPath, 0o444)
+	if info.Mode()&os.ModeSymlink != 0 {
+		// chmod follows links on Unix. Never apply mount permissions through a
+		// symlink, even when a remote event races a local type replacement.
+		return nil
+	}
+	mode := os.FileMode(remoteMode & 0o7777)
+	if mode.Perm() == 0 {
+		mode = 0o644
+	}
+	if !canWrite {
+		mode &^= 0o222
+	}
+	return os.Chmod(localPath, mode.Perm())
 }
 
 // enforceSyncModePermissionsOnTransition applies the current scope-derived
@@ -9403,12 +9879,15 @@ func (s *Syncer) enforceSyncModePermissionsOnTransition() error {
 			s.logf("skipping non-regular tracked path %s during %s->%s transition", remotePath, previousMode, currentMode)
 			continue
 		}
-		desiredMode := os.FileMode(0o444)
-		if canWrite {
+		desiredMode := os.FileMode(tracked.Mode & 0o7777)
+		if desiredMode.Perm() == 0 {
 			desiredMode = 0o644
 		}
+		if !canWrite {
+			desiredMode &^= 0o222
+		}
 		if info.Mode().Perm() != desiredMode {
-			if err := s.applyLocalPermissions(localPath, canWrite); err != nil {
+			if err := s.applyLocalPermissionsForMode(localPath, canWrite, tracked.Mode); err != nil {
 				return fmt.Errorf("apply permissions to tracked path %s during %s->%s transition: %w", remotePath, previousMode, currentMode, err)
 			}
 			changed++
@@ -9534,9 +10013,14 @@ func (s *Syncer) applyRemoteDelete(remotePath string, conflicted map[string]stru
 		delete(s.state.Files, remotePath)
 		return nil
 	}
-	currentBytes, readErr := os.ReadFile(localPath)
-	if readErr == nil && hashBytes(currentBytes) == tracked.Hash {
-		_ = os.Remove(localPath)
+	if snapshot, snapshotErr := s.readLocalSnapshot(localPath, true); snapshotErr == nil {
+		matches := snapshot.Hash == tracked.Hash && normalizeRemoteType(snapshot.Type) == normalizeRemoteType(tracked.Type)
+		if matches && isSymlinkType(tracked.Type) {
+			matches = snapshot.Target == tracked.Target
+		}
+		if matches {
+			_ = removeLocalNoFollow(s.localRoot, localPath)
+		}
 	}
 	delete(s.state.Files, remotePath)
 	return nil
@@ -9588,7 +10072,7 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 			exists &&
 			canWrite &&
 			!tracked.Dirty &&
-			tracked.Hash != snapshot.Hash {
+			!localSnapshotMatchesTracked(snapshot, tracked) {
 			// A fresh process cannot have observed edits made while the daemon
 			// was stopped. A watcherless process must likewise infer edits from
 			// the hash scan it already performs. In watcher mode, later passes
@@ -9605,7 +10089,7 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 				s.logf("skipping denied-file removal for %s: %v", remotePath, err)
 				continue
 			}
-			if err := os.Remove(localPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err := removeLocalNoFollow(s.localRoot, localPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return nil, err
 			}
 			tracked.Dirty = false
@@ -9614,21 +10098,15 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 		}
 		if exists && tracked.ReadOnly {
 			// Check if agent modified the readonly file (e.g. via chmod bypass)
-			if snapshot.Hash != tracked.Hash {
-				// Revert to server content
-				remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
-				if readErr == nil {
-					remoteBytes, decodeErr := decodeRemoteFileContent(remoteFile)
-					if decodeErr == nil && os.WriteFile(localPath, remoteBytes, 0o444) == nil {
-						tracked.Hash = hashBytes(remoteBytes)
-						tracked.Revision = remoteFile.Revision
-						tracked.Encoding = normalizeEncoding(remoteFile.Encoding)
-						s.logDenial("WRITE_REVERTED", remotePath, "file is read-only; content reverted to server version")
-						s.logf("write denied, reverted: %s", remotePath)
-					}
+			if !localSnapshotMatchesReadonlyTracked(snapshot, tracked) {
+				// Revert through the directory-FD anchored writer. A read-only
+				// tracked path may have been replaced by a symlink, so a direct
+				// os.WriteFile would follow it outside the mount root.
+				if err := s.revertReadonlyFile(ctx, remotePath, localPath, tracked, snapshot.ContentType); err != nil {
+					return nil, err
 				}
 			}
-			if err := s.applyLocalPermissions(localPath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err := s.applyLocalPermissionsForMode(localPath, false, tracked.Mode); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return nil, err
 			}
 			// A read-only file is never writeback-eligible regardless of how
@@ -9639,14 +10117,14 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 			continue
 		}
 		if exists && !canWrite {
-			if err := s.applyLocalPermissions(localPath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err := s.applyLocalPermissionsForMode(localPath, false, tracked.Mode); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return nil, err
 			}
 			tracked.Dirty = false
 			s.state.Files[remotePath] = tracked
 			continue
 		}
-		if exists && tracked.Hash == snapshot.Hash && !tracked.Dirty {
+		if exists && !tracked.Dirty && localSnapshotMatchesTracked(snapshot, tracked) {
 			// This is pushLocal's own confirmed-clean short-circuit — it
 			// returns before ever calling preparePendingBulkWrite, so it is
 			// the only place the default poll-mode scan proves an eligible text
@@ -9698,7 +10176,7 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 			s.state.Files[remotePath] = tracked
 			continue
 		}
-		fullSnapshot, err := readLocalSnapshot(localPath, true)
+		fullSnapshot, err := s.readLocalSnapshot(localPath, true)
 		if err != nil {
 			return nil, err
 		}
@@ -9802,7 +10280,7 @@ func (s *Syncer) markReadDenied(remotePath string) error {
 		return nil
 	}
 	s.logDenial("READ_DENIED", remotePath, "agent does not have read permission; file removed")
-	if err := os.Remove(localPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := removeLocalNoFollow(s.localRoot, localPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil
@@ -9872,9 +10350,36 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 		if err == nil && absPath == statePathAbs {
 			return nil
 		}
-		info, err := d.Info()
+		// DirEntry.Info may follow a symlink on some platforms. Lstat is
+		// mandatory here: a local link must be uploaded as a link target and
+		// must never cause the scanner to read outside the mount root.
+		info, err := os.Lstat(path)
 		if err != nil {
 			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			remotePath, err := s.localPathToRemotePath(path, githubPathIndex)
+			if err != nil {
+				return nil
+			}
+			if relativeErr == nil && isEphemeralAtomicSaveRelativePath(relativePath) {
+				if _, tracked := s.state.Files[remotePath]; !tracked {
+					return nil
+				}
+			}
+			snapshot, readErr := s.readLocalSnapshot(path, true)
+			if readErr != nil {
+				if errors.Is(readErr, os.ErrNotExist) {
+					return nil
+				}
+				return readErr
+			}
+			if s.shouldSkipLazyUntrackedPush(remotePath) {
+				snapshot.SkipWriteback = true
+				s.logLazyUntrackedPushSkipped(remotePath)
+			}
+			results[remotePath] = snapshot
+			return nil
 		}
 		if !info.Mode().IsRegular() {
 			return nil
@@ -9900,15 +10405,14 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 				s.logf("skipping oversized local file %s (%d bytes > %d byte writeback cap); not enqueued", path, info.Size(), max)
 				s.oversizedLogged[logKey] = struct{}{}
 			}
-			var snapshot localSnapshot
-			s.runReservedSyncIO(func() {
-				snapshot, err = s.readLocalSnapshot(path, false)
-			})
-			if err != nil {
-				if errors.Is(err, os.ErrNotExist) {
-					return nil
-				}
-				return err
+			// The size check above already proves this path cannot be written.
+			// Keep the scan bounded: do not hash the entire oversized file just
+			// to produce a snapshot that will be skipped.
+			snapshot := localSnapshot{
+				ContentType: detectContentType(path),
+				Type:        remoteTypeFile,
+				Mode:        uint32(info.Mode().Perm()),
+				LocalPath:   path,
 			}
 			snapshot.SkipWriteback = true
 			results[remotePath] = snapshot
@@ -10751,14 +11255,20 @@ func (s *Syncer) refreshShadowContentFromDisk(remotePath, revision, localPath st
 		content []byte
 		err     error
 		cached  bool
+		regular bool
 	)
 	s.runReservedSyncIO(func() {
 		_, cached = s.readShadowContent(remotePath, revision)
 		if !cached {
-			content, err = os.ReadFile(localPath)
+			var snapshot localSnapshot
+			snapshot, err = s.readLocalSnapshot(localPath, true)
+			if err == nil && snapshot.Type == remoteTypeFile {
+				content = snapshot.RawContent
+				regular = true
+			}
 		}
 	})
-	if cached || err != nil {
+	if cached || err != nil || !regular {
 		return
 	}
 	// A live event may have advanced this path while the disk read ran without
@@ -10862,6 +11372,10 @@ func sanitizeRevision(value string) string {
 }
 
 func newLocalSnapshot(path string, data []byte) localSnapshot {
+	return newLocalSnapshotWithMode(path, data, 0o644)
+}
+
+func newLocalSnapshotWithMode(path string, data []byte, mode uint32) localSnapshot {
 	contentType := detectContentType(path)
 	encoding := ""
 	wireContent := string(data)
@@ -10874,30 +11388,103 @@ func newLocalSnapshot(path string, data []byte) localSnapshot {
 		WireContent: wireContent,
 		ContentType: contentType,
 		Encoding:    encoding,
+		Type:        remoteTypeFile,
+		Mode:        mode & 0o7777,
 		Hash:        hashBytes(data),
 		LocalPath:   path,
 	}
 }
 
 func readLocalSnapshot(path string, includeContent bool) (localSnapshot, error) {
-	if includeContent {
-		data, err := os.ReadFile(path)
+	return readLocalSnapshotLimitedUnderRoot("", path, includeContent, maxWritebackBytes())
+}
+
+var errLocalSnapshotTooLarge = errors.New("local file exceeds the writeback size limit")
+
+func readLocalSnapshotLimited(path string, includeContent bool, maxBytes int64) (localSnapshot, error) {
+	return readLocalSnapshotLimitedUnderRoot("", path, includeContent, maxBytes)
+}
+
+func readLocalSnapshotLimitedUnderRoot(localRoot, path string, includeContent bool, maxBytes int64) (localSnapshot, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return localSnapshot{}, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, err := readLocalSymlinkNoFollow(localRoot, path, maxBytes)
 		if err != nil {
 			return localSnapshot{}, err
 		}
-		return newLocalSnapshot(path, data), nil
+		if maxBytes > 0 && int64(len(target)) > maxBytes {
+			return localSnapshot{}, fmt.Errorf("%w: %s symlink target is %d bytes (limit %d)", errLocalSnapshotTooLarge, path, len(target), maxBytes)
+		}
+		return localSnapshot{
+			RawContent:  []byte(target),
+			WireContent: target,
+			ContentType: "application/x-symlink",
+			Encoding:    "utf-8",
+			Type:        remoteTypeSymlink,
+			Target:      target,
+			Mode:        0o777,
+			Hash:        hashBytes([]byte(target)),
+			LocalPath:   path,
+		}, nil
 	}
-	f, err := os.Open(path)
+	if !info.Mode().IsRegular() {
+		return localSnapshot{}, fmt.Errorf("unsupported local file type at %s: %s", path, info.Mode().String())
+	}
+	if includeContent {
+		f, err := openLocalRegularNoFollow(localRoot, path)
+		if err != nil {
+			return localSnapshot{}, err
+		}
+		openedInfo, statErr := f.Stat()
+		if statErr != nil {
+			_ = f.Close()
+			return localSnapshot{}, statErr
+		}
+		var reader io.Reader = f
+		if maxBytes > 0 {
+			reader = io.LimitReader(f, maxBytes+1)
+		}
+		data, readErr := io.ReadAll(reader)
+		closeErr := f.Close()
+		if readErr != nil {
+			return localSnapshot{}, readErr
+		}
+		if closeErr != nil {
+			return localSnapshot{}, closeErr
+		}
+		if maxBytes > 0 && int64(len(data)) > maxBytes {
+			return localSnapshot{}, fmt.Errorf("%w: %s is %d bytes (limit %d)", errLocalSnapshotTooLarge, path, len(data), maxBytes)
+		}
+		return newLocalSnapshotWithMode(path, data, uint32(openedInfo.Mode().Perm())), nil
+	}
+	f, err := openLocalRegularNoFollow(localRoot, path)
 	if err != nil {
 		return localSnapshot{}, err
 	}
 	defer f.Close()
+	openedInfo, statErr := f.Stat()
+	if statErr != nil {
+		return localSnapshot{}, statErr
+	}
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	var reader io.Reader = f
+	if maxBytes > 0 {
+		reader = io.LimitReader(f, maxBytes+1)
+	}
+	n, err := io.Copy(h, reader)
+	if err != nil {
 		return localSnapshot{}, err
+	}
+	if maxBytes > 0 && n > maxBytes {
+		return localSnapshot{}, fmt.Errorf("%w: %s is larger than %d bytes", errLocalSnapshotTooLarge, path, maxBytes)
 	}
 	return localSnapshot{
 		ContentType: detectContentType(path),
+		Type:        remoteTypeFile,
+		Mode:        uint32(openedInfo.Mode().Perm()),
 		Hash:        hex.EncodeToString(h.Sum(nil)),
 		LocalPath:   path,
 	}, nil
@@ -10907,7 +11494,46 @@ func shouldEncodeLocalContentAsBase64(data []byte, contentType string) bool {
 	if !utf8.Valid(data) || !isTextLikeContentType(contentType) {
 		return true
 	}
-	return containsNonTextControlBytes(data)
+	if containsNonTextControlBytes(data) {
+		return true
+	}
+	// JSON's HTML-safe encoder expands '<', '>', and '&' to six-byte
+	// escapes. A 64 MiB otherwise-valid text file can therefore exceed the
+	// 96 MiB request budget even though base64 would fit. Estimate the escaped
+	// string size without allocating a second copy and choose base64 whenever
+	// the raw representation would overflow the wire cap.
+	maxWire := maxWritebackBatchBytes()
+	if maxWire <= 0 {
+		return false
+	}
+	raw := jsonEscapedStringSize(data) + 4096
+	base64Size := int64((len(data)+2)/3*4) + 4096
+	return raw > maxWire && base64Size <= maxWire
+}
+
+func jsonEscapedStringSize(data []byte) int64 {
+	size := int64(0)
+	for index := 0; index < len(data); {
+		r, width := utf8.DecodeRune(data[index:])
+		if width == 0 {
+			break
+		}
+		size += int64(width)
+		switch r {
+		case '"', '\\':
+			size++
+		case '\t', '\n', '\r':
+			// encoding/json emits these one-byte controls as two-byte
+			// escapes (\\t, \\n, or \\r).
+			size++
+		case '<', '>', '&':
+			size += 5 // one byte becomes six bytes (\\u00xx)
+		case '\u2028', '\u2029':
+			size += 6 - int64(width) // encoding/json emits a six-byte escape
+		}
+		index += width
+	}
+	return size
 }
 
 func containsNonTextControlBytes(data []byte) bool {
@@ -10951,14 +11577,51 @@ func normalizeEncoding(value string) string {
 	}
 }
 
+func normalizeRemoteType(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), remoteTypeSymlink) {
+		return remoteTypeSymlink
+	}
+	return remoteTypeFile
+}
+
+func isSymlinkType(value string) bool {
+	return normalizeRemoteType(value) == remoteTypeSymlink
+}
+
+func isMaterializableTreeEntryType(value string) bool {
+	return value == remoteTypeFile || value == remoteTypeSymlink
+}
+
 func decodeRemoteFileContent(file RemoteFile) ([]byte, error) {
+	if isSymlinkType(file.Type) {
+		if max := maxWritebackBytes(); max > 0 && int64(len(file.Target)) > max {
+			return nil, fmt.Errorf("symlink target exceeds %d byte limit", max)
+		}
+		return []byte(file.Target), nil
+	}
 	if normalizeEncoding(file.Encoding) != "base64" {
+		if max := maxWritebackBytes(); max > 0 && int64(len(file.Content)) > max {
+			return nil, fmt.Errorf("remote content exceeds %d byte limit", max)
+		}
 		return []byte(file.Content), nil
 	}
+	if max := maxWritebackBytes(); max > 0 && int64(base64.StdEncoding.DecodedLen(len(file.Content))) > max {
+		return nil, fmt.Errorf("remote base64 content exceeds %d byte limit", max)
+	}
 	if decoded, err := base64.StdEncoding.DecodeString(file.Content); err == nil {
+		if max := maxWritebackBytes(); max > 0 && int64(len(decoded)) > max {
+			return nil, fmt.Errorf("remote content exceeds %d byte limit", max)
+		}
 		return decoded, nil
 	}
-	return base64.RawStdEncoding.DecodeString(file.Content)
+	decoded, err := base64.RawStdEncoding.DecodeString(file.Content)
+	if err != nil {
+		return nil, err
+	}
+	if max := maxWritebackBytes(); max > 0 && int64(len(decoded)) > max {
+		return nil, fmt.Errorf("remote content exceeds %d byte limit", max)
+	}
+	return decoded, nil
 }
 
 func classifyStatusError(err error) *statusError {
@@ -11450,7 +12113,91 @@ func safeLocalPath(localRoot, rel string) (string, error) {
 	if !strings.HasPrefix(cleanJoined, localRoot+string(filepath.Separator)) {
 		return "", fmt.Errorf("resolved path %s escapes local root %s", joined, localRoot)
 	}
+	if err := ensureNoSymlinkParents(localRoot, cleanJoined); err != nil {
+		return "", err
+	}
 	return cleanJoined, nil
+}
+
+// ensureNoSymlinkParents prevents MkdirAll, Open, and Rename from following
+// an attacker-controlled directory link that already exists beneath the
+// mount. The final path itself may be a symlink because materialization
+// atomically replaces that entry; every existing ancestor must be a real
+// directory rooted at localRoot.
+func ensureNoSymlinkParents(localRoot, localPath string) error {
+	root, err := filepath.Abs(filepath.Clean(localRoot))
+	if err != nil {
+		return err
+	}
+	pathAbs, err := filepath.Abs(filepath.Clean(localPath))
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(root, pathAbs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return fmt.Errorf("path %s escapes local root %s", localPath, localRoot)
+	}
+	if info, statErr := os.Lstat(root); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("mount root %s is a symlink", localRoot)
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	current := root
+	for index, part := range parts {
+		if part == "" || (index == len(parts)-1) {
+			break
+		}
+		current = filepath.Join(current, part)
+		info, statErr := os.Lstat(current)
+		if errors.Is(statErr, os.ErrNotExist) {
+			break
+		}
+		if errors.Is(statErr, syscall.ENOTDIR) {
+			return nil
+		}
+		if statErr != nil {
+			return statErr
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("path component %s is a symlink", current)
+		}
+		// A regular-file collision is handled by the existing materialization
+		// quarantine path. Only symlink ancestors are rejected here because
+		// they can redirect a supposedly rooted write outside the mount.
+	}
+	return nil
+}
+
+func ensureNoSymlinkPathComponents(localRoot, localPath string) error {
+	root, err := filepath.Abs(filepath.Clean(localRoot))
+	if err != nil {
+		return err
+	}
+	pathAbs, err := filepath.Abs(filepath.Clean(localPath))
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(root, pathAbs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return fmt.Errorf("path %s escapes local root %s", localPath, localRoot)
+	}
+	current := root
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, statErr := os.Lstat(current)
+		if errors.Is(statErr, os.ErrNotExist) {
+			break
+		}
+		if statErr != nil {
+			return statErr
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("path component %s is a symlink", current)
+		}
+	}
+	return nil
 }
 
 func detectGithubWorkingTreeMount(remoteRoot string) *githubWorkingTreeMount {
@@ -11801,4 +12548,41 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	}
 	committed = true
 	return nil
+}
+
+func validateSymlinkTarget(localRoot, localPath, target string) error {
+	if target == "" || strings.ContainsRune(target, '\x00') || strings.ContainsAny(target, "\r\n") {
+		return errors.New("empty or control-character target")
+	}
+	normalizedTarget := strings.ReplaceAll(target, "\\", "/")
+	if filepath.IsAbs(target) || path.IsAbs(normalizedTarget) || filepath.VolumeName(target) != "" || isWindowsDrivePath(normalizedTarget) {
+		return errors.New("absolute target is not allowed")
+	}
+	resolved := filepath.Clean(filepath.Join(filepath.Dir(localPath), filepath.FromSlash(target)))
+	root, err := filepath.Abs(localRoot)
+	if err != nil {
+		return err
+	}
+	resolved, err = filepath.Abs(resolved)
+	if err != nil {
+		return err
+	}
+	relative, err := filepath.Rel(root, resolved)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+		return errors.New("target escapes the mount root")
+	}
+	if err := ensureNoSymlinkPathComponents(localRoot, resolved); err != nil {
+		return fmt.Errorf("target traverses a symlinked path component: %w", err)
+	}
+	if err := ensureNoSymlinkParents(localRoot, localPath); err != nil {
+		return fmt.Errorf("symlink path traverses a symlinked parent: %w", err)
+	}
+	return nil
+}
+
+// filepath.VolumeName is intentionally host-specific. Symlink targets are a
+// wire contract, so reject Windows drive prefixes even when the mount runs on
+// Unix (where filepath.VolumeName("C:/...") is empty).
+func isWindowsDrivePath(target string) bool {
+	return len(target) >= 2 && ((target[0] >= 'a' && target[0] <= 'z') || (target[0] >= 'A' && target[0] <= 'Z')) && target[1] == ':'
 }

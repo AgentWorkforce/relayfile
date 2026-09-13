@@ -45,7 +45,8 @@ func (c *bulkReadTestClient) ReadFilesBulk(_ context.Context, _ string, paths []
 			continue
 		}
 		response.Files = append(response.Files, BulkReadFileResult{
-			Path: file.Path, Revision: file.Revision, ContentType: file.ContentType,
+			Path: file.Path, Type: file.Type, Target: file.Target, Mode: file.Mode,
+			Revision: file.Revision, ContentType: file.ContentType,
 			Content: file.Content, Encoding: file.Encoding, ContentHash: file.ContentHash,
 		})
 	}
@@ -105,6 +106,24 @@ func TestBootstrapBulkReadBatchesAt32AndDeclaredByteLimit(t *testing.T) {
 	}
 	if client.pointReadCalls != 0 {
 		t.Fatalf("point reads = %d, want 0", client.pointReadCalls)
+	}
+}
+
+func TestBootstrapBulkReadPreservesTypeTargetAndMode(t *testing.T) {
+	path := "/repo/current"
+	client := &bulkReadTestClient{files: map[string]RemoteFile{
+		path: {Path: path, Type: remoteTypeSymlink, Target: "bin/run", Mode: 0o777,
+			Revision: "rev_link", ContentType: "application/x-symlink", Content: "bin/run"},
+	}}
+	results := (&Syncer{workspace: "ws", client: client}).readBootstrapFiles(context.Background(), []bootstrapReadJob{{
+		Index: 0, RemotePath: path, Size: 1,
+	}}, bootstrapProgress{})
+	if len(results) != 1 || results[0].Err != nil {
+		t.Fatalf("bulk results = %#v", results)
+	}
+	got := results[0].File
+	if got.Type != remoteTypeSymlink || got.Target != "bin/run" || got.Mode != 0o777 {
+		t.Fatalf("bulk metadata = %+v, want symlink target and mode preserved", got)
 	}
 }
 
@@ -495,6 +514,18 @@ func TestDecodedRemoteContentSizeStreamsBase64(t *testing.T) {
 	}
 	if _, err := decodedRemoteContentSize("not-base64", "base64"); err == nil {
 		t.Fatal("invalid base64 content unexpectedly accepted")
+	}
+}
+
+func Test64MiBBinaryFitsReadWireBudget(t *testing.T) {
+	t.Setenv("RELAYFILE_MAX_WRITEBACK_BYTES", "")
+	const decoded = int64(64 << 20)
+	wire := int64(base64.StdEncoding.EncodedLen(int(decoded))) + 512 // JSON framing and metadata.
+	if wire >= defaultBulkReadMaxWireBytes {
+		t.Fatalf("64 MiB binary wire size = %d, exceeds budget %d", wire, defaultBulkReadMaxWireBytes)
+	}
+	if maxWritebackBytes() != decoded {
+		t.Fatalf("default writeback decoded limit = %d, want %d", maxWritebackBytes(), decoded)
 	}
 }
 

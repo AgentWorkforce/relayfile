@@ -37,6 +37,9 @@ type outboxRecord struct {
 	ContentType       string       `json:"contentType"`
 	Content           string       `json:"content"`
 	Encoding          string       `json:"encoding,omitempty"`
+	Type              string       `json:"type,omitempty"`
+	Target            string       `json:"target,omitempty"`
+	Mode              uint32       `json:"mode,omitempty"`
 	Hash              string       `json:"hash"`
 	Exists            bool         `json:"exists"`
 	Status            outboxStatus `json:"status"`
@@ -170,6 +173,7 @@ func (s *Syncer) readOutboxRecord(path string) (outboxRecord, error) {
 	record.WorkspaceID = strings.TrimSpace(record.WorkspaceID)
 	record.ContentType = strings.TrimSpace(record.ContentType)
 	record.Encoding = normalizeEncoding(record.Encoding)
+	record.Type = normalizeRemoteType(record.Type)
 	record.Hash = strings.TrimSpace(record.Hash)
 	record.OpID = strings.TrimSpace(record.OpID)
 	record.DispatchStatus = strings.TrimSpace(record.DispatchStatus)
@@ -301,7 +305,10 @@ func (s *Syncer) ensureOutboxRecord(pending pendingBulkWrite) (outboxRecord, err
 		return outboxRecord{}, err
 	}
 	for _, record := range matches {
-		if record.Hash == pending.snapshot.Hash {
+		if record.Hash == pending.snapshot.Hash &&
+			record.Type == normalizeRemoteType(pending.snapshot.Type) &&
+			record.Target == pending.snapshot.Target &&
+			record.Mode == pending.snapshot.Mode {
 			// Stability rule: once a command exists, the persisted record is
 			// the sole source of truth for commandId across reconnect/restart.
 			return record, nil
@@ -331,6 +338,9 @@ func (s *Syncer) ensureOutboxRecord(pending pendingBulkWrite) (outboxRecord, err
 		ContentType:       pending.snapshot.ContentType,
 		Content:           pending.snapshot.WireContent,
 		Encoding:          normalizeEncoding(pending.snapshot.Encoding),
+		Type:              normalizeRemoteType(pending.snapshot.Type),
+		Target:            pending.snapshot.Target,
+		Mode:              pending.snapshot.Mode,
 		Hash:              pending.snapshot.Hash,
 		Exists:            pending.exists,
 		Status:            outboxStatusPending,
@@ -624,6 +634,9 @@ func (s *Syncer) outboxRecordAsPending(record outboxRecord, tracked trackedFile,
 			WireContent: record.Content,
 			ContentType: contentType,
 			Encoding:    normalizeEncoding(record.Encoding),
+			Type:        normalizeRemoteType(record.Type),
+			Target:      record.Target,
+			Mode:        record.Mode,
 			Hash:        strings.TrimSpace(record.Hash),
 		},
 		tracked: tracked,

@@ -59,6 +59,108 @@ func TestWriteFilePopulatesContentHash(t *testing.T) {
 	}
 }
 
+func TestWriteFileReplacesStaleSymlinkMetadata(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	const workspaceID, path = "ws_put_metadata", "/current"
+	created, _, writeErrors := store.BulkWrite(workspaceID, []BulkWriteFile{{
+		Path: path, Type: "symlink", Target: "old", Mode: 0o777,
+		ContentType: "application/x-symlink", Content: "old", Encoding: "utf-8",
+	}})
+	if created != 1 || len(writeErrors) != 0 {
+		t.Fatalf("seed symlink: created=%d errors=%v", created, writeErrors)
+	}
+	file, readErr := store.ReadFile(workspaceID, path)
+	if readErr != nil {
+		t.Fatalf("read seed: %v", readErr)
+	}
+	if _, writeErr := store.WriteFile(WriteRequest{WorkspaceID: workspaceID, Path: path, IfMatch: file.Revision, ContentType: "text/plain", Content: "regular"}); writeErr != nil {
+		t.Fatalf("singular PUT: %v", writeErr)
+	}
+	updated, readErr := store.ReadFile(workspaceID, path)
+	if readErr != nil {
+		t.Fatalf("read update: %v", readErr)
+	}
+	if updated.Type != "file" || updated.Target != "" || updated.Content != "regular" {
+		t.Fatalf("stale symlink metadata survived PUT: %+v", updated)
+	}
+}
+
+func TestBulkWritePreservesFilesystemMetadataAcrossReadTreeAndEvents(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	const workspace = "ws_metadata_roundtrip"
+	const target = "bin/run"
+	written, _, errs := store.BulkWrite(workspace, []BulkWriteFile{{
+		Path: "/current", Type: "symlink", Target: target, Mode: 0o777,
+		ContentType: "application/x-symlink", Content: target, Encoding: "utf-8",
+	}})
+	if written != 1 || len(errs) != 0 {
+		t.Fatalf("bulk write = written %d errors %v", written, errs)
+	}
+	file, err := store.ReadFile(workspace, "/current")
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+	if file.Type != "symlink" || file.Target != target || file.Mode != 0o777 {
+		t.Fatalf("file metadata = %+v", file)
+	}
+	tree, err := store.ListTree(workspace, "/", 1, "")
+	if err != nil || len(tree.Entries) != 1 {
+		t.Fatalf("tree = %+v err=%v", tree, err)
+	}
+	if tree.Entries[0].Type != "symlink" || tree.Entries[0].Target != target || tree.Entries[0].Mode != 0o777 {
+		t.Fatalf("tree metadata = %+v", tree.Entries[0])
+	}
+	events, err := store.GetEvents(workspace, "", "", 10)
+	if err != nil || len(events.Events) != 1 {
+		t.Fatalf("events = %+v err=%v", events, err)
+	}
+	if events.Events[0].TypeMetadata == nil || events.Events[0].TypeMetadata.Type != "symlink" || events.Events[0].TypeMetadata.Target != target || events.Events[0].TypeMetadata.Mode != 0o777 {
+		t.Fatalf("event metadata = %+v", events.Events[0].TypeMetadata)
+	}
+}
+
+func TestBulkWriteLegacyModePreservationAndUTF8SymlinkNormalization(t *testing.T) {
+	store := NewStoreWithOptions(StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	const workspaceID = "ws_bulk_legacy_metadata"
+	written, _, errs := store.BulkWrite(workspaceID, []BulkWriteFile{{
+		Path: "/bin/run", Type: "file", Mode: 0o755, ContentType: "text/plain", Content: "one",
+	}})
+	if written != 1 || len(errs) != 0 {
+		t.Fatalf("seed executable = written %d errors %v", written, errs)
+	}
+	written, _, errs = store.BulkWrite(workspaceID, []BulkWriteFile{{
+		// Legacy bulk clients omit mode and may spell UTF-8 as utf8.
+		Path: "/bin/run", ContentType: "text/plain", Content: "two",
+	}})
+	if written != 1 || len(errs) != 0 {
+		t.Fatalf("legacy mode update = written %d errors %v", written, errs)
+	}
+	file, err := store.ReadFile(workspaceID, "/bin/run")
+	if err != nil {
+		t.Fatalf("read executable: %v", err)
+	}
+	if file.Mode != 0o755 {
+		t.Fatalf("legacy bulk update cleared executable mode: %#o", file.Mode)
+	}
+	written, _, errs = store.BulkWrite(workspaceID, []BulkWriteFile{{
+		Path: "/current", Type: "symlink", Target: "bin/run", Mode: 0o777,
+		ContentType: "application/x-symlink", Content: "bin/run", Encoding: "utf8",
+	}})
+	if written != 1 || len(errs) != 0 {
+		t.Fatalf("utf8 symlink = written %d errors %v", written, errs)
+	}
+	link, err := store.ReadFile(workspaceID, "/current")
+	if err != nil {
+		t.Fatalf("read symlink: %v", err)
+	}
+	if link.Type != "symlink" || link.Target != "bin/run" {
+		t.Fatalf("utf8 symlink metadata = %+v", link)
+	}
+}
+
 // TestWriteFileBase64HashesDecodedBytes verifies that for base64-encoded
 // content the stored ContentHash is the hash of the *decoded* bytes, not the
 // base64 string.
