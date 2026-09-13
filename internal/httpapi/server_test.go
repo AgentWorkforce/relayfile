@@ -229,6 +229,8 @@ func TestGithubWorkingTreeTarExportFiltersAndPreservesMetadata(t *testing.T) {
 		{Path: prefix + "/dir%20name/README.md@" + sha + ".json", Type: "file", Mode: 0o755, ContentType: "text/plain", Content: "hello"},
 		{Path: prefix + "/link@" + sha + ".json", Type: "symlink", Target: "README.md", Mode: 0o777, ContentType: "application/x-symlink", Content: "README.md", Encoding: "utf-8"},
 		{Path: prefix + "/.git/config@" + sha + ".json", Type: "file", ContentType: "text/plain", Content: "secret"},
+		{Path: prefix + "/.git%2Fhooks/pre-commit@" + sha + ".json", Type: "file", ContentType: "text/plain", Content: "secret"},
+		{Path: prefix + "/.github/workflows/ci@" + sha + ".json", Type: "file", ContentType: "text/plain", Content: "name: ci"},
 		{Path: "/other/file@" + sha + ".json", Type: "file", ContentType: "text/plain", Content: "outside"},
 	})
 	if len(errs) != 0 {
@@ -262,7 +264,7 @@ func TestGithubWorkingTreeTarExportFiltersAndPreservesMetadata(t *testing.T) {
 		copyHeader := *header
 		seen[header.Name] = &copyHeader
 	}
-	if len(seen) != 2 || seen["dir name/README.md"] == nil || seen["link"] == nil {
+	if len(seen) != 3 || seen["dir name/README.md"] == nil || seen["link"] == nil || seen[".github/workflows/ci"] == nil {
 		t.Fatalf("tar entries=%v", seen)
 	}
 	if seen["dir name/README.md"].Mode&0o777 != 0o755 || seen["link"].Typeflag != tar.TypeSymlink || seen["link"].Linkname != "README.md" {
@@ -306,6 +308,27 @@ func TestSingularPutClearsStaleSymlinkMetadata(t *testing.T) {
 	}
 	if updated.Type != "file" || updated.Target != "" || updated.Content != "regular" {
 		t.Fatalf("stale metadata after PUT: %+v", updated)
+	}
+}
+
+func TestSingularPutInvalidTypeMetadataReturnsBadRequest(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	const workspaceID, filePath = "ws_put_invalid_metadata", "/current"
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", workspaceID, "Worker1", []string{"fs:write"}, time.Now().Add(time.Hour))
+	resp := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=" + url.QueryEscape(filePath),
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_put_invalid_metadata",
+			"If-Match":         "0",
+		},
+		body: map[string]any{"type": "symlink", "content": "target", "encoding": "base64"},
+	})
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("invalid symlink metadata status=%d body=%s", resp.Code, resp.Body.String())
 	}
 }
 

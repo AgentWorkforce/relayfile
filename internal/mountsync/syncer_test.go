@@ -5980,6 +5980,54 @@ func TestFreshProcessDriftRecoverySkipsReadOnlyFiles(t *testing.T) {
 	}
 }
 
+func TestReadOnlySymlinkReplacementCannotOverwriteOutsideMount(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink privileges are unavailable in the Windows test environment")
+	}
+	localDir := t.TempDir()
+	outsideDir := t.TempDir()
+	outsidePath := filepath.Join(outsideDir, "victim.txt")
+	if err := os.WriteFile(outsidePath, []byte("outside"), 0o644); err != nil {
+		t.Fatalf("seed outside file: %v", err)
+	}
+	remotePath := "/notion/readonly.txt"
+	client := &fakeClient{files: map[string]RemoteFile{
+		remotePath: {Path: remotePath, Revision: "rev_1", ContentType: "text/plain", Content: "server"},
+	}}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:   "ws_readonly_symlink_replace",
+		RemoteRoot:    "/notion",
+		LocalRoot:     localDir,
+		Scopes:        []string{"fs:read"},
+		FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial pull: %v", err)
+	}
+	localPath := filepath.Join(localDir, "readonly.txt")
+	if err := os.Chmod(localPath, 0o644); err != nil {
+		t.Fatalf("make local path writable: %v", err)
+	}
+	if err := os.Remove(localPath); err != nil {
+		t.Fatalf("remove local path: %v", err)
+	}
+	if err := os.Symlink(outsidePath, localPath); err != nil {
+		t.Fatalf("replace with symlink: %v", err)
+	}
+	if err := syncer.PushLocalAndFlushOnce(context.Background()); err != nil {
+		t.Fatalf("readonly restore: %v", err)
+	}
+	if got, err := os.ReadFile(outsidePath); err != nil || string(got) != "outside" {
+		t.Fatalf("outside target was modified: content=%q err=%v", got, err)
+	}
+	if got, err := os.ReadFile(localPath); err != nil || string(got) != "server" {
+		t.Fatalf("readonly path was not restored safely: content=%q err=%v", got, err)
+	}
+}
+
 func TestRestartRecoversTrackedHashDriftWrittenWhileOffline(t *testing.T) {
 	client := &fakeClient{
 		files: map[string]RemoteFile{
@@ -13366,6 +13414,81 @@ func TestInitialTreeBootstrapYieldsAtFileBudgetAndResumes(t *testing.T) {
 	}
 	if syncer.state.LastFullPullAt != "" {
 		t.Fatalf("resumed non-authoritative traversal stamped lastFullPullAt %q", syncer.state.LastFullPullAt)
+	}
+}
+
+func TestCompleteGithubTreeStrictCountResumesWithManifestDenominator(t *testing.T) {
+	files := make(map[string]RemoteFile, 5)
+	for i := 0; i < 5; i++ {
+		path := fmt.Sprintf("/github/repos/acme/repo/contents/%d.txt", i)
+		files[path] = RemoteFile{Path: path, Revision: fmt.Sprintf("rev_%d", i), Content: fmt.Sprintf("%d", i)}
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(&pagedTreeClient{fakeClient: &fakeClient{files: files}, pageSize: 5, totalFiles: 1}, SyncerOptions{
+		WorkspaceID:               "ws_complete_strict_resume",
+		RemoteRoot:                "/github/repos/acme/repo/contents",
+		LocalRoot:                 localDir,
+		BootstrapMaxFilesPerCycle: 2,
+		FullPullEvery:             -1,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	expected := 5
+	syncer.githubWorkingTree = &githubWorkingTreeMount{}
+	syncer.state.GithubWorkingTreeSourceProfile = "complete-v1"
+	syncer.state.GithubWorkingTreeFilesExpected = &expected
+	if err := syncer.pullRemoteFullTree(context.Background(), nil, bootstrapProgress{}); err != nil {
+		t.Fatalf("first strict cycle: %v", err)
+	}
+	if syncer.state.BootstrapStrictFilesSeen != 2 {
+		t.Fatalf("first strict count=%d, want 2", syncer.state.BootstrapStrictFilesSeen)
+	}
+	// An old/non-strict progress denominator must not replace the verified
+	// complete-v1 manifest count when the traversal resumes.
+	syncer.state.BootstrapFilesTotal = 1
+	if err := syncer.pullRemoteFullTree(context.Background(), nil, bootstrapProgress{}); err != nil {
+		t.Fatalf("second strict cycle: %v", err)
+	}
+	if syncer.state.BootstrapStrictFilesSeen != 4 {
+		t.Fatalf("second strict count=%d, want 4", syncer.state.BootstrapStrictFilesSeen)
+	}
+	if err := syncer.pullRemoteFullTree(context.Background(), nil, bootstrapProgress{}); err != nil {
+		t.Fatalf("final strict cycle: %v", err)
+	}
+	if !syncer.state.BootstrapComplete {
+		t.Fatal("strict traversal did not complete")
+	}
+}
+
+func TestJSONEscapedStringSizeMatchesEncodingJSON(t *testing.T) {
+	data := []byte("line\n\r\t\"\\<>&\u2028")
+	encoded, err := json.Marshal(string(data))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want := int64(len(encoded) - 2) // exclude the surrounding JSON quotes
+	if got := jsonEscapedStringSize(data); got != want {
+		t.Fatalf("escaped size=%d, want %d for JSON %q", got, want, encoded)
+	}
+}
+
+func TestLocalSnapshotMatchesTrackedIncludesFilesystemMetadata(t *testing.T) {
+	base := localSnapshot{Hash: "same", Type: remoteTypeFile, Mode: 0o644}
+	tracked := trackedFile{Hash: "same", Type: remoteTypeFile, Mode: 0o644}
+	if !localSnapshotMatchesTracked(base, tracked) {
+		t.Fatal("identical file snapshot did not match tracked state")
+	}
+	modeOnly := base
+	modeOnly.Mode = 0o755
+	if localSnapshotMatchesTracked(modeOnly, tracked) {
+		t.Fatal("mode-only change was treated as clean")
+	}
+	symlink := base
+	symlink.Type = remoteTypeSymlink
+	symlink.Target = "same"
+	if localSnapshotMatchesTracked(symlink, tracked) {
+		t.Fatal("equal-hash type change was treated as clean")
 	}
 }
 

@@ -1996,7 +1996,12 @@ type mountState struct {
 	// BootstrapCursor and resets whenever either advances.
 	BootstrapPageOffset  int `json:"bootstrapPageOffset,omitempty"`
 	BootstrapFilesSynced int `json:"bootstrapFilesSynced,omitempty"`
-	BootstrapFilesTotal  int `json:"bootstrapFilesTotal,omitempty"`
+	// BootstrapStrictFilesSeen is the durable count of materializable files
+	// enumerated for a strict complete-v1 GitHub traversal. It is separate
+	// from FilesSynced because denied, skipped, and already-materialized files
+	// do not all advance that progress counter in the same way.
+	BootstrapStrictFilesSeen int `json:"bootstrapStrictFilesSeen,omitempty"`
+	BootstrapFilesTotal      int `json:"bootstrapFilesTotal,omitempty"`
 	// BootstrapFilesTotalUnavailable is persisted once traversal prunes a
 	// reserved runtime subtree. The server's total includes those descendants,
 	// but the mount intentionally never enumerates them, so retaining that
@@ -6739,6 +6744,7 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 	})
 	if !s.state.BootstrapComplete {
 		s.state.BootstrapFilesSynced = 0
+		s.state.BootstrapStrictFilesSeen = 0
 		if s.lazyRepos {
 			// The export total includes intentionally-unhydrated GitHub repo
 			// contents, so it is not a valid materialization denominator.
@@ -7335,7 +7341,16 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 			// omit totalFiles). Keep it across retries and daemon restarts so an
 			// empty-tree failure cannot become successful on the next cycle.
 			// Fresh traversals must not inherit a historical bootstrap total.
-			expectedFiles = s.state.BootstrapFilesTotal
+			if !strictCompleteGithubSource {
+				expectedFiles = s.state.BootstrapFilesTotal
+			}
+			strictFilesSeen = s.state.BootstrapStrictFilesSeen
+			if strictCompleteGithubSource && strictFilesSeen == 0 && s.state.BootstrapFilesSynced > 0 {
+				// Older checkpoints predate the strict counter. Their synced
+				// count is a safe lower-bound compatibility signal; any denied
+				// or otherwise uncounted entry still fails closed below.
+				strictFilesSeen = s.state.BootstrapFilesSynced
+			}
 			s.logf("resuming bootstrap bounded-tree pull at %s from persisted cursor and page offset %d (%d directories pending, %d files already synced)", directories[0], pageOffset, len(directories), s.state.BootstrapFilesSynced)
 		}
 	} else if !s.state.BootstrapComplete && strings.TrimSpace(s.state.BootstrapCursor) != "" {
@@ -7476,7 +7491,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 					}
 				}
 			}
-			if currentDirectory == s.remoteRoot && !s.lazyRepos && !s.state.BootstrapFilesTotalUnavailable && page.TotalFiles > 0 {
+			if currentDirectory == s.remoteRoot && !strictCompleteGithubSource && !s.lazyRepos && !s.state.BootstrapFilesTotalUnavailable && page.TotalFiles > 0 {
 				expectedFiles = page.TotalFiles
 				// totalFiles is stable across server pagination and counts the full
 				// caller-visible subtree, not just this page. Persist it on the root
@@ -7533,6 +7548,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		}
 		pageComplete := entryEnd == len(page.Entries)
 		filesThisPage := 0
+		strictFilesThisChunk := 0
 		readJobs := make([]bootstrapReadJob, 0, entryEnd-entryStart)
 		for _, entry := range page.Entries[entryStart:entryEnd] {
 			remotePath := normalizeRemotePath(entry.Path)
@@ -7555,7 +7571,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 				continue
 			}
 			if strictCompleteGithubSource && (entry.Type == remoteTypeFile || entry.Type == remoteTypeSymlink) && runtimeRoot == "" {
-				strictFilesSeen++
+				strictFilesThisChunk++
 			}
 			if runtimeRoot != "" {
 				if _, pruned := prunedRuntimeRoots[runtimeRoot]; !pruned {
@@ -7714,6 +7730,10 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 				return err
 			}
 			break
+		}
+		strictFilesSeen += strictFilesThisChunk
+		if strictCompleteGithubSource {
+			s.state.BootstrapStrictFilesSeen = strictFilesSeen
 		}
 		pageOffset = entryEnd
 		filesThisTraversal += fileEntriesThisChunk
@@ -8249,6 +8269,7 @@ func (s *Syncer) markBootstrapComplete() {
 	s.state.BootstrapPageOffset = 0
 	s.state.BootstrapStartedAt = ""
 	s.state.BootstrapFilesSynced = 0
+	s.state.BootstrapStrictFilesSeen = 0
 	s.state.BootstrapFilesTotal = 0
 	s.state.BootstrapFilesTotalUnavailable = false
 	s.state.BootstrapStallCycles = 0
@@ -10009,7 +10030,7 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 			exists &&
 			canWrite &&
 			!tracked.Dirty &&
-			tracked.Hash != snapshot.Hash {
+			!localSnapshotMatchesTracked(snapshot, tracked) {
 			// A fresh process cannot have observed edits made while the daemon
 			// was stopped. A watcherless process must likewise infer edits from
 			// the hash scan it already performs. In watcher mode, later passes
@@ -10035,18 +10056,12 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 		}
 		if exists && tracked.ReadOnly {
 			// Check if agent modified the readonly file (e.g. via chmod bypass)
-			if snapshot.Hash != tracked.Hash {
-				// Revert to server content
-				remoteFile, readErr := s.client.ReadFile(ctx, s.workspace, remotePath)
-				if readErr == nil {
-					remoteBytes, decodeErr := decodeRemoteFileContent(remoteFile)
-					if decodeErr == nil && os.WriteFile(localPath, remoteBytes, 0o444) == nil {
-						tracked.Hash = hashBytes(remoteBytes)
-						tracked.Revision = remoteFile.Revision
-						tracked.Encoding = normalizeEncoding(remoteFile.Encoding)
-						s.logDenial("WRITE_REVERTED", remotePath, "file is read-only; content reverted to server version")
-						s.logf("write denied, reverted: %s", remotePath)
-					}
+			if !localSnapshotMatchesTracked(snapshot, tracked) {
+				// Revert through the directory-FD anchored writer. A read-only
+				// tracked path may have been replaced by a symlink, so a direct
+				// os.WriteFile would follow it outside the mount root.
+				if err := s.revertReadonlyFile(ctx, remotePath, localPath, tracked, snapshot.ContentType); err != nil {
+					return nil, err
 				}
 			}
 			if err := s.applyLocalPermissions(localPath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -10067,7 +10082,7 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 			s.state.Files[remotePath] = tracked
 			continue
 		}
-		if exists && tracked.Hash == snapshot.Hash && !tracked.Dirty {
+		if exists && !tracked.Dirty && localSnapshotMatchesTracked(snapshot, tracked) {
 			// This is pushLocal's own confirmed-clean short-circuit — it
 			// returns before ever calling preparePendingBulkWrite, so it is
 			// the only place the default poll-mode scan proves an eligible text
@@ -11458,6 +11473,10 @@ func jsonEscapedStringSize(data []byte) int64 {
 		size += int64(width)
 		switch r {
 		case '"', '\\':
+			size++
+		case '\t', '\n', '\r':
+			// encoding/json emits these one-byte controls as two-byte
+			// escapes (\\t, \\n, or \\r).
 			size++
 		case '<', '>', '&':
 			size += 5 // one byte becomes six bytes (\\u00xx)

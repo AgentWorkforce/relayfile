@@ -1299,7 +1299,7 @@ func (s *Store) WriteFile(req WriteRequest) (WriteResult, error) {
 	metadata, metadataErr := normalizeWriteTypeMetadata(req, existing, exists, encoding)
 	if metadataErr != nil {
 		s.mu.Unlock()
-		return WriteResult{}, metadataErr
+		return WriteResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, metadataErr)
 	}
 	if !exists {
 		if req.IfMatch != "0" && req.IfMatch != "*" {
@@ -1412,11 +1412,6 @@ func (s *Store) BulkWrite(workspaceID string, files []BulkWriteFile) (int, []Bul
 			})
 			continue
 		}
-		metadata, metadataErr := normalizeBulkWriteTypeMetadata(input)
-		if metadataErr != nil {
-			errorsOut = append(errorsOut, BulkWriteError{Path: path, Code: "invalid_type", Message: metadataErr.Error()})
-			continue
-		}
 		contentType := strings.TrimSpace(input.ContentType)
 		if contentType == "" {
 			contentType = "text/markdown"
@@ -1426,6 +1421,11 @@ func (s *Store) BulkWrite(workspaceID string, files []BulkWriteFile) (int, []Bul
 			continue
 		}
 		existingFile, existed := ws.Files[path]
+		metadata, metadataErr := normalizeBulkWriteTypeMetadata(input, existingFile, existed, encoding)
+		if metadataErr != nil {
+			errorsOut = append(errorsOut, BulkWriteError{Path: path, Code: "invalid_type", Message: metadataErr.Error()})
+			continue
+		}
 		ifMatch := strings.TrimSpace(input.IfMatch)
 		if ifMatch != "" {
 			if !existed {
@@ -1496,8 +1496,19 @@ func (s *Store) BulkWrite(workspaceID string, files []BulkWriteFile) (int, []Bul
 	return written, results, errorsOut
 }
 
-func normalizeBulkWriteTypeMetadata(input BulkWriteFile) (FileTypeMetadata, error) {
-	return normalizeTypeMetadata(input.Type, input.Target, input.Mode, input.Encoding, input.Content)
+func normalizeBulkWriteTypeMetadata(input BulkWriteFile, existing File, exists bool, encoding string) (FileTypeMetadata, error) {
+	mode := input.Mode
+	typeName := strings.ToLower(strings.TrimSpace(input.Type))
+	if typeName == "" {
+		typeName = "file"
+	}
+	// Older bulk clients omitted mode. Preserve executable bits on an
+	// existing regular file rather than interpreting the omitted uint32 as an
+	// explicit request to clear them.
+	if mode == 0 && exists && typeName == "file" && !strings.EqualFold(strings.TrimSpace(existing.Type), "symlink") {
+		mode = existing.Mode
+	}
+	return normalizeTypeMetadata(input.Type, input.Target, mode, encoding, input.Content)
 }
 
 func normalizeWriteTypeMetadata(input WriteRequest, existing File, exists bool, encoding string) (FileTypeMetadata, error) {
@@ -2007,7 +2018,7 @@ func (s *Store) WriteForkFile(req WriteRequest, forkID string) (WriteResult, err
 	existing, exists := s.readForkFileLocked(fork, path)
 	metadata, metadataErr := normalizeWriteTypeMetadata(req, existing, exists, encoding)
 	if metadataErr != nil {
-		return WriteResult{}, metadataErr
+		return WriteResult{}, fmt.Errorf("%w: %v", ErrInvalidInput, metadataErr)
 	}
 	var resolvedBaseRevision *string
 	if exists && req.IfMatch != "*" && req.IfMatch != existing.Revision {
@@ -2113,12 +2124,12 @@ func (s *Store) BulkWriteFork(workspaceID, forkID string, files []BulkWriteFile)
 			})
 			continue
 		}
-		metadata, metadataErr := normalizeBulkWriteTypeMetadata(input)
+		existing, exists := s.readForkFileLocked(fork, path)
+		metadata, metadataErr := normalizeBulkWriteTypeMetadata(input, existing, exists, encoding)
 		if metadataErr != nil {
 			errorsOut = append(errorsOut, BulkWriteError{Path: path, Code: "invalid_type", Message: metadataErr.Error()})
 			continue
 		}
-		existing, exists := s.readForkFileLocked(fork, path)
 		ifMatch := strings.TrimSpace(input.IfMatch)
 		if ifMatch != "" {
 			if !exists {

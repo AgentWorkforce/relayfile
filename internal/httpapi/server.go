@@ -2197,13 +2197,46 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request, workspaceI
 }
 
 func githubWorkingTreeExportPath(filePath, prefix, headSHA string) bool {
-	clean := normalizeRoutePath(filePath)
-	prefix = strings.TrimSuffix(normalizeRoutePath(prefix), "/")
-	if !withinBasePath(prefix, clean) || strings.HasPrefix(strings.TrimPrefix(clean, prefix+"/"), ".git/") || strings.TrimPrefix(clean, prefix+"/") == ".git" {
+	name, err := decodeGithubWorkingTreeTarName(filePath, prefix, headSHA)
+	if err != nil {
 		return false
 	}
+	return name != ".git" && !strings.HasPrefix(name, ".git/")
+}
+
+func decodeGithubWorkingTreeTarName(filePath, prefix, headSHA string) (string, error) {
+	clean := normalizeRoutePath(filePath)
+	prefix = strings.TrimSuffix(normalizeRoutePath(prefix), "/")
+	if !withinBasePath(prefix, clean) {
+		return "", fmt.Errorf("github tar path is outside export prefix: %q", filePath)
+	}
 	name := strings.TrimPrefix(clean, prefix+"/")
-	return strings.HasSuffix(name, "@"+headSHA+".json")
+	if !strings.HasSuffix(name, "@"+headSHA+".json") {
+		return "", fmt.Errorf("github tar path has invalid ref suffix: %q", filePath)
+	}
+	name = strings.TrimSuffix(name, "@"+headSHA+".json")
+	parts := strings.Split(name, "/")
+	for index, part := range parts {
+		decoded, err := url.PathUnescape(part)
+		if err != nil || decoded == "" || decoded == "." || decoded == ".." {
+			return "", fmt.Errorf("invalid encoded github tar path %q", filePath)
+		}
+		parts[index] = decoded
+	}
+	decodedName := strings.Join(parts, "/")
+	if strings.HasPrefix(decodedName, "/") {
+		return "", fmt.Errorf("github tar path is absolute: %q", filePath)
+	}
+	for _, part := range strings.Split(decodedName, "/") {
+		if part == "" || part == "." || part == ".." {
+			return "", fmt.Errorf("github tar path escapes repository root: %q", filePath)
+		}
+	}
+	name = path.Clean(decodedName)
+	if name == "." || name == "" || strings.HasPrefix(name, "../") || strings.Contains(name, "/../") {
+		return "", fmt.Errorf("github tar path escapes repository root: %q", filePath)
+	}
+	return name, nil
 }
 
 func validateGithubWorkingTreeExportPrefix(raw string) (string, error) {
@@ -2315,12 +2348,12 @@ func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request, workspa
 			writeJSON(w, http.StatusConflict, payload)
 			return
 		}
-		switch err {
-		case relayfile.ErrMissingPrecondition:
+		switch {
+		case errors.Is(err, relayfile.ErrMissingPrecondition):
 			writeError(w, http.StatusPreconditionFailed, "precondition_failed", err.Error(), correlationID)
-		case relayfile.ErrNotFound, relayfile.ErrForkExpired:
+		case errors.Is(err, relayfile.ErrNotFound), errors.Is(err, relayfile.ErrForkExpired):
 			writeError(w, http.StatusNotFound, "not_found", err.Error(), correlationID)
-		case relayfile.ErrInvalidInput:
+		case errors.Is(err, relayfile.ErrInvalidInput):
 			writeError(w, http.StatusBadRequest, "bad_request", err.Error(), correlationID)
 		default:
 			writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
@@ -3426,19 +3459,10 @@ func (s *Server) prepareTarExport(files []relayfile.File, githubWorkingTree bool
 func prepareTarFile(file relayfile.File, githubWorkingTree bool, prefix, headSHA string, content []byte) (tarFile, error) {
 	name := strings.TrimPrefix(path.Clean(file.Path), "/")
 	if githubWorkingTree {
-		name = strings.TrimPrefix(name, strings.TrimPrefix(prefix, "/")+"/")
-		name = strings.TrimSuffix(name, "@"+headSHA+".json")
-		parts := strings.Split(name, "/")
-		for index, part := range parts {
-			decoded, err := url.PathUnescape(part)
-			if err != nil || decoded == "" || decoded == "." || decoded == ".." {
-				return tarFile{}, fmt.Errorf("invalid encoded github tar path %q", file.Path)
-			}
-			parts[index] = decoded
-		}
-		name = path.Clean(strings.Join(parts, "/"))
-		if name == "." || name == "" || strings.HasPrefix(name, "../") || strings.Contains(name, "/../") {
-			return tarFile{}, fmt.Errorf("github tar path escapes repository root: %q", file.Path)
+		var err error
+		name, err = decodeGithubWorkingTreeTarName(file.Path, prefix, headSHA)
+		if err != nil {
+			return tarFile{}, err
 		}
 	}
 	if name == "." || name == "" {
