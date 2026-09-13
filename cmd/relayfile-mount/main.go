@@ -677,6 +677,24 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 					log.Printf("mount bootstrapping: %s (in progress)", formatBootstrapProgress(synced, total))
 					return nil
 				}
+				// The public state's `bootstrap` block is only published once a
+				// full pull has started and saveState has run. A workspace that
+				// already tracks files but has not completed its bootstrap (the
+				// "detected non-empty state without completed bootstrap" recovery
+				// shape) can therefore hit the steady-state per-cycle deadline
+				// before any public checkpoint exists. The authoritative private
+				// state is the fact of record: while it still reports an
+				// incomplete bootstrap, a per-cycle deadline is the same
+				// resumable bootstrap yield as the published-checkpoint case, not
+				// a fatal cycle failure. Reporting it as fatal made `--once` exit
+				// 1 on a workspace that was still legitimately bootstrapping,
+				// which the Cloud bootstrap-owner flush treats as a hard failure
+				// and aborts the run.
+				if complete, cerr := syncer.InitialBootstrapComplete(); cerr == nil && !complete {
+					lastCycleErr = &cycleOutcomeError{cause: err, yielded: true}
+					log.Printf("mount bootstrapping: bootstrap incomplete (in progress)")
+					return nil
+				}
 			}
 			lastCycleErr = &cycleOutcomeError{cause: err}
 			log.Printf("mount sync cycle failed: %v", err)
