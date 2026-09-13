@@ -2,18 +2,15 @@
 
 package mountsync
 
-import "os"
+import (
+	"errors"
+	"os"
+)
 
-// Platforms without O_NOFOLLOW still get the Lstat check in readLocalSnapshot;
-// their filesystem-specific no-follow primitive can be added without changing
-// the snapshot contract.
-func openLocalRegularNoFollow(path string) (*os.File, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, os.ErrInvalid
-	}
-	return os.Open(path)
+var errLocalSnapshotSafetyUnsupported = errors.New("anchored local file reads are unsupported on this platform")
+
+// Platforms without a directory-FD no-follow primitive fail closed. A
+// check-then-open fallback would permit an ancestor or final-component swap.
+func openLocalRegularNoFollow(root, path string) (*os.File, error) {
+	return nil, errLocalSnapshotSafetyUnsupported
 }

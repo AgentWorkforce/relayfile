@@ -24,13 +24,16 @@ import (
 )
 
 const (
-	maxBulkReadPaths          = 32
-	maxBulkReadRequestBytes   = 64 << 10
-	maxBulkReadPathBytes      = 4096
-	maxBulkReadPathsBytes     = 32 << 10
-	maxBulkReadContentBytes   = 32 << 20
-	maxBulkReadResponseBytes  = 64 << 20
-	maxTreeEntriesPerHTTPPage = 1000
+	maxBulkReadPaths             = 32
+	maxBulkReadRequestBytes      = 64 << 10
+	maxBulkReadPathBytes         = 4096
+	maxBulkReadPathsBytes        = 32 << 10
+	maxBulkReadContentBytes      = 32 << 20
+	maxBulkReadResponseBytes     = 64 << 20
+	maxTreeEntriesPerHTTPPage    = 1000
+	defaultMaxExportFiles        = 50_000
+	defaultMaxExportDecodedBytes = 256 << 20
+	defaultMaxExportTarBodyBytes = 512 << 20
 )
 
 type ServerConfig struct {
@@ -48,6 +51,14 @@ type ServerConfig struct {
 	// MaxGithubTarballBytes bounds the compressed size accepted by the
 	// GitHub tarball import endpoints. Defaults to 1 GiB.
 	MaxGithubTarballBytes int64
+	// MaxExportFiles bounds the number of visible files in any export.
+	MaxExportFiles int
+	// MaxExportDecodedBytes bounds the cumulative decoded file bytes retained
+	// while preparing a tar export.
+	MaxExportDecodedBytes int64
+	// MaxExportTarBodyBytes bounds the uncompressed tar body, including tar
+	// headers and end blocks. Gzip compression does not bypass this ceiling.
+	MaxExportTarBodyBytes int64
 }
 
 type Server struct {
@@ -109,6 +120,15 @@ func NewServerWithConfig(store *relayfile.Store, cfg ServerConfig) (*Server, err
 		// A complete-v1 mount may upload one 64 MiB binary. Base64 and JSON
 		// framing keep the bulk request below the 96 MiB client wire budget.
 		cfg.MaxBulkWriteBodyBytes = 96 << 20
+	}
+	if cfg.MaxExportFiles <= 0 {
+		cfg.MaxExportFiles = defaultMaxExportFiles
+	}
+	if cfg.MaxExportDecodedBytes <= 0 {
+		cfg.MaxExportDecodedBytes = defaultMaxExportDecodedBytes
+	}
+	if cfg.MaxExportTarBodyBytes <= 0 {
+		cfg.MaxExportTarBodyBytes = defaultMaxExportTarBodyBytes
 	}
 	var limiter *rateLimiter
 	if cfg.RateLimitMax > 0 {
@@ -320,7 +340,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			scopePath = normalizeRoutePath(r.URL.Query().Get("path"))
 		case "read_file", "write_file", "merge_file", "delete_file":
 			scopePath = strings.TrimSpace(r.URL.Query().Get("path"))
-		case "export", "query_files":
+		case "export":
+			if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("decode")), "github-working-tree") {
+				if prefix, err := validateGithubWorkingTreeExportPrefix(r.URL.Query().Get("pathPrefix")); err == nil {
+					scopePath = prefix
+				} else {
+					// Let the handler return the precise bad-request response. A
+					// malformed prefix must never widen authorization to "/".
+					scopePath = "/"
+				}
+			} else {
+				scopePath = normalizeRoutePath(r.URL.Query().Get("path"))
+			}
+		case "query_files":
 			scopePath = normalizeRoutePath(r.URL.Query().Get("path"))
 		case "events":
 			scopePath = "/"
@@ -2094,8 +2126,9 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request, workspaceI
 	decode := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("decode")))
 	headSHA := strings.TrimSpace(r.URL.Query().Get("headSha"))
 	if decode == "github-working-tree" {
-		exportRoot = normalizeRoutePath(r.URL.Query().Get("pathPrefix"))
-		if exportRoot == "" || exportRoot == "/" || headSHA == "" {
+		var prefixErr error
+		exportRoot, prefixErr = validateGithubWorkingTreeExportPrefix(r.URL.Query().Get("pathPrefix"))
+		if prefixErr != nil || headSHA == "" {
 			writeError(w, http.StatusBadRequest, "bad_request", "github-working-tree export requires pathPrefix and headSha", correlationID)
 			return
 		}
@@ -2113,8 +2146,11 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request, workspaceI
 		writeForkAwareError(w, err, correlationID)
 		return
 	}
-
-	visible := make([]relayfile.File, 0, len(files))
+	visibleCapacity := len(files)
+	if s.cfg.MaxExportFiles > 0 && visibleCapacity > s.cfg.MaxExportFiles {
+		visibleCapacity = s.cfg.MaxExportFiles
+	}
+	visible := make([]relayfile.File, 0, visibleCapacity)
 	for _, file := range files {
 		if decode == "github-working-tree" && !githubWorkingTreeExportPath(file.Path, exportRoot, headSHA) {
 			continue
@@ -2127,6 +2163,10 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request, workspaceI
 			!filePermissionAllows(effectivePermissions, workspaceID, &claims, "read", file.Path) {
 			continue
 		}
+		if s.cfg.MaxExportFiles > 0 && len(visible) >= s.cfg.MaxExportFiles {
+			s.writeExportLimitError(w, correlationID, fmt.Sprintf("export contains more than %d visible files", s.cfg.MaxExportFiles))
+			return
+		}
 		visible = append(visible, file)
 	}
 
@@ -2136,10 +2176,16 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request, workspaceI
 	case "tar":
 		prepared, prepErr := s.prepareTarExport(visible, decode == "github-working-tree", exportRoot, headSHA)
 		if prepErr != nil {
-			writeError(w, http.StatusInternalServerError, "export_error", "tar export failed: "+prepErr.Error(), correlationID)
+			var limitErr *exportLimitError
+			if errors.As(prepErr, &limitErr) {
+				s.writeExportLimitError(w, correlationID, limitErr.Error())
+			} else {
+				writeError(w, http.StatusInternalServerError, "export_error", "tar export failed: "+prepErr.Error(), correlationID)
+			}
 			return
 		}
-		if err := s.streamTarExport(w, prepared); err != nil {
+		gzipEnabled := !isFalseQueryValue(r.URL.Query().Get("gzip"))
+		if err := s.streamTarExport(w, prepared, gzipEnabled); err != nil {
 			// Headers already sent — can only log
 			log.Printf("tar export streaming error (headers already sent): %v", err)
 		}
@@ -2158,6 +2204,33 @@ func githubWorkingTreeExportPath(filePath, prefix, headSHA string) bool {
 	}
 	name := strings.TrimPrefix(clean, prefix+"/")
 	return strings.HasSuffix(name, "@"+headSHA+".json")
+}
+
+func validateGithubWorkingTreeExportPrefix(raw string) (string, error) {
+	prefix := normalizeRoutePath(raw)
+	parts := strings.Split(strings.TrimPrefix(prefix, "/"), "/")
+	if len(parts) != 5 || parts[0] != "github" || parts[1] != "repos" || parts[2] == "" || parts[3] == "" || parts[4] != "contents" {
+		return "", fmt.Errorf("invalid github working-tree path prefix")
+	}
+	for _, part := range parts {
+		if part == "." || part == ".." || strings.ContainsAny(part, "\x00\r\n") {
+			return "", fmt.Errorf("invalid github working-tree path prefix")
+		}
+	}
+	return prefix, nil
+}
+
+func isFalseQueryValue(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "0", "false", "no", "off":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) writeExportLimitError(w http.ResponseWriter, correlationID, message string) {
+	writeError(w, http.StatusRequestEntityTooLarge, "export_too_large", message, correlationID)
 }
 
 func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
@@ -3255,87 +3328,176 @@ type tarFile struct {
 	mode     int64
 }
 
+type exportLimitError struct{ message string }
+
+func (e *exportLimitError) Error() string { return e.message }
+
+type countingWriter struct {
+	w     io.Writer
+	bytes int64
+	limit int64
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	if w.limit > 0 && int64(len(p)) > w.limit-w.bytes {
+		return 0, &exportLimitError{message: fmt.Sprintf("tar export exceeds the %d byte body limit", w.limit)}
+	}
+	n, err := w.w.Write(p)
+	w.bytes += int64(n)
+	return n, err
+}
+
 // prepareTarExport decodes content and validates all files before any headers are sent.
 // Errors here can still produce a proper HTTP error response.
 func (s *Server) prepareTarExport(files []relayfile.File, githubWorkingTree bool, prefix, headSHA string) ([]tarFile, error) {
-	prepared := make([]tarFile, 0, len(files))
+	if s.cfg.MaxExportFiles > 0 && len(files) > s.cfg.MaxExportFiles {
+		return nil, &exportLimitError{message: fmt.Sprintf("export contains more than %d visible files", s.cfg.MaxExportFiles)}
+	}
+	var decodedBytes int64
+	measured := &countingWriter{w: io.Discard}
+	measureTar := tar.NewWriter(measured)
 	for _, file := range files {
-		name := strings.TrimPrefix(path.Clean(file.Path), "/")
-		if githubWorkingTree {
-			name = strings.TrimPrefix(name, strings.TrimPrefix(prefix, "/")+"/")
-			name = strings.TrimSuffix(name, "@"+headSHA+".json")
-			parts := strings.Split(name, "/")
-			for index, part := range parts {
-				decoded, err := url.PathUnescape(part)
-				if err != nil || decoded == "" || decoded == "." || decoded == ".." {
-					return nil, fmt.Errorf("invalid encoded github tar path %q", file.Path)
-				}
-				parts[index] = decoded
-			}
-			name = path.Clean(strings.Join(parts, "/"))
-			if name == "." || name == "" || strings.HasPrefix(name, "../") || strings.Contains(name, "/../") {
-				return nil, fmt.Errorf("github tar path escapes repository root: %q", file.Path)
-			}
-		}
-		if name == "." || name == "" {
-			return nil, fmt.Errorf("invalid empty tar path for %s", file.Path)
-		}
 		typeName := strings.ToLower(strings.TrimSpace(file.Type))
 		if typeName == "" {
 			typeName = "file"
 		}
-		entry := tarFile{name: name, modTime: parseFileTime(file.LastEditedAt), typeName: typeName, mode: int64(file.Mode & 0o777)}
-		switch typeName {
-		case "file":
-			content, err := decodeExportContent(file)
+		var content []byte
+		if typeName == "file" {
+			upperBound := int64(len(file.Content))
+			if file.Encoding == "base64" {
+				upperBound = int64(base64.StdEncoding.DecodedLen(len(file.Content)))
+			}
+			if s.cfg.MaxExportDecodedBytes > 0 && upperBound > s.cfg.MaxExportDecodedBytes-decodedBytes {
+				return nil, &exportLimitError{message: fmt.Sprintf("decoded export content exceeds the %d byte limit", s.cfg.MaxExportDecodedBytes)}
+			}
+			var err error
+			content, err = decodeExportContent(file)
 			if err != nil {
 				return nil, err
 			}
-			entry.content = content
-			if entry.mode == 0 {
-				entry.mode = 0o644
+			decodedBytes += int64(len(content))
+			if s.cfg.MaxExportDecodedBytes > 0 && decodedBytes > s.cfg.MaxExportDecodedBytes {
+				return nil, &exportLimitError{message: fmt.Sprintf("decoded export content exceeds the %d byte limit", s.cfg.MaxExportDecodedBytes)}
 			}
-		case "symlink":
-			if file.Target == "" || strings.ContainsRune(file.Target, '\x00') {
-				return nil, fmt.Errorf("invalid symlink target for %s", file.Path)
-			}
-			entry.target = file.Target
-		default:
-			return nil, fmt.Errorf("unsupported file type %q", file.Type)
 		}
-		prepared = append(prepared, tarFile{
-			name: entry.name, modTime: entry.modTime, content: entry.content,
-			typeName: entry.typeName, target: entry.target, mode: entry.mode,
-		})
+		entry, err := prepareTarFile(file, githubWorkingTree, prefix, headSHA, content)
+		if err != nil {
+			return nil, err
+		}
+		if err := measureTar.WriteHeader(tarHeader(entry)); err != nil {
+			return nil, err
+		}
+		if entry.typeName != "symlink" {
+			if _, err := measureTar.Write(entry.content); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := measureTar.Close(); err != nil {
+		return nil, err
+	}
+	if s.cfg.MaxExportTarBodyBytes > 0 && measured.bytes > s.cfg.MaxExportTarBodyBytes {
+		return nil, &exportLimitError{message: fmt.Sprintf("tar export exceeds the %d byte body limit", s.cfg.MaxExportTarBodyBytes)}
+	}
+
+	prepared := make([]tarFile, 0, len(files))
+	for _, file := range files {
+		typeName := strings.ToLower(strings.TrimSpace(file.Type))
+		if typeName == "" {
+			typeName = "file"
+		}
+		var content []byte
+		if typeName == "file" {
+			var err error
+			content, err = decodeExportContent(file)
+			if err != nil {
+				return nil, err
+			}
+		}
+		entry, err := prepareTarFile(file, githubWorkingTree, prefix, headSHA, content)
+		if err != nil {
+			return nil, err
+		}
+		prepared = append(prepared, entry)
 	}
 	return prepared, nil
 }
 
+func prepareTarFile(file relayfile.File, githubWorkingTree bool, prefix, headSHA string, content []byte) (tarFile, error) {
+	name := strings.TrimPrefix(path.Clean(file.Path), "/")
+	if githubWorkingTree {
+		name = strings.TrimPrefix(name, strings.TrimPrefix(prefix, "/")+"/")
+		name = strings.TrimSuffix(name, "@"+headSHA+".json")
+		parts := strings.Split(name, "/")
+		for index, part := range parts {
+			decoded, err := url.PathUnescape(part)
+			if err != nil || decoded == "" || decoded == "." || decoded == ".." {
+				return tarFile{}, fmt.Errorf("invalid encoded github tar path %q", file.Path)
+			}
+			parts[index] = decoded
+		}
+		name = path.Clean(strings.Join(parts, "/"))
+		if name == "." || name == "" || strings.HasPrefix(name, "../") || strings.Contains(name, "/../") {
+			return tarFile{}, fmt.Errorf("github tar path escapes repository root: %q", file.Path)
+		}
+	}
+	if name == "." || name == "" {
+		return tarFile{}, fmt.Errorf("invalid empty tar path for %s", file.Path)
+	}
+	typeName := strings.ToLower(strings.TrimSpace(file.Type))
+	if typeName == "" {
+		typeName = "file"
+	}
+	entry := tarFile{name: name, modTime: parseFileTime(file.LastEditedAt), typeName: typeName, content: content, mode: int64(file.Mode & 0o777)}
+	switch typeName {
+	case "file":
+		if entry.mode == 0 {
+			entry.mode = 0o644
+		}
+	case "symlink":
+		if file.Target == "" || strings.ContainsRune(file.Target, '\x00') {
+			return tarFile{}, fmt.Errorf("invalid symlink target for %s", file.Path)
+		}
+		entry.target = file.Target
+	default:
+		return tarFile{}, fmt.Errorf("unsupported file type %q", file.Type)
+	}
+	return entry, nil
+}
+
+func tarHeader(file tarFile) *tar.Header {
+	header := &tar.Header{Name: file.name, Mode: file.mode, Size: int64(len(file.content)), ModTime: file.modTime}
+	if file.typeName == "symlink" {
+		header.Typeflag = tar.TypeSymlink
+		header.Linkname = file.target
+		header.Size = 0
+	}
+	return header
+}
+
 // streamTarExport writes headers and streams gzip tar data.
 // Once called, HTTP 200 is committed — errors can only be logged, not sent to client.
-func (s *Server) streamTarExport(w http.ResponseWriter, prepared []tarFile) error {
-	w.Header().Set("Content-Type", "application/gzip")
-	w.Header().Set("Content-Disposition", `attachment; filename="workspace-export.tar.gz"`)
+func (s *Server) streamTarExport(w http.ResponseWriter, prepared []tarFile, gzipEnabled bool) error {
+	if gzipEnabled {
+		w.Header().Set("Content-Type", "application/gzip")
+		w.Header().Set("Content-Disposition", `attachment; filename="workspace-export.tar.gz"`)
+	} else {
+		w.Header().Set("Content-Type", "application/x-tar")
+		w.Header().Set("Content-Disposition", `attachment; filename="workspace-export.tar"`)
+	}
 	w.WriteHeader(http.StatusOK)
 
-	gz := gzip.NewWriter(w)
-	defer gz.Close()
-	tw := tar.NewWriter(gz)
-	defer tw.Close()
+	var output io.Writer = w
+	var gz *gzip.Writer
+	if gzipEnabled {
+		gz = gzip.NewWriter(w)
+		output = gz
+	}
+	counted := &countingWriter{w: output, limit: s.cfg.MaxExportTarBodyBytes}
+	tw := tar.NewWriter(counted)
 
 	for _, file := range prepared {
-		header := &tar.Header{
-			Name:    file.name,
-			Mode:    file.mode,
-			Size:    int64(len(file.content)),
-			ModTime: file.modTime,
-		}
-		if file.typeName == "symlink" {
-			header.Typeflag = tar.TypeSymlink
-			header.Linkname = file.target
-			header.Size = 0
-		}
-		if err := tw.WriteHeader(header); err != nil {
+		if err := tw.WriteHeader(tarHeader(file)); err != nil {
 			return err
 		}
 		if file.typeName == "symlink" {
@@ -3344,6 +3506,12 @@ func (s *Server) streamTarExport(w http.ResponseWriter, prepared []tarFile) erro
 		if _, err := tw.Write(file.content); err != nil {
 			return err
 		}
+	}
+	if err := tw.Close(); err != nil {
+		return err
+	}
+	if gz != nil {
+		return gz.Close()
 	}
 	return nil
 }

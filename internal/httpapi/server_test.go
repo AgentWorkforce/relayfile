@@ -3616,6 +3616,90 @@ func TestExportEnforcesPathScopedMountGrant(t *testing.T) {
 	}
 }
 
+func TestGithubWorkingTreeExportUsesPathPrefixScopeAndRawTar(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	const workspaceID = "ws_export_github_scope"
+	const prefix = "/github/repos/acme/repo/contents"
+	const sha = "abc123"
+	if written, _, errs := store.BulkWrite(workspaceID, []relayfile.BulkWriteFile{
+		{Path: prefix + "/README.md@" + sha + ".json", ContentType: "text/plain", Content: "hello"},
+	}); written != 1 || len(errs) != 0 {
+		t.Fatalf("seed bulk write failed: written=%d errs=%+v", written, errs)
+	}
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", workspaceID, "MountSync", []string{
+		"fs:read",
+		"workspace:mount-sponsor:read:" + prefix + "/**",
+	}, time.Now().Add(time.Hour))
+	req := httptest.NewRequest(http.MethodGet, "/v1/workspaces/"+workspaceID+"/fs/export?format=tar&decode=github-working-tree&pathPrefix="+url.QueryEscape(prefix)+"&headSha="+sha+"&gzip=0", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Correlation-Id", "corr_export_github_scope")
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("export status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "application/x-tar" {
+		t.Fatalf("raw export content type=%q", got)
+	}
+	tr := tar.NewReader(bytes.NewReader(recorder.Body.Bytes()))
+	header, err := tr.Next()
+	if err != nil {
+		t.Fatalf("read raw tar header: %v", err)
+	}
+	if header.Name != "README.md" {
+		t.Fatalf("raw tar entry=%q", header.Name)
+	}
+}
+
+func TestExportFailsClosedAtConfiguredFileAndByteBounds(t *testing.T) {
+	t.Run("file count", func(t *testing.T) {
+		store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+		t.Cleanup(store.Close)
+		if written, _, errs := store.BulkWrite("ws_export_count_limit", []relayfile.BulkWriteFile{
+			{Path: "/one", ContentType: "text/plain", Content: "1"},
+			{Path: "/two", ContentType: "text/plain", Content: "2"},
+		}); written != 2 || len(errs) != 0 {
+			t.Fatalf("seed bulk write failed: written=%d errs=%+v", written, errs)
+		}
+		server := mustNewServerWithConfig(t, store, ServerConfig{MaxExportFiles: 1})
+		token := mustTestJWT(t, "dev-secret", "ws_export_count_limit", "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+		resp := doRequest(t, server, request{method: http.MethodGet, path: "/v1/workspaces/ws_export_count_limit/fs/export?format=json", headers: map[string]string{"Authorization": "Bearer " + token, "X-Correlation-Id": "corr_export_count_limit"}})
+		if resp.Code != http.StatusRequestEntityTooLarge || !strings.Contains(resp.Body.String(), "export_too_large") {
+			t.Fatalf("count bound response=%d body=%s", resp.Code, resp.Body.String())
+		}
+	})
+
+	t.Run("decoded and tar bytes", func(t *testing.T) {
+		store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+		t.Cleanup(store.Close)
+		if written, _, errs := store.BulkWrite("ws_export_byte_limit", []relayfile.BulkWriteFile{{Path: "/large", ContentType: "text/plain", Content: strings.Repeat("x", 32)}}); written != 1 || len(errs) != 0 {
+			t.Fatalf("seed bulk write failed: written=%d errs=%+v", written, errs)
+		}
+		server := mustNewServerWithConfig(t, store, ServerConfig{MaxExportDecodedBytes: 16, MaxExportTarBodyBytes: 4096})
+		token := mustTestJWT(t, "dev-secret", "ws_export_byte_limit", "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+		resp := doRequest(t, server, request{method: http.MethodGet, path: "/v1/workspaces/ws_export_byte_limit/fs/export?format=tar&gzip=0", headers: map[string]string{"Authorization": "Bearer " + token, "X-Correlation-Id": "corr_export_byte_limit"}})
+		if resp.Code != http.StatusRequestEntityTooLarge || !strings.Contains(resp.Body.String(), "export_too_large") {
+			t.Fatalf("decoded bound response=%d body=%s", resp.Code, resp.Body.String())
+		}
+	})
+
+	t.Run("tar body", func(t *testing.T) {
+		store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+		t.Cleanup(store.Close)
+		if written, _, errs := store.BulkWrite("ws_export_tar_limit", []relayfile.BulkWriteFile{{Path: "/file", ContentType: "text/plain", Content: "small"}}); written != 1 || len(errs) != 0 {
+			t.Fatalf("seed bulk write failed: written=%d errs=%+v", written, errs)
+		}
+		server := mustNewServerWithConfig(t, store, ServerConfig{MaxExportDecodedBytes: 1024, MaxExportTarBodyBytes: 1024})
+		token := mustTestJWT(t, "dev-secret", "ws_export_tar_limit", "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+		resp := doRequest(t, server, request{method: http.MethodGet, path: "/v1/workspaces/ws_export_tar_limit/fs/export?format=tar&gzip=0", headers: map[string]string{"Authorization": "Bearer " + token, "X-Correlation-Id": "corr_export_tar_limit"}})
+		if resp.Code != http.StatusRequestEntityTooLarge || !strings.Contains(resp.Body.String(), "export_too_large") {
+			t.Fatalf("tar bound response=%d body=%s", resp.Code, resp.Body.String())
+		}
+	})
+}
+
 func TestExportTar(t *testing.T) {
 	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
 	t.Cleanup(store.Close)

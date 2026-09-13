@@ -1955,7 +1955,7 @@ func (s *Syncer) readLocalSnapshot(path string, includeContent bool) (localSnaps
 	if s.readLocalSnapshotFn != nil {
 		return s.readLocalSnapshotFn(path, includeContent)
 	}
-	return readLocalSnapshot(path, includeContent)
+	return readLocalSnapshotLimitedUnderRoot(s.localRoot, path, includeContent, maxWritebackBytes())
 }
 
 type mountState struct {
@@ -11333,12 +11333,16 @@ func newLocalSnapshotWithMode(path string, data []byte, mode uint32) localSnapsh
 }
 
 func readLocalSnapshot(path string, includeContent bool) (localSnapshot, error) {
-	return readLocalSnapshotLimited(path, includeContent, maxWritebackBytes())
+	return readLocalSnapshotLimitedUnderRoot("", path, includeContent, maxWritebackBytes())
 }
 
 var errLocalSnapshotTooLarge = errors.New("local file exceeds the writeback size limit")
 
 func readLocalSnapshotLimited(path string, includeContent bool, maxBytes int64) (localSnapshot, error) {
+	return readLocalSnapshotLimitedUnderRoot("", path, includeContent, maxBytes)
+}
+
+func readLocalSnapshotLimitedUnderRoot(localRoot, path string, includeContent bool, maxBytes int64) (localSnapshot, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return localSnapshot{}, err
@@ -11367,9 +11371,14 @@ func readLocalSnapshotLimited(path string, includeContent bool, maxBytes int64) 
 		return localSnapshot{}, fmt.Errorf("unsupported local file type at %s: %s", path, info.Mode().String())
 	}
 	if includeContent {
-		f, err := openLocalRegularNoFollow(path)
+		f, err := openLocalRegularNoFollow(localRoot, path)
 		if err != nil {
 			return localSnapshot{}, err
+		}
+		openedInfo, statErr := f.Stat()
+		if statErr != nil {
+			_ = f.Close()
+			return localSnapshot{}, statErr
 		}
 		var reader io.Reader = f
 		if maxBytes > 0 {
@@ -11386,13 +11395,17 @@ func readLocalSnapshotLimited(path string, includeContent bool, maxBytes int64) 
 		if maxBytes > 0 && int64(len(data)) > maxBytes {
 			return localSnapshot{}, fmt.Errorf("%w: %s is %d bytes (limit %d)", errLocalSnapshotTooLarge, path, len(data), maxBytes)
 		}
-		return newLocalSnapshotWithMode(path, data, uint32(info.Mode().Perm())), nil
+		return newLocalSnapshotWithMode(path, data, uint32(openedInfo.Mode().Perm())), nil
 	}
-	f, err := openLocalRegularNoFollow(path)
+	f, err := openLocalRegularNoFollow(localRoot, path)
 	if err != nil {
 		return localSnapshot{}, err
 	}
 	defer f.Close()
+	openedInfo, statErr := f.Stat()
+	if statErr != nil {
+		return localSnapshot{}, statErr
+	}
 	h := sha256.New()
 	var reader io.Reader = f
 	if maxBytes > 0 {
@@ -11408,7 +11421,7 @@ func readLocalSnapshotLimited(path string, includeContent bool, maxBytes int64) 
 	return localSnapshot{
 		ContentType: detectContentType(path),
 		Type:        remoteTypeFile,
-		Mode:        uint32(info.Mode().Perm()),
+		Mode:        uint32(openedInfo.Mode().Perm()),
 		Hash:        hex.EncodeToString(h.Sum(nil)),
 		LocalPath:   path,
 	}, nil
