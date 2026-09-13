@@ -86,4 +86,5 @@ Use the existing Pipedream account ID as relayfile's `connectionId`. Configure t
 - Use one workspace per isolated task or run.
 - Reuse a workspace when humans and agents need a shared persistent project tree.
 - Keep OAuth credentials out of relayfile. Store them in Nango, Composio, Pipedream, or your own provider layer.
+- When receiving outbound workspace events, follow the [webhook delivery verification and retry guide](webhook-delivery.md).
 - Use [API reference](../api-reference.md) endpoints for tree reads, file writes, webhook ingestion, writeback status, and operation replay.
