@@ -3674,6 +3674,7 @@ func TestGithubWorkingTreeExportUsesPathPrefixScopeAndRawTar(t *testing.T) {
 		content  []byte
 		linkname string
 		typeflag byte
+		mode     int64
 	}{}
 	for {
 		header, nextErr := tr.Next()
@@ -3691,7 +3692,8 @@ func TestGithubWorkingTreeExportUsesPathPrefixScopeAndRawTar(t *testing.T) {
 			content  []byte
 			linkname string
 			typeflag byte
-		}{content: content, linkname: header.Linkname, typeflag: header.Typeflag}
+			mode     int64
+		}{content: content, linkname: header.Linkname, typeflag: header.Typeflag, mode: header.Mode}
 	}
 	if len(entries) != 3 {
 		t.Fatalf("raw tar entries=%v, want README, app, and symlink", entries)
@@ -3710,7 +3712,7 @@ func TestGithubWorkingTreeExportUsesPathPrefixScopeAndRawTar(t *testing.T) {
 	if got := string(entries["src/app.ts"].content); got != "export const ok = true;\n" {
 		t.Fatalf("app content=%q", got)
 	}
-	if entries["link"].typeflag != tar.TypeSymlink || entries["link"].linkname != "README.md" || len(entries["link"].content) != 0 {
+	if entries["link"].typeflag != tar.TypeSymlink || entries["link"].linkname != "README.md" || entries["link"].mode != 0o777 || len(entries["link"].content) != 0 {
 		t.Fatalf("symlink entry=%+v", entries["link"])
 	}
 	rawBody := recorder.Body.Bytes()
