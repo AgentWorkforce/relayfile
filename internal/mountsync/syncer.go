@@ -3826,7 +3826,7 @@ func (s *Syncer) preparePendingBulkWrite(
 		if snapshot.Hash != tracked.Hash && tracked.Hash != "" {
 			return nil, s.revertReadonlyFile(ctx, remotePath, localPath, tracked, snapshot.ContentType)
 		}
-		if err := s.applyLocalPermissions(localPath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := s.applyLocalPermissionsForMode(localPath, false, tracked.Mode); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, err
 		}
 		tracked.Dirty = false
@@ -3930,6 +3930,17 @@ func localSnapshotMatchesTracked(snapshot localSnapshot, tracked trackedFile) bo
 	// server has returned mode metadata, while allowing a new executable bit
 	// to be uploaded once the mode-aware contract is in use.
 	return tracked.Mode == 0 || tracked.Mode == snapshot.Mode
+}
+
+func localSnapshotMatchesReadonlyTracked(snapshot localSnapshot, tracked trackedFile) bool {
+	// Read-only materialization deliberately clears the write bits while
+	// preserving all other Git mode information, including executability.
+	// Compare against that effective on-disk mode or every clean read-only
+	// executable looks locally modified on every reconciliation cycle.
+	if tracked.Mode != 0 && !isSymlinkType(snapshot.Type) {
+		tracked.Mode &^= 0o222
+	}
+	return localSnapshotMatchesTracked(snapshot, tracked)
 }
 
 func (s *Syncer) flushPendingBulkWrites(ctx context.Context, pending []pendingBulkWrite, conflicted map[string]struct{}) error {
@@ -4906,7 +4917,7 @@ func (s *Syncer) attemptMountRolloutMerge(ctx context.Context, remotePath, local
 		s.logf("mount rollout: merge for %s applied but local write failed (%v), falling back to conflict handling", remotePath, err)
 		return false
 	}
-	if err := s.applyLocalPermissions(localPath, s.canWritePath(remotePath)); err != nil {
+	if err := s.applyLocalPermissionsForMode(localPath, s.canWritePath(remotePath), remoteFile.Mode); err != nil {
 		s.logf("mount rollout: merge for %s applied but permission apply failed (%v), falling back to conflict handling", remotePath, err)
 		return false
 	}
@@ -5118,7 +5129,7 @@ func (s *Syncer) revertReadonlyFile(ctx context.Context, remotePath, localPath s
 		tracked.Hash = hashBytes(remoteBytes)
 		s.logDenial("WRITE_REVERTED", remotePath, "file is read-only; content reverted to server version")
 	} else {
-		if err := s.applyLocalPermissions(localPath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := s.applyLocalPermissionsForMode(localPath, false, tracked.Mode); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 		if tracked.ContentType == "" {
@@ -7114,7 +7125,7 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 		tracked := s.state.Files[meta.RemotePath]
 		canWrite := s.canWritePath(meta.RemotePath)
 		if tracked.Dirty {
-			if err := s.applyLocalPermissions(localPath, canWrite); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err := s.applyLocalPermissionsForMode(localPath, canWrite, tracked.Mode); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return nil, err
 			}
 			tracked.ReadOnly = !canWrite
@@ -7454,6 +7465,22 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 					cursor = ""
 					pageOffset = 0
 					pageLoaded = false
+					if strictCompleteGithubSource {
+						// The complete-v1 count is an exact traversal invariant. A
+						// rejected cursor makes it impossible to know how much of the
+						// current directory is already represented by the persisted
+						// global count, so restart the entire frontier and its counters.
+						// Replaying from the root is safe through the local-hash fast
+						// path and avoids double-counting the page prefix.
+						directories = []string{s.remoteRoot}
+						queuedDirectories = map[string]struct{}{s.remoteRoot: {}}
+						strictFilesSeen = 0
+						filesThisTraversal = 0
+						s.state.BootstrapStrictFilesSeen = 0
+						s.state.BootstrapFilesSynced = 0
+						s.state.BootstrapDirectoriesDiscovered = 1
+						s.state.BootstrapBlockedPath = ""
+					}
 					// Replaying the current directory and its local-hash fast path is
 					// idempotent. It is not safe to grant snapshot-delete authority to
 					// this recovery traversal because it began from a persisted frontier.
@@ -10052,7 +10079,7 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 		}
 		if exists && tracked.ReadOnly {
 			// Check if agent modified the readonly file (e.g. via chmod bypass)
-			if !localSnapshotMatchesTracked(snapshot, tracked) {
+			if !localSnapshotMatchesReadonlyTracked(snapshot, tracked) {
 				// Revert through the directory-FD anchored writer. A read-only
 				// tracked path may have been replaced by a symlink, so a direct
 				// os.WriteFile would follow it outside the mount root.
@@ -10060,7 +10087,7 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 					return nil, err
 				}
 			}
-			if err := s.applyLocalPermissions(localPath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err := s.applyLocalPermissionsForMode(localPath, false, tracked.Mode); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return nil, err
 			}
 			// A read-only file is never writeback-eligible regardless of how
@@ -10071,7 +10098,7 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 			continue
 		}
 		if exists && !canWrite {
-			if err := s.applyLocalPermissions(localPath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err := s.applyLocalPermissionsForMode(localPath, false, tracked.Mode); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return nil, err
 			}
 			tracked.Dirty = false

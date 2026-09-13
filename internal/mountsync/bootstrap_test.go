@@ -710,6 +710,43 @@ func TestBootstrapInvalidPersistedCursorClearsCheckpointAndRestartsSafely(t *tes
 	}
 }
 
+func TestCompleteGithubBootstrapInvalidCursorRestartsExactCountFromRoot(t *testing.T) {
+	base := newBootstrapClient(3, 3)
+	client := &invalidCursorBootstrapClient{bootstrapClient: base}
+	localDir := t.TempDir()
+	s := newBootstrapSyncer(t, client, localDir, SyncerOptions{RootCtx: context.Background()})
+	s.loaded = true
+	expected := 3
+	s.githubWorkingTree = &githubWorkingTreeMount{}
+	s.state = mountState{
+		Files:                          map[string]trackedFile{},
+		BootstrapDirectories:           []string{"/"},
+		BootstrapCursor:                "tc2.persisted-cursor",
+		BootstrapPageOffset:            2,
+		BootstrapFilesSynced:           2,
+		BootstrapStrictFilesSeen:       2,
+		BootstrapDirectoriesDiscovered: 1,
+		GithubWorkingTreeSourceProfile: "complete-v1",
+		GithubWorkingTreeFilesExpected: &expected,
+	}
+
+	if err := s.pullRemoteFullTree(context.Background(), nil, bootstrapProgress{}); err != nil {
+		t.Fatalf("complete-v1 cursor recovery: %v", err)
+	}
+	if !s.state.BootstrapComplete {
+		t.Fatal("complete-v1 traversal did not complete after root restart")
+	}
+	if got := countLocalFiles(t, localDir); got != 3 {
+		t.Fatalf("materialized files = %d, want 3", got)
+	}
+	client.mu.Lock()
+	cursors := append([]string(nil), client.cursors...)
+	client.mu.Unlock()
+	if !reflect.DeepEqual(cursors, []string{"tc2.persisted-cursor", ""}) {
+		t.Fatalf("tree cursors = %#v, want rejected cursor then root restart", cursors)
+	}
+}
+
 func TestBootstrapInvalidCursorRecoveryIsBoundedAndNeverPersistsRejectedCursor(t *testing.T) {
 	base := newBootstrapClient(2, 1)
 	client := &invalidCursorBootstrapClient{

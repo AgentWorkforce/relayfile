@@ -13490,6 +13490,69 @@ func TestLocalSnapshotMatchesTrackedIncludesFilesystemMetadata(t *testing.T) {
 	if localSnapshotMatchesTracked(symlink, tracked) {
 		t.Fatal("equal-hash type change was treated as clean")
 	}
+	readonlyExecutable := base
+	readonlyExecutable.Mode = 0o555
+	trackedExecutable := tracked
+	trackedExecutable.Mode = 0o755
+	if !localSnapshotMatchesReadonlyTracked(readonlyExecutable, trackedExecutable) {
+		t.Fatal("read-only executable mode was treated as modified")
+	}
+	readonlyExecutable.Mode = 0o444
+	if localSnapshotMatchesReadonlyTracked(readonlyExecutable, trackedExecutable) {
+		t.Fatal("missing executable bits were treated as clean")
+	}
+}
+
+func TestReadonlyExecutableStaysCleanAndExecutableAcrossPushScan(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits are not enforced on Windows")
+	}
+	remotePath := "/repo/tool.sh"
+	client := &fakeClient{files: map[string]RemoteFile{
+		remotePath: {
+			Path:        remotePath,
+			Revision:    "rev_1",
+			ContentType: "text/x-shellscript",
+			Content:     "#!/bin/sh\nexit 0\n",
+			Mode:        0o755,
+		},
+	}}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:   "ws_readonly_executable",
+		RemoteRoot:    "/repo",
+		LocalRoot:     localDir,
+		Scopes:        []string{"relayfile:fs:read:/repo/tool.sh"},
+		FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+	localPath := filepath.Join(localDir, "tool.sh")
+	info, err := os.Stat(localPath)
+	if err != nil {
+		t.Fatalf("stat executable: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o555 {
+		t.Fatalf("initial read-only executable mode = %04o, want 0555", got)
+	}
+	readsBefore := client.readFileCalls
+	if _, err := syncer.pushLocal(context.Background()); err != nil {
+		t.Fatalf("clean read-only push scan: %v", err)
+	}
+	if client.readFileCalls != readsBefore {
+		t.Fatalf("clean read-only executable was re-read from remote: before=%d after=%d", readsBefore, client.readFileCalls)
+	}
+	info, err = os.Stat(localPath)
+	if err != nil {
+		t.Fatalf("stat executable after push scan: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o555 {
+		t.Fatalf("read-only executable mode after push scan = %04o, want 0555", got)
+	}
 }
 
 func TestTreeBootstrapPersistsWithinPageBeforeDeadlineAndResumes(t *testing.T) {
