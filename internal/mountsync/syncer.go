@@ -9694,6 +9694,21 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 		s.state.Files[remotePath] = tracked
 		s.logf("preserving oversized local file %s during remote apply: %v", remotePath, readErr)
 		return nil
+	} else if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		// A failed read of an existing local file is not evidence that it is
+		// safe to replace. Preserve it and retry once the path is readable.
+		// Directories are the deliberate exception: the secure atomic writer
+		// below rejects that type collision and records it in quarantine.
+		info, statErr := os.Lstat(localPath)
+		if statErr == nil && !info.IsDir() {
+			return fmt.Errorf("read existing local path before remote apply: %w", readErr)
+		}
+		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+			if s.skipPathLocalMaterializationError(remotePath, "local read preflight", statErr) {
+				return nil
+			}
+			return fmt.Errorf("inspect unreadable local path before remote apply: %w", statErr)
+		}
 	}
 	if shouldWrite {
 		var writeErr error
@@ -11236,6 +11251,7 @@ func (s *Syncer) refreshShadowContentFromDisk(remotePath, revision, localPath st
 		content []byte
 		err     error
 		cached  bool
+		regular bool
 	)
 	s.runReservedSyncIO(func() {
 		_, cached = s.readShadowContent(remotePath, revision)
@@ -11244,10 +11260,11 @@ func (s *Syncer) refreshShadowContentFromDisk(remotePath, revision, localPath st
 			snapshot, err = s.readLocalSnapshot(localPath, true)
 			if err == nil && snapshot.Type == remoteTypeFile {
 				content = snapshot.RawContent
+				regular = true
 			}
 		}
 	})
-	if cached || err != nil {
+	if cached || err != nil || !regular {
 		return
 	}
 	// A live event may have advanced this path while the disk read ran without

@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -13552,6 +13553,85 @@ func TestReadonlyExecutableStaysCleanAndExecutableAcrossPushScan(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0o555 {
 		t.Fatalf("read-only executable mode after push scan = %04o, want 0555", got)
+	}
+}
+
+func TestApplyRemoteFilePreservesExistingFileWhenLocalReadFails(t *testing.T) {
+	localDir := t.TempDir()
+	localPath := filepath.Join(localDir, "notes.md")
+	localContent := []byte("local edit\n")
+	if err := os.WriteFile(localPath, localContent, 0o644); err != nil {
+		t.Fatalf("write local fixture: %v", err)
+	}
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_remote_apply_read_failure",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	remotePath := "/notes.md"
+	syncer.state.Files[remotePath] = trackedFile{
+		Revision: "rev_base",
+		Type:     remoteTypeFile,
+		Mode:     0o644,
+		Hash:     hashString("base\n"),
+	}
+	syncer.readLocalSnapshotFn = func(path string, includeContent bool) (localSnapshot, error) {
+		if path == localPath && includeContent {
+			return localSnapshot{}, fs.ErrPermission
+		}
+		return readLocalSnapshot(path, includeContent)
+	}
+
+	err = syncer.applyRemoteFile(remotePath, RemoteFile{
+		Path:     remotePath,
+		Revision: "rev_remote",
+		Type:     remoteTypeFile,
+		Mode:     0o644,
+		Content:  "remote edit\n",
+	}, nil)
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("remote apply error = %v, want permission failure", err)
+	}
+	if got, readErr := os.ReadFile(localPath); readErr != nil || !bytes.Equal(got, localContent) {
+		t.Fatalf("local file after failed read = %q, err=%v; want preserved", got, readErr)
+	}
+	if got := syncer.state.Files[remotePath].Revision; got != "rev_base" {
+		t.Fatalf("tracked revision advanced to %q after failed local read", got)
+	}
+}
+
+func TestRefreshShadowContentSkipsSymlinkSnapshots(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink behavior differs on Windows")
+	}
+	localDir := t.TempDir()
+	localPath := filepath.Join(localDir, "notes.md")
+	if err := os.Symlink("target.md", localPath); err != nil {
+		t.Fatalf("create symlink fixture: %v", err)
+	}
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_shadow_symlink",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	remotePath := "/notes.md"
+	syncer.state.Files[remotePath] = trackedFile{
+		Revision: "rev_symlink",
+		Type:     remoteTypeSymlink,
+		Target:   "target.md",
+		Mode:     0o777,
+		Hash:     hashString("target.md"),
+	}
+
+	syncer.refreshShadowContentFromDisk(remotePath, "rev_symlink", localPath)
+	if content, ok := syncer.readShadowContent(remotePath, "rev_symlink"); ok {
+		t.Fatalf("symlink snapshot created a shadow merge base: %q", content)
 	}
 }
 

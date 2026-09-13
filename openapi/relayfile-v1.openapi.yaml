@@ -412,7 +412,7 @@ paths:
           description: Set to 0, false, no, or off to return an uncompressed raw tar stream with content type application/x-tar. Omit or set to 1 for gzip-compressed tar.
           schema:
             type: string
-            enum: ["0", "1"]
+            enum: ["0", "1", "false", "no", "off"]
       responses:
         '200':
           description: Export data in requested format
