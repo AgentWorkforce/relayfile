@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -7844,6 +7845,51 @@ func TestApplyRemoteFile_QuarantinesPathCollision(t *testing.T) {
 	}
 	if got := len(syncer.quarantinedPaths); got != distinctBefore {
 		t.Fatalf("distinct quarantined paths should not grow on a repeat: got %d, want %d", got, distinctBefore)
+	}
+}
+
+func TestApplyRemoteFileQuarantinesAncestorSwapDuringLocalRead(t *testing.T) {
+	localDir := t.TempDir()
+	parent := filepath.Join(localDir, "parent")
+	if err := os.Mkdir(parent, 0o755); err != nil {
+		t.Fatalf("create parent fixture: %v", err)
+	}
+	localPath := filepath.Join(parent, "child.txt")
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_remote_apply_ancestor_swap",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	syncer.readLocalSnapshotFn = func(path string, includeContent bool) (localSnapshot, error) {
+		if path != localPath || !includeContent {
+			return readLocalSnapshot(path, includeContent)
+		}
+		if removeErr := os.Remove(parent); removeErr != nil {
+			t.Fatalf("remove parent during read: %v", removeErr)
+		}
+		if writeErr := os.WriteFile(parent, []byte("replacement"), 0o644); writeErr != nil {
+			t.Fatalf("replace parent during read: %v", writeErr)
+		}
+		return localSnapshot{}, syscall.ENOTDIR
+	}
+
+	remotePath := "/parent/child.txt"
+	if err := syncer.applyRemoteFile(remotePath, RemoteFile{
+		Path: remotePath, Revision: "rev_1", Type: remoteTypeFile, Mode: 0o644, Content: "remote",
+	}, nil); err != nil {
+		t.Fatalf("ancestor swap should quarantine, got: %v", err)
+	}
+	if got := syncer.state.Counters.PathCollisionQuarantined; got != 1 {
+		t.Fatalf("path collisions quarantined = %d, want 1", got)
+	}
+	if info, statErr := os.Stat(parent); statErr != nil || !info.Mode().IsRegular() {
+		t.Fatalf("replacement ancestor changed: info=%v err=%v", info, statErr)
+	}
+	if _, tracked := syncer.state.Files[remotePath]; tracked {
+		t.Fatal("quarantined descendant was recorded as materialized")
 	}
 }
 

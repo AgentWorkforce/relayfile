@@ -9704,6 +9704,10 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 			return fmt.Errorf("read existing local path before remote apply: %w", readErr)
 		}
 		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+			if isRemotePathCollision(statErr) {
+				s.quarantineRemotePath(remotePath, "local read preflight path collision", statErr)
+				return nil
+			}
 			if s.skipPathLocalMaterializationError(remotePath, "local read preflight", statErr) {
 				return nil
 			}
