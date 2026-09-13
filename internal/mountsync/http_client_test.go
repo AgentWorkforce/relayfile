@@ -638,7 +638,7 @@ func TestHTTPClientExportFilesUsesPathFilter(t *testing.T) {
 			t.Fatalf("expected path filter /github, got %q", r.URL.Query().Get("path"))
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"path":"/github/repos/demo/README.md","revision":"rev_1","contentType":"text/markdown","content":"# Demo"}]`))
+		_, _ = w.Write([]byte(`[{"path":"/github/repos/demo/run","type":"symlink","target":"bin/run","mode":511,"revision":"rev_1","contentType":"text/plain","content":"bin/run"}]`))
 	}))
 	defer server.Close()
 
@@ -650,7 +650,7 @@ func TestHTTPClientExportFilesUsesPathFilter(t *testing.T) {
 	if len(files) != 1 {
 		t.Fatalf("expected one exported file, got %d", len(files))
 	}
-	if files[0].Path != "/github/repos/demo/README.md" || files[0].Revision != "rev_1" || files[0].Content != "# Demo" {
+	if files[0].Path != "/github/repos/demo/run" || files[0].Type != "symlink" || files[0].Target != "bin/run" || files[0].Mode != 0o777 || files[0].Revision != "rev_1" || files[0].Content != "bin/run" {
 		t.Fatalf("unexpected exported file: %+v", files[0])
 	}
 }
@@ -673,6 +673,9 @@ func TestHTTPClientExportGithubWorkingTreeTarUsesRawTarContract(t *testing.T) {
 		if r.URL.Query().Get("headSha") != "head123" {
 			t.Fatalf("unexpected headSha %q", r.URL.Query().Get("headSha"))
 		}
+		if r.URL.Query().Get("sourceProfile") != "complete-v1" {
+			t.Fatalf("unexpected sourceProfile %q", r.URL.Query().Get("sourceProfile"))
+		}
 		if r.URL.Query().Get("gzip") != "0" {
 			t.Fatalf("expected gzip=0 raw tar request, got %q", r.URL.Query().Get("gzip"))
 		}
@@ -694,11 +697,12 @@ func TestHTTPClientExportGithubWorkingTreeTarUsesRawTarContract(t *testing.T) {
 
 	client := NewHTTPClient(server.URL, "token", server.Client())
 	out, err := client.ExportGithubWorkingTreeTar(context.Background(), "ws_tar", GithubWorkingTreeSeedRequest{
-		Owner:      "AgentWorkforce",
-		Repo:       "cloud",
-		PathPrefix: "/github/repos/AgentWorkforce/cloud/contents",
-		HeadSHA:    "head123",
-		Gzip:       false,
+		Owner:         "AgentWorkforce",
+		Repo:          "cloud",
+		PathPrefix:    "/github/repos/AgentWorkforce/cloud/contents",
+		HeadSHA:       "head123",
+		SourceProfile: "complete-v1",
+		Gzip:          false,
 	})
 	if err != nil {
 		t.Fatalf("export github working-tree tar failed: %v", err)

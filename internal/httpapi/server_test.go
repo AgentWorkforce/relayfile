@@ -39,6 +39,28 @@ func TestAuthRequired(t *testing.T) {
 	}
 }
 
+func TestHealthAdvertisesSymlinkCapability(t *testing.T) {
+	server := NewServer(relayfile.NewStore())
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("health status = %d", rec.Code)
+	}
+	var payload struct {
+		Features []string `json:"features"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode health: %v", err)
+	}
+	for _, feature := range payload.Features {
+		if feature == "symlink-v1" {
+			return
+		}
+	}
+	t.Fatalf("health features = %v, want symlink-v1", payload.Features)
+}
+
 func TestDashboardRoute(t *testing.T) {
 	server := NewServer(relayfile.NewStore())
 	resp := doRequest(t, server, request{
@@ -160,6 +182,130 @@ func TestFileEventsWebSocketCatchUpAndPingPong(t *testing.T) {
 	}
 	if live["inlineContent"] != true || live["content"] != "# two" {
 		t.Fatalf("live event did not inline current file content: %+v", live)
+	}
+}
+
+func TestFileEventsWebSocketEnvelopeCarriesTypeMetadata(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	const workspaceID = "ws_socket_metadata"
+	if _, _, errs := store.BulkWrite(workspaceID, []relayfile.BulkWriteFile{{
+		Path: "/seed", Type: "file", Mode: 0o755, ContentType: "text/plain", Content: "seed",
+	}}); len(errs) != 0 {
+		t.Fatalf("seed writes failed: %v", errs)
+	}
+	server := httptest.NewServer(NewServer(store))
+	defer server.Close()
+	token := mustTestJWT(t, "dev-secret", workspaceID, "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+"/v1/workspaces/"+workspaceID+"/fs/ws?token="+token, nil)
+	if err != nil {
+		t.Fatalf("websocket dial failed: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	var seedEvent map[string]any
+	if err := wsjson.Read(ctx, conn, &seedEvent); err != nil {
+		t.Fatalf("read seed event failed: %v", err)
+	}
+	if _, err := store.WriteFile(relayfile.WriteRequest{WorkspaceID: workspaceID, Path: "/link", IfMatch: "0", Type: "symlink", Target: "bin/run", Mode: 0o777, ContentType: "application/x-symlink", Content: "bin/run", Encoding: "utf-8"}); err != nil {
+		t.Fatalf("write symlink failed: %v", err)
+	}
+	var message map[string]any
+	if err := wsjson.Read(ctx, conn, &message); err != nil {
+		t.Fatalf("read event failed: %v", err)
+	}
+	metadata, ok := message["typeMetadata"].(map[string]any)
+	if !ok || metadata["type"] != "symlink" || metadata["target"] != "bin/run" || metadata["mode"] != float64(0o777) {
+		t.Fatalf("websocket metadata = %#v, full message=%#v", message["typeMetadata"], message)
+	}
+}
+
+func TestGithubWorkingTreeTarExportFiltersAndPreservesMetadata(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	const workspaceID, prefix, sha = "ws_tar_metadata", "/github/repos/acme/repo/contents", "abc123"
+	_, _, errs := store.BulkWrite(workspaceID, []relayfile.BulkWriteFile{
+		{Path: prefix + "/dir%20name/README.md@" + sha + ".json", Type: "file", Mode: 0o755, ContentType: "text/plain", Content: "hello"},
+		{Path: prefix + "/link@" + sha + ".json", Type: "symlink", Target: "README.md", Mode: 0o777, ContentType: "application/x-symlink", Content: "README.md", Encoding: "utf-8"},
+		{Path: prefix + "/.git/config@" + sha + ".json", Type: "file", ContentType: "text/plain", Content: "secret"},
+		{Path: "/other/file@" + sha + ".json", Type: "file", ContentType: "text/plain", Content: "outside"},
+	})
+	if len(errs) != 0 {
+		t.Fatalf("seed writes failed: %v", errs)
+	}
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", workspaceID, "Worker1", []string{"fs:read"}, time.Now().Add(time.Hour))
+	req := httptest.NewRequest(http.MethodGet, "/v1/workspaces/"+workspaceID+"/fs/export?format=tar&decode=github-working-tree&pathPrefix="+url.QueryEscape(prefix)+"&headSha="+sha, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Correlation-Id", "corr_tar_metadata")
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("export status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	gz, err := gzip.NewReader(bytes.NewReader(recorder.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("gzip: %v", err)
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	seen := map[string]*tar.Header{}
+	for {
+		header, nextErr := tr.Next()
+		if nextErr == io.EOF {
+			break
+		}
+		if nextErr != nil {
+			t.Fatalf("tar: %v", nextErr)
+		}
+		copyHeader := *header
+		seen[header.Name] = &copyHeader
+	}
+	if len(seen) != 2 || seen["dir name/README.md"] == nil || seen["link"] == nil {
+		t.Fatalf("tar entries=%v", seen)
+	}
+	if seen["dir name/README.md"].Mode&0o777 != 0o755 || seen["link"].Typeflag != tar.TypeSymlink || seen["link"].Linkname != "README.md" {
+		t.Fatalf("metadata not preserved: readme=%+v link=%+v", seen["dir name/README.md"], seen["link"])
+	}
+}
+
+func TestSingularPutClearsStaleSymlinkMetadata(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	const workspaceID, filePath = "ws_put_metadata_http", "/current"
+	_, _, errs := store.BulkWrite(workspaceID, []relayfile.BulkWriteFile{{
+		Path: filePath, Type: "symlink", Target: "old", Mode: 0o777,
+		ContentType: "application/x-symlink", Content: "old", Encoding: "utf-8",
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("seed writes failed: %v", errs)
+	}
+	file, err := store.ReadFile(workspaceID, filePath)
+	if err != nil {
+		t.Fatalf("read seed: %v", err)
+	}
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", workspaceID, "Worker1", []string{"fs:write"}, time.Now().Add(time.Hour))
+	resp := doRequest(t, server, request{
+		method: http.MethodPut,
+		path:   "/v1/workspaces/" + workspaceID + "/fs/file?path=" + url.QueryEscape(filePath),
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_put_metadata",
+			"If-Match":         file.Revision,
+		},
+		body: map[string]any{"contentType": "text/plain", "content": "regular"},
+	})
+	if resp.Code != http.StatusOK && resp.Code != http.StatusAccepted {
+		t.Fatalf("PUT status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	updated, err := store.ReadFile(workspaceID, filePath)
+	if err != nil {
+		t.Fatalf("read updated file: %v", err)
+	}
+	if updated.Type != "file" || updated.Target != "" || updated.Content != "regular" {
+		t.Fatalf("stale metadata after PUT: %+v", updated)
 	}
 }
 

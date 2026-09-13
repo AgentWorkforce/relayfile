@@ -48,6 +48,10 @@ paths:
                   status:
                     type: string
                     enum: [ok]
+                  features:
+                    type: array
+                    items:
+                      type: string
 
   /v1/workspaces/{workspaceId}/fs/tree:
     get:
@@ -353,7 +357,9 @@ paths:
       description: |
         Exports all files visible to the caller under effective permission rules.
         Supports multiple output formats: JSON (default), tar (gzipped tarball),
-        or patch (unified diff format).
+        or patch (unified diff format). With `decode=github-working-tree`,
+        `pathPrefix` and `headSha` select a complete-v1 GitHub snapshot; the tar
+        entry names are repository-relative and preserve symlink and mode metadata.
       security:
         - BearerAuth: [fs:read]
       parameters:
@@ -375,6 +381,37 @@ paths:
             type: string
             default: /
             pattern: '^/.*'
+        - name: decode
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [github-working-tree]
+        - name: pathPrefix
+          in: query
+          required: false
+          description: Required with decode=github-working-tree.
+          schema:
+            type: string
+            pattern: '^/.*'
+        - name: headSha
+          in: query
+          required: false
+          description: Required with decode=github-working-tree.
+          schema:
+            type: string
+        - name: sourceProfile
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: gzip
+          in: query
+          required: false
+          description: Compatibility hint for GitHub working-tree exports; responses remain application/gzip.
+          schema:
+            type: string
+            enum: ["0", "1"]
       responses:
         '200':
           description: Export data in requested format
@@ -2791,7 +2828,14 @@ components:
           type: string
         type:
           type: string
-          enum: [file, dir]
+          enum: [file, dir, symlink]
+        target:
+          type: string
+          description: Relative symlink target when type is symlink.
+        mode:
+          type: integer
+          minimum: 0
+          description: POSIX permission bits when present.
         revision:
           type: string
         contentHash:
@@ -2883,6 +2927,14 @@ components:
           type: string
         content:
           type: string
+        type:
+          type: string
+          enum: [file, symlink]
+        target:
+          type: string
+        mode:
+          type: integer
+          minimum: 0
         encoding:
           type: string
           description: Content encoding, e.g. "base64" for binary data
@@ -2964,6 +3016,14 @@ components:
         encoding:
           type: string
           description: Content encoding, e.g. "base64" for binary data
+        type:
+          type: string
+          enum: [file, symlink]
+        target:
+          type: string
+        mode:
+          type: integer
+          minimum: 0
         semantics:
           $ref: '#/components/schemas/FileSemantics'
 
@@ -3187,6 +3247,21 @@ components:
         timestamp:
           type: string
           format: date-time
+        typeMetadata:
+          $ref: '#/components/schemas/FileTypeMetadata'
+
+    FileTypeMetadata:
+      type: object
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          enum: [file, symlink]
+        target:
+          type: string
+        mode:
+          type: integer
+          minimum: 0
 
     EventFeedResponse:
       type: object
@@ -4640,6 +4715,14 @@ components:
         encoding:
           type: string
           description: Content encoding, e.g. "base64" for binary data
+        type:
+          type: string
+          enum: [file, symlink]
+        target:
+          type: string
+        mode:
+          type: integer
+          minimum: 0
         contentIdentity:
           $ref: '#/components/schemas/ContentIdentity'
         writebackIntent:

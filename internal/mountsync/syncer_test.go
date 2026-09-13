@@ -2902,7 +2902,7 @@ func TestPullRemoteFullGithubWorkingTreeTarSeedsAndStoresCursor(t *testing.T) {
 					Path:        sentinelPath,
 					Revision:    "rev_1",
 					ContentType: "application/json",
-					Content:     `{"headSha":"` + headSHA + `","defaultBranch":"main"}`,
+					Content:     `{"headSha":"` + headSHA + `","defaultBranch":"main","sourceProfile":"complete-v1","filesExpected":2}`,
 				},
 				readmeRemote: {
 					Path:        readmeRemote,
@@ -2946,6 +2946,9 @@ func TestPullRemoteFullGithubWorkingTreeTarSeedsAndStoresCursor(t *testing.T) {
 	if client.tarCalls != 1 {
 		t.Fatalf("expected github tar export to be used once, got %d", client.tarCalls)
 	}
+	if client.lastTarSeed.SourceProfile != "complete-v1" {
+		t.Fatalf("expected complete source profile on tar export, got %q", client.lastTarSeed.SourceProfile)
+	}
 	gotReadme, err := os.ReadFile(filepath.Join(localDir, "README.md"))
 	if err != nil {
 		t.Fatalf("read seeded README: %v", err)
@@ -2968,6 +2971,133 @@ func TestPullRemoteFullGithubWorkingTreeTarSeedsAndStoresCursor(t *testing.T) {
 	if got := syncer.localRelativeToRemotePath("src/app.ts"); got != appRemote {
 		t.Fatalf("local write path should map back to content object with head sha: got %q want %q", got, appRemote)
 	}
+
+	client.files[sentinelPath] = RemoteFile{
+		Path:        sentinelPath,
+		Revision:    "rev_4",
+		ContentType: "application/json",
+		Content:     `{"headSha":"` + headSHA + `","defaultBranch":"main","sourceProfile":"complete-v1","filesExpected":3}`,
+	}
+	mismatchDir := t.TempDir()
+	mismatchSyncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:   "ws_tar_seed_count_mismatch",
+		RemoteRoot:    contentsRoot,
+		LocalRoot:     mismatchDir,
+		StateFile:     filepath.Join(mismatchDir, ".relayfile-mount-state.json"),
+		WebSocket:     boolPtr(false),
+		FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer for count mismatch failed: %v", err)
+	}
+	err = mismatchSyncer.Reconcile(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "tree listed 2 entries, clone manifest expected 3") {
+		t.Fatalf("expected strict clone manifest count mismatch, got %v", err)
+	}
+	if client.tarCalls != 1 {
+		t.Fatalf("count mismatch must fail before tar export; got %d total tar calls", client.tarCalls)
+	}
+}
+
+type unsupportedGithubTreeClient struct{ *fakeClient }
+
+func (c *unsupportedGithubTreeClient) ListTree(context.Context, string, string, int, string) (TreeResponse, error) {
+	return TreeResponse{Entries: []TreeEntry{{Path: "/github/repos/o/r/contents/device", Type: "fifo"}}}, nil
+}
+
+func TestGithubWorkingTreeSnapshotRejectsUnsupportedCompleteEntry(t *testing.T) {
+	localDir := t.TempDir()
+	client := &unsupportedGithubTreeClient{fakeClient: &fakeClient{}}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_unsupported_tree", RemoteRoot: "/github/repos/o/r/contents",
+		LocalRoot: localDir, StateFile: filepath.Join(localDir, ".state.json"), WebSocket: boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+	_, _, err = syncer.githubWorkingTreeSnapshot(context.Background(), bootstrapProgress{}, true)
+	if err == nil || !strings.Contains(err.Error(), `unsupported entry type "fifo"`) {
+		t.Fatalf("unsupported complete-v1 entry error = %v", err)
+	}
+}
+
+func TestGithubWorkingTreeTarSeedPreservesSymlinkAndExecutableMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires developer mode or elevated privileges on Windows")
+	}
+	localDir := t.TempDir()
+	contentsRoot := "/github/repos/AgentWorkforce/cloud/contents"
+	headSHA := "head-metadata"
+	runBody := []byte("#!/bin/sh\n")
+	runRemote := contentsRoot + "/bin/run@" + headSHA + ".json"
+	linkRemote := contentsRoot + "/current@" + headSHA + ".json"
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_tar_metadata",
+		RemoteRoot:  contentsRoot,
+		LocalRoot:   localDir,
+		StateFile:   filepath.Join(localDir, ".relayfile-mount-state.json"),
+		WebSocket:   boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+	syncer.githubWorkingTree.HeadSHA = headSHA
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := tw.WriteHeader(&tar.Header{
+		Name: "bin/run", Mode: 0o755, Size: int64(len(runBody)), Typeflag: tar.TypeReg,
+	}); err != nil {
+		t.Fatalf("write executable header: %v", err)
+	}
+	if _, err := tw.Write(runBody); err != nil {
+		t.Fatalf("write executable body: %v", err)
+	}
+	if err := tw.WriteHeader(&tar.Header{
+		Name: "current", Mode: 0o777, Typeflag: tar.TypeSymlink, Linkname: "bin/run",
+	}); err != nil {
+		t.Fatalf("write symlink header: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	remotePaths, err := syncer.applyGithubWorkingTreeTarSeed(
+		GithubWorkingTreeTar{
+			Body: io.NopCloser(bytes.NewReader(buf.Bytes())), ContentType: "application/x-tar",
+		},
+		map[string]githubTreeFile{
+			"bin/run": {
+				RemotePath: runRemote, Revision: "rev_1", ContentHash: hashBytes(runBody),
+				Type: remoteTypeFile, Mode: 0o755,
+			},
+			"current": {
+				RemotePath: linkRemote, Revision: "rev_2", ContentHash: hashBytes([]byte("bin/run")),
+				Type: remoteTypeSymlink, Target: "bin/run", Mode: 0o777,
+			},
+		},
+		nil,
+		bootstrapProgress{},
+	)
+	if err != nil {
+		t.Fatalf("apply tar seed: %v", err)
+	}
+	if len(remotePaths) != 2 {
+		t.Fatalf("expected 2 materialized paths, got %d", len(remotePaths))
+	}
+	info, err := os.Stat(filepath.Join(localDir, "bin", "run"))
+	if err != nil {
+		t.Fatalf("stat executable: %v", err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("expected executable mode 0755, got %04o", info.Mode().Perm())
+	}
+	if target, err := os.Readlink(filepath.Join(localDir, "current")); err != nil || target != "bin/run" {
+		t.Fatalf("expected current -> bin/run, target=%q err=%v", target, err)
+	}
+	if tracked := syncer.state.Files[linkRemote]; tracked.Type != remoteTypeSymlink || tracked.Target != "bin/run" {
+		t.Fatalf("unexpected tracked symlink state: %+v", tracked)
+	}
 }
 
 func TestParseGithubCloneManifestAcceptsSnakeCaseCursor(t *testing.T) {
@@ -2975,7 +3105,9 @@ func TestParseGithubCloneManifestAcceptsSnakeCaseCursor(t *testing.T) {
 		"head_sha": "head123",
 		"default_branch": "main",
 		"events_cursor": "evt_cursor",
-		"event_id": "evt_id"
+		"event_id": "evt_id",
+		"source_profile": "complete-v1",
+		"files_expected": 42
 	}`))
 	if !ok {
 		t.Fatalf("expected snake_case clone manifest to parse")
@@ -2988,6 +3120,12 @@ func TestParseGithubCloneManifestAcceptsSnakeCaseCursor(t *testing.T) {
 	}
 	if manifest.EventID != "evt_id" {
 		t.Fatalf("unexpected event id %q", manifest.EventID)
+	}
+	if manifest.SourceProfile != "complete-v1" {
+		t.Fatalf("unexpected source profile %q", manifest.SourceProfile)
+	}
+	if manifest.FilesExpected == nil || *manifest.FilesExpected != 42 {
+		t.Fatalf("unexpected files expected %#v", manifest.FilesExpected)
 	}
 }
 
@@ -8245,7 +8383,7 @@ func TestApplyWebSocketEvent_DirectoryCreatedTriggersProviderLayout(t *testing.T
 	}
 }
 
-func TestScanLocalFilesSkipsSymlinkedDirectories(t *testing.T) {
+func TestScanLocalFilesIncludesSymlinkedDirectoriesAsLinks(t *testing.T) {
 	t.Parallel()
 
 	localDir := t.TempDir()
@@ -8279,8 +8417,12 @@ func TestScanLocalFilesSkipsSymlinkedDirectories(t *testing.T) {
 	if got := files["/note.md"]; len(got.RawContent) != 0 || got.WireContent != "" {
 		t.Fatalf("expected scanLocalFiles to defer content reads, got raw=%d wire=%q", len(got.RawContent), got.WireContent)
 	}
-	if _, ok := files["/node_modules_link"]; ok {
-		t.Fatalf("expected symlinked directory to be skipped")
+	link, ok := files["/node_modules_link"]
+	if !ok {
+		t.Fatalf("expected symlinked directory to be scanned as a link")
+	}
+	if link.Type != remoteTypeSymlink || link.Target != targetDir {
+		t.Fatalf("symlink snapshot = type %q target %q, want link to %q", link.Type, link.Target, targetDir)
 	}
 }
 
@@ -9312,6 +9454,7 @@ type fakeExportClient struct {
 	*fakeClient
 	exportCalls   int
 	tarCalls      int
+	lastTarSeed   GithubWorkingTreeSeedRequest
 	tarFiles      map[string][]byte
 	tarErr        error
 	readFileCalls int
@@ -9448,8 +9591,8 @@ func (c *fakeExportClient) ReadFile(ctx context.Context, workspaceID, path strin
 func (c *fakeExportClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID string, seed GithubWorkingTreeSeedRequest) (GithubWorkingTreeTar, error) {
 	_ = ctx
 	_ = workspaceID
-	_ = seed
 	c.tarCalls++
+	c.lastTarSeed = seed
 	if c.tarErr != nil {
 		return GithubWorkingTreeTar{}, c.tarErr
 	}
