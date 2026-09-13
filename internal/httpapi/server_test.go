@@ -3647,7 +3647,10 @@ func TestGithubWorkingTreeExportUsesPathPrefixScopeAndRawTar(t *testing.T) {
 	const sha = "abc123"
 	if written, _, errs := store.BulkWrite(workspaceID, []relayfile.BulkWriteFile{
 		{Path: prefix + "/README.md@" + sha + ".json", ContentType: "text/plain", Content: "hello"},
-	}); written != 1 || len(errs) != 0 {
+		{Path: prefix + "/src/app.ts@" + sha + ".json", ContentType: "text/plain", Content: "export const ok = true;\n"},
+		{Path: prefix + "/link@" + sha + ".json", Type: "symlink", Target: "README.md", Mode: 0o777, ContentType: "application/x-symlink", Content: "README.md", Encoding: "utf-8"},
+		{Path: prefix + "/.git%2Fconfig@" + sha + ".json", ContentType: "text/plain", Content: "secret"},
+	}); written != 4 || len(errs) != 0 {
 		t.Fatalf("seed bulk write failed: written=%d errs=%+v", written, errs)
 	}
 	server := NewServer(store)
@@ -3667,12 +3670,52 @@ func TestGithubWorkingTreeExportUsesPathPrefixScopeAndRawTar(t *testing.T) {
 		t.Fatalf("raw export content type=%q", got)
 	}
 	tr := tar.NewReader(bytes.NewReader(recorder.Body.Bytes()))
-	header, err := tr.Next()
-	if err != nil {
-		t.Fatalf("read raw tar header: %v", err)
+	entries := map[string]struct {
+		content  []byte
+		linkname string
+		typeflag byte
+	}{}
+	for {
+		header, nextErr := tr.Next()
+		if nextErr == io.EOF {
+			break
+		}
+		if nextErr != nil {
+			t.Fatalf("read raw tar header: %v", nextErr)
+		}
+		content, readErr := io.ReadAll(tr)
+		if readErr != nil {
+			t.Fatalf("read raw tar entry %q: %v", header.Name, readErr)
+		}
+		entries[header.Name] = struct {
+			content  []byte
+			linkname string
+			typeflag byte
+		}{content: content, linkname: header.Linkname, typeflag: header.Typeflag}
 	}
-	if header.Name != "README.md" {
-		t.Fatalf("raw tar entry=%q", header.Name)
+	if len(entries) != 3 {
+		t.Fatalf("raw tar entries=%v, want README, app, and symlink", entries)
+	}
+	for _, name := range []string{"README.md", "src/app.ts", "link"} {
+		if _, ok := entries[name]; !ok {
+			t.Fatalf("raw tar missing expected entry %q: %v", name, entries)
+		}
+	}
+	if _, filtered := entries[".git/config"]; filtered {
+		t.Fatal("raw tar included decoded .git entry")
+	}
+	if got := string(entries["README.md"].content); got != "hello" {
+		t.Fatalf("README content=%q", got)
+	}
+	if got := string(entries["src/app.ts"].content); got != "export const ok = true;\n" {
+		t.Fatalf("app content=%q", got)
+	}
+	if entries["link"].typeflag != tar.TypeSymlink || entries["link"].linkname != "README.md" || len(entries["link"].content) != 0 {
+		t.Fatalf("symlink entry=%+v", entries["link"])
+	}
+	rawBody := recorder.Body.Bytes()
+	if len(rawBody) < 1024 || !bytes.Equal(rawBody[len(rawBody)-1024:], make([]byte, 1024)) {
+		t.Fatal("raw tar stream is missing its two zero termination blocks")
 	}
 }
 

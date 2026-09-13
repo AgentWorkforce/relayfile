@@ -3,12 +3,31 @@
 package mountsync
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
 )
+
+func TestRemoveLocalNoFollowRejectsAncestorSymlink(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "victim")
+	if err := os.WriteFile(victim, []byte("outside"), 0o600); err != nil {
+		t.Fatalf("write outside victim: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "redirect")); err != nil {
+		t.Fatalf("create redirect: %v", err)
+	}
+	if err := removeLocalNoFollow(root, filepath.Join(root, "redirect", "victim")); err == nil {
+		t.Fatal("removed a file through an ancestor symlink")
+	}
+	if _, err := os.Stat(victim); errors.Is(err, os.ErrNotExist) {
+		t.Fatal("outside victim was removed")
+	}
+}
 
 func TestOpenLocalRegularNoFollowRejectsAncestorSymlink(t *testing.T) {
 	root := t.TempDir()
@@ -22,6 +41,21 @@ func TestOpenLocalRegularNoFollowRejectsAncestorSymlink(t *testing.T) {
 	}
 	if _, err := openLocalRegularNoFollow(root, filepath.Join(root, "redirect", "secret")); err == nil {
 		t.Fatal("opened a file through a replaced ancestor symlink")
+	}
+}
+
+func TestOpenLocalRegularNoFollowRejectsSymlinkMountRoot(t *testing.T) {
+	actual := t.TempDir()
+	if err := os.WriteFile(filepath.Join(actual, "file.txt"), []byte("content"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	base := t.TempDir()
+	root := filepath.Join(base, "mount")
+	if err := os.Symlink(actual, root); err != nil {
+		t.Fatalf("create symlink mount root: %v", err)
+	}
+	if _, err := openLocalRegularNoFollow(root, filepath.Join(root, "file.txt")); err == nil {
+		t.Fatal("opened a file through a symlink mount root")
 	}
 }
 

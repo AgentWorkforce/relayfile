@@ -3731,7 +3731,7 @@ func (s *Syncer) handleLocalChanges(ctx context.Context, changes []LocalChange, 
 				continue
 			}
 
-			snapshot, err := readLocalSnapshot(localPath, true)
+			snapshot, err := s.readLocalSnapshot(localPath, true)
 			if err != nil {
 				if errors.Is(err, os.ErrNotExist) {
 					if err := s.pushSingleDelete(ctx, remotePath, localPath); err != nil {
@@ -3767,7 +3767,7 @@ func (s *Syncer) handleLocalChanges(ctx context.Context, changes []LocalChange, 
 }
 
 func (s *Syncer) handleLocalWriteOrCreate(ctx context.Context, remotePath, localPath string) error {
-	snapshot, err := readLocalSnapshot(localPath, true)
+	snapshot, err := s.readLocalSnapshot(localPath, true)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return s.pushSingleDelete(ctx, remotePath, localPath)
@@ -4961,7 +4961,7 @@ func (s *Syncer) materializeSchemaInvalid(
 		// No prior remote version to restore — typical for a CREATE that
 		// violated the schema. Remove the local file and stop tracking
 		// it so the next reconcile does not re-push.
-		_ = os.Remove(localPath)
+		_ = removeLocalNoFollow(s.localRoot, localPath)
 		delete(s.state.Files, remotePath)
 		s.logf("schema validation failed at %s (%s); local saved at %s; no prior remote version to restore",
 			remotePath, violationDescription, artifactPath)
@@ -7127,13 +7127,11 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 		}
 		shouldWrite := true
 		if isSymlink {
-			if current, readErr := os.Readlink(localPath); readErr == nil && current == header.Linkname {
+			if current, readErr := readLocalSymlinkNoFollow(s.localRoot, localPath, maxWritebackBytes()); readErr == nil && current == header.Linkname {
 				shouldWrite = false
 			}
-		} else if info, statErr := os.Lstat(localPath); statErr == nil && info.Mode().IsRegular() {
-			if current, readErr := os.ReadFile(localPath); readErr == nil && hashBytes(current) == hash {
-				shouldWrite = false
-			}
+		} else if current, readErr := s.readLocalSnapshot(localPath, true); readErr == nil && current.Type == remoteTypeFile && current.Hash == hash {
+			shouldWrite = false
 		}
 		if shouldWrite {
 			var writeErr error
@@ -7904,7 +7902,7 @@ func (s *Syncer) trySkipBootstrapRead(remotePath string, entry TreeEntry) (bool,
 		s.logf("skipping local hash probe for %s: %v", remotePath, err)
 		return false, nil
 	}
-	snapshot, err := readLocalSnapshot(localPath, false)
+	snapshot, err := s.readLocalSnapshot(localPath, false)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return false, nil
@@ -9311,7 +9309,7 @@ func (s *Syncer) trySkipIncrementalRead(remotePath string, event FilesystemEvent
 		s.logf("skipping local hash probe for %s: %v", remotePath, err)
 		return false, nil
 	}
-	snapshot, err := readLocalSnapshot(localPath, false)
+	snapshot, err := s.readLocalSnapshot(localPath, false)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return false, nil
@@ -9613,16 +9611,13 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 	}
 	shouldWrite := true
 	if file.Type == remoteTypeSymlink {
-		currentTarget, readlinkErr := os.Readlink(localPath)
+		currentTarget, readlinkErr := readLocalSymlinkNoFollow(s.localRoot, localPath, maxWritebackBytes())
 		if readlinkErr == nil && normalizeRemoteType(tracked.Type) == remoteTypeSymlink && currentTarget == file.Target && tracked.Mode == file.Mode {
 			shouldWrite = false
 		}
-	} else if currentInfo, statErr := os.Lstat(localPath); statErr == nil && currentInfo.Mode().IsRegular() {
-		current, err := os.ReadFile(localPath)
-		if err != nil {
-			return err
-		}
-		localHash := hashBytes(current)
+	} else if currentSnapshot, readErr := s.readLocalSnapshot(localPath, true); readErr == nil && currentSnapshot.Type == remoteTypeFile {
+		current := currentSnapshot.RawContent
+		localHash := currentSnapshot.Hash
 		if localHash == remoteHash {
 			shouldWrite = false
 		} else {
@@ -9664,6 +9659,14 @@ func (s *Syncer) applyRemoteFile(remotePath string, file RemoteFile, conflicted 
 				s.logf("conflict at %s before remote apply; debounced local edit saved at %s", remotePath, artifactPath)
 			}
 		}
+	} else if readErr != nil && errors.Is(readErr, errLocalSnapshotTooLarge) {
+		// A bounded local read must never turn an oversized local edit into a
+		// remote overwrite during pull. Preserve it as dirty; the scan phase
+		// will mark it writeback-skipped and surface the size cap.
+		tracked.Dirty = true
+		s.state.Files[remotePath] = tracked
+		s.logf("preserving oversized local file %s during remote apply: %v", remotePath, readErr)
+		return nil
 	}
 	if shouldWrite {
 		var writeErr error
@@ -9964,20 +9967,13 @@ func (s *Syncer) applyRemoteDelete(remotePath string, conflicted map[string]stru
 		delete(s.state.Files, remotePath)
 		return nil
 	}
-	localInfo, statErr := os.Lstat(localPath)
-	if statErr == nil {
-		matches := false
-		if localInfo.Mode()&os.ModeSymlink != 0 && isSymlinkType(tracked.Type) {
-			if target, readlinkErr := os.Readlink(localPath); readlinkErr == nil {
-				matches = hashBytes([]byte(target)) == tracked.Hash && target == tracked.Target
-			}
-		} else if localInfo.Mode().IsRegular() && !isSymlinkType(tracked.Type) {
-			if currentBytes, readErr := os.ReadFile(localPath); readErr == nil {
-				matches = hashBytes(currentBytes) == tracked.Hash
-			}
+	if snapshot, snapshotErr := s.readLocalSnapshot(localPath, true); snapshotErr == nil {
+		matches := snapshot.Hash == tracked.Hash && normalizeRemoteType(snapshot.Type) == normalizeRemoteType(tracked.Type)
+		if matches && isSymlinkType(tracked.Type) {
+			matches = snapshot.Target == tracked.Target
 		}
 		if matches {
-			_ = os.Remove(localPath)
+			_ = removeLocalNoFollow(s.localRoot, localPath)
 		}
 	}
 	delete(s.state.Files, remotePath)
@@ -10047,7 +10043,7 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 				s.logf("skipping denied-file removal for %s: %v", remotePath, err)
 				continue
 			}
-			if err := os.Remove(localPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err := removeLocalNoFollow(s.localRoot, localPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return nil, err
 			}
 			tracked.Dirty = false
@@ -10134,7 +10130,7 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 			s.state.Files[remotePath] = tracked
 			continue
 		}
-		fullSnapshot, err := readLocalSnapshot(localPath, true)
+		fullSnapshot, err := s.readLocalSnapshot(localPath, true)
 		if err != nil {
 			return nil, err
 		}
@@ -10238,7 +10234,7 @@ func (s *Syncer) markReadDenied(remotePath string) error {
 		return nil
 	}
 	s.logDenial("READ_DENIED", remotePath, "agent does not have read permission; file removed")
-	if err := os.Remove(localPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := removeLocalNoFollow(s.localRoot, localPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil
@@ -11217,7 +11213,11 @@ func (s *Syncer) refreshShadowContentFromDisk(remotePath, revision, localPath st
 	s.runReservedSyncIO(func() {
 		_, cached = s.readShadowContent(remotePath, revision)
 		if !cached {
-			content, err = os.ReadFile(localPath)
+			var snapshot localSnapshot
+			snapshot, err = s.readLocalSnapshot(localPath, true)
+			if err == nil && snapshot.Type == remoteTypeFile {
+				content = snapshot.RawContent
+			}
 		}
 	})
 	if cached || err != nil {
@@ -11363,7 +11363,7 @@ func readLocalSnapshotLimitedUnderRoot(localRoot, path string, includeContent bo
 		return localSnapshot{}, err
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		target, err := os.Readlink(path)
+		target, err := readLocalSymlinkNoFollow(localRoot, path, maxBytes)
 		if err != nil {
 			return localSnapshot{}, err
 		}

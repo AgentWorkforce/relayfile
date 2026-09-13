@@ -45,23 +45,22 @@ func secureParentDir(root, target string) (*os.File, string, error) {
 	if len(parts) == 0 || parts[len(parts)-1] == "" || parts[len(parts)-1] == "." {
 		return nil, "", fmt.Errorf("invalid target path %s", target)
 	}
-	fd, err := unix.Open(rootAbs, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	current, err := openDirectoryNoFollow(rootAbs)
 	if err != nil {
 		return nil, "", err
 	}
-	current := os.NewFile(uintptr(fd), rootAbs)
 	for _, part := range parts[:len(parts)-1] {
 		if part == "" || part == "." || part == ".." {
 			_ = current.Close()
 			return nil, "", fmt.Errorf("invalid path component %q", part)
 		}
-		nextFD, openErr := unix.Openat(int(current.Fd()), part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		nextFD, openErr := unix.Openat(int(current.Fd()), part, directoryOpenFlags(), 0)
 		if errors.Is(openErr, unix.ENOENT) {
 			if mkdirErr := unix.Mkdirat(int(current.Fd()), part, 0o755); mkdirErr != nil && !errors.Is(mkdirErr, unix.EEXIST) {
 				_ = current.Close()
 				return nil, "", mkdirErr
 			}
-			nextFD, openErr = unix.Openat(int(current.Fd()), part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+			nextFD, openErr = unix.Openat(int(current.Fd()), part, directoryOpenFlags(), 0)
 		}
 		if openErr != nil {
 			_ = current.Close()

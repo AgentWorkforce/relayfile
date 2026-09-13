@@ -14,3 +14,11 @@ var errLocalSnapshotSafetyUnsupported = errors.New("anchored local file reads ar
 func openLocalRegularNoFollow(root, path string) (*os.File, error) {
 	return nil, errLocalSnapshotSafetyUnsupported
 }
+
+func readLocalSymlinkNoFollow(root, path string, maxBytes int64) (string, error) {
+	return "", errLocalSnapshotSafetyUnsupported
+}
+
+func removeLocalNoFollow(root, path string) error {
+	return errLocalSnapshotSafetyUnsupported
+}

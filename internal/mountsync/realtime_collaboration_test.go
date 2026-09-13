@@ -755,8 +755,10 @@ func TestBackgroundLocalTreeHashDoesNotBlockInlinePeerEvent(t *testing.T) {
 	scanRelease := make(chan struct{})
 	var startOnce sync.Once
 	syncer.readLocalSnapshotFn = func(path string, includeContent bool) (localSnapshot, error) {
-		startOnce.Do(func() { close(scanStarted) })
-		<-scanRelease
+		if filepath.Base(path) == "scan.txt" {
+			startOnce.Do(func() { close(scanStarted) })
+			<-scanRelease
+		}
 		return readLocalSnapshot(path, includeContent)
 	}
 	scanDone := make(chan error, 1)

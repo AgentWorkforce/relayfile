@@ -356,7 +356,8 @@ paths:
       summary: Export all visible files in a workspace
       description: |
         Exports all files visible to the caller under effective permission rules.
-        Supports multiple output formats: JSON (default), tar (gzipped tarball),
+        Supports multiple output formats: JSON (default), tar (gzipped tarball by default),
+        or raw tar when `format=tar&gzip=0`,
         or patch (unified diff format). With `decode=github-working-tree`,
         `pathPrefix` and `headSha` select a complete-v1 GitHub snapshot; the tar
         entry names are repository-relative and preserve symlink and mode metadata.
@@ -408,7 +409,7 @@ paths:
         - name: gzip
           in: query
           required: false
-          description: Compatibility hint for GitHub working-tree exports; responses remain application/gzip.
+          description: Set to 0, false, no, or off to return an uncompressed raw tar stream with content type application/x-tar. Omit or set to 1 for gzip-compressed tar.
           schema:
             type: string
             enum: ["0", "1"]
@@ -425,6 +426,10 @@ paths:
               schema:
                 type: string
                 format: binary
+            application/x-tar:
+              schema:
+                type: string
+                format: binary
             text/plain:
               schema:
                 type: string
@@ -436,6 +441,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
