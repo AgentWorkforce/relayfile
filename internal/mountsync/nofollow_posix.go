@@ -106,7 +106,7 @@ func readLocalSymlinkNoFollow(root, path string, maxBytes int64) (string, error)
 	}
 	defer parent.Close()
 	capacity := 256
-	if maxBytes > 0 && maxBytes+1 < int64(capacity) {
+	if maxBytes > 0 && maxBytes < int64(capacity)-1 {
 		capacity = int(maxBytes + 1)
 	}
 	for {
@@ -118,7 +118,7 @@ func readLocalSymlinkNoFollow(root, path string, maxBytes int64) (string, error)
 		if n < len(buffer) {
 			return string(buffer[:n]), nil
 		}
-		if maxBytes > 0 && int64(len(buffer)) >= maxBytes+1 {
+		if maxBytes > 0 && int64(len(buffer)) > maxBytes {
 			return string(buffer[:n]), nil
 		}
 		if capacity >= 1<<20 {

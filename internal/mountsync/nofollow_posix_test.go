@@ -4,12 +4,29 @@ package mountsync
 
 import (
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
 )
+
+func TestReadLocalSymlinkNoFollowAcceptsMaxInt64Limit(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "link")
+	if err := os.Symlink("target", path); err != nil {
+		t.Fatalf("create symlink: %v", err)
+	}
+
+	got, err := readLocalSymlinkNoFollow(root, path, math.MaxInt64)
+	if err != nil {
+		t.Fatalf("read symlink with max int64 limit: %v", err)
+	}
+	if got != "target" {
+		t.Fatalf("symlink target = %q, want target", got)
+	}
+}
 
 func TestRemoveLocalNoFollowRejectsAncestorSymlink(t *testing.T) {
 	root := t.TempDir()
