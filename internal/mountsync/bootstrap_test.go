@@ -739,6 +739,10 @@ func TestCompleteGithubBootstrapInvalidCursorRestartsExactCountFromRoot(t *testi
 	if got := countLocalFiles(t, localDir); got != 3 {
 		t.Fatalf("materialized files = %d, want 3", got)
 	}
+	st := loadPersistedState(t, localDir)
+	if st.BootstrapCursor != "" || st.BootstrapPageOffset != 0 {
+		t.Fatalf("recovered checkpoint = cursor %q offset %d, want cleared", st.BootstrapCursor, st.BootstrapPageOffset)
+	}
 	client.mu.Lock()
 	cursors := append([]string(nil), client.cursors...)
 	client.mu.Unlock()
