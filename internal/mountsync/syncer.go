@@ -11609,21 +11609,24 @@ func decodeRemoteFileContent(file RemoteFile) ([]byte, error) {
 		}
 		return []byte(file.Content), nil
 	}
-	if max := maxWritebackBytes(); max > 0 && int64(base64.StdEncoding.DecodedLen(len(file.Content))) > max {
-		return nil, fmt.Errorf("remote base64 content exceeds %d byte limit", max)
+	// DecodedLen is an upper bound: padding can put an exactly-at-limit
+	// file two bytes over it. Bound actual decoded bytes instead, also
+	// handling permitted CR/LF without allocating an oversized output.
+	encoding := base64.StdEncoding
+	if !strings.Contains(file.Content, "=") {
+		encoding = base64.RawStdEncoding
 	}
-	if decoded, err := base64.StdEncoding.DecodeString(file.Content); err == nil {
-		if max := maxWritebackBytes(); max > 0 && int64(len(decoded)) > max {
-			return nil, fmt.Errorf("remote content exceeds %d byte limit", max)
-		}
-		return decoded, nil
+	var reader io.Reader = base64.NewDecoder(encoding, strings.NewReader(file.Content))
+	max := maxWritebackBytes()
+	if max > 0 && max < math.MaxInt64 {
+		reader = io.LimitReader(reader, max+1)
 	}
-	decoded, err := base64.RawStdEncoding.DecodeString(file.Content)
+	decoded, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, err
 	}
-	if max := maxWritebackBytes(); max > 0 && int64(len(decoded)) > max {
-		return nil, fmt.Errorf("remote content exceeds %d byte limit", max)
+	if max > 0 && int64(len(decoded)) > max {
+		return nil, fmt.Errorf("remote base64 content exceeds %d byte limit", max)
 	}
 	return decoded, nil
 }

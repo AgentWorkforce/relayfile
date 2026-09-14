@@ -182,3 +182,29 @@ func TestHTTPClientLargeWriteRetainsJSONWhenDiscoveryFails(t *testing.T) {
 		})
 	}
 }
+
+func TestRemoteBase64MaterializationAt64MiBBoundary(t *testing.T) {
+	raw := bytes.Repeat([]byte{0xa5}, (64<<20)+1)
+	for _, encoding := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding} {
+		file := RemoteFile{Encoding: "base64", Content: encoding.EncodeToString(raw[:64<<20])}
+		decoded, err := decodeRemoteFileContent(file)
+		if err != nil || !bytes.Equal(decoded, raw[:64<<20]) {
+			t.Fatalf("exact64MiB rejected/corrupted: %v", err)
+		}
+		file.Content = encoding.EncodeToString(raw)
+		if _, err := decodeRemoteFileContent(file); err == nil {
+			t.Fatal("accepted above64MiB")
+		}
+	}
+}
+
+func TestRemoteBase64LimitCountsBytesNotLineBreaks(t *testing.T) {
+	t.Setenv("RELAYFILE_MAX_WRITEBACK_BYTES", "1")
+	decoded, err := decodeRemoteFileContent(RemoteFile{Encoding: "base64", Content: "YQ==\r\n"})
+	if err != nil || string(decoded) != "a" {
+		t.Fatalf("padded one-byte content failed: %v", err)
+	}
+	if _, err := decodeRemoteFileContent(RemoteFile{Encoding: "base64", Content: "Y@=="}); err == nil {
+		t.Fatal("accepted invalid base64")
+	}
+}
