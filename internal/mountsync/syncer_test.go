@@ -3023,6 +3023,149 @@ func TestGithubWorkingTreeSnapshotRejectsUnsupportedCompleteEntry(t *testing.T) 
 	}
 }
 
+func TestValidateSymlinkTargetAcceptsInRootSymlinkChain(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires developer mode or elevated privileges on Windows")
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("# rules\n"), 0o644); err != nil {
+		t.Fatalf("write AGENTS.md: %v", err)
+	}
+	gemini := filepath.Join(root, "GEMINI.md")
+	// The verdict must not depend on materialization order: validate the
+	// chain both before and after its intermediate link exists locally.
+	if err := validateSymlinkTarget(root, gemini, "CLAUDE.md"); err != nil {
+		t.Fatalf("chain rejected before the intermediate link exists: %v", err)
+	}
+	if err := os.Symlink("AGENTS.md", filepath.Join(root, "CLAUDE.md")); err != nil {
+		t.Fatalf("create CLAUDE.md link: %v", err)
+	}
+	if err := validateSymlinkTarget(root, gemini, "CLAUDE.md"); err != nil {
+		t.Fatalf("in-root symlink chain rejected: %v", err)
+	}
+}
+
+func TestValidateSymlinkTargetRejectsChainWhoseNextHopEscapes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires developer mode or elevated privileges on Windows")
+	}
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(filepath.Join(outside, "secret"), filepath.Join(root, "CLAUDE.md")); err != nil {
+		t.Fatalf("create escaping link: %v", err)
+	}
+	if err := validateSymlinkTarget(root, filepath.Join(root, "GEMINI.md"), "CLAUDE.md"); err == nil {
+		t.Fatal("chain whose next hop escapes the mount was accepted")
+	}
+	if err := os.Remove(filepath.Join(root, "CLAUDE.md")); err != nil {
+		t.Fatalf("remove escaping link: %v", err)
+	}
+	if err := os.Symlink("../"+filepath.Base(outside)+"/secret", filepath.Join(root, "CLAUDE.md")); err != nil {
+		t.Fatalf("create relative escaping link: %v", err)
+	}
+	if err := validateSymlinkTarget(root, filepath.Join(root, "GEMINI.md"), "CLAUDE.md"); err == nil {
+		t.Fatal("chain whose relative next hop escapes the mount was accepted")
+	}
+}
+
+func TestValidateSymlinkTargetRejectsSymlinkCycle(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires developer mode or elevated privileges on Windows")
+	}
+	root := t.TempDir()
+	if err := os.Symlink("b", filepath.Join(root, "a")); err != nil {
+		t.Fatalf("create a: %v", err)
+	}
+	if err := os.Symlink("a", filepath.Join(root, "b")); err != nil {
+		t.Fatalf("create b: %v", err)
+	}
+	if err := validateSymlinkTarget(root, filepath.Join(root, "c"), "a"); err == nil {
+		t.Fatal("symlink cycle accepted")
+	}
+}
+
+func TestGithubWorkingTreeTarSeedMaterializesInRootSymlinkChain(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires developer mode or elevated privileges on Windows")
+	}
+	localDir := t.TempDir()
+	contentsRoot := "/github/repos/AgentWorkforce/relay/contents"
+	headSHA := "head-chain"
+	agentsBody := []byte("# rules\n")
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_tar_chain",
+		RemoteRoot:  contentsRoot,
+		LocalRoot:   localDir,
+		StateFile:   filepath.Join(localDir, ".relayfile-mount-state.json"),
+		WebSocket:   boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+	syncer.githubWorkingTree.HeadSHA = headSHA
+
+	// Relay's own tree: GEMINI.md -> CLAUDE.md -> AGENTS.md, in git's tar
+	// order, so CLAUDE.md is already a local link when GEMINI.md arrives.
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := tw.WriteHeader(&tar.Header{
+		Name: "AGENTS.md", Mode: 0o644, Size: int64(len(agentsBody)), Typeflag: tar.TypeReg,
+	}); err != nil {
+		t.Fatalf("write AGENTS.md header: %v", err)
+	}
+	if _, err := tw.Write(agentsBody); err != nil {
+		t.Fatalf("write AGENTS.md body: %v", err)
+	}
+	for _, link := range []struct{ name, target string }{{"CLAUDE.md", "AGENTS.md"}, {"GEMINI.md", "CLAUDE.md"}} {
+		if err := tw.WriteHeader(&tar.Header{
+			Name: link.name, Mode: 0o777, Typeflag: tar.TypeSymlink, Linkname: link.target,
+		}); err != nil {
+			t.Fatalf("write %s header: %v", link.name, err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	remotePaths, err := syncer.applyGithubWorkingTreeTarSeed(
+		GithubWorkingTreeTar{
+			Body: io.NopCloser(bytes.NewReader(buf.Bytes())), ContentType: "application/x-tar",
+		},
+		map[string]githubTreeFile{
+			"AGENTS.md": {
+				RemotePath: contentsRoot + "/AGENTS.md@" + headSHA + ".json", Revision: "rev_1",
+				ContentHash: hashBytes(agentsBody), Type: remoteTypeFile, Mode: 0o644,
+			},
+			"CLAUDE.md": {
+				RemotePath: contentsRoot + "/CLAUDE.md@" + headSHA + ".json", Revision: "rev_2",
+				ContentHash: hashBytes([]byte("AGENTS.md")), Type: remoteTypeSymlink, Target: "AGENTS.md", Mode: 0o777,
+			},
+			"GEMINI.md": {
+				RemotePath: contentsRoot + "/GEMINI.md@" + headSHA + ".json", Revision: "rev_3",
+				ContentHash: hashBytes([]byte("CLAUDE.md")), Type: remoteTypeSymlink, Target: "CLAUDE.md", Mode: 0o777,
+			},
+		},
+		nil,
+		bootstrapProgress{},
+	)
+	if err != nil {
+		t.Fatalf("apply tar seed with in-root symlink chain: %v", err)
+	}
+	if len(remotePaths) != 3 {
+		t.Fatalf("expected 3 materialized paths, got %d", len(remotePaths))
+	}
+	for name, want := range map[string]string{"CLAUDE.md": "AGENTS.md", "GEMINI.md": "CLAUDE.md"} {
+		got, err := os.Readlink(filepath.Join(localDir, name))
+		if err != nil || got != want {
+			t.Fatalf("%s link = %q, %v; want %q", name, got, err, want)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(localDir, "GEMINI.md"))
+	if err != nil || !bytes.Equal(data, agentsBody) {
+		t.Fatalf("reading through the chain = %q, %v; want %q", data, err, agentsBody)
+	}
+}
+
 func TestGithubWorkingTreeTarSeedPreservesSymlinkAndExecutableMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation requires developer mode or elevated privileges on Windows")

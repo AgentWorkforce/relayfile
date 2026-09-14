@@ -12550,7 +12550,16 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	return nil
 }
 
+// maxSymlinkChainHops bounds how many in-root links validateSymlinkTarget
+// follows through a chain such as GEMINI.md -> CLAUDE.md -> AGENTS.md, so a
+// cycle is refused instead of recursing forever.
+const maxSymlinkChainHops = 8
+
 func validateSymlinkTarget(localRoot, localPath, target string) error {
+	return validateSymlinkTargetHops(localRoot, localPath, target, 0)
+}
+
+func validateSymlinkTargetHops(localRoot, localPath, target string, hops int) error {
 	if target == "" || strings.ContainsRune(target, '\x00') || strings.ContainsAny(target, "\r\n") {
 		return errors.New("empty or control-character target")
 	}
@@ -12571,8 +12580,28 @@ func validateSymlinkTarget(localRoot, localPath, target string) error {
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
 		return errors.New("target escapes the mount root")
 	}
-	if err := ensureNoSymlinkPathComponents(localRoot, resolved); err != nil {
-		return fmt.Errorf("target traverses a symlinked path component: %w", err)
+	// Only the target's directories must be real: a symlinked directory there
+	// could redirect the link outside the mount. The target itself may be
+	// another link (a chain), because creating a link never follows its
+	// target; that next hop is validated by the same rules instead of being
+	// refused, so the verdict no longer depends on whether it was
+	// materialized first.
+	if resolved != root {
+		if err := ensureNoSymlinkPathComponents(localRoot, filepath.Dir(resolved)); err != nil {
+			return fmt.Errorf("target traverses a symlinked path component: %w", err)
+		}
+		if info, statErr := os.Lstat(resolved); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			if hops >= maxSymlinkChainHops {
+				return fmt.Errorf("symlink chain exceeds %d hops", maxSymlinkChainHops)
+			}
+			next, err := os.Readlink(resolved)
+			if err != nil {
+				return err
+			}
+			if err := validateSymlinkTargetHops(localRoot, resolved, next, hops+1); err != nil {
+				return fmt.Errorf("chained target %s: %w", relative, err)
+			}
+		}
 	}
 	if err := ensureNoSymlinkParents(localRoot, localPath); err != nil {
 		return fmt.Errorf("symlink path traverses a symlinked parent: %w", err)
