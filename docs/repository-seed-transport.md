@@ -9,7 +9,8 @@ When a single file exceeds that batch budget, the mount checks `/health` for
 route with raw bytes and these headers:
 
 - `Content-Type: application/octet-stream`
-- `Content-Length`: exact decoded file size, at most 64 MiB by default
+- `Content-Length`: required exact decoded file size, at most 64 MiB by default;
+  absent or malformed lengths return 411 before the body is read
 - `X-Relayfile-Encoding`: `utf-8` or `base64` (storage/read representation;
   the uploaded body always contains raw bytes)
 - `X-Relayfile-Content-Type`: original media type
