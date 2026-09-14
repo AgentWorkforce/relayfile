@@ -151,3 +151,34 @@ func TestHTTPClientLargeMetadataWriteKeepsJSONContract(t *testing.T) {
 		t.Fatalf("metadata result %#v %v", out, err)
 	}
 }
+
+func TestHTTPClientLargeWriteRetainsJSONWhenDiscoveryFails(t *testing.T) {
+	for _, status := range []int{200, 404, 503} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			writes := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/health" {
+					w.WriteHeader(status)
+					io.WriteString(w, "legacy health response")
+					return
+				}
+				if r.Method != "POST" || !strings.HasSuffix(r.URL.Path, "/fs/bulk") {
+					t.Errorf("unexpected fallback route %s", r.URL.Path)
+				}
+				if r.ContentLength > 96<<20 {
+					t.Error("unbounded JSON fallback")
+				}
+				io.Copy(io.Discard, r.Body)
+				writes++
+				io.WriteString(w, `{"written":1}`)
+			}))
+			defer server.Close()
+			client := NewHTTPClient(server.URL, "local-test", server.Client())
+			client.maxRetries = 0
+			out, err := client.WriteFilesBulk(context.Background(), "workspace", []BulkWriteFile{{Path: "/large.txt", Content: strings.Repeat("x", 9<<20)}})
+			if err != nil || writes != 1 || out.Written != 1 {
+				t.Fatalf("fallback failed: %#v %v writes=%d", out, err, writes)
+			}
+		})
+	}
+}

@@ -53,7 +53,12 @@ func (c *HTTPClient) writeLargeFile(ctx context.Context, workspaceID string, fil
 		Features []string `json:"features"`
 	}
 	if err := c.doJSON(ctx, http.MethodGet, "/health", nil, nil, &health); err != nil {
-		return BulkWriteResponse{}, err
+		if ctx.Err() != nil {
+			return BulkWriteResponse{}, ctx.Err()
+		}
+		// Discovery is optional on older servers/proxies. Failure must not
+		// remove their existing bounded JSON write capability.
+		return c.writeFilesBulkJSON(ctx, workspaceID, []BulkWriteFile{file})
 	}
 	streamSupported := false
 	for _, feature := range health.Features {
