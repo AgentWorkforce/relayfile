@@ -102,3 +102,52 @@ func TestHTTPClientStreamingConflictRemainsPerFileError(t *testing.T) {
 		t.Fatalf("lost conflict: %#v %v", out, err)
 	}
 }
+
+func TestHTTPClientLargeUTF8AndConfiguredLimits(t *testing.T) {
+	content := strings.Repeat("x", 65<<20)
+	for _, limit := range []string{"0", "68157440"} {
+		t.Run(limit, func(t *testing.T) {
+			t.Setenv("RELAYFILE_MAX_WRITEBACK_BYTES", limit)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/health" {
+					io.WriteString(w, `{"features":["file-stream-v1"]}`)
+					return
+				}
+				if r.Header.Get("X-Relayfile-Encoding") != "utf-8" {
+					t.Error("missing explicit UTF-8 representation")
+				}
+				n, err := io.Copy(io.Discard, r.Body)
+				if err != nil || n != int64(len(content)) {
+					t.Errorf("content size=%d err=%v", n, err)
+				}
+				io.WriteString(w, `{"targetRevision":"rev_1"}`)
+			}))
+			defer server.Close()
+			out, err := NewHTTPClient(server.URL, "local-test", server.Client()).WriteFilesBulk(context.Background(), "workspace", []BulkWriteFile{{Path: "/large.txt", Content: content}})
+			if err != nil || out.Written != 1 {
+				t.Fatalf("configured limit rejected: %#v %v", out, err)
+			}
+		})
+	}
+}
+
+func TestHTTPClientLargeMetadataWriteKeepsJSONContract(t *testing.T) {
+	file := BulkWriteFile{Path: "/provider/draft", Content: strings.Repeat("x", 9<<20), WritebackIntent: "provider-specific"}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || !strings.HasSuffix(r.URL.Path, "/fs/bulk") {
+			t.Errorf("metadata write lost JSON route %s", r.URL.Path)
+		}
+		var body struct {
+			Files []BulkWriteFile `json:"files"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Files) != 1 || body.Files[0].WritebackIntent != file.WritebackIntent {
+			t.Error("metadata lost")
+		}
+		io.WriteString(w, `{"written":1}`)
+	}))
+	defer server.Close()
+	out, err := NewHTTPClient(server.URL, "local-test", server.Client()).WriteFilesBulk(context.Background(), "workspace", []BulkWriteFile{file})
+	if err != nil || out.Written != 1 {
+		t.Fatalf("metadata result %#v %v", out, err)
+	}
+}

@@ -45,6 +45,10 @@ func (c *HTTPClient) WriteFilesBulk(ctx context.Context, workspaceID string, fil
 }
 
 func (c *HTTPClient) writeLargeFile(ctx context.Context, workspaceID string, file BulkWriteFile) (BulkWriteResponse, error) {
+	if isSymlinkType(file.Type) || file.WritebackIntent != "" {
+		return c.writeFilesBulkJSON(ctx, workspaceID, []BulkWriteFile{file})
+	}
+
 	var health struct {
 		Features []string `json:"features"`
 	}
@@ -60,9 +64,6 @@ func (c *HTTPClient) writeLargeFile(ctx context.Context, workspaceID string, fil
 	if !streamSupported {
 		return c.writeFilesBulkJSON(ctx, workspaceID, []BulkWriteFile{file})
 	}
-	if isSymlinkType(file.Type) || file.WritebackIntent != "" {
-		return BulkWriteResponse{}, fmt.Errorf("large streaming write unsupported for metadata on %s", file.Path)
-	}
 	var raw []byte
 	var err error
 	if normalizeEncoding(file.Encoding) == "base64" {
@@ -76,8 +77,8 @@ func (c *HTTPClient) writeLargeFile(ctx context.Context, workspaceID string, fil
 	if err != nil {
 		return BulkWriteResponse{}, fmt.Errorf("invalid base64 for %s", file.Path)
 	}
-	if len(raw) > 64<<20 {
-		return BulkWriteResponse{}, fmt.Errorf("file %s exceeds the 64 MiB streaming limit", file.Path)
+	if maxBytes := maxWritebackBytes(); maxBytes > 0 && int64(len(raw)) > maxBytes {
+		return BulkWriteResponse{}, fmt.Errorf("file %s exceeds the configured %d-byte writeback limit", file.Path, maxBytes)
 	}
 	ifMatch := file.IfMatch
 	if ifMatch == "" {
@@ -87,9 +88,13 @@ func (c *HTTPClient) writeLargeFile(ctx context.Context, workspaceID string, fil
 	if mode == 0 {
 		mode = 0644
 	}
+	encoding := normalizeEncoding(file.Encoding)
+	if encoding == "" {
+		encoding = "utf-8"
+	}
 	headers := map[string]string{
 		"Content-Type":             "application/octet-stream",
-		"X-Relayfile-Encoding":     normalizeEncoding(file.Encoding),
+		"X-Relayfile-Encoding":     encoding,
 		"X-Relayfile-Content-Type": file.ContentType,
 		"X-Relayfile-Mode":         fmt.Sprintf("%03o", mode&0777),
 		"If-Match":                 ifMatch,
