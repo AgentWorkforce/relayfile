@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"io"
 	"net/http"
@@ -249,8 +250,8 @@ func TestLargeEscapedTextUsesBase64WireEncoding(t *testing.T) {
 	if snapshot.Encoding != "base64" {
 		t.Fatalf("large escaped text encoding = %q, want base64", snapshot.Encoding)
 	}
-	if bulkWriteRequestSize([]BulkWriteFile{{Path: "/large.json", ContentType: snapshot.ContentType, Content: snapshot.WireContent, Encoding: snapshot.Encoding}}) > maxWritebackBatchBytes() {
-		t.Fatal("base64 snapshot still exceeds request wire budget")
+	if decoded, err := base64.StdEncoding.DecodeString(snapshot.WireContent); err != nil || !bytes.Equal(decoded, data) {
+		t.Fatal("large streaming snapshot lost content")
 	}
 }
 

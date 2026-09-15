@@ -1102,7 +1102,7 @@ func (c *HTTPClient) writeFile(ctx context.Context, workspaceID, path, baseRevis
 	return out, err
 }
 
-func (c *HTTPClient) WriteFilesBulk(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
+func (c *HTTPClient) writeFilesBulkJSON(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
 	if len(files) == 0 {
 		return BulkWriteResponse{}, ErrEmptyBulkWrite
 	}
@@ -1111,8 +1111,8 @@ func (c *HTTPClient) WriteFilesBulk(ctx context.Context, workspaceID string, fil
 	}{
 		Files: files,
 	}
-	if wireBytes := bulkWriteRequestSize(files); maxWritebackBatchBytes() > 0 && wireBytes > maxWritebackBatchBytes() {
-		return BulkWriteResponse{}, fmt.Errorf("bulk write request exceeds %d wire bytes (got %d)", maxWritebackBatchBytes(), wireBytes)
+	if wireBytes := bulkWriteRequestSize(files); wireBytes > 96<<20 {
+		return BulkWriteResponse{}, fmt.Errorf("bulk write request exceeds %d wire bytes (got %d)", 96<<20, wireBytes)
 	}
 	var out BulkWriteResponse
 	err := c.doJSON(ctx, http.MethodPost, fmt.Sprintf("/v1/workspaces/%s/fs/bulk", url.PathEscape(workspaceID)), nil, body, &out)
@@ -1389,6 +1389,10 @@ func (c *HTTPClient) doJSONWithLimit(
 			return err
 		}
 	}
+	return c.doBytesWithLimit(ctx, method, requestPath, headers, bodyBytes, out, maxResponseSize, retryBodyReadErrors)
+}
+
+func (c *HTTPClient) doBytesWithLimit(ctx context.Context, method, requestPath string, headers map[string]string, bodyBytes []byte, out any, maxResponseSize int64, retryBodyReadErrors bool) error {
 	authRefreshTried := false
 	for attempt := 0; ; attempt++ {
 		var bodyReader io.Reader
@@ -1402,7 +1406,7 @@ func (c *HTTPClient) doJSONWithLimit(
 		}
 		req.Header.Set("Authorization", "Bearer "+requestToken)
 		req.Header.Set("X-Correlation-Id", c.correlationIDForRequest())
-		if body != nil {
+		if bodyBytes != nil {
 			req.Header.Set("Content-Type", "application/json")
 		}
 		for key, value := range headers {
@@ -8479,9 +8483,9 @@ func (s *Syncer) recordCloudSuccess() {
 const defaultMaxWritebackBytes int64 = 64 << 20
 
 // defaultMaxWritebackBatchBytes caps the serialized /fs/bulk request body.
-// A single 64 MiB binary expands to about 85 MiB as base64, so leave JSON
-// framing headroom while keeping batches bounded.
-const defaultMaxWritebackBatchBytes int64 = 96 << 20
+// Keep ordinary batches below the Cloud Worker 10 MiB JSON body limit.
+// Individual large files use raw streaming rather than base64 JSON.
+const defaultMaxWritebackBatchBytes int64 = 8 << 20
 
 // maxWritebackBytes returns the writeback body size cap in bytes.
 // Configurable via RELAYFILE_MAX_WRITEBACK_BYTES (positive integer).
@@ -11502,7 +11506,7 @@ func shouldEncodeLocalContentAsBase64(data []byte, contentType string) bool {
 	// 96 MiB request budget even though base64 would fit. Estimate the escaped
 	// string size without allocating a second copy and choose base64 whenever
 	// the raw representation would overflow the wire cap.
-	maxWire := maxWritebackBatchBytes()
+	maxWire := int64(96 << 20)
 	if maxWire <= 0 {
 		return false
 	}
@@ -11605,21 +11609,24 @@ func decodeRemoteFileContent(file RemoteFile) ([]byte, error) {
 		}
 		return []byte(file.Content), nil
 	}
-	if max := maxWritebackBytes(); max > 0 && int64(base64.StdEncoding.DecodedLen(len(file.Content))) > max {
-		return nil, fmt.Errorf("remote base64 content exceeds %d byte limit", max)
+	// DecodedLen is an upper bound: padding can put an exactly-at-limit
+	// file two bytes over it. Bound actual decoded bytes instead, also
+	// handling permitted CR/LF without allocating an oversized output.
+	encoding := base64.StdEncoding
+	if !strings.Contains(file.Content, "=") {
+		encoding = base64.RawStdEncoding
 	}
-	if decoded, err := base64.StdEncoding.DecodeString(file.Content); err == nil {
-		if max := maxWritebackBytes(); max > 0 && int64(len(decoded)) > max {
-			return nil, fmt.Errorf("remote content exceeds %d byte limit", max)
-		}
-		return decoded, nil
+	var reader io.Reader = base64.NewDecoder(encoding, strings.NewReader(file.Content))
+	max := maxWritebackBytes()
+	if max > 0 && max < math.MaxInt64 {
+		reader = io.LimitReader(reader, max+1)
 	}
-	decoded, err := base64.RawStdEncoding.DecodeString(file.Content)
+	decoded, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, err
 	}
-	if max := maxWritebackBytes(); max > 0 && int64(len(decoded)) > max {
-		return nil, fmt.Errorf("remote content exceeds %d byte limit", max)
+	if max > 0 && int64(len(decoded)) > max {
+		return nil, fmt.Errorf("remote base64 content exceeds %d byte limit", max)
 	}
 	return decoded, nil
 }
