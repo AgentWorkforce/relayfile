@@ -7,6 +7,10 @@ import {
   type RelayfileCloudTokenSet,
   type RelayfileCloudTokenSetupOptions
 } from "./cloud-token-provider.js"
+import {
+  createRelayauthPathTokenAccessTokenProvider,
+  isRelayauthRefreshToken
+} from "./relayauth-token-provider.js"
 import type { RelayfileCloudLoginOptions } from "./cloud-login.js"
 import {
   CloudAbortError,
@@ -224,19 +228,52 @@ export class RelayfileSetup {
     options: RelayfileCloudTokenSetupOptions = {}
   ): RelayfileSetup {
     const cloudApiUrl = options.cloudApiUrl ?? tokens.apiUrl ?? DEFAULT_CLOUD_API_URL
+
+    // Auto-route by the refresh token's issuer: a RelayAuth `relay_pa` pair
+    // (e.g. RELAYFILE_ACCESS_TOKEN + RELAYFILE_REFRESH_TOKEN) rotates at
+    // RelayAuth, not the Cloud device-auth endpoint. Routing it through the
+    // Cloud provider returns `invalid_grant`, so pick the right provider here —
+    // callers get a working credential with no code change, just an upgrade.
+    const accessToken: AccessTokenProvider = isRelayauthRefreshToken(
+      tokens.refreshToken
+    )
+      ? createRelayauthPathTokenAccessTokenProvider(
+          {
+            accessToken: tokens.accessToken,
+            refreshToken: tokens.refreshToken,
+            accessTokenExpiresAt: tokens.accessTokenExpiresAt,
+            refreshTokenExpiresAt: tokens.refreshTokenExpiresAt
+          },
+          {
+            requestTimeoutMs: options.requestTimeoutMs,
+            refreshWindowMs: options.refreshWindowMs,
+            onTokens: options.onTokens
+              ? (rotated) =>
+                  options.onTokens!({
+                    apiUrl: tokens.apiUrl ?? cloudApiUrl,
+                    accessToken: rotated.accessToken,
+                    refreshToken: rotated.refreshToken,
+                    accessTokenExpiresAt: rotated.accessTokenExpiresAt ?? "",
+                    refreshTokenExpiresAt: rotated.refreshTokenExpiresAt
+                  })
+              : undefined
+          }
+        )
+      : createRelayfileCloudAccessTokenProvider(
+          {
+            ...tokens,
+            apiUrl: tokens.apiUrl ?? cloudApiUrl
+          },
+          {
+            ...options,
+            cloudApiUrl
+          }
+        )
+
     return new RelayfileSetup({
       ...options,
       cloudApiUrl,
-      accessToken: createRelayfileCloudAccessTokenProvider(
-        {
-          ...tokens,
-          apiUrl: tokens.apiUrl ?? cloudApiUrl
-        },
-        {
-          ...options,
-          cloudApiUrl
-        }
-      )
+      accessToken
     })
   }
 

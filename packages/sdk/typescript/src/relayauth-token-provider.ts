@@ -2,7 +2,8 @@ import type { AccessTokenProvider } from "./client.js"
 import {
   CloudApiError,
   CloudTimeoutError,
-  MalformedCloudResponseError
+  MalformedCloudResponseError,
+  RelayfileSetupError
 } from "./setup-errors.js"
 import { RELAYFILE_SDK_VERSION } from "./version.js"
 
@@ -69,6 +70,11 @@ export function createRelayauthPathTokenAccessTokenProvider(
 
   let tokens = withDerivedAccessExpiry(initialTokens)
   let refreshPromise: Promise<void> | undefined
+  // A rotated token set whose `onTokens` persistence callback has not yet
+  // succeeded. Until it does, a consumed refresh token may still live in the
+  // caller's persisted copy (→ `invalid_grant` after restart), so we retry the
+  // callback on every subsequent use rather than treating rotation as complete.
+  let pendingPersist: RelayauthPathTokenSet | undefined
 
   return async () => {
     if (shouldRefresh(tokens, refreshWindowMs)) {
@@ -80,12 +86,15 @@ export function createRelayauthPathTokenAccessTokenProvider(
       } finally {
         refreshPromise = undefined
       }
+    } else if (pendingPersist) {
+      // No refresh needed, but a prior rotation still owes a successful persist.
+      await persistPendingTokens()
     }
     return tokens.accessToken
   }
 
   async function refresh(): Promise<void> {
-    const response = await fetchWithTimeout(
+    const { response, payload } = await fetchJsonWithTimeout(
       refreshUrl,
       {
         method: "POST",
@@ -97,7 +106,6 @@ export function createRelayauthPathTokenAccessTokenProvider(
       },
       requestTimeoutMs
     )
-    const payload = await readResponseBody(response)
     if (!response.ok) {
       throw new CloudApiError(response.status, payload)
     }
@@ -108,7 +116,32 @@ export function createRelayauthPathTokenAccessTokenProvider(
       accessTokenExpiresAt: readOptionalStringField(payload, "accessTokenExpiresAt"),
       refreshTokenExpiresAt: readOptionalStringField(payload, "refreshTokenExpiresAt")
     })
-    await options.onTokens?.({ ...tokens })
+    pendingPersist = { ...tokens }
+    await persistPendingTokens()
+  }
+
+  // Best-effort, retried persistence. A callback failure never rejects the
+  // provider — the in-memory access token is valid and usable — but the set
+  // stays pending so the next provider() call re-attempts, so a durable copy
+  // eventually catches up with the rotated refresh token.
+  async function persistPendingTokens(): Promise<void> {
+    if (!pendingPersist) {
+      return
+    }
+    if (!options.onTokens) {
+      pendingPersist = undefined
+      return
+    }
+    const toPersist = pendingPersist
+    try {
+      await options.onTokens({ ...toPersist })
+      // Only clear if nothing rotated again while the callback was in flight.
+      if (pendingPersist === toPersist) {
+        pendingPersist = undefined
+      }
+    } catch {
+      // Keep pending; retried on the next use.
+    }
   }
 }
 
@@ -116,13 +149,42 @@ function buildRefreshUrl(tokens: RelayauthPathTokenSet): string {
   const explicit = normalizeNonEmptyString(tokens.relayauthUrl)
   const base = explicit ?? deriveRelayauthApiBase(tokens.refreshToken)
   if (!base) {
-    throw new MalformedCloudResponseError("relayauthUrl", tokens.refreshToken)
+    // NEVER put the refresh token in the error — it is a live bearer credential.
+    throw new RelayfileSetupError(
+      "Cannot determine the RelayAuth refresh endpoint: pass `relayauthUrl`, or use a refresh token that carries an `iss` claim.",
+      "relayauth_url_unresolved"
+    )
   }
-  const url = new URL(base)
+  let url: URL
+  try {
+    url = new URL(base)
+  } catch {
+    throw new RelayfileSetupError(
+      `Invalid RelayAuth URL: ${base}`,
+      "relayauth_url_invalid"
+    )
+  }
+  // The refresh token is transmitted in the request body, so the endpoint must
+  // be HTTPS. A loopback host is allowed for local self-host development.
+  if (url.protocol !== "https:" && !isLoopbackHost(url.hostname)) {
+    throw new RelayfileSetupError(
+      `RelayAuth refresh endpoint must use HTTPS (got ${url.protocol}//${url.host}).`,
+      "relayauth_url_insecure"
+    )
+  }
   if (!url.pathname.endsWith("/")) {
     url.pathname = `${url.pathname}/`
   }
   return new URL("v1/tokens/refresh", url).toString()
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname === "[::1]"
+  )
 }
 
 // Derive the RelayAuth API base from the refresh token's `iss`. The issuer is the
@@ -138,7 +200,8 @@ function deriveRelayauthApiBase(refreshToken: string): string | undefined {
     if (!url.hostname.startsWith("api.")) {
       url.hostname = `api.${url.hostname}`
     }
-    return `${url.protocol}//${url.hostname}`
+    // `url.host` preserves a non-default port; `url.hostname` would drop it.
+    return `${url.protocol}//${url.host}`
   } catch {
     return undefined
   }
@@ -189,15 +252,20 @@ function decodeJwtClaims(token: string): JwtClaims | undefined {
   }
 }
 
-async function fetchWithTimeout(
+// Runs the fetch AND the response-body read under one timeout, so a server that
+// sends headers then stalls the body still trips `requestTimeoutMs` instead of
+// hanging the shared refresh (and every caller awaiting it) indefinitely.
+async function fetchJsonWithTimeout(
   url: string,
   init: RequestInit,
   timeoutMs: number
-): Promise<Response> {
+): Promise<{ response: Response; payload: unknown }> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    return await fetch(url, { ...init, signal: controller.signal })
+    const response = await fetch(url, { ...init, signal: controller.signal })
+    const payload = await readResponseBody(response)
+    return { response, payload }
   } catch (error) {
     if (controller.signal.aborted) {
       throw new CloudTimeoutError("refreshRelayauthAccessToken", timeoutMs)

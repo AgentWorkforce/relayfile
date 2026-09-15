@@ -3,7 +3,11 @@ import {
   createRelayauthPathTokenAccessTokenProvider,
   isRelayauthRefreshToken
 } from "./relayauth-token-provider.js"
-import { CloudApiError } from "./setup-errors.js"
+import {
+  CloudApiError,
+  CloudTimeoutError,
+  RelayfileSetupError
+} from "./setup-errors.js"
 
 // Build a compact JWT (header.payload.signature) with the given claims and an
 // optional relay_* prefix, matching how relay_pa tokens are wrapped.
@@ -127,5 +131,134 @@ describe("createRelayauthPathTokenAccessTokenProvider", () => {
       refreshToken: relayPaRefresh()
     })
     await expect(provider()).rejects.toBeInstanceOf(CloudApiError)
+  })
+
+  it("preserves a non-default port from the issuer", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            accessToken: accessToken(3600),
+            refreshToken: relayPaRefresh()
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+      )
+    const refresh = jwt(
+      {
+        iss: "https://relayauth.dev:8443",
+        aud: ["relayauth"],
+        exp: Math.floor(Date.now() / 1000) + 90 * 24 * 3600
+      },
+      "relay_pa_"
+    )
+    const provider = createRelayauthPathTokenAccessTokenProvider({
+      accessToken: accessToken(-10),
+      refreshToken: refresh
+    })
+    await provider()
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "https://api.relayauth.dev:8443/v1/tokens/refresh"
+    )
+  })
+
+  it("rejects a non-HTTPS RelayAuth URL, but allows loopback for local dev", () => {
+    const refresh = relayPaRefresh()
+    expect(() =>
+      createRelayauthPathTokenAccessTokenProvider({
+        accessToken: accessToken(3600),
+        refreshToken: refresh,
+        relayauthUrl: "http://api.evil.example"
+      })
+    ).toThrowError(RelayfileSetupError)
+    // loopback over http is permitted (local self-host)
+    expect(() =>
+      createRelayauthPathTokenAccessTokenProvider({
+        accessToken: accessToken(3600),
+        refreshToken: refresh,
+        relayauthUrl: "http://localhost:8787"
+      })
+    ).not.toThrow()
+  })
+
+  it("does not leak the refresh token when the endpoint cannot be resolved", () => {
+    const secret = jwt({ aud: ["relayauth"] }, "relay_pa_") // no iss claim
+    try {
+      createRelayauthPathTokenAccessTokenProvider({
+        accessToken: accessToken(3600),
+        refreshToken: secret
+      })
+      throw new Error("expected throw")
+    } catch (err) {
+      expect(err).toBeInstanceOf(RelayfileSetupError)
+      expect((err as Error).message).not.toContain(secret)
+      expect((err as Error).message).not.toContain(secret.split(".")[1])
+    }
+  })
+
+  it("times out if the server stalls the response body after headers", async () => {
+    vi.useFakeTimers()
+    try {
+      vi.spyOn(globalThis, "fetch").mockImplementation(
+        (_url, init?: RequestInit) => {
+          const signal = init?.signal
+          const response = {
+            ok: true,
+            status: 200,
+            headers: { get: () => "application/json" },
+            // Body never arrives until the request is aborted by the timeout.
+            text: () =>
+              new Promise<string>((_resolve, reject) => {
+                signal?.addEventListener("abort", () =>
+                  reject(new DOMException("aborted", "AbortError"))
+                )
+              })
+          } as unknown as Response
+          return Promise.resolve(response)
+        }
+      )
+      const provider = createRelayauthPathTokenAccessTokenProvider(
+        { accessToken: accessToken(-10), refreshToken: relayPaRefresh() },
+        { requestTimeoutMs: 1000 }
+      )
+      const pending = provider()
+      const assertion = expect(pending).rejects.toBeInstanceOf(CloudTimeoutError)
+      await vi.advanceTimersByTimeAsync(1001)
+      await assertion
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("retries onTokens after a persistence failure without blocking token use", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          accessToken: accessToken(3600),
+          refreshToken: relayPaRefresh()
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )
+    )
+    let calls = 0
+    const onTokens = vi.fn(async () => {
+      calls += 1
+      if (calls === 1) throw new Error("disk full")
+    })
+    const provider = createRelayauthPathTokenAccessTokenProvider(
+      { accessToken: accessToken(-10), refreshToken: relayPaRefresh() },
+      { onTokens }
+    )
+    // First call: refresh happens, onTokens throws — but a valid token is still returned.
+    const token1 = await provider()
+    expect(typeof token1).toBe("string")
+    expect(onTokens).toHaveBeenCalledTimes(1)
+    // Second call: access token still valid, but persistence is pending -> retried and succeeds.
+    await provider()
+    expect(onTokens).toHaveBeenCalledTimes(2)
+    // Third call: nothing pending -> no further callback.
+    await provider()
+    expect(onTokens).toHaveBeenCalledTimes(2)
   })
 })
