@@ -116,6 +116,7 @@
         "RelayFileClientOptions",
         "RelayFileJwtClaims",
         "RelayFileRetryOptions",
+        "RelayFileTokenPair",
         "ReplayOptions",
         "ResourceAtEventResult",
         "RevisionConflictError",
