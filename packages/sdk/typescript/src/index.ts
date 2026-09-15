@@ -3,6 +3,7 @@ export {
   DEFAULT_RELAYFILE_BASE_URL,
   type AccessTokenProvider,
   type RelayFileTokenPair,
+  type RelayFileTokenPersister,
   type RelayFileChangeLogOptions,
   type ConnectWebSocketOptions,
   type RelayFileClientOptions,

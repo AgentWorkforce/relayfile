@@ -298,6 +298,41 @@ describe("RelayFileClient token-pair auto-wrap", () => {
     expect(await client.getToken()).toBe("relay_pa_static.token.here")
     expect(fetchMock).not.toHaveBeenCalled()
   })
+
+  it("hands the rotated pair to onTokens so it survives a restart", async () => {
+    // Reproduces the Render redeploy failure: the refresh token rotates and the
+    // old one is revoked, so without persistence the next process reloads the
+    // spent pair. With onTokens the caller can write the live pair back.
+    const rotatedAccess = accessToken(3600)
+    const rotatedRefresh = relayPaRefresh()
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          accessToken: rotatedAccess,
+          refreshToken: rotatedRefresh
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )
+    )
+    const persisted: Array<{ accessToken: string; refreshToken: string }> = []
+    const client = new RelayFileClient({
+      token: {
+        accessToken: accessToken(-10), // expired -> forces a refresh
+        refreshToken: relayPaRefresh()
+      },
+      onTokens: (pair) => {
+        persisted.push({
+          accessToken: pair.accessToken,
+          refreshToken: pair.refreshToken
+        })
+      },
+      workspaceId: "rw_test"
+    })
+    expect(await client.getToken()).toBe(rotatedAccess)
+    expect(persisted).toEqual([
+      { accessToken: rotatedAccess, refreshToken: rotatedRefresh }
+    ])
+  })
 })
 
 describe("resolveCloudTokensAccessToken routing (base + CLI fromCloudTokens)", () => {
