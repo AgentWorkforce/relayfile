@@ -1,4 +1,3 @@
-import { createRelayfileCloudAccessTokenProvider } from "../cloud-token-provider.js"
 import {
   runRelayfileCloudLogin,
   type RelayfileCloudLoginOptions,
@@ -10,7 +9,8 @@ import {
   readMountedWorkspaceStatus
 } from "../mount-launcher.js"
 import {
-  RelayfileSetup as BaseRelayfileSetup
+  RelayfileSetup as BaseRelayfileSetup,
+  resolveCloudTokensAccessToken
 } from "../setup.js"
 import type {
   MountLauncher,
@@ -44,16 +44,8 @@ export class RelayfileSetup extends BaseRelayfileSetup {
     return new RelayfileSetup({
       ...options,
       cloudApiUrl,
-      accessToken: createRelayfileCloudAccessTokenProvider(
-        {
-          ...tokens,
-          apiUrl: tokens.apiUrl ?? cloudApiUrl
-        },
-        {
-          ...options,
-          cloudApiUrl
-        }
-      )
+      // Shared routing: relay_pa pairs rotate at RelayAuth, cloud pairs at Cloud.
+      accessToken: resolveCloudTokensAccessToken(tokens, options, cloudApiUrl)
     })
   }
 

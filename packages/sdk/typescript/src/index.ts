@@ -2,6 +2,7 @@ export {
   RelayFileClient,
   DEFAULT_RELAYFILE_BASE_URL,
   type AccessTokenProvider,
+  type RelayFileTokenPair,
   type RelayFileChangeLogOptions,
   type ConnectWebSocketOptions,
   type RelayFileClientOptions,
@@ -19,6 +20,12 @@ export {
   type RelayfileCloudTokenSet,
   type RelayfileCloudTokenSetupOptions
 } from "./cloud-login.js";
+export {
+  createRelayauthPathTokenAccessTokenProvider,
+  isRelayauthRefreshToken,
+  type RelayauthPathTokenSet,
+  type RelayauthPathTokenSetupOptions
+} from "./relayauth-token-provider.js";
 export {
   CloudAbortError,
   CloudApiError,

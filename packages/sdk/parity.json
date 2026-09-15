@@ -116,6 +116,7 @@
         "RelayFileClientOptions",
         "RelayFileJwtClaims",
         "RelayFileRetryOptions",
+        "RelayFileTokenPair",
         "ReplayOptions",
         "ResourceAtEventResult",
         "RevisionConflictError",
@@ -445,6 +446,18 @@
         "RelayfileCloudLoginOptions",
         "RelayfileCloudTokenSet",
         "RelayfileCloudTokenSetupOptions"
+      ],
+      "pyExports": []
+    },
+    {
+      "id": "relayauth-path-token-refresh",
+      "status": "ts-only",
+      "summary": "Access-token provider that refreshes relay_pa path tokens against RelayAuth.",
+      "tsExports": [
+        "RelayauthPathTokenSet",
+        "RelayauthPathTokenSetupOptions",
+        "createRelayauthPathTokenAccessTokenProvider",
+        "isRelayauthRefreshToken"
       ],
       "pyExports": []
     },

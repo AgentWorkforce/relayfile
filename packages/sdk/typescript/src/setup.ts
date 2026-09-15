@@ -7,6 +7,10 @@ import {
   type RelayfileCloudTokenSet,
   type RelayfileCloudTokenSetupOptions
 } from "./cloud-token-provider.js"
+import {
+  createRelayauthPathTokenAccessTokenProvider,
+  isRelayauthRefreshToken
+} from "./relayauth-token-provider.js"
 import type { RelayfileCloudLoginOptions } from "./cloud-login.js"
 import {
   CloudAbortError,
@@ -202,6 +206,50 @@ interface WorkspaceHandleOptions {
   joinOptions: NormalizedJoinWorkspaceOptions
 }
 
+/**
+ * Build the rotating access-token provider for a cloud token set, auto-routing
+ * by the refresh token's issuer: a RelayAuth `relay_pa` pair (e.g.
+ * RELAYFILE_ACCESS_TOKEN + RELAYFILE_REFRESH_TOKEN) rotates at RelayAuth, while a
+ * Cloud device-auth pair rotates at Cloud. Routing a relay_pa token through the
+ * Cloud endpoint returns `invalid_grant`, so this picks the right provider once
+ * and is shared by every `fromCloudTokens` (base and CLI subclass) so no entry
+ * point can silently skip the routing.
+ */
+export function resolveCloudTokensAccessToken(
+  tokens: RelayfileCloudTokenSet,
+  options: RelayfileCloudTokenSetupOptions,
+  cloudApiUrl: string
+): AccessTokenProvider {
+  if (!isRelayauthRefreshToken(tokens.refreshToken)) {
+    return createRelayfileCloudAccessTokenProvider(
+      { ...tokens, apiUrl: tokens.apiUrl ?? cloudApiUrl },
+      { ...options, cloudApiUrl }
+    )
+  }
+  return createRelayauthPathTokenAccessTokenProvider(
+    {
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      accessTokenExpiresAt: tokens.accessTokenExpiresAt,
+      refreshTokenExpiresAt: tokens.refreshTokenExpiresAt
+    },
+    {
+      requestTimeoutMs: options.requestTimeoutMs,
+      refreshWindowMs: options.refreshWindowMs,
+      onTokens: options.onTokens
+        ? (rotated) =>
+            options.onTokens!({
+              apiUrl: tokens.apiUrl ?? cloudApiUrl,
+              accessToken: rotated.accessToken,
+              refreshToken: rotated.refreshToken,
+              accessTokenExpiresAt: rotated.accessTokenExpiresAt ?? "",
+              refreshTokenExpiresAt: rotated.refreshTokenExpiresAt
+            })
+        : undefined
+    }
+  )
+}
+
 export class RelayfileSetup {
   private readonly cloudApiUrl: string
   private readonly accessToken?: AccessTokenProvider
@@ -227,16 +275,7 @@ export class RelayfileSetup {
     return new RelayfileSetup({
       ...options,
       cloudApiUrl,
-      accessToken: createRelayfileCloudAccessTokenProvider(
-        {
-          ...tokens,
-          apiUrl: tokens.apiUrl ?? cloudApiUrl
-        },
-        {
-          ...options,
-          cloudApiUrl
-        }
-      )
+      accessToken: resolveCloudTokensAccessToken(tokens, options, cloudApiUrl)
     })
   }
 
