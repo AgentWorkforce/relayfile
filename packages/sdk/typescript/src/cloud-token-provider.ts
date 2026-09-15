@@ -47,6 +47,11 @@ export function createRelayfileCloudAccessTokenProvider(
     apiUrl: normalizeNonEmptyString(initialTokens.apiUrl) ?? cloudApiUrl
   }
   let refreshPromise: Promise<void> | undefined
+  // A rotated token set whose `onTokens` persistence callback has not yet
+  // succeeded. Until it does, a consumed refresh token may still live in the
+  // caller's persisted copy (→ `invalid_grant` after restart), so we retry the
+  // callback on every subsequent use rather than treating rotation as complete.
+  let pendingPersist: RelayfileCloudTokenSet | undefined
 
   return async () => {
     if (shouldRefresh(tokens, refreshWindowMs)) {
@@ -58,6 +63,9 @@ export function createRelayfileCloudAccessTokenProvider(
       } finally {
         refreshPromise = undefined
       }
+    } else if (pendingPersist) {
+      // No refresh needed, but a prior rotation still owes a successful persist.
+      await persistPendingTokens()
     }
     return tokens.accessToken
   }
@@ -80,7 +88,32 @@ export function createRelayfileCloudAccessTokenProvider(
       throw new CloudApiError(response.status, payload)
     }
     tokens = readTokenSetFromPayload(payload, cloudApiUrl)
-    await options.onTokens?.({ ...tokens })
+    pendingPersist = { ...tokens }
+    await persistPendingTokens()
+  }
+
+  // Best-effort, retried persistence. A callback failure never rejects the
+  // provider — the in-memory access token is valid and usable — but the set
+  // stays pending so the next provider() call re-attempts, so a durable copy
+  // eventually catches up with the rotated refresh token.
+  async function persistPendingTokens(): Promise<void> {
+    if (!pendingPersist) {
+      return
+    }
+    if (!options.onTokens) {
+      pendingPersist = undefined
+      return
+    }
+    const toPersist = pendingPersist
+    try {
+      await options.onTokens({ ...toPersist })
+      // Only clear if nothing rotated again while the callback was in flight.
+      if (pendingPersist === toPersist) {
+        pendingPersist = undefined
+      }
+    } catch {
+      // Keep pending; retried on the next use.
+    }
   }
 }
 
