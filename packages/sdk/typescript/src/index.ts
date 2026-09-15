@@ -20,6 +20,12 @@ export {
   type RelayfileCloudTokenSetupOptions
 } from "./cloud-login.js";
 export {
+  createRelayauthPathTokenAccessTokenProvider,
+  isRelayauthRefreshToken,
+  type RelayauthPathTokenSet,
+  type RelayauthPathTokenSetupOptions
+} from "./relayauth-token-provider.js";
+export {
   CloudAbortError,
   CloudApiError,
   CloudTimeoutError,
