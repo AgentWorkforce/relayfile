@@ -8,6 +8,7 @@ import {
   CloudTimeoutError,
   RelayfileSetupError
 } from "./setup-errors.js"
+import { RelayFileClient } from "./client.js"
 
 // Build a compact JWT (header.payload.signature) with the given claims and an
 // optional relay_* prefix, matching how relay_pa tokens are wrapped.
@@ -260,5 +261,40 @@ describe("createRelayauthPathTokenAccessTokenProvider", () => {
     // Third call: nothing pending -> no further callback.
     await provider()
     expect(onTokens).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe("RelayFileClient token-pair auto-wrap", () => {
+  it("auto-refreshes a relay_pa token pair at RelayAuth with no extra wiring", async () => {
+    const rotated = accessToken(3600)
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ accessToken: rotated, refreshToken: relayPaRefresh() }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )
+    )
+    const client = new RelayFileClient({
+      // Just the pair — the client wraps it in the RelayAuth rotating provider.
+      token: {
+        accessToken: accessToken(-10), // expired -> forces a refresh
+        refreshToken: relayPaRefresh()
+      },
+      workspaceId: "rw_test"
+    })
+    const token = await client.getToken()
+    expect(token).toBe(rotated)
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "https://api.relayauth.dev/v1/tokens/refresh"
+    )
+  })
+
+  it("leaves a raw string token untouched (no refresh machinery)", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+    const client = new RelayFileClient({
+      token: "relay_pa_static.token.here",
+      workspaceId: "rw_test"
+    })
+    expect(await client.getToken()).toBe("relay_pa_static.token.here")
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })

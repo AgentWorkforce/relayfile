@@ -92,6 +92,11 @@ import {
 } from "./types.js";
 import type { ForkHandle } from "@relayfile/core";
 import { RelayFileSync, normalizeFilesystemEvent } from "./sync.js";
+import { createRelayfileCloudAccessTokenProvider } from "./cloud-token-provider.js";
+import {
+  createRelayauthPathTokenAccessTokenProvider,
+  isRelayauthRefreshToken
+} from "./relayauth-token-provider.js";
 import {
   InvalidStateError,
   MergeConflictError,
@@ -109,6 +114,53 @@ import {
  * `{ workspace_id: "ws_123", agent_name: "review-bot", aud: ["relayfile"] }`
  */
 export type AccessTokenProvider = string | (() => string | Promise<string>);
+
+/**
+ * An access+refresh token pair (e.g. `RELAYFILE_ACCESS_TOKEN` +
+ * `RELAYFILE_REFRESH_TOKEN`). Pass this as `token` and the client auto-wraps it
+ * in the correct rotating provider — a RelayAuth `relay_pa` pair refreshes at
+ * RelayAuth, a Cloud device-auth pair at Cloud — so the short access token is
+ * rotated automatically with no extra wiring.
+ */
+export interface RelayFileTokenPair {
+  accessToken: string;
+  refreshToken: string;
+  /** ISO expiry of the access token; derived from its `exp` claim when omitted. */
+  accessTokenExpiresAt?: string;
+  refreshTokenExpiresAt?: string;
+  /** RelayAuth base URL; derived from the refresh token's `iss` when omitted. */
+  relayauthUrl?: string;
+  /** Cloud API URL for a Cloud device-auth pair. */
+  apiUrl?: string;
+}
+
+// Resolve the `token` option into a concrete AccessTokenProvider. A string or
+// function is used as-is; a token PAIR is auto-wrapped in the rotating provider
+// that matches the refresh token's issuer.
+function resolveTokenOption(
+  token: AccessTokenProvider | RelayFileTokenPair
+): AccessTokenProvider {
+  if (typeof token === "string" || typeof token === "function") {
+    return token;
+  }
+  if (isRelayauthRefreshToken(token.refreshToken)) {
+    return createRelayauthPathTokenAccessTokenProvider({
+      accessToken: token.accessToken,
+      refreshToken: token.refreshToken,
+      accessTokenExpiresAt: token.accessTokenExpiresAt,
+      refreshTokenExpiresAt: token.refreshTokenExpiresAt,
+      relayauthUrl: token.relayauthUrl
+    });
+  }
+  return createRelayfileCloudAccessTokenProvider({
+    apiUrl: token.apiUrl,
+    accessToken: token.accessToken,
+    refreshToken: token.refreshToken,
+    // The cloud provider treats an unparseable expiry as "refresh now".
+    accessTokenExpiresAt: token.accessTokenExpiresAt ?? "",
+    refreshTokenExpiresAt: token.refreshTokenExpiresAt
+  });
+}
 
 export interface RelayFileRetryOptions {
   maxRetries?: number;
@@ -137,12 +189,15 @@ export interface RelayFileClientOptions {
   /** API base URL. Defaults to https://api.relayfile.dev */
   baseUrl?: string;
   /**
-   * Bearer token or token factory for SDK requests.
+   * Bearer token, token factory, or an access+refresh {@link RelayFileTokenPair}
+   * for SDK requests. A pair is auto-wrapped in a rotating provider (RelayAuth
+   * `relay_pa` pairs refresh at RelayAuth, Cloud pairs at Cloud), so the short
+   * access token is renewed automatically.
    *
    * Relayfile-authenticated JWTs should include `workspace_id`, `agent_name`,
    * and `aud` containing `relayfile`.
    */
-  token: AccessTokenProvider;
+  token: AccessTokenProvider | RelayFileTokenPair;
   fetchImpl?: typeof fetch;
   userAgent?: string;
   retry?: RelayFileRetryOptions;
@@ -1496,7 +1551,7 @@ export class RelayFileClient {
 
   constructor(options: RelayFileClientOptions) {
     this.baseUrl = (options.baseUrl ?? DEFAULT_RELAYFILE_BASE_URL).replace(/\/+$/, "");
-    this.tokenProvider = options.token;
+    this.tokenProvider = resolveTokenOption(options.token);
     this.fetchImpl = options.fetchImpl ?? fetch.bind(globalThis);
     this.userAgent = options.userAgent;
     this.retryOptions = normalizeRetryOptions(options.retry);
