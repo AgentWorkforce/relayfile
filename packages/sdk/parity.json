@@ -449,6 +449,18 @@
       "pyExports": []
     },
     {
+      "id": "relayauth-path-token-refresh",
+      "status": "ts-only",
+      "summary": "Access-token provider that refreshes relay_pa path tokens against RelayAuth.",
+      "tsExports": [
+        "RelayauthPathTokenSet",
+        "RelayauthPathTokenSetupOptions",
+        "createRelayauthPathTokenAccessTokenProvider",
+        "isRelayauthRefreshToken"
+      ],
+      "pyExports": []
+    },
+    {
       "id": "workspace-seeder",
       "status": "ts-only",
       "summary": "Node filesystem and tar-based workspace seeding helpers.",
