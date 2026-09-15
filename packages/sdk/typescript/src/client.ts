@@ -120,7 +120,15 @@ export type AccessTokenProvider = string | (() => string | Promise<string>);
  * `RELAYFILE_REFRESH_TOKEN`). Pass this as `token` and the client auto-wraps it
  * in the correct rotating provider — a RelayAuth `relay_pa` pair refreshes at
  * RelayAuth, a Cloud device-auth pair at Cloud — so the short access token is
- * rotated automatically with no extra wiring.
+ * rotated automatically.
+ *
+ * Rotation is in-memory: on refresh the refresh token rotates too and the old
+ * one is revoked, so the pair you passed here (e.g. the one in your `.env`) is
+ * spent after the first refresh. In a long-lived process this is invisible, but
+ * a process that restarts (a redeploy, a new worker) will reload the original,
+ * now-revoked pair and fail with `invalid_grant` / "refresh token revoked".
+ * Supply {@link RelayFileClientOptions.onTokens} to persist each rotated pair so
+ * the next process boots from a live credential.
  */
 export interface RelayFileTokenPair {
   accessToken: string;
@@ -134,32 +142,74 @@ export interface RelayFileTokenPair {
   apiUrl?: string;
 }
 
+/**
+ * Called after the client rotates the access+refresh {@link RelayFileTokenPair}.
+ * Persist the new pair (e.g. write it back to your secret store / `.env`) so a
+ * later process starts from a live credential instead of the revoked original.
+ * The callback is best-effort and retried on the next request until it succeeds;
+ * a throw is swallowed (the in-memory access token stays usable) but leaves the
+ * pair unpersisted, so make it durable.
+ */
+export type RelayFileTokenPersister = (
+  tokens: RelayFileTokenPair
+) => void | Promise<void>;
+
 // Resolve the `token` option into a concrete AccessTokenProvider. A string or
 // function is used as-is; a token PAIR is auto-wrapped in the rotating provider
-// that matches the refresh token's issuer.
+// that matches the refresh token's issuer. When `onTokens` is supplied, each
+// rotated pair is handed back so the caller can persist it across restarts.
 function resolveTokenOption(
-  token: AccessTokenProvider | RelayFileTokenPair
+  token: AccessTokenProvider | RelayFileTokenPair,
+  onTokens?: RelayFileTokenPersister
 ): AccessTokenProvider {
   if (typeof token === "string" || typeof token === "function") {
     return token;
   }
   if (isRelayauthRefreshToken(token.refreshToken)) {
-    return createRelayauthPathTokenAccessTokenProvider({
+    return createRelayauthPathTokenAccessTokenProvider(
+      {
+        accessToken: token.accessToken,
+        refreshToken: token.refreshToken,
+        accessTokenExpiresAt: token.accessTokenExpiresAt,
+        refreshTokenExpiresAt: token.refreshTokenExpiresAt,
+        relayauthUrl: token.relayauthUrl
+      },
+      onTokens
+        ? {
+            onTokens: (rotated) =>
+              onTokens({
+                accessToken: rotated.accessToken,
+                refreshToken: rotated.refreshToken,
+                accessTokenExpiresAt: rotated.accessTokenExpiresAt,
+                refreshTokenExpiresAt: rotated.refreshTokenExpiresAt,
+                relayauthUrl: rotated.relayauthUrl
+              })
+          }
+        : undefined
+    );
+  }
+  return createRelayfileCloudAccessTokenProvider(
+    {
+      apiUrl: token.apiUrl,
       accessToken: token.accessToken,
       refreshToken: token.refreshToken,
-      accessTokenExpiresAt: token.accessTokenExpiresAt,
-      refreshTokenExpiresAt: token.refreshTokenExpiresAt,
-      relayauthUrl: token.relayauthUrl
-    });
-  }
-  return createRelayfileCloudAccessTokenProvider({
-    apiUrl: token.apiUrl,
-    accessToken: token.accessToken,
-    refreshToken: token.refreshToken,
-    // The cloud provider treats an unparseable expiry as "refresh now".
-    accessTokenExpiresAt: token.accessTokenExpiresAt ?? "",
-    refreshTokenExpiresAt: token.refreshTokenExpiresAt
-  });
+      // The cloud provider treats an unparseable expiry as "refresh now".
+      accessTokenExpiresAt: token.accessTokenExpiresAt ?? "",
+      refreshTokenExpiresAt: token.refreshTokenExpiresAt
+    },
+    onTokens
+      ? {
+          onTokens: (rotated) =>
+            onTokens({
+              accessToken: rotated.accessToken,
+              refreshToken: rotated.refreshToken,
+              accessTokenExpiresAt: rotated.accessTokenExpiresAt,
+              refreshTokenExpiresAt: rotated.refreshTokenExpiresAt,
+              apiUrl: rotated.apiUrl
+            })
+        }
+      : undefined
+  );
 }
 
 export interface RelayFileRetryOptions {
@@ -198,6 +248,15 @@ export interface RelayFileClientOptions {
    * and `aud` containing `relayfile`.
    */
   token: AccessTokenProvider | RelayFileTokenPair;
+  /**
+   * Persistence hook for a rotating {@link RelayFileTokenPair}. Called with the
+   * new pair each time the access token is refreshed (the refresh token rotates
+   * too). Write it back to your secret store so a process that restarts reloads a
+   * live credential instead of the spent original — without this, a `token` pair
+   * survives only within one process lifetime. Ignored when `token` is a string
+   * or token factory (that provider owns its own rotation).
+   */
+  onTokens?: RelayFileTokenPersister;
   fetchImpl?: typeof fetch;
   userAgent?: string;
   retry?: RelayFileRetryOptions;
@@ -1630,7 +1689,7 @@ export class RelayFileClient {
 
   constructor(options: RelayFileClientOptions) {
     this.baseUrl = (options.baseUrl ?? DEFAULT_RELAYFILE_BASE_URL).replace(/\/+$/, "");
-    this.tokenProvider = resolveTokenOption(options.token);
+    this.tokenProvider = resolveTokenOption(options.token, options.onTokens);
     this.fetchImpl = options.fetchImpl ?? fetch.bind(globalThis);
     this.userAgent = options.userAgent;
     this.retryOptions = normalizeRetryOptions(options.retry);
