@@ -206,6 +206,50 @@ interface WorkspaceHandleOptions {
   joinOptions: NormalizedJoinWorkspaceOptions
 }
 
+/**
+ * Build the rotating access-token provider for a cloud token set, auto-routing
+ * by the refresh token's issuer: a RelayAuth `relay_pa` pair (e.g.
+ * RELAYFILE_ACCESS_TOKEN + RELAYFILE_REFRESH_TOKEN) rotates at RelayAuth, while a
+ * Cloud device-auth pair rotates at Cloud. Routing a relay_pa token through the
+ * Cloud endpoint returns `invalid_grant`, so this picks the right provider once
+ * and is shared by every `fromCloudTokens` (base and CLI subclass) so no entry
+ * point can silently skip the routing.
+ */
+export function resolveCloudTokensAccessToken(
+  tokens: RelayfileCloudTokenSet,
+  options: RelayfileCloudTokenSetupOptions,
+  cloudApiUrl: string
+): AccessTokenProvider {
+  if (!isRelayauthRefreshToken(tokens.refreshToken)) {
+    return createRelayfileCloudAccessTokenProvider(
+      { ...tokens, apiUrl: tokens.apiUrl ?? cloudApiUrl },
+      { ...options, cloudApiUrl }
+    )
+  }
+  return createRelayauthPathTokenAccessTokenProvider(
+    {
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      accessTokenExpiresAt: tokens.accessTokenExpiresAt,
+      refreshTokenExpiresAt: tokens.refreshTokenExpiresAt
+    },
+    {
+      requestTimeoutMs: options.requestTimeoutMs,
+      refreshWindowMs: options.refreshWindowMs,
+      onTokens: options.onTokens
+        ? (rotated) =>
+            options.onTokens!({
+              apiUrl: tokens.apiUrl ?? cloudApiUrl,
+              accessToken: rotated.accessToken,
+              refreshToken: rotated.refreshToken,
+              accessTokenExpiresAt: rotated.accessTokenExpiresAt ?? "",
+              refreshTokenExpiresAt: rotated.refreshTokenExpiresAt
+            })
+        : undefined
+    }
+  )
+}
+
 export class RelayfileSetup {
   private readonly cloudApiUrl: string
   private readonly accessToken?: AccessTokenProvider
@@ -228,52 +272,10 @@ export class RelayfileSetup {
     options: RelayfileCloudTokenSetupOptions = {}
   ): RelayfileSetup {
     const cloudApiUrl = options.cloudApiUrl ?? tokens.apiUrl ?? DEFAULT_CLOUD_API_URL
-
-    // Auto-route by the refresh token's issuer: a RelayAuth `relay_pa` pair
-    // (e.g. RELAYFILE_ACCESS_TOKEN + RELAYFILE_REFRESH_TOKEN) rotates at
-    // RelayAuth, not the Cloud device-auth endpoint. Routing it through the
-    // Cloud provider returns `invalid_grant`, so pick the right provider here —
-    // callers get a working credential with no code change, just an upgrade.
-    const accessToken: AccessTokenProvider = isRelayauthRefreshToken(
-      tokens.refreshToken
-    )
-      ? createRelayauthPathTokenAccessTokenProvider(
-          {
-            accessToken: tokens.accessToken,
-            refreshToken: tokens.refreshToken,
-            accessTokenExpiresAt: tokens.accessTokenExpiresAt,
-            refreshTokenExpiresAt: tokens.refreshTokenExpiresAt
-          },
-          {
-            requestTimeoutMs: options.requestTimeoutMs,
-            refreshWindowMs: options.refreshWindowMs,
-            onTokens: options.onTokens
-              ? (rotated) =>
-                  options.onTokens!({
-                    apiUrl: tokens.apiUrl ?? cloudApiUrl,
-                    accessToken: rotated.accessToken,
-                    refreshToken: rotated.refreshToken,
-                    accessTokenExpiresAt: rotated.accessTokenExpiresAt ?? "",
-                    refreshTokenExpiresAt: rotated.refreshTokenExpiresAt
-                  })
-              : undefined
-          }
-        )
-      : createRelayfileCloudAccessTokenProvider(
-          {
-            ...tokens,
-            apiUrl: tokens.apiUrl ?? cloudApiUrl
-          },
-          {
-            ...options,
-            cloudApiUrl
-          }
-        )
-
     return new RelayfileSetup({
       ...options,
       cloudApiUrl,
-      accessToken
+      accessToken: resolveCloudTokensAccessToken(tokens, options, cloudApiUrl)
     })
   }
 

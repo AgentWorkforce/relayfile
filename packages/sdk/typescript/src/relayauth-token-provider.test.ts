@@ -9,6 +9,7 @@ import {
   RelayfileSetupError
 } from "./setup-errors.js"
 import { RelayFileClient } from "./client.js"
+import { resolveCloudTokensAccessToken } from "./setup.js"
 
 // Build a compact JWT (header.payload.signature) with the given claims and an
 // optional relay_* prefix, matching how relay_pa tokens are wrapped.
@@ -296,5 +297,58 @@ describe("RelayFileClient token-pair auto-wrap", () => {
     })
     expect(await client.getToken()).toBe("relay_pa_static.token.here")
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+describe("resolveCloudTokensAccessToken routing (base + CLI fromCloudTokens)", () => {
+  const expired = new Date(Date.now() - 1000).toISOString()
+
+  it("routes a relay_pa pair to the RelayAuth endpoint", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ accessToken: accessToken(3600), refreshToken: relayPaRefresh() }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )
+    )
+    const provider = resolveCloudTokensAccessToken(
+      {
+        accessToken: accessToken(-10),
+        refreshToken: relayPaRefresh(),
+        accessTokenExpiresAt: expired
+      },
+      {},
+      "https://agentrelay.com/cloud"
+    )
+    await (provider as () => Promise<string>)()
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "https://api.relayauth.dev/v1/tokens/refresh"
+    )
+  })
+
+  it("routes a Cloud device-auth pair to the Cloud endpoint", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          accessToken: "new-access",
+          refreshToken: "new-refresh",
+          accessTokenExpiresAt: new Date(Date.now() + 3600_000).toISOString()
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )
+    )
+    const cloudRefresh = jwt({ iss: "https://agentrelay.com", aud: ["cloud"] }, "cld_rt_")
+    const provider = resolveCloudTokensAccessToken(
+      {
+        accessToken: "expired-access",
+        refreshToken: cloudRefresh,
+        accessTokenExpiresAt: expired
+      },
+      {},
+      "https://agentrelay.com/cloud"
+    )
+    await (provider as () => Promise<string>)()
+    const url = String(fetchMock.mock.calls[0]?.[0])
+    expect(url).toContain("/api/v1/auth/token/refresh")
+    expect(url).not.toContain("api.relayauth.dev")
   })
 })
