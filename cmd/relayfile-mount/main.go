@@ -690,10 +690,13 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 				// 1 on a workspace that was still legitimately bootstrapping,
 				// which the Cloud bootstrap-owner flush treats as a hard failure
 				// and aborts the run.
-				if complete, cerr := syncer.InitialBootstrapComplete(); cerr == nil && !complete {
-					lastCycleErr = &cycleOutcomeError{cause: err, yielded: true}
-					log.Printf("mount bootstrapping: bootstrap incomplete (in progress)")
-					return nil
+				if rootCtx.Err() == nil {
+					complete, cerr := syncer.InitialBootstrapComplete()
+					if cerr == nil && !complete {
+						lastCycleErr = &cycleOutcomeError{cause: err, yielded: true}
+						log.Printf("mount bootstrapping: bootstrap incomplete (in progress)")
+						return nil
+					}
 				}
 			}
 			lastCycleErr = &cycleOutcomeError{cause: err}

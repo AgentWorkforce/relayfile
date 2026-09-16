@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -76,10 +77,59 @@ func TestOnceRecoveryStateDeadlineIsResumableBootstrap(t *testing.T) {
 	if synced, total, ok := readBootstrapProgress(localDir); ok {
 		t.Fatalf("test setup unexpectedly published a public bootstrap block: %d/%d", synced, total)
 	}
-	// The authoritative state still records an incomplete bootstrap so a later
-	// run can finish it.
-	if _, statErr := os.Stat(statePath); statErr != nil {
-		t.Fatalf("private state file missing after recovery cycle: %v", statErr)
+	assertIncompleteRecoveryState(t, statePath, blockedPath)
+}
+
+func TestOnceRecoveryStateRootDeadlineRemainsFatal(t *testing.T) {
+	const blockedPath = "/github/f/00001.txt"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/fs/file") {
+			<-r.Context().Done()
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	localDir := t.TempDir()
+	cfg := onceMountConfig(t, server.URL, localDir)
+	cfg.timeout = time.Second
+	statePath := seedRecoveryState(t, cfg, localDir, blockedPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	err := runSinglePollingMount(ctx, cfg)
+	if err == nil {
+		t.Fatal("root deadline during incomplete bootstrap must not report success")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("root deadline cause = %v, want context.DeadlineExceeded", err)
+	}
+	if got := mountProcessExitCode(cfg, err); got == 0 {
+		t.Fatalf("root deadline exit code = %d, want nonzero", got)
+	}
+	assertIncompleteRecoveryState(t, statePath, blockedPath)
+}
+
+func assertIncompleteRecoveryState(t *testing.T, statePath, blockedPath string) {
+	t.Helper()
+	payload, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read private state after recovery cycle: %v", err)
+	}
+	var state struct {
+		BootstrapComplete       bool                       `json:"bootstrapComplete"`
+		SkippedMaterializations map[string]json.RawMessage `json:"skippedMaterializations"`
+	}
+	if err := json.Unmarshal(payload, &state); err != nil {
+		t.Fatalf("decode private recovery state: %v", err)
+	}
+	if state.BootstrapComplete {
+		t.Fatal("private recovery state marked bootstrap complete")
+	}
+	if _, ok := state.SkippedMaterializations[blockedPath]; !ok {
+		t.Fatalf("private recovery state lost blocked path %q", blockedPath)
 	}
 }
 
