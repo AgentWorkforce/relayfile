@@ -690,13 +690,11 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 				// 1 on a workspace that was still legitimately bootstrapping,
 				// which the Cloud bootstrap-owner flush treats as a hard failure
 				// and aborts the run.
-				if rootCtx.Err() == nil {
-					complete, cerr := syncer.InitialBootstrapComplete()
-					if cerr == nil && !complete {
-						lastCycleErr = &cycleOutcomeError{cause: err, yielded: true}
-						log.Printf("mount bootstrapping: bootstrap incomplete (in progress)")
-						return nil
-					}
+				complete, cerr := syncer.InitialBootstrapComplete()
+				if cerr == nil && !complete && rootCtx.Err() == nil {
+					lastCycleErr = &cycleOutcomeError{cause: err, yielded: true}
+					log.Printf("mount bootstrapping: bootstrap incomplete (in progress)")
+					return nil
 				}
 			}
 			lastCycleErr = &cycleOutcomeError{cause: err}
@@ -1040,8 +1038,14 @@ func finishInitialBootstrap(rootCtx context.Context, cfg mountConfig, run func(r
 		// a concurrent rootCtx cancellation. A real (non-yielded) cycle
 		// failure is still terminal here, since it can also mean the cycle
 		// failed before any bootstrap got the chance to start.
-		if err := lastCycleErr(); err != nil && !cycleYielded(err) {
-			return newInitialBootstrapIncompleteError(state, "initial cycle failed", err)
+		if err := lastCycleErr(); err != nil {
+			if cycleYielded(err) {
+				if rootErr := rootCtx.Err(); rootErr != nil {
+					return newResumableInitialBootstrapIncompleteError(state, "context cancelled after yielded initial cycle", rootErr)
+				}
+			} else {
+				return newInitialBootstrapIncompleteError(state, "initial cycle failed", err)
+			}
 		}
 		return nil
 	}

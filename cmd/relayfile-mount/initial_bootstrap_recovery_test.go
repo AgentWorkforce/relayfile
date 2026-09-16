@@ -112,6 +112,29 @@ func TestOnceRecoveryStateRootDeadlineRemainsFatal(t *testing.T) {
 	assertIncompleteRecoveryState(t, statePath, blockedPath)
 }
 
+func TestFinishInitialBootstrapYieldedNoCheckpointRootDeadlineRemainsFatal(t *testing.T) {
+	localDir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := finishInitialBootstrap(ctx, mountConfig{localDir: localDir},
+		func(bool) error { return nil },
+		func() error {
+			return &cycleOutcomeError{cause: context.DeadlineExceeded, yielded: true}
+		},
+		false,
+	)
+	if err == nil {
+		t.Fatal("yielded no-checkpoint cycle after root cancellation must not report success")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("yielded no-checkpoint root cancellation cause = %v, want context.Canceled", err)
+	}
+	if got := mountProcessExitCode(mountConfig{once: true}, err); got == 0 {
+		t.Fatalf("yielded no-checkpoint root cancellation exit code = %d, want nonzero", got)
+	}
+}
+
 func assertIncompleteRecoveryState(t *testing.T, statePath, blockedPath string) {
 	t.Helper()
 	payload, err := os.ReadFile(statePath)
