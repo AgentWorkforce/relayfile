@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `relayfile-mount --once` now treats a per-cycle deadline during an incomplete bootstrap as resumable: it reports `mount bootstrapping: bootstrap incomplete (in progress)` and exits 0 so a later bounded run can resume. A root-context deadline remains a nonzero failure.
 - `RELAYFILE_MOUNT_CORRELATION_ID` now pins one validated, log-safe request correlation across every bulk read, point fallback, export, and retry made by a mount process, enabling exact per-mount request attribution without exposing the raw identifier in logs.
 - `relayfile-mount --version` now reports the exact packaged release without requiring credentials or a running service, and release builds inject the same version symbol exercised by qualification.
 - Fresh-user setup now creates and resolves the prompted Cloud workspace before minting delegated credentials, so Cloud app UUIDs are never sent to Relayfile-only routes. Hosted setup never reuses a shared catalog row by display name alone: it verifies exact stored Cloud IDs against the current session, creates when no current binding exists, and preserves colliding self-hosted or stale rows unchanged. Workspace create/list/current resolve the canonical hosted session before the self-hosted API-key file while preserving that file unchanged, and `relayfile logout` now revokes and clears the hosted session created by login instead of claiming the user was already logged out.
