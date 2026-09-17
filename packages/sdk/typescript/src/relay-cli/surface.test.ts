@@ -7,7 +7,11 @@ import {
   type RelayCliSurface
 } from "@agent-relay/cli-surface"
 
-import { createRelayCliSurface, relayfileCommands } from "./index.js"
+import {
+  createRelayCliSurface,
+  relayfileCommands,
+  routableTopLevelNames
+} from "./index.js"
 import { buildRelayfileBinary } from "./testing/build-binary.js"
 
 /**
@@ -106,11 +110,14 @@ describe("command tree drift", () => {
         declared.add(alias)
       }
     }
-    // `help` and `__command-spec` are the two documented exceptions: the host
-    // renders help itself, and `__command-spec` is the introspection hook that
-    // produces the snapshot.
-    for (const routable of ["help", "__command-spec"]) {
+    // `help`, `__command-spec`, and `version` are the documented exceptions:
+    // the binary routes all three outside its command table, so they are
+    // routable without being declared. The host renders help itself,
+    // `__command-spec` is the introspection hook that produces the snapshot,
+    // and `version` is `wantsVersion`'s alias for `--version`.
+    for (const routable of ["help", "__command-spec", "version"]) {
       expect(declared.has(routable)).toBe(false)
+      expect(routableTopLevelNames()).toContain(routable)
     }
   }, 60_000)
 
@@ -133,6 +140,28 @@ describe("run", () => {
     expect(version.stdout.trim()).toMatch(/^\d+\.\d+\.\d+/)
     expect(version.stderr).toBe("")
   })
+
+  it("routes a bare `version` token the way the binary does", async () => {
+    // The binary's `wantsVersion` accepts `version` as well as `--version`, so
+    // `agent-relay file version` must reach it rather than trip the surface's
+    // own unknown-command guard.
+    const spelled = await invoke(["version"])
+    const flagged = await invoke(["--version"])
+    expect(spelled.code).toBe(0)
+    expect(spelled.stdout).toBe(flagged.stdout)
+    expect(spelled.stdout.trim()).toMatch(/^\d+\.\d+\.\d+/)
+    expect(spelled.stderr).toBe("")
+  })
+
+  it("lets the binary reject `version` with arguments", async () => {
+    // `wantsVersion` only matches a lone `version`, so `version --json` falls
+    // through to the binary's dispatcher. The surface must not pre-empt that
+    // with its own exit 2: the error has to come from the binary.
+    const result = await invoke(["version", "--json"])
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain("unknown subcommand")
+    expect(result.stderr).not.toContain('unknown command "version"')
+  }, 30_000)
 
   it("returns a non-zero code from a real failure", async () => {
     // `workspace use` with a workspace that cannot exist fails inside the

@@ -250,6 +250,45 @@ describe("resolveRelayfileBinary", () => {
     ).toMatchObject({ kind: "binary", command: released })
   })
 
+  it("finds the .exe those builds write in a Windows checkout", () => {
+    // `go build -o bin/relayfile-cli` appends `.exe` for GOOS=windows, and the
+    // dist name carries it too. Without the suffix a successful `make build`
+    // is invisible and resolution falls through to `go run`.
+    const repoRoot = path.join("/work", "relayfile")
+    const checkout = [
+      path.join(repoRoot, "go.mod"),
+      path.join(repoRoot, "cmd", "relayfile-cli")
+    ]
+    const madeBinary = path.join(repoRoot, "bin", "relayfile-cli.exe")
+    expect(
+      resolve({
+        binDirs: [],
+        searchFrom: [repoRoot],
+        platform: "win32",
+        arch: "x64",
+        fileExists: fakeFs([...checkout, madeBinary])
+      })
+    ).toMatchObject({ kind: "binary", command: madeBinary })
+
+    // The dist name is the one build-cli-npm-packages.mjs looks for, which is
+    // exactly `platformBinaryName`.
+    const released = path.join(
+      repoRoot,
+      "dist",
+      platformBinaryName("win32", "x64") ?? ""
+    )
+    expect(path.basename(released)).toBe("relayfile-cli-windows-amd64.exe")
+    expect(
+      resolve({
+        binDirs: [],
+        searchFrom: [repoRoot],
+        platform: "win32",
+        arch: "x64",
+        fileExists: fakeFs([...checkout, released])
+      })
+    ).toMatchObject({ kind: "binary", command: released })
+  })
+
   it("runs from Go source in a checkout when no binary is built", () => {
     // postinstall intentionally skips building the binary in a source
     // checkout; without this fallback the installed command is unusable there.

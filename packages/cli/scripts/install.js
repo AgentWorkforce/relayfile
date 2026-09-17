@@ -2,9 +2,16 @@
 
 // postinstall: put a runnable relayfile binary in this package's bin/.
 //
-// The platform mapping, binary file names, and source-checkout detection come
-// from @relayfile/sdk/relay-cli, the same module run.js and `agent-relay file`
-// use, so "which binary is this host's" is decided in exactly one place.
+// The platform mapping and binary file names come from @relayfile/sdk/relay-cli,
+// the same module run.js and `agent-relay file` use, so "which binary is this
+// host's" is decided in exactly one place.
+//
+// Source-checkout detection is the one thing that cannot come from there. This
+// script runs during `npm install`, and in a fresh clone that is before
+// packages/sdk/typescript/dist exists — importing the SDK to decide whether to
+// skip would fail the install before it could skip. So the two checkout markers
+// are tested locally, ahead of any SDK load. `install.test.js` pins this
+// predicate against the SDK's `findSourceCheckoutRoot`.
 
 const fs = require("fs");
 const path = require("path");
@@ -25,6 +32,33 @@ async function loadRelayCli() {
     console.error(SDK_LOAD_HINT);
     console.error(error && error.message ? error.message : String(error));
     process.exit(1);
+  }
+}
+
+/**
+ * Locate a relayfile source checkout above `start`: a directory with both
+ * `go.mod` and `cmd/relayfile-cli`.
+ *
+ * Same two markers as `findSourceCheckoutRoot` in @relayfile/sdk/relay-cli,
+ * duplicated here only because this runs before the SDK is built.
+ *
+ * @param {string} start - Directory to search upward from.
+ * @returns {string|null} The checkout root, or null when there is none.
+ */
+function findSourceCheckoutRoot(start) {
+  let current = path.resolve(start);
+  for (;;) {
+    if (
+      fs.existsSync(path.join(current, "go.mod")) &&
+      fs.existsSync(path.join(current, "cmd", "relayfile-cli"))
+    ) {
+      return current;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return null;
+    }
+    current = parent;
   }
 }
 
@@ -56,8 +90,18 @@ function download(url, dest) {
 }
 
 async function main() {
-  const { genericBinaryName, platformBinaryName, findSourceCheckoutRoot } =
-    await loadRelayCli();
+  // Before the SDK is touched: a fresh clone has no SDK dist/, and failing
+  // here would break `npm install` for the whole repo.
+  if (findSourceCheckoutRoot(__dirname)) {
+    // run.js falls back to `go run ./cmd/relayfile-cli` in a checkout, so the
+    // command still works without a downloaded binary.
+    console.log(
+      "Skipping relayfile binary install in source checkout; run npm run build --workspace=packages/cli to build package binaries."
+    );
+    return;
+  }
+
+  const { genericBinaryName, platformBinaryName } = await loadRelayCli();
 
   const packagedBinaryName = platformBinaryName();
   if (!packagedBinaryName) {
@@ -72,15 +116,6 @@ async function main() {
   if (fs.existsSync(binPath)) {
     fs.chmodSync(binPath, 0o755);
     console.log("relayfile binary already installed.");
-    return;
-  }
-
-  if (findSourceCheckoutRoot(__dirname)) {
-    // run.js falls back to `go run ./cmd/relayfile-cli` in a checkout, so the
-    // command still works without a downloaded binary.
-    console.log(
-      "Skipping relayfile binary install in source checkout; run npm run build --workspace=packages/cli to build package binaries."
-    );
     return;
   }
 

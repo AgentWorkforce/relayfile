@@ -360,6 +360,11 @@ function defaultResolveFrom(): readonly string[] {
 /**
  * `make build` and `make release` outputs inside a source checkout.
  *
+ * Both names carry `.exe` on Windows: `go build -o bin/relayfile-cli` appends
+ * it for GOOS=windows, and `scripts/build-cli-npm-packages.mjs` looks for
+ * `dist/relayfile-cli-windows-<arch>.exe`. Without the suffix a successful
+ * `make build` is invisible here and resolution falls through to `go run`.
+ *
  * @returns Candidate binary paths, highest priority first.
  */
 function sourceCheckoutBinaries(
@@ -376,9 +381,11 @@ function sourceCheckoutBinaries(
       continue
     }
     seenRoots.add(root)
-    candidates.push(path.join(root, "bin", "relayfile-cli"))
+    const goOs = PLATFORM_MAP[platform] ?? platform
+    const extension = goOs === "windows" ? ".exe" : ""
+    candidates.push(path.join(root, "bin", `relayfile-cli${extension}`))
     candidates.push(
-      path.join(root, "dist", `relayfile-cli-${PLATFORM_MAP[platform] ?? platform}-${goArch(arch)}`)
+      path.join(root, "dist", `relayfile-cli-${goOs}-${goArch(arch)}${extension}`)
     )
   }
   return candidates

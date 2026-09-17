@@ -140,14 +140,20 @@ export function relayfileCommands(): readonly RelayCliCommandSpec[] {
 /**
  * Every name and alias the relayfile binary routes at the top level.
  *
- * Includes `help` and `__command-spec`, which the binary routes but keeps out
- * of its published surface (the host renders help itself, and
- * `__command-spec` is the introspection hook that produces the snapshot).
+ * Includes three tokens the binary routes outside its command table, and so
+ * keeps out of its published surface: `help` (the host renders help itself),
+ * `__command-spec` (the introspection hook that produces the snapshot), and
+ * `version` (handled by the binary's `wantsVersion`, the same path as
+ * `--version`). They are routable here but deliberately not declared in
+ * `commands`: that tree is a generated snapshot of the Go command table, and
+ * the binary's own usage does not advertise `version` either, so declaring it
+ * would make `agent-relay file --help` claim a command `relayfile --help`
+ * does not.
  *
  * @returns The routable top-level tokens.
  */
 export function routableTopLevelNames(): readonly string[] {
-  const names = new Set<string>(["help", "__command-spec"])
+  const names = new Set<string>(["help", "__command-spec", "version"])
   for (const command of relayfileCommands()) {
     names.add(command.name)
     for (const alias of command.aliases ?? []) {
