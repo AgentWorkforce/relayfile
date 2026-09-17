@@ -26,7 +26,9 @@ import {
 } from "./cloud-preflight.js"
 import {
   GO_TOOLCHAIN_MISSING_MESSAGE,
+  RelayfileBinaryNotFoundError,
   resolveRelayfileBinary,
+  type RelayfileBinaryResolution,
   type ResolveRelayfileBinaryOptions
 } from "./resolve-binary.js"
 
@@ -36,9 +38,26 @@ export const RELAY_CLI_CONTRACT_VERSION = 1
 /** Exit code for an argv the surface cannot route. */
 export const RELAY_CLI_EXIT_UNKNOWN_COMMAND = 2
 
+/**
+ * Exit code when no relayfile binary could be found. Distinct from an
+ * unroutable argv (2) and from any code the binary itself returns, so a host
+ * can tell "relayfile is not installed here" from "relayfile ran and failed".
+ */
+export const RELAY_CLI_EXIT_BINARY_NOT_FOUND = 127
+
+/**
+ * Output sink supplied by the host.
+ *
+ * Chunks are handed over as the raw bytes the binary wrote, not as decoded
+ * strings. `relayfile export --format tar --output -` streams a tar archive to
+ * stdout, and decoding that as UTF-8 corrupts it silently; a multibyte
+ * character split across two reads corrupts the same way in the other
+ * direction. Passing the bytes through untouched is correct for both, and
+ * matches `RelayCliIo` in `@agent-relay/cli-surface`.
+ */
 export interface RelayCliIo {
-  stdout(chunk: string): void
-  stderr(chunk: string): void
+  stdout(chunk: string | Uint8Array): void
+  stderr(chunk: string | Uint8Array): void
 }
 
 export interface RelayCliArgSpec {
@@ -196,7 +215,20 @@ export function createRelayCliSurface(
         })
       }
 
-      const resolution = resolveRelayfileBinary(options.resolve)
+      let resolution: RelayfileBinaryResolution
+      try {
+        resolution = resolveRelayfileBinary(options.resolve)
+      } catch (error) {
+        if (!(error instanceof RelayfileBinaryNotFoundError)) {
+          throw error
+        }
+        // The contract says run() resolves to an exit code, so a missing
+        // binary is reported through io rather than thrown at the host. The
+        // message names the `@relayfile/cli-*` package to install for this
+        // platform; a bare ENOENT would send people hunting their PATH.
+        io.stderr(`${error.message}\n`)
+        return RELAY_CLI_EXIT_BINARY_NOT_FOUND
+      }
       const command = resolution.command
       const childArgs = [...resolution.args, ...args]
       const cwd = resolution.kind === "go-run" ? resolution.cwd : options.cwd
@@ -212,10 +244,10 @@ export function createRelayCliSurface(
           stdio: ["inherit", "pipe", "pipe"]
         })
 
-        child.stdout?.setEncoding("utf8")
-        child.stderr?.setEncoding("utf8")
-        child.stdout?.on("data", (chunk: string) => io.stdout(chunk))
-        child.stderr?.on("data", (chunk: string) => io.stderr(chunk))
+        // No setEncoding: the bytes go to `io` exactly as the binary wrote
+        // them. `export --format tar --output -` streams an archive here.
+        child.stdout?.on("data", (chunk: Buffer) => io.stdout(chunk))
+        child.stderr?.on("data", (chunk: Buffer) => io.stderr(chunk))
 
         child.on("error", (error: NodeJS.ErrnoException) => {
           if (error.code === "ENOENT" && resolution.kind === "go-run") {
@@ -246,9 +278,14 @@ export {
   RelayfileBinaryNotFoundError,
   resolveRelayfileBinary,
   findSourceCheckoutRoot,
+  formatBinaryNotFoundMessage,
   genericBinaryName,
   platformBinaryName,
+  platformPackageBinaryName,
+  platformPackageName,
+  platformPackageNames,
   GO_TOOLCHAIN_MISSING_MESSAGE,
+  RELAYFILE_CLI_BIN_ENV,
   type RelayfileBinaryResolution,
   type ResolveRelayfileBinaryOptions
 } from "./resolve-binary.js"

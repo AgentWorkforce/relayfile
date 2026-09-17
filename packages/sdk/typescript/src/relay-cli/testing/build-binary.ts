@@ -19,6 +19,17 @@ import { findSourceCheckoutRoot } from "../resolve-binary.js"
 let cached: { binDir: string; checkoutRoot: string } | undefined
 
 /**
+ * Create a throwaway directory for a test that needs a real filesystem —
+ * resolution through `require.resolve` cannot be faked.
+ *
+ * @param prefix - Label included in the directory name.
+ * @returns The directory path.
+ */
+export function temporaryDirectory(prefix: string): string {
+  return mkdtempSync(path.join(os.tmpdir(), `relayfile-${prefix}-`))
+}
+
+/**
  * Locate the relayfile checkout these tests run inside.
  *
  * @returns The checkout root.
@@ -71,4 +82,47 @@ export function buildRelayfileBinary(): { binDir: string; checkoutRoot: string }
 
   cached = { binDir, checkoutRoot: root }
   return cached
+}
+
+let sdkDist: string | undefined
+
+/**
+ * Ensure this package's `dist/` exists, for tests that need the SDK as it is
+ * published rather than as vitest transforms it — resolution through the
+ * `exports` map only works against the built files.
+ *
+ * Builds only when `dist/` is missing, so a normal `npm run build && npm test`
+ * pays nothing.
+ *
+ * @returns The `dist` directory.
+ * @throws When the build fails.
+ */
+export function buildSdkDist(): string {
+  if (sdkDist) {
+    return sdkDist
+  }
+
+  // src/relay-cli/testing -> packages/sdk/typescript
+  const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..")
+  const dist = path.join(packageRoot, "dist")
+
+  if (!existsSync(path.join(dist, "relay-cli", "index.js"))) {
+    const result = spawnSync("npm", ["run", "build"], {
+      cwd: packageRoot,
+      encoding: "utf8"
+    })
+    if (result.status !== 0) {
+      throw new Error(
+        `npm run build (packages/sdk/typescript) exited ${result.status}\n${result.stdout}\n${result.stderr}`
+      )
+    }
+  }
+  if (!existsSync(path.join(dist, "relay-cli", "command-spec.json"))) {
+    throw new Error(
+      "dist/relay-cli/command-spec.json is missing; run `npm run build --workspace=packages/sdk/typescript`"
+    )
+  }
+
+  sdkDist = dist
+  return dist
 }

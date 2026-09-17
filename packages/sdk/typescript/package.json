@@ -71,6 +71,12 @@
     "tar": "^7.5.10"
   },
   "optionalDependencies": {
+    "@relayfile/cli-darwin-arm64": "0.10.56",
+    "@relayfile/cli-darwin-x64": "0.10.56",
+    "@relayfile/cli-linux-arm64": "0.10.56",
+    "@relayfile/cli-linux-x64": "0.10.56",
+    "@relayfile/cli-win32-arm64": "0.10.56",
+    "@relayfile/cli-win32-x64": "0.10.56",
     "@relayfile/mount-darwin-arm64": "0.10.56",
     "@relayfile/mount-darwin-x64": "0.10.56",
     "@relayfile/mount-linux-arm64": "0.10.56",

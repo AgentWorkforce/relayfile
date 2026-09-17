@@ -60,6 +60,12 @@ bin/
 !packages/mount-*/bin/.gitkeep
 packages/mount-*/bin/relayfile-mount
 
+# CLI platform packages: same arrangement as the mount packages above.
+!packages/cli-*/bin/
+!packages/cli-*/bin/.gitkeep
+packages/cli-*/bin/relayfile-cli
+packages/cli-*/bin/relayfile-cli.exe
+
 # Agent tool configs
 .factory/
 .gemini/
