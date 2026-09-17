@@ -1,7 +1,7 @@
 {
   "name": "@relayfile/sdk",
   "version": "0.10.56",
-  "description": "TypeScript SDK for relayfile — real-time filesystem for humans and agents",
+  "description": "TypeScript SDK for relayfile \u2014 real-time filesystem for humans and agents",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "module",
@@ -83,7 +83,7 @@
     "@relayfile/mount-linux-x64": "0.10.56"
   },
   "devDependencies": {
-    "@agent-relay/cli-surface": "file:../../../../relay/packages/cli-surface",
+    "@agent-relay/cli-surface": "^12.2.2",
     "typescript": "^5.7.3",
     "vitest": "^3.0.0"
   },
