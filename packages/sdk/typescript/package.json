@@ -14,6 +14,10 @@
       "types": "./dist/cli/index.d.ts",
       "default": "./dist/cli/index.js"
     },
+    "./relay-cli": {
+      "types": "./dist/relay-cli/index.d.ts",
+      "default": "./dist/relay-cli/index.js"
+    },
     "./cloud-login": {
       "types": "./dist/cloud-login.d.ts",
       "default": "./dist/cloud-login.js"
@@ -46,7 +50,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "node scripts/sync-package-version.mjs && tsc",
+    "build": "node scripts/sync-package-version.mjs && tsc && node scripts/copy-relay-cli-assets.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:bundle:bun": "node scripts/verify-bun-workspace-mount.mjs",
@@ -57,7 +61,9 @@
     "test:e2e:golden-path": "node scripts/agent-workspace-golden-path-e2e.mjs",
     "demo:agent-workspace": "npm run build && node scripts/agent-workspace-demo.mjs",
     "setup:e2e": "node scripts/setup-e2e.mjs",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "gen:command-spec": "node scripts/gen-command-spec.mjs",
+    "check:command-spec": "node scripts/gen-command-spec.mjs --check"
   },
   "dependencies": {
     "@relayfile/core": "0.10.56",
@@ -71,6 +77,7 @@
     "@relayfile/mount-linux-x64": "0.10.56"
   },
   "devDependencies": {
+    "@agent-relay/cli-surface": "file:../../../../relay/packages/cli-surface",
     "typescript": "^5.7.3",
     "vitest": "^3.0.0"
   },

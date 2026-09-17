@@ -637,77 +637,20 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		)
 	}
 
-	switch args[0] {
-	case "setup":
-		return runSetup(args[1:], stdin, stdout)
-	case "login":
-		return runLogin(args[1:], stdin, stdout)
-	case "logout":
-		return runLogout(args[1:], stdout)
-	case "workspace":
-		return runWorkspace(args[1:], stdin, stdout)
-	case "integration":
-		return runIntegration(args[1:], stdin, stdout)
-	case "ops":
-		return runOps(args[1:], stdin, stdout)
-	case "writeback":
-		return runWriteback(args[1:], stdout)
-	case "digest":
-		return runDigest(args[1:], stdout)
-	case "pull":
-		return runPull(args[1:], stdout)
-	case "mount", "start", "on":
-		// `start` and `on` are friendlier aliases for `mount`. Same flags,
-		// same foreground/background behavior; pass --background to detach.
-		// `on` migrates the agent-relay `relay on` mount UX into relayfile.
-		if len(args) > 1 && args[1] == "checkpoint-seal" {
-			return runMountCheckpointSeal(args[2:], stdout)
-		}
-		if len(args) > 1 && args[1] == "resume-seal" {
-			return runMountResumeSeal(args[2:], stdin, stdout)
-		}
-		if len(args) > 1 && args[1] == "verify-seal" {
-			return runMountVerifySeal(args[2:], stdin, stdout)
-		}
-		if len(args) > 1 && args[1] == "handback-seal" {
-			return runMountHandbackSeal(args[2:], stdin, stdout)
-		}
-		return runMount(args[1:])
-	case "restart":
-		return runRestart(args[1:], stdout)
-	case "supervisor":
-		return runSupervisor(args[1:], stdout)
-	case "tree", "ls":
-		return runTree(args[1:], stdout)
-	case "read", "cat":
-		return runRead(args[1:], stdout)
-	case "seed":
-		return runSeed(args[1:], stdout)
-	case "export":
-		return runExport(args[1:], stdout)
-	case "status":
-		return runStatus(args[1:], stdout)
-	case "stop", "off":
-		// `off` is the friendlier alias for `stop`, migrating the
-		// agent-relay `relay off` unmount UX into relayfile.
-		return runStop(args[1:], stdout)
-	case "logs":
-		return runLogs(args[1:], stdout)
-	case "observer":
-		return runObserver(args[1:], stdout)
-	case "listen", "watch":
-		return runListen(args[1:], stdout)
-	case "control-plane":
-		return runControlPlane(args[1:], stdout)
-	case "dev":
-		return runDev(args[1:], nil, stdout)
-	case "help", "-h", "--help":
-		printUsage(stdout)
-		return nil
-	default:
-		printUsage(stderr)
-		return fmt.Errorf("unknown subcommand %q", args[0])
+	// Dispatch through the declared command table in commandspec.go so the
+	// tree relayfile advertises (and that @relayfile/sdk/relay-cli snapshots
+	// for `agent-relay file`) cannot drift from the tree it actually routes.
+	if command, ok := lookupCommand(args[0]); ok {
+		return command.dispatch(cliInvocation{
+			args:   args[1:],
+			stdin:  stdin,
+			stdout: stdout,
+			stderr: stderr,
+		})
 	}
+
+	printUsage(stderr)
+	return fmt.Errorf("unknown subcommand %q", args[0])
 }
 
 func quickStartSetupArgs() []string {
@@ -914,7 +857,7 @@ func printWritebackUsage(w io.Writer, subcommand string) {
 	case "delete":
 		fmt.Fprintln(w, "Usage: relayfile writeback delete LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]")
 	case "retry":
-		fmt.Fprintln(w, "Usage: relayfile writeback retry --opId OP [WORKSPACE]")
+		fmt.Fprintln(w, "Usage: relayfile writeback retry --op-id OP [WORKSPACE]")
 	case "skip-stuck":
 		fmt.Fprintln(w, "Usage: relayfile writeback skip-stuck [WORKSPACE] [--workspace WS] [--max N] [--json]")
 	case "sweep-drafts":
@@ -923,7 +866,7 @@ func printWritebackUsage(w io.Writer, subcommand string) {
 		fmt.Fprintln(w, `Usage:
   relayfile writeback list --state pending|dead [--workspace WS] [--json]
   relayfile writeback status [WORKSPACE] [--json]
-  relayfile writeback retry --opId OP [WORKSPACE]
+  relayfile writeback retry --op-id OP [WORKSPACE]
   relayfile writeback push LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
   relayfile writeback update LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
   relayfile writeback delete LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
@@ -972,7 +915,7 @@ Usage:
   relayfile ops replay OPID [--workspace NAME]
   relayfile writeback list --state pending|dead [--workspace WS] [--json]
   relayfile writeback status [WORKSPACE] [--json]
-  relayfile writeback retry --opId OP [WORKSPACE]
+  relayfile writeback retry --op-id OP [WORKSPACE]
   relayfile writeback push LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
   relayfile writeback update LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
   relayfile writeback delete LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
@@ -5668,15 +5611,23 @@ func runWritebackRetry(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("writeback retry", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	opID := fs.String("opId", "", "dead-lettered operation id")
+	// --op-id is the kebab-case spelling the relay CLI surface contract
+	// requires of a declared flag. --opId stays accepted so existing scripts
+	// keep working.
+	opIDKebab := fs.String("op-id", "", "dead-lettered operation id (alias for --opId)")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
-		"opId": true,
+		"opId":  true,
+		"op-id": true,
 	})); err != nil {
 		return err
 	}
 	if fs.NArg() > 1 {
-		return errors.New("usage: relayfile writeback retry --opId OP [WORKSPACE]")
+		return errors.New("usage: relayfile writeback retry --op-id OP [WORKSPACE]")
 	}
 	op := strings.TrimSpace(*opID)
+	if op == "" {
+		op = strings.TrimSpace(*opIDKebab)
+	}
 	if op == "" {
 		return errors.New("opId is required")
 	}

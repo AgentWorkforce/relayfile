@@ -1,0 +1,1636 @@
+[
+  {
+    "name": "setup",
+    "description": "Sign in, connect an integration, and mount the workspace",
+    "options": [
+      {
+        "flags": "--cloud-api-url <url>",
+        "description": "Relayfile Cloud API URL (default: $RELAYFILE_CLOUD_API_URL or https://agentrelay.com/cloud)"
+      },
+      {
+        "flags": "--cloud-token <token>",
+        "description": "Relayfile Cloud access token; skips browser login when set"
+      },
+      {
+        "flags": "--workspace <name>",
+        "description": "workspace name to create"
+      },
+      {
+        "flags": "--provider <provider>",
+        "description": "integration provider to connect; use none to skip"
+      },
+      {
+        "flags": "--backend <backend>",
+        "description": "integration backend to request (nango or composio)"
+      },
+      {
+        "flags": "--local-dir <dir>",
+        "description": "local mount directory"
+      },
+      {
+        "flags": "--no-open",
+        "description": "print browser URLs instead of opening them",
+        "defaultValue": false
+      },
+      {
+        "flags": "--skip-mount",
+        "description": "finish after setup without starting the mount process",
+        "defaultValue": false
+      },
+      {
+        "flags": "--once",
+        "description": "run one mount sync cycle and exit",
+        "defaultValue": false
+      },
+      {
+        "flags": "--login-timeout <duration>",
+        "description": "cloud login timeout",
+        "defaultValue": "5m0s"
+      },
+      {
+        "flags": "--connect-timeout <duration>",
+        "description": "integration connection timeout",
+        "defaultValue": "5m0s"
+      }
+    ]
+  },
+  {
+    "name": "login",
+    "description": "Sign in via agent-relay cloud login (or --api-key for self-hosted)",
+    "options": [
+      {
+        "flags": "--server <url>",
+        "description": "relayfile server URL (only used with --api-key)"
+      },
+      {
+        "flags": "--token <token>",
+        "description": "relayfile API token"
+      },
+      {
+        "flags": "--cloud-api-url <url>",
+        "description": "Relayfile Cloud API URL (default: $RELAYFILE_CLOUD_API_URL or https://agentrelay.com/cloud)"
+      },
+      {
+        "flags": "--cloud-token <token>",
+        "description": "Relayfile Cloud access token; skips browser login when set"
+      },
+      {
+        "flags": "--api-key",
+        "description": "use the legacy API-key flow against --server instead of the cloud browser login",
+        "defaultValue": false
+      },
+      {
+        "flags": "--no-open",
+        "description": "print the cloud sign-in URL instead of opening it",
+        "defaultValue": false
+      },
+      {
+        "flags": "--login-timeout <duration>",
+        "description": "cloud login timeout",
+        "defaultValue": "5m0s"
+      },
+      {
+        "flags": "--workspace <name>",
+        "description": "workspace name or id to refresh; defaults to the active workspace"
+      },
+      {
+        "flags": "--skip-workspace-refresh",
+        "description": "sign into the cloud only; do not refresh the workspace token",
+        "defaultValue": false
+      },
+      {
+        "flags": "--provision-messaging-only",
+        "description": "create a separate Relayfile-backed workspace when the active Agent Relay workspace is messaging-only",
+        "defaultValue": false
+      }
+    ]
+  },
+  {
+    "name": "logout",
+    "description": "Clear Relayfile credentials from this machine"
+  },
+  {
+    "name": "workspace",
+    "description": "Create, join, select via agent-relay, list, show current, or delete locally tracked workspaces",
+    "subcommands": [
+      {
+        "name": "create",
+        "description": "Create a workspace on the relayfile server",
+        "args": [
+          {
+            "name": "name",
+            "description": "workspace name",
+            "required": true
+          }
+        ],
+        "options": [
+          {
+            "flags": "--token <token>",
+            "description": "relayfile token override"
+          }
+        ]
+      },
+      {
+        "name": "join",
+        "description": "Join an existing workspace by id and track it locally",
+        "args": [
+          {
+            "name": "workspace-id",
+            "description": "workspace id to join",
+            "required": true
+          }
+        ],
+        "options": [
+          {
+            "flags": "--cloud-api-url <url>",
+            "description": "Relayfile Cloud API URL (default: $RELAYFILE_CLOUD_API_URL or https://agentrelay.com/cloud)"
+          },
+          {
+            "flags": "--cloud-token <token>",
+            "description": "Relayfile Cloud access token; skips browser login when set"
+          },
+          {
+            "flags": "--name <name>",
+            "description": "local workspace name"
+          },
+          {
+            "flags": "--write",
+            "description": "request read/write workspace token scopes",
+            "defaultValue": false
+          },
+          {
+            "flags": "--no-open",
+            "description": "print browser URLs instead of opening them",
+            "defaultValue": false
+          },
+          {
+            "flags": "--login-timeout <duration>",
+            "description": "cloud login timeout",
+            "defaultValue": "5m0s"
+          }
+        ]
+      },
+      {
+        "name": "use",
+        "description": "Select the active workspace for later commands",
+        "args": [
+          {
+            "name": "name",
+            "description": "workspace name or id",
+            "required": true
+          }
+        ]
+      },
+      {
+        "name": "list",
+        "description": "List locally tracked workspaces",
+        "options": [
+          {
+            "flags": "--server <url>",
+            "description": "relayfile server URL override"
+          },
+          {
+            "flags": "--token <token>",
+            "description": "relayfile token override"
+          },
+          {
+            "flags": "--names-only",
+            "description": "print bare workspace names without an active marker",
+            "defaultValue": false
+          }
+        ]
+      },
+      {
+        "name": "current",
+        "description": "Show the active workspace",
+        "options": [
+          {
+            "flags": "--token <token>",
+            "description": "relayfile token override"
+          },
+          {
+            "flags": "--verbose",
+            "description": "include workspace id and selection source",
+            "defaultValue": false
+          }
+        ]
+      },
+      {
+        "name": "view",
+        "description": "Manage read-only aliases into a registered workspace mirror",
+        "subcommands": [
+          {
+            "name": "add",
+            "description": "Create an alias directory pointing into the canonical mirror",
+            "args": [
+              {
+                "name": "remote-path",
+                "description": "remote path to expose",
+                "required": true
+              },
+              {
+                "name": "local-dir",
+                "description": "local alias directory",
+                "required": true
+              }
+            ],
+            "options": [
+              {
+                "flags": "--workspace <name>",
+                "description": "workspace name or id"
+              },
+              {
+                "flags": "--replace",
+                "description": "replace an existing relayfile view symlink",
+                "defaultValue": false
+              }
+            ]
+          },
+          {
+            "name": "list",
+            "description": "List alias directories registered for a workspace",
+            "options": [
+              {
+                "flags": "--workspace <name>",
+                "description": "workspace name or id"
+              },
+              {
+                "flags": "--json",
+                "description": "emit JSON",
+                "defaultValue": false
+              }
+            ]
+          },
+          {
+            "name": "remove",
+            "description": "Remove an alias directory",
+            "args": [
+              {
+                "name": "local-dir",
+                "description": "local alias directory",
+                "required": true
+              }
+            ],
+            "options": [
+              {
+                "flags": "--workspace <name>",
+                "description": "workspace name or id"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "status",
+        "description": "Show sync status for a workspace",
+        "options": [
+          {
+            "flags": "--workspace <name>",
+            "description": "workspace name or id"
+          },
+          {
+            "flags": "--json",
+            "description": "emit JSON",
+            "defaultValue": false
+          }
+        ]
+      },
+      {
+        "name": "delete",
+        "description": "Delete a locally tracked workspace",
+        "args": [
+          {
+            "name": "name",
+            "description": "workspace name or id",
+            "required": true
+          }
+        ],
+        "options": [
+          {
+            "flags": "--yes",
+            "description": "skip confirmation prompt",
+            "defaultValue": false
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "integration",
+    "description": "Connect, discover, list, disconnect, or adopt workspace integrations",
+    "subcommands": [
+      {
+        "name": "connect",
+        "description": "Connect a provider integration to a workspace",
+        "args": [
+          {
+            "name": "provider",
+            "description": "provider id, e.g. github or linear",
+            "required": true
+          }
+        ],
+        "options": [
+          {
+            "flags": "--workspace <name>",
+            "description": "workspace name or id"
+          },
+          {
+            "flags": "--cloud-api-url <url>",
+            "description": "Relayfile Cloud API URL (default: $RELAYFILE_CLOUD_API_URL or https://agentrelay.com/cloud)"
+          },
+          {
+            "flags": "--backend <backend>",
+            "description": "integration backend to request (nango or composio)"
+          },
+          {
+            "flags": "--no-open",
+            "description": "print the hosted URL instead of opening it",
+            "defaultValue": false
+          },
+          {
+            "flags": "--timeout <duration>",
+            "description": "integration readiness timeout",
+            "defaultValue": "5m0s"
+          },
+          {
+            "flags": "--wait-sync",
+            "description": "wait for initial sync before returning",
+            "defaultValue": false
+          }
+        ]
+      },
+      {
+        "name": "available",
+        "description": "List providers available to connect",
+        "aliases": [
+          "catalog",
+          "providers"
+        ],
+        "options": [
+          {
+            "flags": "--cloud-api-url <url>",
+            "description": "Relayfile Cloud API URL (default: $RELAYFILE_CLOUD_API_URL or https://agentrelay.com/cloud)"
+          },
+          {
+            "flags": "--backend <backend>",
+            "description": "filter by backend (nango or composio)"
+          },
+          {
+            "flags": "--search <query>",
+            "description": "search provider id, display name, category, or backend"
+          },
+          {
+            "flags": "--json",
+            "description": "emit JSON",
+            "defaultValue": false
+          },
+          {
+            "flags": "--refresh",
+            "description": "refresh the cached provider catalog",
+            "defaultValue": false
+          }
+        ]
+      },
+      {
+        "name": "search",
+        "description": "Search the provider catalog",
+        "args": [
+          {
+            "name": "query",
+            "description": "search query",
+            "required": true
+          }
+        ],
+        "options": [
+          {
+            "flags": "--cloud-api-url <url>",
+            "description": "Relayfile Cloud API URL (default: $RELAYFILE_CLOUD_API_URL or https://agentrelay.com/cloud)"
+          },
+          {
+            "flags": "--backend <backend>",
+            "description": "filter by backend (nango or composio)"
+          },
+          {
+            "flags": "--json",
+            "description": "emit JSON",
+            "defaultValue": false
+          },
+          {
+            "flags": "--refresh",
+            "description": "refresh the cached provider catalog",
+            "defaultValue": false
+          }
+        ]
+      },
+      {
+        "name": "list",
+        "description": "List a workspace's connected integrations",
+        "options": [
+          {
+            "flags": "--workspace <name>",
+            "description": "workspace name or id"
+          },
+          {
+            "flags": "--json",
+            "description": "emit JSON",
+            "defaultValue": false
+          },
+          {
+            "flags": "--cloud-api-url <url>",
+            "description": "Relayfile Cloud API URL (default: $RELAYFILE_CLOUD_API_URL or https://agentrelay.com/cloud)"
+          },
+          {
+            "flags": "--cloud-token <token>",
+            "description": "Relayfile Cloud access token"
+          }
+        ]
+      },
+      {
+        "name": "disconnect",
+        "description": "Disconnect a provider integration",
+        "args": [
+          {
+            "name": "provider",
+            "description": "provider id",
+            "required": true
+          }
+        ],
+        "options": [
+          {
+            "flags": "--workspace <name>",
+            "description": "workspace name or id"
+          },
+          {
+            "flags": "--cloud-api-url <url>",
+            "description": "Relayfile Cloud API URL (default: $RELAYFILE_CLOUD_API_URL or https://agentrelay.com/cloud)"
+          },
+          {
+            "flags": "--yes",
+            "description": "skip confirmation",
+            "defaultValue": false
+          }
+        ]
+      },
+      {
+        "name": "adopt",
+        "description": "Adopt an existing Nango connection as a workspace integration",
+        "args": [
+          {
+            "name": "provider",
+            "description": "provider id",
+            "required": true
+          }
+        ],
+        "options": [
+          {
+            "flags": "--workspace <name>",
+            "description": "workspace name or id"
+          },
+          {
+            "flags": "--cloud-api-url <url>",
+            "description": "Relayfile Cloud API URL (default: $RELAYFILE_CLOUD_API_URL or https://agentrelay.com/cloud)"
+          },
+          {
+            "flags": "--connection-id <id>",
+            "description": "Nango connection id to adopt (required)"
+          },
+          {
+            "flags": "--provider-config-key <key>",
+            "description": "optional Nango providerConfigKey override"
+          },
+          {
+            "flags": "--yes",
+            "description": "skip confirmation",
+            "defaultValue": false
+          }
+        ]
+      },
+      {
+        "name": "set-metadata",
+        "description": "Set provider connection metadata as KEY=VALUE pairs",
+        "args": [
+          {
+            "name": "provider",
+            "description": "provider id",
+            "required": true
+          },
+          {
+            "name": "assignments",
+            "description": "one or more KEY=VALUE metadata assignments",
+            "required": true,
+            "variadic": true
+          }
+        ],
+        "options": [
+          {
+            "flags": "--workspace <name>",
+            "description": "workspace name or id"
+          },
+          {
+            "flags": "--cloud-api-url <url>",
+            "description": "Relayfile Cloud API URL (default: $RELAYFILE_CLOUD_API_URL or https://agentrelay.com/cloud)"
+          },
+          {
+            "flags": "--yes",
+            "description": "skip confirmation",
+            "defaultValue": false
+          }
+        ]
+      },
+      {
+        "name": "bind",
+        "description": "Bind a provider resource or path glob to a relay channel",
+        "args": [
+          {
+            "name": "provider",
+            "description": "provider id",
+            "required": false
+          },
+          {
+            "name": "resource",
+            "description": "provider resource or path glob",
+            "required": false
+          }
+        ],
+        "options": [
+          {
+            "flags": "--list",
+            "description": "list active relay bindings as JSON",
+            "defaultValue": false
+          },
+          {
+            "flags": "--json",
+            "description": "accepted for consistency with other JSON-emitting integration commands",
+            "defaultValue": false
+          },
+          {
+            "flags": "--channel <channel>",
+            "description": "relay channel to receive provider records"
+          },
+          {
+            "flags": "--webhook <id>",
+            "description": "RelayCast inbound webhook id"
+          },
+          {
+            "flags": "--webhook-token <token>",
+            "description": "RelayCast inbound webhook token"
+          },
+          {
+            "flags": "--subscription <id>",
+            "description": "relay integration subscription id"
+          },
+          {
+            "flags": "--webhook-subscription <id>",
+            "description": "relayfile-cloud inbound webhook subscription id"
+          },
+          {
+            "flags": "--webhook-subscription-workspace <id>",
+            "description": "workspace the webhook subscription was created in (pairs with --webhook-subscription)"
+          }
+        ]
+      },
+      {
+        "name": "resolve-path",
+        "description": "Resolve a provider resource to its relayfile path",
+        "args": [
+          {
+            "name": "provider",
+            "description": "provider id",
+            "required": true
+          },
+          {
+            "name": "resource",
+            "description": "provider resource identifier",
+            "required": true
+          }
+        ],
+        "options": [
+          {
+            "flags": "--json",
+            "description": "emit JSON",
+            "defaultValue": false
+          }
+        ]
+      },
+      {
+        "name": "unbind",
+        "description": "Remove a relay binding for a provider",
+        "args": [
+          {
+            "name": "provider",
+            "description": "provider id",
+            "required": true
+          },
+          {
+            "name": "resource",
+            "description": "path glob or resource to unbind; may be passed as --resource instead",
+            "required": false
+          }
+        ],
+        "options": [
+          {
+            "flags": "--resource <resource>",
+            "description": "path glob/resource to unbind"
+          }
+        ]
+      },
+      {
+        "name": "writeback-secret",
+        "description": "Print the writeback secret for a bound relay channel",
+        "options": [
+          {
+            "flags": "--workspace <name>",
+            "description": "workspace name or id"
+          },
+          {
+            "flags": "--channel <channel>",
+            "description": "relay channel the binding delivers to"
+          },
+          {
+            "flags": "--json",
+            "description": "emit JSON",
+            "defaultValue": false
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "ops",
+    "description": "List or replay dead-lettered writeback ops",
+    "subcommands": [
+      {
+        "name": "list",
+        "description": "List dead-lettered writeback ops",
+        "options": [
+          {
+            "flags": "--workspace <name>",
+            "description": "workspace name or id"
+          },
+          {
+            "flags": "--json",
+            "description": "emit JSON",
+            "defaultValue": false
+          },
+          {
+            "flags": "--no-refresh",
+            "description": "skip refreshing the local mirror from the server",
+            "defaultValue": false
+          },
+          {
+            "flags": "--server <url>",
+            "description": "relayfile server URL override"
+          },
+          {
+            "flags": "--token <token>",
+            "description": "relayfile token override"
+          }
+        ]
+      },
+      {
+        "name": "replay",
+        "description": "Replay one dead-lettered writeback op",
+        "args": [
+          {
+            "name": "op-id",
+            "description": "dead-lettered operation id",
+            "required": true
+          }
+        ],
+        "options": [
+          {
+            "flags": "--workspace <name>",
+            "description": "workspace name or id"
+          },
+          {
+            "flags": "--cloud-api-url <url>",
+            "description": "Relayfile Cloud API URL (default: $RELAYFILE_CLOUD_API_URL or https://agentrelay.com/cloud)"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "writeback",
+    "description": "Inspect or retry local writeback failures",
+    "subcommands": [
+      {
+        "name": "list",
+        "description": "List local writeback items by state",
+        "options": [
+          {
+            "flags": "--state <state>",
+            "description": "writeback state: pending or dead"
+          },
+          {
+            "flags": "--workspace <name>",
+            "description": "workspace name or id"
+          },
+          {
+            "flags": "--json",
+            "description": "emit JSON",
+            "defaultValue": false
+          }
+        ]
+      },
+      {
+        "name": "push",
+        "description": "Push a local file to the workspace and wait for its receipt",
+        "args": [
+          {
+            "name": "local-path",
+            "description": "local mirror path to push",
+            "required": true
+          }
+        ],
+        "options": [
+          {
+            "flags": "--workspace <name>",
+            "description": "workspace name or id"
+          },
+          {
+            "flags": "--server <url>",
+            "description": "relayfile server URL override"
+          },
+          {
+            "flags": "--token <token>",
+            "description": "relayfile token override"
+          },
+          {
+            "flags": "--json",
+            "description": "emit JSON",
+            "defaultValue": false
+          },
+          {
+            "flags": "--timeout <duration>",
+            "description": "operation receipt wait timeout",
+            "defaultValue": "1m30s"
+          }
+        ]
+      },
+      {
+        "name": "update",
+        "description": "Update a workspace file from its local mirror copy",
+        "args": [
+          {
+            "name": "local-path",
+            "description": "local mirror path to update",
+            "required": true
+          }
+        ],
+        "options": [
+          {
+            "flags": "--workspace <name>",
+            "description": "workspace name or id"
+          },
+          {
+            "flags": "--server <url>",
+            "description": "relayfile server URL override"
+          },
+          {
+            "flags": "--token <token>",
+            "description": "relayfile token override"
+          },
+          {
+            "flags": "--json",
+            "description": "emit JSON",
+            "defaultValue": false
+          },
+          {
+            "flags": "--timeout <duration>",
+            "description": "operation receipt wait timeout",
+            "defaultValue": "1m30s"
+          }
+        ]
+      },
+      {
+        "name": "delete",
+        "description": "Delete a workspace file via its local mirror path",
+        "args": [
+          {
+            "name": "local-path",
+            "description": "local mirror path to delete",
+            "required": true
+          }
+        ],
+        "options": [
+          {
+            "flags": "--workspace <name>",
+            "description": "workspace name or id"
+          },
+          {
+            "flags": "--server <url>",
+            "description": "relayfile server URL override"
+          },
+          {
+            "flags": "--token <token>",
+            "description": "relayfile token override"
+          },
+          {
+            "flags": "--json",
+            "description": "emit JSON",
+            "defaultValue": false
+          },
+          {
+            "flags": "--timeout <duration>",
+            "description": "operation receipt wait timeout",
+            "defaultValue": "1m30s"
+          }
+        ]
+      },
+      {
+        "name": "status",
+        "description": "Show local pending, failed, and dead-lettered writebacks",
+        "args": [
+          {
+            "name": "workspace",
+            "description": "workspace name or id; defaults to the active workspace",
+            "required": false
+          }
+        ],
+        "options": [
+          {
+            "flags": "--json",
+            "description": "emit JSON",
+            "defaultValue": false
+          }
+        ]
+      },
+      {
+        "name": "retry",
+        "description": "Re-enqueue a local dead-lettered writeback op",
+        "args": [
+          {
+            "name": "workspace",
+            "description": "workspace name or id; defaults to the active workspace",
+            "required": false
+          }
+        ],
+        "options": [
+          {
+            "flags": "--op-id <id>",
+            "description": "dead-lettered operation id (also accepted as --opId)"
+          }
+        ]
+      },
+      {
+        "name": "skip-stuck",
+        "description": "Walk the events cursor past stuck (404) events without waiting the treat-as-deleted timer",
+        "args": [
+          {
+            "name": "workspace",
+            "description": "workspace name or id; defaults to the active workspace",
+            "required": false
+          }
+        ],
+        "options": [
+          {
+            "flags": "--workspace <name>",
+            "description": "workspace name or id"
+          },
+          {
+            "flags": "--max <n>",
+            "description": "maximum number of stuck events to skip (0 = unbounded)",
+            "defaultValue": 0
+          },
+          {
+            "flags": "--json",
+            "description": "emit JSON",
+            "defaultValue": false
+          }
+        ]
+      },
+      {
+        "name": "sweep-drafts",
+        "description": "Remove hand-named draft files left behind under a workspace subtree",
+        "args": [
+          {
+            "name": "workspace",
+            "description": "workspace name or id; defaults to the active workspace",
+            "required": false
+          }
+        ],
+        "options": [
+          {
+            "flags": "--path-prefix <prefix>",
+            "description": "restrict the sweep to a subtree"
+          },
+          {
+            "flags": "--pattern <glob>",
+            "description": "basename glob for hand-named drafts (repeatable), e.g. wb-*.json"
+          },
+          {
+            "flags": "--apply",
+            "description": "execute removals (default is a dry run)",
+            "defaultValue": false
+          },
+          {
+            "flags": "--json",
+            "description": "emit JSON",
+            "defaultValue": false
+          },
+          {
+            "flags": "--server <url>",
+            "description": "relayfile server URL override"
+          },
+          {
+            "flags": "--token <token>",
+            "description": "relayfile token override"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "digest",
+    "description": "Regenerate workspace digests",
+    "subcommands": [
+      {
+        "name": "rebuild",
+        "description": "Regenerate daily, weekly, or date-stamped digest artifacts",
+        "options": [
+          {
+            "flags": "--window <window>",
+            "description": "digest window: today, yesterday, this-week, last-week, or YYYY-MM-DD"
+          },
+          {
+            "flags": "--workspace <name>",
+            "description": "workspace name or id"
+          },
+          {
+            "flags": "--json",
+            "description": "print machine-readable JSON",
+            "defaultValue": false
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "pull",
+    "description": "Trigger an immediate sync refresh for one or all providers",
+    "options": [
+      {
+        "flags": "--workspace <name>",
+        "description": "workspace name or id"
+      },
+      {
+        "flags": "--provider <provider>",
+        "description": "provider id (default: refresh all connected providers)"
+      },
+      {
+        "flags": "--reason <text>",
+        "description": "free-form reason recorded server-side",
+        "defaultValue": "manual"
+      },
+      {
+        "flags": "--server <url>",
+        "description": "relayfile server URL override"
+      },
+      {
+        "flags": "--token <token>",
+        "description": "relayfile token override"
+      }
+    ]
+  },
+  {
+    "name": "mount",
+    "description": "Mirror a remote workspace to a local directory; add --background to detach",
+    "aliases": [
+      "start",
+      "on"
+    ],
+    "args": [
+      {
+        "name": "workspace",
+        "description": "workspace name or id; defaults to the active workspace",
+        "required": false
+      },
+      {
+        "name": "local-dir",
+        "description": "local mirror directory",
+        "required": false
+      }
+    ],
+    "options": [
+      {
+        "flags": "--server <url>",
+        "description": "relayfile server URL"
+      },
+      {
+        "flags": "--token <token>",
+        "description": "bearer token"
+      },
+      {
+        "flags": "--creds-file <file>",
+        "description": "delegated relayfile credentials file"
+      },
+      {
+        "flags": "--remote-path <path>",
+        "description": "remote root path (may be repeated)"
+      },
+      {
+        "flags": "--paths-file <file>",
+        "description": "file containing remote root paths, as a JSON array or newline-separated list"
+      },
+      {
+        "flags": "--local-layout <layout>",
+        "description": "local directory layout: exact or scoped"
+      },
+      {
+        "flags": "--provider <provider>",
+        "description": "event provider filter"
+      },
+      {
+        "flags": "--state-file <file>",
+        "description": "state file path"
+      },
+      {
+        "flags": "--state-dir <dir>",
+        "description": "directory for private mount state"
+      },
+      {
+        "flags": "--mount-kind <kind>",
+        "description": "private state identity kind: daemon, flush, or initial-sync"
+      },
+      {
+        "flags": "--local-dir <dir>",
+        "description": "local mirror directory"
+      },
+      {
+        "flags": "--mode <mode>",
+        "description": "mount mode: poll (recommended) or fuse"
+      },
+      {
+        "flags": "--interval <duration>",
+        "description": "sync interval"
+      },
+      {
+        "flags": "--interval-jitter <ratio>",
+        "description": "sync interval jitter ratio (0.0-1.0)"
+      },
+      {
+        "flags": "--timeout <duration>",
+        "description": "per-sync timeout"
+      },
+      {
+        "flags": "--bootstrap-timeout <duration>",
+        "description": "hard cap for the one-time/full-tree bootstrap pull (0 = unbounded while making progress)"
+      },
+      {
+        "flags": "--bootstrap-max-files-per-cycle <n>",
+        "description": "maximum files materialized per resumable tree-bootstrap cycle (-1 = legacy unbounded tree behavior)"
+      },
+      {
+        "flags": "--full-pull-min-interval <duration>",
+        "description": "minimum wall-clock interval between completed periodic full-tree audits (-1 disables the time guard)"
+      },
+      {
+        "flags": "--cursor-timeout <duration>",
+        "description": "independent timeout for events-cursor resolution"
+      },
+      {
+        "flags": "--full-reconcile",
+        "description": "force one full reconcile regardless of bootstrap-complete state (escape hatch)"
+      },
+      {
+        "flags": "--websocket",
+        "description": "enable websocket event streaming when available"
+      },
+      {
+        "flags": "--low-memory",
+        "description": "reduce mount memory use by omitting per-file public state and deferring content reads"
+      },
+      {
+        "flags": "--pprof-addr <addr>",
+        "description": "optional pprof listen address, e.g. 127.0.0.1:6060"
+      },
+      {
+        "flags": "--memlog-interval <duration>",
+        "description": "optional interval for logging runtime memory stats"
+      },
+      {
+        "flags": "--background",
+        "description": "detach and keep syncing in the background",
+        "defaultValue": false
+      },
+      {
+        "flags": "--pid-file <file>",
+        "description": "pid file path for background mode"
+      },
+      {
+        "flags": "--log-file <file>",
+        "description": "log file path for background mode"
+      },
+      {
+        "flags": "--daemonized",
+        "description": "internal flag used by relayfile mount --background",
+        "defaultValue": false
+      },
+      {
+        "flags": "--once",
+        "description": "run one sync cycle and exit",
+        "defaultValue": false
+      },
+      {
+        "flags": "--reset-after-clobber",
+        "description": "acknowledge a mount-root clobber and authorize daemon to recreate the directory"
+      },
+      {
+        "flags": "--rehome",
+        "description": "allow re-homing an already-registered workspace mirror to a different LOCAL_DIR",
+        "defaultValue": false
+      }
+    ],
+    "subcommands": [
+      {
+        "name": "checkpoint-seal",
+        "description": "Seal a mount checkpoint for controller-driven cutover",
+        "options": [
+          {
+            "flags": "--root <path>",
+            "description": "absolute local mount root"
+          },
+          {
+            "flags": "--lifecycle-id <id>",
+            "description": "stable controller-persisted cutover lifecycle id"
+          },
+          {
+            "flags": "--session <id>",
+            "description": "live session identifier"
+          },
+          {
+            "flags": "--generation <n>",
+            "description": "strictly increasing migration generation",
+            "defaultValue": 0
+          },
+          {
+            "flags": "--timeout <duration>",
+            "description": "checkpoint deadline",
+            "defaultValue": "30s"
+          },
+          {
+            "flags": "--ttl <duration>",
+            "description": "server receipt TTL"
+          },
+          {
+            "flags": "--json",
+            "description": "emit the machine contract",
+            "defaultValue": false
+          }
+        ],
+        "hidden": true
+      },
+      {
+        "name": "resume-seal",
+        "description": "Resume a sealed mount checkpoint on the destination host",
+        "options": [
+          {
+            "flags": "--root <path>",
+            "description": "absolute local mount root"
+          },
+          {
+            "flags": "--timeout <duration>",
+            "description": "resume readiness deadline"
+          },
+          {
+            "flags": "--json",
+            "description": "emit the machine contract",
+            "defaultValue": false
+          }
+        ],
+        "hidden": true
+      },
+      {
+        "name": "verify-seal",
+        "description": "Verify a resumed mount checkpoint and recover if needed",
+        "options": [
+          {
+            "flags": "--root <path>",
+            "description": "absolute local mount root"
+          },
+          {
+            "flags": "--timeout <duration>",
+            "description": "verification and recovery deadline"
+          },
+          {
+            "flags": "--json",
+            "description": "emit the machine contract",
+            "defaultValue": false
+          }
+        ],
+        "hidden": true
+      },
+      {
+        "name": "handback-seal",
+        "description": "Drain and hand a verified mount back to its original host",
+        "options": [
+          {
+            "flags": "--root <path>",
+            "description": "absolute local mount root"
+          },
+          {
+            "flags": "--timeout <duration>",
+            "description": "final drain and handback deadline"
+          },
+          {
+            "flags": "--json",
+            "description": "emit the machine contract",
+            "defaultValue": false
+          }
+        ],
+        "hidden": true
+      }
+    ]
+  },
+  {
+    "name": "restart",
+    "description": "Stop and start a workspace's mount in one step (--foreground to attach)",
+    "args": [
+      {
+        "name": "workspace",
+        "description": "workspace name or id; defaults to the active workspace",
+        "required": false
+      }
+    ],
+    "options": [
+      {
+        "flags": "--foreground",
+        "description": "run the restarted mount in the foreground instead of detaching",
+        "defaultValue": false
+      }
+    ]
+  },
+  {
+    "name": "supervisor",
+    "description": "Install/uninstall/status launchd (macOS) or systemd (Linux) service for auto-restart",
+    "subcommands": [
+      {
+        "name": "install",
+        "description": "Install the auto-restart service for a workspace mount",
+        "args": [
+          {
+            "name": "workspace",
+            "description": "workspace name or id; defaults to the active workspace",
+            "required": false
+          }
+        ],
+        "options": [
+          {
+            "flags": "--interval <duration>",
+            "description": "sync interval passed through to the supervised listen process"
+          }
+        ]
+      },
+      {
+        "name": "uninstall",
+        "description": "Remove the auto-restart service",
+        "aliases": [
+          "remove"
+        ]
+      },
+      {
+        "name": "status",
+        "description": "Show the auto-restart service state"
+      }
+    ]
+  },
+  {
+    "name": "tree",
+    "description": "List a remote workspace path",
+    "aliases": [
+      "ls"
+    ],
+    "args": [
+      {
+        "name": "workspace",
+        "description": "workspace name or id; defaults to the active workspace",
+        "required": false
+      },
+      {
+        "name": "path",
+        "description": "remote path to list; defaults to /",
+        "required": false
+      }
+    ],
+    "options": [
+      {
+        "flags": "--server <url>",
+        "description": "relayfile server URL override"
+      },
+      {
+        "flags": "--token <token>",
+        "description": "relayfile token override"
+      },
+      {
+        "flags": "--path <path>",
+        "description": "remote path to list",
+        "defaultValue": "/"
+      },
+      {
+        "flags": "--depth <n>",
+        "description": "tree depth",
+        "defaultValue": 1
+      },
+      {
+        "flags": "--json",
+        "description": "print the raw JSON response",
+        "defaultValue": false
+      }
+    ]
+  },
+  {
+    "name": "read",
+    "description": "Print a remote file's content",
+    "aliases": [
+      "cat"
+    ],
+    "args": [
+      {
+        "name": "workspace",
+        "description": "workspace name or id; defaults to the active workspace",
+        "required": false
+      },
+      {
+        "name": "path",
+        "description": "remote file path (required; the sole positional when no workspace is given)",
+        "required": false
+      }
+    ],
+    "options": [
+      {
+        "flags": "--server <url>",
+        "description": "relayfile server URL override"
+      },
+      {
+        "flags": "--token <token>",
+        "description": "relayfile token override"
+      },
+      {
+        "flags": "--output <file>",
+        "description": "output file path or - for stdout",
+        "defaultValue": "-"
+      },
+      {
+        "flags": "--json",
+        "description": "print the raw JSON response",
+        "defaultValue": false
+      }
+    ]
+  },
+  {
+    "name": "seed",
+    "description": "Upload a directory tree with bulk writes",
+    "args": [
+      {
+        "name": "workspace",
+        "description": "workspace name or id; defaults to the active workspace",
+        "required": false
+      },
+      {
+        "name": "dir",
+        "description": "local directory to upload; defaults to the current directory",
+        "required": false
+      }
+    ],
+    "options": [
+      {
+        "flags": "--server <url>",
+        "description": "relayfile server URL override"
+      },
+      {
+        "flags": "--token <token>",
+        "description": "relayfile token override"
+      }
+    ]
+  },
+  {
+    "name": "export",
+    "description": "Export a workspace as json, tar, or patch",
+    "args": [
+      {
+        "name": "workspace",
+        "description": "workspace name or id; defaults to the active workspace",
+        "required": false
+      }
+    ],
+    "options": [
+      {
+        "flags": "--server <url>",
+        "description": "relayfile server URL override"
+      },
+      {
+        "flags": "--token <token>",
+        "description": "relayfile token override"
+      },
+      {
+        "flags": "--format <format>",
+        "description": "export format: tar, json, or patch",
+        "defaultValue": "json"
+      },
+      {
+        "flags": "--output <file>",
+        "description": "output file path or - for stdout",
+        "defaultValue": "-"
+      }
+    ]
+  },
+  {
+    "name": "status",
+    "description": "Show sync status and local mirror state for a workspace",
+    "args": [
+      {
+        "name": "workspace",
+        "description": "workspace name or id; defaults to the active workspace",
+        "required": false
+      }
+    ],
+    "options": [
+      {
+        "flags": "--server <url>",
+        "description": "relayfile server URL override"
+      },
+      {
+        "flags": "--token <token>",
+        "description": "relayfile token override"
+      },
+      {
+        "flags": "--json",
+        "description": "emit JSON",
+        "defaultValue": false
+      }
+    ]
+  },
+  {
+    "name": "stop",
+    "description": "Stop a background mount",
+    "aliases": [
+      "off"
+    ],
+    "args": [
+      {
+        "name": "workspace",
+        "description": "workspace name or id; defaults to the active workspace",
+        "required": false
+      }
+    ]
+  },
+  {
+    "name": "logs",
+    "description": "Print the background mount log",
+    "args": [
+      {
+        "name": "workspace",
+        "description": "workspace name or id; defaults to the active workspace",
+        "required": false
+      }
+    ],
+    "options": [
+      {
+        "flags": "--lines <n>",
+        "description": "number of lines to print",
+        "defaultValue": 40
+      }
+    ]
+  },
+  {
+    "name": "observer",
+    "description": "Open the hosted file observer for a workspace",
+    "args": [
+      {
+        "name": "workspace",
+        "description": "workspace name or id; defaults to the active workspace",
+        "required": false
+      }
+    ],
+    "options": [
+      {
+        "flags": "--server <url>",
+        "description": "relayfile server URL override"
+      },
+      {
+        "flags": "--token <token>",
+        "description": "relayfile token override"
+      },
+      {
+        "flags": "--url <url>",
+        "description": "observer URL (default: $RELAYFILE_OBSERVER_URL or the hosted observer)"
+      },
+      {
+        "flags": "--no-open",
+        "description": "print the observer URL without opening a browser",
+        "defaultValue": false
+      }
+    ]
+  },
+  {
+    "name": "listen",
+    "description": "Stream workspace file events, optionally running a command per event",
+    "aliases": [
+      "watch"
+    ],
+    "options": [
+      {
+        "flags": "--server <url>",
+        "description": "relayfile server URL override"
+      },
+      {
+        "flags": "--token <token>",
+        "description": "relayfile token override"
+      },
+      {
+        "flags": "--provider <provider>",
+        "description": "filter to a specific provider (e.g. linear, notion)"
+      },
+      {
+        "flags": "--path <glob>",
+        "description": "glob path filter (e.g. /linear/issues/**)"
+      },
+      {
+        "flags": "--event <type>",
+        "description": "event type filter: file.created, file.updated, file.deleted"
+      },
+      {
+        "flags": "--run <command>",
+        "description": "shell command per event; supports {{path}}, {{type}}, {{provider}}, {{revision}}, {{event}}"
+      },
+      {
+        "flags": "--format <format>",
+        "description": "output format when --run is not set: text or json",
+        "defaultValue": "text"
+      },
+      {
+        "flags": "--background",
+        "description": "run in background; logs to ~/.relayfile/listen.log",
+        "defaultValue": false
+      },
+      {
+        "flags": "--daemonized",
+        "description": "internal flag used by relayfile listen --background",
+        "defaultValue": false
+      }
+    ]
+  },
+  {
+    "name": "control-plane",
+    "description": "Serve the local relayfile control-plane socket",
+    "subcommands": [
+      {
+        "name": "serve",
+        "description": "Serve the control-plane unix socket",
+        "options": [
+          {
+            "flags": "--sock <path>",
+            "description": "unix socket path (default: the per-user relayfile socket)"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "dev",
+    "description": "Print workspace context, then stream file events like `listen`",
+    "options": [
+      {
+        "flags": "--server <url>",
+        "description": "relayfile server URL override"
+      },
+      {
+        "flags": "--token <token>",
+        "description": "relayfile token override"
+      },
+      {
+        "flags": "--provider <provider>",
+        "description": "filter to a specific provider (e.g. linear, notion)"
+      },
+      {
+        "flags": "--path <glob>",
+        "description": "glob path filter (e.g. /linear/issues/**)"
+      },
+      {
+        "flags": "--event <type>",
+        "description": "event type filter: file.created, file.updated, file.deleted"
+      },
+      {
+        "flags": "--run <command>",
+        "description": "shell command per event; supports {{path}}, {{type}}, {{provider}}, {{revision}}, {{event}}"
+      },
+      {
+        "flags": "--format <format>",
+        "description": "output format when --run is not set: text or json",
+        "defaultValue": "text"
+      },
+      {
+        "flags": "--background",
+        "description": "run in background; logs to ~/.relayfile/listen.log",
+        "defaultValue": false
+      },
+      {
+        "flags": "--daemonized",
+        "description": "internal flag used by relayfile listen --background",
+        "defaultValue": false
+      }
+    ],
+    "hidden": true
+  }
+]
