@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-09-18T06:29:20.150Z",
+  "lastUpdated": "2026-09-18T06:29:37.765Z",
   "trajectories": {
     "traj_4pvrlmqfnzng": {
       "title": "Review PR #278 in AgentWorkforce/relayfile",
@@ -396,9 +396,10 @@
     },
     "traj_3lyio30tipf8": {
       "title": "Fix four Devin findings on relayfile PR #507 (CLI surface)",
-      "status": "active",
+      "status": "completed",
       "startedAt": "2026-09-18T06:29:04.757Z",
-      "path": "/home/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/active/traj_3lyio30tipf8.json"
+      "completedAt": "2026-09-18T06:29:37.710Z",
+      "path": "/home/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-09/traj_3lyio30tipf8.json"
     }
   }
 }
