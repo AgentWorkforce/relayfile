@@ -134,7 +134,7 @@ type agentRelayMessagingOnlyWorkspaceError struct {
 
 func (e *agentRelayMessagingOnlyWorkspaceError) Error() string {
 	name := strings.TrimSpace(e.Name)
-	setupCommand := "relayfile setup --workspace <name>"
+	setupCommand := programName() + " setup --workspace <name>"
 	workspaceLabel := "active Agent Relay workspace"
 	if name != "" {
 		setupCommand = programName() + " setup --workspace " + strconv.Quote(name)
@@ -151,7 +151,7 @@ func (e *agentRelayMessagingOnlyWorkspaceError) Error() string {
 type agentRelayInvalidWorkspaceKeyError struct{}
 
 func (*agentRelayInvalidWorkspaceKeyError) Error() string {
-	return "the active Agent Relay workspace key is invalid or unknown: Cloud could not resolve it and Relaycast rejected it. Run `agent-relay workspace list`, switch to a valid workspace with `agent-relay workspace switch <name>`, or create a Relayfile-backed workspace with `relayfile setup --workspace <name>`."
+	return fmt.Sprintf("the active Agent Relay workspace key is invalid or unknown: Cloud could not resolve it and Relaycast rejected it. Run `agent-relay workspace list`, switch to a valid workspace with `agent-relay workspace switch <name>`, or create a Relayfile-backed workspace with `%s setup --workspace <name>`.", programName())
 }
 
 type workspaceCatalog struct {
@@ -719,11 +719,11 @@ func printHelpForArgs(args []string, stdout io.Writer) {
 
 	switch command {
 	case "setup":
-		fmt.Fprintln(stdout, "Usage: relayfile setup [--provider PROVIDER] [--backend BACKEND] [--workspace NAME] [--local-dir DIR]")
+		fmt.Fprintf(stdout, "Usage: %s setup [--provider PROVIDER] [--backend BACKEND] [--workspace NAME] [--local-dir DIR]\n", programName())
 	case "login":
-		fmt.Fprintln(stdout, "Usage: relayfile login [--no-open] [--provision-messaging-only] [--api-key] [--server URL] [--token TOKEN]")
+		fmt.Fprintf(stdout, "Usage: %s login [--no-open] [--provision-messaging-only] [--api-key] [--server URL] [--token TOKEN]\n", programName())
 	case "logout":
-		fmt.Fprintln(stdout, "Usage: relayfile logout")
+		fmt.Fprintf(stdout, "Usage: %s logout\n", programName())
 	case "workspace":
 		printWorkspaceUsage(stdout, subcommand)
 	case "integration":
@@ -735,45 +735,45 @@ func printHelpForArgs(args []string, stdout io.Writer) {
 	case "digest":
 		printDigestUsage(stdout, subcommand)
 	case "pull":
-		fmt.Fprintln(stdout, "Usage: relayfile pull [--workspace NAME] [--provider PROVIDER] [--reason TEXT]")
+		fmt.Fprintf(stdout, "Usage: %s pull [--workspace NAME] [--provider PROVIDER] [--reason TEXT]\n", programName())
 	case "mount", "start", "on":
 		if subcommand == "checkpoint-seal" {
-			fmt.Fprintln(stdout, "Usage: relayfile mount checkpoint-seal --root ABS_LOCAL_ROOT --lifecycle-id STABLE_ID --session ID --generation N [--timeout 30s] [--ttl 60s] --json")
+			fmt.Fprintf(stdout, "Usage: %s mount checkpoint-seal --root ABS_LOCAL_ROOT --lifecycle-id STABLE_ID --session ID --generation N [--timeout 30s] [--ttl 60s] --json\n", programName())
 		} else if subcommand == "resume-seal" {
-			fmt.Fprintln(stdout, "Usage: printf '{\"resumeId\":\"...\"}' | relayfile mount resume-seal --root ABS_LOCAL_ROOT [--timeout 60s] --json")
+			fmt.Fprintf(stdout, "Usage: printf '{\"resumeId\":\"...\"}' | %s mount resume-seal --root ABS_LOCAL_ROOT [--timeout 60s] --json\n", programName())
 		} else if subcommand == "verify-seal" {
-			fmt.Fprintln(stdout, "Usage: printf '{\"verificationId\":\"...\",\"receipt\":{...}}' | relayfile mount verify-seal --root ABS_LOCAL_ROOT [--timeout 60s] --json")
+			fmt.Fprintf(stdout, "Usage: printf '{\"verificationId\":\"...\",\"receipt\":{...}}' | %s mount verify-seal --root ABS_LOCAL_ROOT [--timeout 60s] --json\n", programName())
 		} else if subcommand == "handback-seal" {
-			fmt.Fprintln(stdout, "Usage: printf '{\"handbackId\":\"...\",\"consumerIdempotencyKey\":\"...\",\"receipt\":{...}}' | relayfile mount handback-seal --root ABS_LOCAL_ROOT [--timeout 60s] --json")
+			fmt.Fprintf(stdout, "Usage: printf '{\"handbackId\":\"...\",\"consumerIdempotencyKey\":\"...\",\"receipt\":{...}}' | %s mount handback-seal --root ABS_LOCAL_ROOT [--timeout 60s] --json\n", programName())
 		} else {
 			printMountHelp(stdout)
 		}
 	case "restart":
-		fmt.Fprintln(stdout, "Usage: relayfile restart [WORKSPACE] [--foreground]")
+		fmt.Fprintf(stdout, "Usage: %s restart [WORKSPACE] [--foreground]\n", programName())
 	case "tree", "ls":
-		fmt.Fprintln(stdout, "Usage: relayfile tree [WORKSPACE] [PATH] [--depth N] [--json]")
+		fmt.Fprintf(stdout, "Usage: %s tree [WORKSPACE] [PATH] [--depth N] [--json]\n", programName())
 	case "read", "cat":
-		fmt.Fprintln(stdout, "Usage: relayfile read [WORKSPACE] PATH [--output FILE] [--json]")
+		fmt.Fprintf(stdout, "Usage: %s read [WORKSPACE] PATH [--output FILE] [--json]\n", programName())
 	case "seed":
-		fmt.Fprintln(stdout, "Usage: relayfile seed [WORKSPACE] [DIR]")
+		fmt.Fprintf(stdout, "Usage: %s seed [WORKSPACE] [DIR]\n", programName())
 	case "export":
-		fmt.Fprintln(stdout, "Usage: relayfile export [WORKSPACE] --format FORMAT [--output FILE]")
+		fmt.Fprintf(stdout, "Usage: %s export [WORKSPACE] --format FORMAT [--output FILE]\n", programName())
 	case "status":
-		fmt.Fprintln(stdout, "Usage: relayfile status [WORKSPACE] [--json]")
+		fmt.Fprintf(stdout, "Usage: %s status [WORKSPACE] [--json]\n", programName())
 	case "stop", "off":
-		fmt.Fprintln(stdout, "Usage: relayfile stop [WORKSPACE]")
+		fmt.Fprintf(stdout, "Usage: %s stop [WORKSPACE]\n", programName())
 	case "supervisor":
-		fmt.Fprintln(stdout, "Usage: relayfile supervisor <install|uninstall|status> [WORKSPACE] [LISTEN_FILTERS...]")
+		fmt.Fprintf(stdout, "Usage: %s supervisor <install|uninstall|status> [WORKSPACE] [LISTEN_FILTERS...]\n", programName())
 	case "logs":
-		fmt.Fprintln(stdout, "Usage: relayfile logs [WORKSPACE] [--lines N]")
+		fmt.Fprintf(stdout, "Usage: %s logs [WORKSPACE] [--lines N]\n", programName())
 	case "observer":
-		fmt.Fprintln(stdout, "Usage: relayfile observer [WORKSPACE] [--no-open]")
+		fmt.Fprintf(stdout, "Usage: %s observer [WORKSPACE] [--no-open]\n", programName())
 	case "listen", "watch":
-		fmt.Fprintln(stdout, "Usage: relayfile listen [WORKSPACE] [--provider PROVIDER] [--path GLOB] [--event TYPE] [--run CMD] [--format text|json] [--background]")
+		fmt.Fprintf(stdout, "Usage: %s listen [WORKSPACE] [--provider PROVIDER] [--path GLOB] [--event TYPE] [--run CMD] [--format text|json] [--background]\n", programName())
 	case "control-plane":
-		fmt.Fprintln(stdout, "Usage: relayfile control-plane serve [--sock PATH]")
+		fmt.Fprintf(stdout, "Usage: %s control-plane serve [--sock PATH]\n", programName())
 	case "dev":
-		fmt.Fprintln(stdout, "Usage: relayfile dev [WORKSPACE] [--provider PROVIDER] [--path GLOB] [--event TYPE] [--run CMD]")
+		fmt.Fprintf(stdout, "Usage: %s dev [WORKSPACE] [--provider PROVIDER] [--path GLOB] [--event TYPE] [--run CMD]\n", programName())
 	case "help":
 		printUsage(stdout)
 	default:
@@ -784,82 +784,85 @@ func printHelpForArgs(args []string, stdout io.Writer) {
 func printWorkspaceUsage(w io.Writer, subcommand string) {
 	switch subcommand {
 	case "create":
-		fmt.Fprintln(w, "Usage: relayfile workspace create NAME")
+		fmt.Fprintf(w, "Usage: %s workspace create NAME\n", programName())
 	case "join":
-		fmt.Fprintln(w, "Usage: relayfile workspace join WORKSPACE_ID [--name NAME] [--write]")
+		fmt.Fprintf(w, "Usage: %s workspace join WORKSPACE_ID [--name NAME] [--write]\n", programName())
 	case "use":
-		fmt.Fprintln(w, "Usage: relayfile workspace use NAME")
+		fmt.Fprintf(w, "Usage: %s workspace use NAME\n", programName())
 	case "list":
-		fmt.Fprintln(w, "Usage: relayfile workspace list [--names-only]")
+		fmt.Fprintf(w, "Usage: %s workspace list [--names-only]\n", programName())
 	case "current":
-		fmt.Fprintln(w, "Usage: relayfile workspace current [--verbose]")
+		fmt.Fprintf(w, "Usage: %s workspace current [--verbose]\n", programName())
 	case "view":
-		fmt.Fprintln(w, "Usage: relayfile workspace view <add|list|remove> ...")
+		fmt.Fprintf(w, "Usage: %s workspace view <add|list|remove> ...\n", programName())
 	case "status":
-		fmt.Fprintln(w, "Usage: relayfile workspace status [--workspace NAME] [--json]")
+		fmt.Fprintf(w, "Usage: %s workspace status [--workspace NAME] [--json]\n", programName())
 	case "delete":
-		fmt.Fprintln(w, "Usage: relayfile workspace delete NAME [--yes]")
+		fmt.Fprintf(w, "Usage: %s workspace delete NAME [--yes]\n", programName())
 	default:
-		fmt.Fprintln(w, `Usage:
-  relayfile workspace create NAME
-  relayfile workspace join WORKSPACE_ID [--name NAME] [--write]
-  relayfile workspace use NAME
-  relayfile workspace list [--names-only]
-  relayfile workspace current [--verbose]
-  relayfile workspace view <add|list|remove> ...
-  relayfile workspace status [--workspace NAME] [--json]
-  relayfile workspace delete NAME [--yes]`)
+		fmt.Fprintf(w, `Usage:
+  %[1]s workspace create NAME
+  %[1]s workspace join WORKSPACE_ID [--name NAME] [--write]
+  %[1]s workspace use NAME
+  %[1]s workspace list [--names-only]
+  %[1]s workspace current [--verbose]
+  %[1]s workspace view <add|list|remove> ...
+  %[1]s workspace status [--workspace NAME] [--json]
+  %[1]s workspace delete NAME [--yes]
+`, programName())
 	}
 }
 
 func printIntegrationUsage(w io.Writer, subcommand string) {
 	switch subcommand {
 	case "connect":
-		fmt.Fprintln(w, "Usage: relayfile integration connect PROVIDER [--backend BACKEND] [--workspace NAME] [--no-open] [--timeout 5m] [--wait-sync]")
+		fmt.Fprintf(w, "Usage: %s integration connect PROVIDER [--backend BACKEND] [--workspace NAME] [--no-open] [--timeout 5m] [--wait-sync]\n", programName())
 	case "available", "catalog", "providers":
-		fmt.Fprintln(w, "Usage: relayfile integration available [--search QUERY] [--backend BACKEND] [--json] [--refresh]")
+		fmt.Fprintf(w, "Usage: %s integration available [--search QUERY] [--backend BACKEND] [--json] [--refresh]\n", programName())
 	case "search":
-		fmt.Fprintln(w, "Usage: relayfile integration search QUERY [--backend BACKEND] [--json] [--refresh]")
+		fmt.Fprintf(w, "Usage: %s integration search QUERY [--backend BACKEND] [--json] [--refresh]\n", programName())
 	case "list":
-		fmt.Fprintln(w, "Usage: relayfile integration list [--workspace NAME] [--json]")
+		fmt.Fprintf(w, "Usage: %s integration list [--workspace NAME] [--json]\n", programName())
 	case "disconnect":
-		fmt.Fprintln(w, "Usage: relayfile integration disconnect PROVIDER [--workspace NAME] [--yes]")
+		fmt.Fprintf(w, "Usage: %s integration disconnect PROVIDER [--workspace NAME] [--yes]\n", programName())
 	case "adopt":
-		fmt.Fprintln(w, "Usage: relayfile integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]")
+		fmt.Fprintf(w, "Usage: %s integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]\n", programName())
 	case "set-metadata":
-		fmt.Fprintln(w, "Usage: relayfile integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]")
+		fmt.Fprintf(w, "Usage: %s integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]\n", programName())
 	case "bind":
-		fmt.Fprintln(w, "Usage: relayfile integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN")
+		fmt.Fprintf(w, "Usage: %s integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN\n", programName())
 	case "resolve-path":
-		fmt.Fprintln(w, "Usage: relayfile integration resolve-path PROVIDER RESOURCE [--json]")
+		fmt.Fprintf(w, "Usage: %s integration resolve-path PROVIDER RESOURCE [--json]\n", programName())
 	case "unbind":
-		fmt.Fprintln(w, "Usage: relayfile integration unbind PROVIDER [RESOURCE_OR_PATH_GLOB|--resource RESOURCE_OR_PATH_GLOB]")
+		fmt.Fprintf(w, "Usage: %s integration unbind PROVIDER [RESOURCE_OR_PATH_GLOB|--resource RESOURCE_OR_PATH_GLOB]\n", programName())
 	default:
-		fmt.Fprintln(w, `Usage:
-  relayfile integration connect PROVIDER [--backend BACKEND] [--workspace NAME] [--wait-sync]
-  relayfile integration available [--search QUERY] [--backend BACKEND] [--json] [--refresh]
-  relayfile integration search QUERY [--backend BACKEND] [--json] [--refresh]
-  relayfile integration list [--workspace NAME] [--json]
-  relayfile integration disconnect PROVIDER [--workspace NAME] [--yes]
-  relayfile integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]
-  relayfile integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]
-  relayfile integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN
-  relayfile integration resolve-path PROVIDER RESOURCE [--json]
-  relayfile integration unbind PROVIDER [RESOURCE_OR_PATH_GLOB|--resource RESOURCE_OR_PATH_GLOB]
-  relayfile integration writeback-secret --channel CHANNEL [--workspace WS] [--json]`)
+		fmt.Fprintf(w, `Usage:
+  %[1]s integration connect PROVIDER [--backend BACKEND] [--workspace NAME] [--wait-sync]
+  %[1]s integration available [--search QUERY] [--backend BACKEND] [--json] [--refresh]
+  %[1]s integration search QUERY [--backend BACKEND] [--json] [--refresh]
+  %[1]s integration list [--workspace NAME] [--json]
+  %[1]s integration disconnect PROVIDER [--workspace NAME] [--yes]
+  %[1]s integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]
+  %[1]s integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]
+  %[1]s integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN
+  %[1]s integration resolve-path PROVIDER RESOURCE [--json]
+  %[1]s integration unbind PROVIDER [RESOURCE_OR_PATH_GLOB|--resource RESOURCE_OR_PATH_GLOB]
+  %[1]s integration writeback-secret --channel CHANNEL [--workspace WS] [--json]
+`, programName())
 	}
 }
 
 func printOpsUsage(w io.Writer, subcommand string) {
 	switch subcommand {
 	case "list":
-		fmt.Fprintln(w, "Usage: relayfile ops list [--workspace NAME] [--json] [--no-refresh]")
+		fmt.Fprintf(w, "Usage: %s ops list [--workspace NAME] [--json] [--no-refresh]\n", programName())
 	case "replay":
-		fmt.Fprintln(w, "Usage: relayfile ops replay OPID [--workspace NAME]")
+		fmt.Fprintf(w, "Usage: %s ops replay OPID [--workspace NAME]\n", programName())
 	default:
-		fmt.Fprintln(w, `Usage:
-  relayfile ops list [--workspace NAME] [--json]
-  relayfile ops replay OPID [--workspace NAME]`)
+		fmt.Fprintf(w, `Usage:
+  %[1]s ops list [--workspace NAME] [--json]
+  %[1]s ops replay OPID [--workspace NAME]
+`, programName())
 	}
 }
 
@@ -868,29 +871,30 @@ func printWritebackUsage(w io.Writer, subcommand string) {
 	case "list":
 		fmt.Fprintln(w, writebackListUsage)
 	case "status":
-		fmt.Fprintln(w, "Usage: relayfile writeback status [WORKSPACE] [--json]")
+		fmt.Fprintf(w, "Usage: %s writeback status [WORKSPACE] [--json]\n", programName())
 	case "push":
-		fmt.Fprintln(w, "Usage: relayfile writeback push LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]")
+		fmt.Fprintf(w, "Usage: %s writeback push LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]\n", programName())
 	case "update":
-		fmt.Fprintln(w, "Usage: relayfile writeback update LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]")
+		fmt.Fprintf(w, "Usage: %s writeback update LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]\n", programName())
 	case "delete":
-		fmt.Fprintln(w, "Usage: relayfile writeback delete LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]")
+		fmt.Fprintf(w, "Usage: %s writeback delete LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]\n", programName())
 	case "retry":
-		fmt.Fprintln(w, "Usage: relayfile writeback retry --op-id OP [WORKSPACE]")
+		fmt.Fprintf(w, "Usage: %s writeback retry --op-id OP [WORKSPACE]\n", programName())
 	case "skip-stuck":
-		fmt.Fprintln(w, "Usage: relayfile writeback skip-stuck [WORKSPACE] [--workspace WS] [--max N] [--json]")
+		fmt.Fprintf(w, "Usage: %s writeback skip-stuck [WORKSPACE] [--workspace WS] [--max N] [--json]\n", programName())
 	case "sweep-drafts":
 		fmt.Fprintln(w, writebackSweepUsage)
 	default:
-		fmt.Fprintln(w, `Usage:
-  relayfile writeback list --state pending|dead [--workspace WS] [--json]
-  relayfile writeback status [WORKSPACE] [--json]
-  relayfile writeback retry --op-id OP [WORKSPACE]
-  relayfile writeback push LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
-  relayfile writeback update LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
-  relayfile writeback delete LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
-  relayfile writeback skip-stuck [WORKSPACE] [--workspace WS] [--max N] [--json]
-  relayfile writeback sweep-drafts [WORKSPACE] [--path-prefix PREFIX] [--pattern GLOB ...] [--apply] [--json]`)
+		fmt.Fprintf(w, `Usage:
+  %[1]s writeback list --state pending|dead [--workspace WS] [--json]
+  %[1]s writeback status [WORKSPACE] [--json]
+  %[1]s writeback retry --op-id OP [WORKSPACE]
+  %[1]s writeback push LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
+  %[1]s writeback update LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
+  %[1]s writeback delete LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
+  %[1]s writeback skip-stuck [WORKSPACE] [--workspace WS] [--max N] [--json]
+  %[1]s writeback sweep-drafts [WORKSPACE] [--path-prefix PREFIX] [--pattern GLOB ...] [--apply] [--json]
+`, programName())
 	}
 }
 
@@ -899,65 +903,66 @@ func printDigestUsage(w io.Writer, subcommand string) {
 	case "rebuild":
 		fmt.Fprintln(w, digestRebuildUsage)
 	default:
-		fmt.Fprintln(w, `Usage:
-  relayfile digest rebuild --window today|yesterday|YYYY-MM-DD|this-week|last-week [--workspace NAME] [--json]`)
+		fmt.Fprintf(w, `Usage:
+  %[1]s digest rebuild --window today|yesterday|YYYY-MM-DD|this-week|last-week [--workspace NAME] [--json]
+`, programName())
 	}
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintln(w, `relayfile is the RelayFile CLI.
+	fmt.Fprintf(w, `%[1]s is the RelayFile CLI.
 
 Usage:
-  relayfile                                             (hosted GitHub quickstart for the current project)
-  relayfile setup [--provider PROVIDER] [--backend BACKEND] [--workspace NAME] [--local-dir DIR]
-  relayfile login [--no-open] [--provision-messaging-only] [--api-key] [--server URL] [--token TOKEN]
-  relayfile logout
-  relayfile workspace create NAME
-  relayfile workspace join WORKSPACE_ID [--name NAME] [--write]
-  relayfile workspace use NAME
-  relayfile workspace list [--names-only]
-  relayfile workspace current [--verbose]
-  relayfile workspace status [--workspace NAME] [--json]
-  relayfile workspace delete NAME [--yes]
-  relayfile integration connect PROVIDER [--backend BACKEND] [--workspace NAME]
+  %[1]s                                             (hosted GitHub quickstart for the current project)
+  %[1]s setup [--provider PROVIDER] [--backend BACKEND] [--workspace NAME] [--local-dir DIR]
+  %[1]s login [--no-open] [--provision-messaging-only] [--api-key] [--server URL] [--token TOKEN]
+  %[1]s logout
+  %[1]s workspace create NAME
+  %[1]s workspace join WORKSPACE_ID [--name NAME] [--write]
+  %[1]s workspace use NAME
+  %[1]s workspace list [--names-only]
+  %[1]s workspace current [--verbose]
+  %[1]s workspace status [--workspace NAME] [--json]
+  %[1]s workspace delete NAME [--yes]
+  %[1]s integration connect PROVIDER [--backend BACKEND] [--workspace NAME]
     (for jira/confluence: prompts for the Atlassian site to bind after OAuth completes)
-  relayfile integration available [--search QUERY] [--backend BACKEND] [--json] [--refresh]
-  relayfile integration search QUERY [--backend BACKEND] [--json] [--refresh]
-  relayfile integration list [--workspace NAME] [--json]
-  relayfile integration disconnect PROVIDER [--workspace NAME] [--yes]
-  relayfile integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]
-  relayfile integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]
-  relayfile integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN
-  relayfile integration resolve-path PROVIDER RESOURCE [--json]
-  relayfile integration unbind PROVIDER [RESOURCE_OR_PATH_GLOB|--resource RESOURCE_OR_PATH_GLOB]
-  relayfile ops list [--workspace NAME] [--json]
-  relayfile ops replay OPID [--workspace NAME]
-  relayfile writeback list --state pending|dead [--workspace WS] [--json]
-  relayfile writeback status [WORKSPACE] [--json]
-  relayfile writeback retry --op-id OP [WORKSPACE]
-  relayfile writeback push LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
-  relayfile writeback update LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
-  relayfile writeback delete LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
-  relayfile writeback skip-stuck [WORKSPACE] [--workspace WS] [--max N] [--json]
-  relayfile digest rebuild --window today|yesterday|YYYY-MM-DD|this-week|last-week [--workspace NAME] [--json]
-  relayfile pull [--workspace NAME] [--provider PROVIDER] [--reason TEXT]
-  relayfile mount [WORKSPACE] [LOCAL_DIR]
-  relayfile start [WORKSPACE] [LOCAL_DIR]            (alias for mount; pass --background to detach)
-  relayfile on [WORKSPACE] [LOCAL_DIR]              (alias for mount; pass --background to detach)
-  relayfile stop [WORKSPACE]
-  relayfile off [WORKSPACE]                         (alias for stop)
-  relayfile restart [WORKSPACE] [--foreground]
-  relayfile supervisor install [WORKSPACE] [LISTEN_FILTERS...]
-  relayfile supervisor uninstall [WORKSPACE]
-  relayfile supervisor status [WORKSPACE]
-  relayfile tree [WORKSPACE] [PATH] [--depth N]
-  relayfile read [WORKSPACE] PATH
-  relayfile seed [WORKSPACE] [DIR]
-  relayfile export [WORKSPACE] --format FORMAT [--output FILE]
-  relayfile status [WORKSPACE]
-  relayfile logs [WORKSPACE]
-  relayfile observer [WORKSPACE] [--no-open]
-  relayfile control-plane serve [--sock PATH]
+  %[1]s integration available [--search QUERY] [--backend BACKEND] [--json] [--refresh]
+  %[1]s integration search QUERY [--backend BACKEND] [--json] [--refresh]
+  %[1]s integration list [--workspace NAME] [--json]
+  %[1]s integration disconnect PROVIDER [--workspace NAME] [--yes]
+  %[1]s integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]
+  %[1]s integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]
+  %[1]s integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN
+  %[1]s integration resolve-path PROVIDER RESOURCE [--json]
+  %[1]s integration unbind PROVIDER [RESOURCE_OR_PATH_GLOB|--resource RESOURCE_OR_PATH_GLOB]
+  %[1]s ops list [--workspace NAME] [--json]
+  %[1]s ops replay OPID [--workspace NAME]
+  %[1]s writeback list --state pending|dead [--workspace WS] [--json]
+  %[1]s writeback status [WORKSPACE] [--json]
+  %[1]s writeback retry --op-id OP [WORKSPACE]
+  %[1]s writeback push LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
+  %[1]s writeback update LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
+  %[1]s writeback delete LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
+  %[1]s writeback skip-stuck [WORKSPACE] [--workspace WS] [--max N] [--json]
+  %[1]s digest rebuild --window today|yesterday|YYYY-MM-DD|this-week|last-week [--workspace NAME] [--json]
+  %[1]s pull [--workspace NAME] [--provider PROVIDER] [--reason TEXT]
+  %[1]s mount [WORKSPACE] [LOCAL_DIR]
+  %[1]s start [WORKSPACE] [LOCAL_DIR]            (alias for mount; pass --background to detach)
+  %[1]s on [WORKSPACE] [LOCAL_DIR]              (alias for mount; pass --background to detach)
+  %[1]s stop [WORKSPACE]
+  %[1]s off [WORKSPACE]                         (alias for stop)
+  %[1]s restart [WORKSPACE] [--foreground]
+  %[1]s supervisor install [WORKSPACE] [LISTEN_FILTERS...]
+  %[1]s supervisor uninstall [WORKSPACE]
+  %[1]s supervisor status [WORKSPACE]
+  %[1]s tree [WORKSPACE] [PATH] [--depth N]
+  %[1]s read [WORKSPACE] PATH
+  %[1]s seed [WORKSPACE] [DIR]
+  %[1]s export [WORKSPACE] --format FORMAT [--output FILE]
+  %[1]s status [WORKSPACE]
+  %[1]s logs [WORKSPACE]
+  %[1]s observer [WORKSPACE] [--no-open]
+  %[1]s control-plane serve [--sock PATH]
 
 Subcommands:
   setup       Sign in, connect an integration, and mount the workspace
@@ -992,7 +997,8 @@ Subcommands:
   export      Export a workspace as json, tar, or patch
   status      Show sync status and local mirror state for a workspace
   logs        Print the background mount log
-  observer    Open the hosted file observer for a workspace`)
+  observer    Open the hosted file observer for a workspace
+`, programName())
 }
 
 type setupRunOptions struct {
@@ -1033,7 +1039,7 @@ func runSetupWithOptions(args []string, stdin io.Reader, stdout io.Writer, optio
 		return err
 	}
 	if fs.NArg() > 0 {
-		return errors.New("usage: relayfile setup [--provider PROVIDER] [--backend BACKEND] [--workspace NAME] [--local-dir DIR]")
+		return fmt.Errorf("usage: %s setup [--provider PROVIDER] [--backend BACKEND] [--workspace NAME] [--local-dir DIR]", programName())
 	}
 
 	cloudAPI := strings.TrimRight(strings.TrimSpace(*cloudAPIURL), "/")
@@ -1178,7 +1184,7 @@ func runSetupWithOptions(args []string, stdin io.Reader, stdout io.Writer, optio
 		mountArgs = append(mountArgs, "--once")
 	}
 	if *skipMount {
-		fmt.Fprintf(stdout, "Setup complete. Start the VFS mount with:\n  relayfile mount %s %s\n", record.ID, localDir)
+		fmt.Fprintf(stdout, "Setup complete. Start the VFS mount with:\n  %s mount %s %s\n", programName(), record.ID, localDir)
 		return nil
 	}
 
@@ -2984,7 +2990,7 @@ func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
 
 	if (strings.TrimSpace(*cloudAPIURL) != "" && strings.TrimRight(strings.TrimSpace(*cloudAPIURL), "/") != defaultCloudAPIURL) ||
 		strings.TrimSpace(*cloudToken) != "" || *loginTimeout != 5*time.Minute || *skipWorkspace || strings.TrimSpace(*workspaceFlag) != "" {
-		fmt.Fprintln(stdout, "warning: relayfile login delegates cloud sign-in to agent-relay; relayfile cloud flags are deprecated")
+		fmt.Fprintf(stdout, "warning: %s login delegates cloud sign-in to agent-relay; its cloud flags are deprecated\n", programName())
 	}
 	if err := runAgentRelayLogin(stdin, stdout, *noOpen); err != nil {
 		return err
@@ -3014,7 +3020,7 @@ func runLogin(args []string, stdin io.Reader, stdout io.Writer) error {
 
 func runLogout(args []string, stdout io.Writer) error {
 	if len(args) > 0 {
-		return errors.New("usage: relayfile logout")
+		return fmt.Errorf("usage: %s logout", programName())
 	}
 	cloudRemoved, err := revokeAndClearAgentRelayCloudSession(context.Background())
 	if err != nil {
@@ -3250,7 +3256,7 @@ func runIntegrationBind(args []string, stdout io.Writer) error {
 	}
 	if *list {
 		if fs.NArg() != 0 {
-			return errors.New("usage: relayfile integration bind --list")
+			return fmt.Errorf("usage: %s integration bind --list", programName())
 		}
 		bindings, err := listRelayIntegrationBindings()
 		if err != nil {
@@ -3259,7 +3265,7 @@ func runIntegrationBind(args []string, stdout io.Writer) error {
 		return writeJSON(stdout, bindings)
 	}
 	if fs.NArg() != 2 {
-		return errors.New("usage: relayfile integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN [--subscription ID] [--webhook-subscription ID --webhook-subscription-workspace WS]")
+		return fmt.Errorf("usage: %s integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN [--subscription ID] [--webhook-subscription ID --webhook-subscription-workspace WS]", programName())
 	}
 	binding, replaced, warning, err := bindRelayIntegration(relayIntegrationBindInput{
 		Provider:                       fs.Arg(0),
@@ -3295,7 +3301,7 @@ func runIntegrationResolvePath(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() != 2 {
-		return errors.New("usage: relayfile integration resolve-path PROVIDER RESOURCE [--json]")
+		return fmt.Errorf("usage: %s integration resolve-path PROVIDER RESOURCE [--json]", programName())
 	}
 	provider := normalizeProviderID(fs.Arg(0))
 	if err := validateLocalProviderID(provider); err != nil {
@@ -3395,7 +3401,7 @@ func runIntegrationUnbind(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() < 1 || fs.NArg() > 2 {
-		return errors.New("usage: relayfile integration unbind PROVIDER [RESOURCE_OR_PATH_GLOB|--resource RESOURCE_OR_PATH_GLOB]")
+		return fmt.Errorf("usage: %s integration unbind PROVIDER [RESOURCE_OR_PATH_GLOB|--resource RESOURCE_OR_PATH_GLOB]", programName())
 	}
 	pathGlob := strings.TrimSpace(*resource)
 	if fs.NArg() == 2 {
@@ -3448,7 +3454,7 @@ func runIntegrationWritebackSecret(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return errors.New("usage: relayfile integration writeback-secret --channel CHANNEL [--workspace WS] [--json]")
+		return fmt.Errorf("usage: %s integration writeback-secret --channel CHANNEL [--workspace WS] [--json]", programName())
 	}
 	channelValue := strings.TrimSpace(*channel)
 	if channelValue == "" {
@@ -3514,7 +3520,7 @@ func runIntegrationConnect(args []string, stdin io.Reader, stdout io.Writer) err
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: relayfile integration connect PROVIDER [--backend BACKEND] [--workspace NAME] [--no-open] [--timeout 5m] [--wait-sync]")
+		return fmt.Errorf("usage: %s integration connect PROVIDER [--backend BACKEND] [--workspace NAME] [--no-open] [--timeout 5m] [--wait-sync]", programName())
 	}
 	provider := normalizeProviderID(fs.Arg(0))
 	requestedBackend, err := normalizeIntegrationBackend(*backend)
@@ -3564,9 +3570,9 @@ func runIntegrationConnect(args []string, stdin io.Reader, stdout io.Writer) err
 		return waitForInitialSync(delegated.ServerURL(), delegated.BearerToken(), relayWorkspaceID, provider, record.LocalDir, *timeout, stdout)
 	}
 	if record.LocalDir != "" {
-		fmt.Fprintf(stdout, "Run `relayfile mount %s %s` to mirror files locally, or rerun with --wait-sync to block until initial data is ready.\n", record.ID, record.LocalDir)
+		fmt.Fprintf(stdout, "Run `%s mount %s %s` to mirror files locally, or rerun with --wait-sync to block until initial data is ready.\n", programName(), record.ID, record.LocalDir)
 	} else {
-		fmt.Fprintln(stdout, "Run `relayfile mount` to mirror files locally, or rerun with --wait-sync to block until initial data is ready.")
+		fmt.Fprintf(stdout, "Run `%s mount` to mirror files locally, or rerun with --wait-sync to block until initial data is ready.\n", programName())
 	}
 	return nil
 }
@@ -3736,7 +3742,7 @@ func runIntegrationSearch(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: relayfile integration search QUERY [--backend BACKEND] [--json] [--refresh]")
+		return fmt.Errorf("usage: %s integration search QUERY [--backend BACKEND] [--json] [--refresh]", programName())
 	}
 	availableArgs := []string{
 		"--cloud-api-url", *cloudAPIURL,
@@ -3772,7 +3778,7 @@ func runIntegrationAvailable(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() > 0 {
-		return errors.New("usage: relayfile integration available [--search QUERY] [--backend BACKEND] [--json] [--refresh]")
+		return fmt.Errorf("usage: %s integration available [--search QUERY] [--backend BACKEND] [--json] [--refresh]", programName())
 	}
 	requestedBackend, err := normalizeIntegrationBackend(*backend)
 	if err != nil {
@@ -3894,7 +3900,7 @@ func runIntegrationList(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() > 0 {
-		return errors.New("usage: relayfile integration list [--workspace NAME] [--json] [--cloud-token TOKEN]")
+		return fmt.Errorf("usage: %s integration list [--workspace NAME] [--json] [--cloud-token TOKEN]", programName())
 	}
 	cloudTokenPassedExplicitly := false
 	fs.Visit(func(item *flag.Flag) {
@@ -4048,7 +4054,7 @@ func runIntegrationDisconnect(args []string, stdin io.Reader, stdout io.Writer) 
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: relayfile integration disconnect PROVIDER [--workspace NAME] [--yes]")
+		return fmt.Errorf("usage: %s integration disconnect PROVIDER [--workspace NAME] [--yes]", programName())
 	}
 	provider := normalizeProviderID(fs.Arg(0))
 	record, err := resolveWorkspaceRecord(strings.TrimSpace(*workspaceName))
@@ -4113,7 +4119,7 @@ func runIntegrationAdopt(args []string, stdin io.Reader, stdout io.Writer) error
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: relayfile integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]")
+		return fmt.Errorf("usage: %s integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]", programName())
 	}
 	provider := normalizeProviderID(fs.Arg(0))
 	if err := validateLocalProviderID(provider); err != nil {
@@ -4234,9 +4240,13 @@ func runIntegrationSetMetadata(args []string, stdin io.Reader, stdout io.Writer)
 	}
 	rest := fs.Args()
 	if len(rest) < 2 {
-		return errors.New("usage: relayfile integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]\n\n" +
-			"  v1 accepts flat KEY=VALUE pairs only; nested keys are not yet supported.\n" +
-			"  Example: relayfile integration set-metadata jira cloudId=abc-123 baseUrl=https://foo.atlassian.net")
+		return fmt.Errorf(
+			"usage: %s integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]\n\n"+
+				"  v1 accepts flat KEY=VALUE pairs only; nested keys are not yet supported.\n"+
+				"  Example: %s integration set-metadata jira cloudId=abc-123 baseUrl=https://foo.atlassian.net",
+			programName(),
+			programName(),
+		)
 	}
 	provider := normalizeProviderID(rest[0])
 	if err := validateLocalProviderID(provider); err != nil {
@@ -4872,7 +4882,7 @@ func runWritebackFileMutation(mode writebackCommandMode, args []string, stdout i
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: relayfile writeback %s LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]", mode)
+		return fmt.Errorf("usage: %s writeback %s LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]", programName(), mode)
 	}
 
 	resolved, err := resolveWritebackPushPath(fs.Arg(0), strings.TrimSpace(*workspaceName))
@@ -5515,7 +5525,7 @@ func runWritebackSkipStuck(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() > 1 {
-		return errors.New("usage: relayfile writeback skip-stuck [WORKSPACE] [--workspace WS] [--max N] [--json]")
+		return fmt.Errorf("usage: %s writeback skip-stuck [WORKSPACE] [--workspace WS] [--max N] [--json]", programName())
 	}
 	if *maxSkips < 0 {
 		return errors.New("--max must be >= 0")
@@ -5580,7 +5590,7 @@ func runWritebackSkipStuck(args []string, stdout io.Writer) error {
 
 	fmt.Fprintf(stdout, "Skipped %d stuck event(s)\n", skipped)
 	if backlog {
-		fmt.Fprintln(stdout, "Backlog remains — re-run 'relayfile writeback skip-stuck' to continue clearing")
+		fmt.Fprintf(stdout, "Backlog remains — re-run '%s writeback skip-stuck' to continue clearing\n", programName())
 	} else {
 		fmt.Fprintln(stdout, "Events cursor caught up to live head")
 	}
@@ -5597,7 +5607,7 @@ func runWritebackStatus(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() > 1 {
-		return errors.New("usage: relayfile writeback status [WORKSPACE] [--json]")
+		return fmt.Errorf("usage: %s writeback status [WORKSPACE] [--json]", programName())
 	}
 
 	workspaceID, record, err := resolveWorkspaceLikeStatus(firstArg(fs))
@@ -5642,7 +5652,7 @@ func runWritebackRetry(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() > 1 {
-		return errors.New("usage: relayfile writeback retry --op-id OP [WORKSPACE]")
+		return fmt.Errorf("usage: %s writeback retry --op-id OP [WORKSPACE]", programName())
 	}
 	op := strings.TrimSpace(*opID)
 	if op == "" {
@@ -5727,7 +5737,7 @@ func runOpsList(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() > 0 {
-		return errors.New("usage: relayfile ops list [--workspace NAME] [--json] [--no-refresh]")
+		return fmt.Errorf("usage: %s ops list [--workspace NAME] [--json] [--no-refresh]", programName())
 	}
 	record, err := resolveWorkspaceRecord(strings.TrimSpace(*workspaceName))
 	if err != nil {
@@ -6258,7 +6268,7 @@ func runOpsReplay(args []string, stdin io.Reader, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: relayfile ops replay OPID [--workspace NAME]")
+		return fmt.Errorf("usage: %s ops replay OPID [--workspace NAME]", programName())
 	}
 	opID := strings.TrimSpace(fs.Arg(0))
 	if opID == "" {
@@ -6318,7 +6328,7 @@ func runPull(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() > 0 {
-		return errors.New("usage: relayfile pull [--workspace NAME] [--provider PROVIDER] [--reason TEXT]")
+		return fmt.Errorf("usage: %s pull [--workspace NAME] [--provider PROVIDER] [--reason TEXT]", programName())
 	}
 
 	commandClient, err := prepareWorkspaceCommandClient(strings.TrimSpace(*workspaceName), *server, *tokenOverride, defaultJoinScopes)
@@ -6390,7 +6400,7 @@ func runWorkspaceCreate(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: relayfile workspace create NAME [--token TOKEN]")
+		return fmt.Errorf("usage: %s workspace create NAME [--token TOKEN]", programName())
 	}
 
 	name := strings.TrimSpace(fs.Arg(0))
@@ -6463,7 +6473,7 @@ func runWorkspaceJoin(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: relayfile workspace join WORKSPACE_ID [--name NAME] [--write]")
+		return fmt.Errorf("usage: %s workspace join WORKSPACE_ID [--name NAME] [--write]", programName())
 	}
 
 	workspaceID := strings.TrimSpace(fs.Arg(0))
@@ -6519,7 +6529,7 @@ func runWorkspaceUse(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: relayfile workspace use NAME")
+		return fmt.Errorf("usage: %s workspace use NAME", programName())
 	}
 
 	if err := ensureAgentRelayCLICompatible(); err != nil {
@@ -6775,7 +6785,7 @@ func runWorkspaceViewAdd(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() != 2 {
-		return errors.New("usage: relayfile workspace view add REMOTE_PATH LOCAL_DIR [--workspace NAME] [--replace]")
+		return fmt.Errorf("usage: %s workspace view add REMOTE_PATH LOCAL_DIR [--workspace NAME] [--replace]", programName())
 	}
 	workspaceID, record, err := resolveWorkspaceLikeStatus(strings.TrimSpace(*workspaceName))
 	if err != nil {
@@ -6842,7 +6852,7 @@ func runWorkspaceViewList(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return errors.New("usage: relayfile workspace view list [--workspace NAME] [--json]")
+		return fmt.Errorf("usage: %s workspace view list [--workspace NAME] [--json]", programName())
 	}
 	workspaceID, record, err := resolveWorkspaceLikeStatus(strings.TrimSpace(*workspaceName))
 	if err != nil {
@@ -6866,7 +6876,7 @@ func runWorkspaceViewRemove(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: relayfile workspace view remove LOCAL_DIR [--workspace NAME]")
+		return fmt.Errorf("usage: %s workspace view remove LOCAL_DIR [--workspace NAME]", programName())
 	}
 	workspaceID, record, err := resolveWorkspaceLikeStatus(strings.TrimSpace(*workspaceName))
 	if err != nil {
@@ -7071,7 +7081,7 @@ func runWorkspaceStatus(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() > 1 {
-		return errors.New("usage: relayfile workspace status [--workspace NAME] [--json]")
+		return fmt.Errorf("usage: %s workspace status [--workspace NAME] [--json]", programName())
 	}
 	value := strings.TrimSpace(*workspaceName)
 	if value == "" && fs.NArg() == 1 {
@@ -7297,7 +7307,7 @@ func runWorkspaceDelete(args []string, stdin io.Reader, stdout io.Writer) error 
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: relayfile workspace delete NAME [--yes]")
+		return fmt.Errorf("usage: %s workspace delete NAME [--yes]", programName())
 	}
 
 	name := strings.TrimSpace(fs.Arg(0))
@@ -7416,7 +7426,7 @@ func runMount(args []string) error {
 		return fmt.Errorf("invalid --full-pull-min-interval: %w", fullPullIntervalErr)
 	}
 	if fs.NArg() > 2 {
-		return errors.New("usage: relayfile mount [WORKSPACE] [LOCAL_DIR]")
+		return fmt.Errorf("usage: %s mount [WORKSPACE] [LOCAL_DIR]", programName())
 	}
 	localLayoutProvided := false
 	stateFileProvided := false
@@ -8078,7 +8088,7 @@ func mountStartBanner(localDir string, interval time.Duration, intervalJitter fl
 // limitations alongside `relayfile mount`'s flag summary so that
 // `relayfile mount --help` is self-describing per A13.
 func printMountHelp(w io.Writer) {
-	fmt.Fprintln(w, `Usage: relayfile mount [WORKSPACE] [LOCAL_DIR]
+	fmt.Fprintf(w, `Usage: %[1]s mount [WORKSPACE] [LOCAL_DIR]
 
 Mirror a remote workspace to a local directory. The default mode is a
 synced mirror (--mode=poll): ordinary files on disk that a daemon polls
@@ -8127,8 +8137,9 @@ Common flags:
   --pprof-addr ADDR    expose pprof diagnostics, e.g. 127.0.0.1:6060
   --memlog-interval 1m log runtime memory stats periodically
 
-See 'relayfile help' for the full command list and
-docs/guides/vfs-cloud-setup.md#known-limitations for details.`)
+See '%[1]s help' for the full command list and
+docs/guides/vfs-cloud-setup.md#known-limitations for details.
+`, programName())
 }
 
 type workspaceCommandClient struct {
@@ -8452,11 +8463,11 @@ func listenRunDuplicateKey(evt listenEvent) string {
 }
 
 func printListenUsage(w io.Writer) {
-	fmt.Fprintln(w, `relayfile listen streams live file events from a workspace and optionally
+	fmt.Fprintf(w, `%[1]s listen streams live file events from a workspace and optionally
 runs a command for each matching event.
 
 Usage:
-  relayfile listen [WORKSPACE] [--provider PROVIDER] [--path GLOB] [--event TYPE] [--run CMD] [--format text|json]
+  %[1]s listen [WORKSPACE] [--provider PROVIDER] [--path GLOB] [--event TYPE] [--run CMD] [--format text|json]
 
 Flags:
   --provider PROVIDER  filter to a specific integration (linear, notion, hubspot, …)
@@ -8478,90 +8489,91 @@ Flags:
 Examples:
 
   # Stream all events from the default workspace
-  relayfile listen
+  %[1]s listen
 
   # --- Linear ---
 
   # New issue filed anywhere in Linear
-  relayfile listen --provider linear --event file.created \
+  %[1]s listen --provider linear --event file.created \
     --run "claude --print 'New Linear issue at {{path}}. Suggest a priority and owner.'"
 
   # New issue filed, but only when it lands in the Triage state
-  relayfile listen --path "/linear/issues/by-state/triage/**" --event file.created \
+  %[1]s listen --path "/linear/issues/by-state/triage/**" --event file.created \
     --run "claude --print 'Untriaged issue at {{path}}. Assign priority, owner, and cycle.'"
 
   # Any In Progress issue updated (catch status changes, description edits, etc.)
-  relayfile listen --path "/linear/issues/by-state/in-progress/**" --event file.updated \
+  %[1]s listen --path "/linear/issues/by-state/in-progress/**" --event file.updated \
     --run "claude --print 'In-progress issue changed at {{path}}. Check for blockers.'"
 
   # --- GitHub ---
 
   # New PR opened on any repo in the org
-  relayfile listen --path "/github/repos/**/pulls/**" --event file.created \
+  %[1]s listen --path "/github/repos/**/pulls/**" --event file.created \
     --run "claude --print 'New PR at {{path}}. Write a one-paragraph review summary.'"
 
   # New PR labeled needs-review on a specific repo
-  relayfile listen --path "/github/repos/acme/api/pulls/by-label/needs-review/**" --event file.created \
+  %[1]s listen --path "/github/repos/acme/api/pulls/by-label/needs-review/**" --event file.created \
     --run "claude --print 'PR needs review at {{path}}. Summarise the diff and flag risks.'"
 
   # --- Notion ---
 
   # Any page edited across the whole workspace
-  relayfile listen --provider notion --event file.updated \
+  %[1]s listen --provider notion --event file.updated \
     --run "claude --print 'Notion page changed at {{path}}. Summarise the update.'"
 
   # Edits only inside a specific Notion database
-  relayfile listen --path "/notion/databases/roadmap/**" --event file.updated \
+  %[1]s listen --path "/notion/databases/roadmap/**" --event file.updated \
     --run "claude --print 'Roadmap item changed at {{path}}. Send a Slack digest.'"
 
   # --- Slack ---
 
   # New message in a specific channel
-  relayfile listen --path "/slack/channels/incidents/**" --event file.created \
+  %[1]s listen --path "/slack/channels/incidents/**" --event file.created \
     --run "claude --print 'New incident message at {{path}}. Draft a status-page update.'"
 
   # --- HubSpot ---
 
   # New contact created
-  relayfile listen --path "/hubspot/contacts/**" --event file.created \
+  %[1]s listen --path "/hubspot/contacts/**" --event file.created \
     --run "claude --print 'New HubSpot contact at {{path}}. Draft a personalised intro email.'"
 
   # Deal moved to a new stage
-  relayfile listen --path "/hubspot/deals/**" --event file.updated \
+  %[1]s listen --path "/hubspot/deals/**" --event file.updated \
     --run "claude --print 'Deal updated at {{path}}. Draft a follow-up for the new stage.'"
 
   # --- Asana ---
 
   # New task in a specific project
-  relayfile listen --path "/asana/projects/q3-launch/**" --event file.created \
+  %[1]s listen --path "/asana/projects/q3-launch/**" --event file.created \
     --run "claude --print 'New task in Q3 launch at {{path}}. Break it into subtasks.'"
 
   # --- Shortcut ---
 
   # New story under a specific epic
-  relayfile listen --path "/shortcut/stories/by-epic/payments/**" --event file.created \
+  %[1]s listen --path "/shortcut/stories/by-epic/payments/**" --event file.created \
     --run "claude --print 'New payments story at {{path}}. Suggest an implementation approach.'"
 
   # --- Granola / Fathom ---
 
   # New meeting notes → extract action items
-  relayfile listen --provider granola --event file.created \
+  %[1]s listen --provider granola --event file.created \
     --run "claude --print 'New meeting notes at {{path}}. Extract action items and owners.'"
 
   # New Fathom call recording → follow-up email
-  relayfile listen --provider fathom --event file.created \
+  %[1]s listen --provider fathom --event file.created \
     --run "claude --print 'New call at {{path}}. Write a follow-up email with key decisions.'"
 
   # --- Scripting ---
 
   # Print raw JSON events for piping
-  relayfile listen --provider linear --format json | jq '.path'
+  %[1]s listen --provider linear --format json | jq '.path'
 
 The workspace tree has alias views (by-state/, by-label/, by-epic/, by-name/, by-id/, …)
-for every provider. Run 'relayfile tree / --depth 3' to explore what's available.
+for every provider. Run '%[1]s tree / --depth 3' to explore what's available.
 
 Want this running headlessly for your whole team — turning issues into reviewed PRs automatically?
-See https://github.com/AgentWorkforce/factory`)
+See https://github.com/AgentWorkforce/factory
+`, programName())
 }
 
 // runDev is the zero-friction entry point for reactive local agents.
@@ -8587,15 +8599,15 @@ func runDev(args []string, stdin io.Reader, stdout io.Writer) error {
 			provider = "linear"
 		}
 		fmt.Fprintln(stdout, "Not connected to Agent Relay. Get started with:")
-		fmt.Fprintf(stdout, "\n  relayfile setup --provider %s\n\n", provider)
-		fmt.Fprintln(stdout, "Then re-run: relayfile dev "+strings.Join(args, " "))
+		fmt.Fprintf(stdout, "\n  %s setup --provider %s\n\n", programName(), provider)
+		fmt.Fprintf(stdout, "Then re-run: %s dev %s\n", programName(), strings.Join(args, " "))
 		return err
 	}
 
 	fmt.Fprintf(stdout, "Workspace: %s\n", commandClient.workspaceID)
 	if p := strings.TrimSpace(*providerPeek); p != "" {
 		fmt.Fprintf(stdout, "Provider filter: %s\n", p)
-		fmt.Fprintf(stdout, "Tip: run 'relayfile integration list' to see connected providers.\n")
+		fmt.Fprintf(stdout, "Tip: run '%s integration list' to see connected providers.\n", programName())
 	}
 	fmt.Fprintln(stdout)
 
@@ -8744,7 +8756,7 @@ func runListen(args []string, stdout io.Writer) error {
 		if runCmd == "" && format == "text" {
 			fmt.Fprintln(stdout, "Tip: pass --run to execute a command per event.")
 			fmt.Fprintln(stdout, "     See 'relayfile help listen' for examples with Linear, Notion, HubSpot, and more.")
-			fmt.Fprintln(stdout, "     Add --background to detach; 'relayfile supervisor install' to survive reboots.")
+			fmt.Fprintf(stdout, "     Add --background to detach; '%s supervisor install' to survive reboots.\n", programName())
 		}
 		fmt.Fprintln(stdout)
 	}
@@ -9028,34 +9040,35 @@ func runListenCommand(rootCtx context.Context, runCmd string, evt listenEvent, r
 }
 
 func printSupervisorUsage(w io.Writer) {
-	fmt.Fprintln(w, `relayfile supervisor manages the listen daemon as a system service.
+	fmt.Fprintf(w, `%[1]s supervisor manages the listen daemon as a system service.
 
 On Linux  it writes a systemd user unit (~/.config/systemd/user/relayfile-listen.service).
 On macOS  it writes a launchd agent  (~/Library/LaunchAgents/com.relayfile.listen.plist).
 
 Usage:
-  relayfile supervisor install [LISTEN_FILTERS...] install and start the service
-  relayfile supervisor uninstall                   stop, disable, and remove the service
-  relayfile supervisor status                      show service status
+  %[1]s supervisor install [LISTEN_FILTERS...] install and start the service
+  %[1]s supervisor uninstall                   stop, disable, and remove the service
+  %[1]s supervisor status                      show service status
 
 Examples:
 
   # Install: react to every new Linear triage issue
-  relayfile supervisor install \
+  %[1]s supervisor install \
     --path "/linear/issues/by-state/triage/**" --event file.created \
     --run "claude --print 'New triage issue at {{path}}. Assign it.'"
 
   # Install: all Linear events, background agent
-  relayfile supervisor install --provider linear --run "my-agent --event '{{event}}'"
+  %[1]s supervisor install --provider linear --run "my-agent --event '{{event}}'"
 
-  relayfile supervisor status
-  relayfile supervisor uninstall
+  %[1]s supervisor status
+  %[1]s supervisor uninstall
 
-The filters accepted by 'relayfile listen' — --server, --token, --provider,
+The filters accepted by '%[1]s listen' — --server, --token, --provider,
 --path, --event, --run, --format — are accepted here and embedded verbatim
 into the unit file. Its process-model flags (--background, --daemonized) are
 not: the service is what keeps the listener running, so a unit that detached
-would exit on every start. The service restarts automatically on failure.`)
+would exit on every start. The service restarts automatically on failure.
+`, programName())
 }
 
 const (
@@ -9366,7 +9379,7 @@ func runTree(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() > 2 {
-		return errors.New("usage: relayfile tree [WORKSPACE] [PATH] [--depth N]")
+		return fmt.Errorf("usage: %s tree [WORKSPACE] [PATH] [--depth N]", programName())
 	}
 
 	remotePath := strings.TrimSpace(*pathFlag)
@@ -9514,7 +9527,7 @@ func runRead(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() < 1 || fs.NArg() > 2 {
-		return errors.New("usage: relayfile read [WORKSPACE] PATH")
+		return fmt.Errorf("usage: %s read [WORKSPACE] PATH", programName())
 	}
 
 	var workspaceValue string
@@ -9583,7 +9596,7 @@ func runSeed(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() > 2 {
-		return errors.New("usage: relayfile seed [WORKSPACE] [DIR]")
+		return fmt.Errorf("usage: %s seed [WORKSPACE] [DIR]", programName())
 	}
 
 	creds, err := loadCredentials()
@@ -9658,7 +9671,7 @@ func runExport(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() > 1 {
-		return errors.New("usage: relayfile export [WORKSPACE] --format FORMAT [--output FILE]")
+		return fmt.Errorf("usage: %s export [WORKSPACE] --format FORMAT [--output FILE]", programName())
 	}
 
 	workspaceValue := ""
@@ -9703,7 +9716,7 @@ func runStatus(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() > 1 {
-		return errors.New("usage: relayfile status [WORKSPACE] [--json]")
+		return fmt.Errorf("usage: %s status [WORKSPACE] [--json]", programName())
 	}
 
 	workspaceValue := ""
@@ -9930,7 +9943,7 @@ func runStop(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() > 1 {
-		return errors.New("usage: relayfile stop [WORKSPACE]")
+		return fmt.Errorf("usage: %s stop [WORKSPACE]", programName())
 	}
 	record, err := resolveWorkspaceRecord(firstArg(fs))
 	if err != nil {
@@ -9958,13 +9971,13 @@ func runRestart(args []string, stdout io.Writer) error {
 		"foreground": false,
 	})); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			fmt.Fprintln(stdout, "usage: relayfile restart [WORKSPACE] [--foreground]")
+			fmt.Fprintf(stdout, "usage: %s restart [WORKSPACE] [--foreground]\n", programName())
 			return nil
 		}
 		return err
 	}
 	if fs.NArg() > 1 {
-		return errors.New("usage: relayfile restart [WORKSPACE] [--foreground]")
+		return fmt.Errorf("usage: %s restart [WORKSPACE] [--foreground]", programName())
 	}
 
 	record, err := resolveWorkspaceRecord(firstArg(fs))
@@ -10059,7 +10072,7 @@ func runLogs(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() > 1 {
-		return errors.New("usage: relayfile logs [WORKSPACE] [--lines N]")
+		return fmt.Errorf("usage: %s logs [WORKSPACE] [--lines N]", programName())
 	}
 	record, err := resolveWorkspaceRecord(firstArg(fs))
 	if err != nil {
@@ -10095,7 +10108,7 @@ func runObserver(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() > 1 {
-		return errors.New("usage: relayfile observer [WORKSPACE] [--no-open]")
+		return fmt.Errorf("usage: %s observer [WORKSPACE] [--no-open]", programName())
 	}
 
 	workspaceValue := ""
