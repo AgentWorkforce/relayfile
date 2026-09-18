@@ -16,7 +16,7 @@ gh workflow run publish.yml --ref main \
 
 | Input | Notes |
 | --- | --- |
-| `package` | Must be `all` for a real publish. The workflow hard-fails otherwise: it rewrites every manifest, and lockfile regeneration needs every `@relayfile/mount-*` package already published at the new version so npm can resolve tarball integrity metadata. |
+| `package` | Must be `all` for a real publish. The workflow hard-fails otherwise: it rewrites every manifest, and lockfile regeneration needs every `@relayfile/mount-*` and `@relayfile/cli-*` package already published at the new version so npm can resolve tarball integrity metadata. |
 | `version` | `patch` / `minor` / `major`, or `prerelease` with `preid=rc` for a release candidate. |
 | `tag` | `latest` for stable, `next` for prereleases. |
 

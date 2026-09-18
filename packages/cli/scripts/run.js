@@ -1,7 +1,12 @@
 #!/usr/bin/env node
 
+// The `relayfile` bin shim. It resolves the Go binary and prepares the Cloud
+// session, but owns neither implementation: both live in @relayfile/sdk's
+// relay-cli module, which `agent-relay file` mounts as its CLI surface. Keeping
+// them there means "find the relayfile binary" and "prepare Cloud auth" exist
+// once in this repo, and the two entry points cannot diverge.
+
 const { spawnSync } = require("child_process");
-const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
@@ -12,87 +17,81 @@ if (args[0] === "--version") {
   process.exit(0);
 }
 
-const {
-  announceSetupIntent,
-  prepareCloudSession,
-} = require("./cloud-preflight.js");
+const SDK_BUILD_HINT =
+  "@relayfile/sdk/relay-cli could not be loaded. In a source checkout, build it first:\n" +
+  "  npm run build --workspace=packages/sdk/typescript";
 
-const PLATFORM_MAP = {
-  darwin: "darwin",
-  linux: "linux",
-  win32: "windows",
-};
-
-const ARCH_MAP = {
-  x64: "amd64",
-  arm64: "arm64",
-};
-
-function getPlatformBinaryName() {
-  const platform = PLATFORM_MAP[os.platform()];
-  const arch = ARCH_MAP[os.arch()];
-
-  if (!platform || !arch) {
-    return null;
+async function loadRelayCli() {
+  try {
+    return await import("@relayfile/sdk/relay-cli");
+  } catch (error) {
+    const code = error && error.code;
+    if (
+      code === "ERR_MODULE_NOT_FOUND" ||
+      code === "MODULE_NOT_FOUND" ||
+      code === "ERR_PACKAGE_PATH_NOT_EXPORTED"
+    ) {
+      console.error(SDK_BUILD_HINT);
+      process.exit(1);
+    }
+    throw error;
   }
-
-  const ext = platform === "windows" ? ".exe" : "";
-  return `relayfile-cli-${platform}-${arch}${ext}`;
-}
-
-const genericBinName = os.platform() === "win32" ? "relayfile.exe" : "relayfile";
-const packagedBinName = getPlatformBinaryName();
-const candidates = [
-  path.join(__dirname, "..", "bin", genericBinName),
-  packagedBinName && path.join(__dirname, "..", "bin", packagedBinName),
-].filter(Boolean);
-
-const binPath = candidates.find((candidate) => fs.existsSync(candidate));
-
-// In a source checkout, postinstall intentionally skips building the
-// binary. Rather than leaving the installed `relayfile` command unusable,
-// fall back to running it straight from Go source.
-function sourceCheckoutRoot() {
-  const repoRoot = path.resolve(__dirname, "..", "..", "..");
-  if (
-    fs.existsSync(path.join(repoRoot, "go.mod")) &&
-    fs.existsSync(path.join(repoRoot, "cmd", "relayfile-cli"))
-  ) {
-    return repoRoot;
-  }
-  return null;
 }
 
 async function main() {
+  const relayCli = await loadRelayCli();
+
   // Agent Relay's Cloud SDK owns interactive login, token refresh, locking,
   // and the canonical session store. The native runtime reads that same store
   // directly instead of receiving copied tokens or invoking agent-relay CLI.
-  announceSetupIntent(args, process.env);
-  await prepareCloudSession(args, process.env);
+  relayCli.announceSetupIntent(args, process.env);
+  await relayCli.prepareCloudSession(args, {
+    env: process.env,
+    // This package vendors the Cloud SDK bundle; hand the resolver the exact
+    // path rather than making it search for it.
+    cloudAuthBundlePath: path.join(__dirname, "cloud-auth.cjs"),
+  });
 
-  let result;
-  if (binPath) {
-    result = spawnSync(binPath, args, { stdio: "inherit" });
-  } else {
-    const repoRoot = sourceCheckoutRoot();
-    if (!repoRoot) {
-      console.error(
-        `relayfile binary not found for ${os.platform()} ${os.arch()}. Reinstall the package or run postinstall again.`
-      );
+  let resolution;
+  try {
+    resolution = relayCli.resolveRelayfileBinary({
+      binDirs: [path.join(__dirname, "..", "bin")],
+      searchFrom: [__dirname],
+    });
+  } catch (error) {
+    if (error instanceof relayCli.RelayfileBinaryNotFoundError) {
+      console.error(error.message);
       process.exit(1);
     }
-    result = spawnSync("go", ["run", "./cmd/relayfile-cli", ...args], {
-      cwd: repoRoot,
-      stdio: "inherit",
-    });
-    if (result.error && result.error.code === "ENOENT") {
-      console.error(
-        "relayfile binary not found and Go is not installed to run from source. " +
-          "Install Go or run `npm run build --workspace=packages/cli`."
-      );
-      process.exit(1);
+    throw error;
+  }
+
+  let command = resolution.command;
+  let childArgs = [...resolution.args, ...args];
+  if (resolution.kind === "go-run") {
+    // `go run` would hand relayfile the checkout as its working directory,
+    // so relative paths in argv would resolve against the repository rather
+    // than the directory the user ran in. Build first, run from here.
+    try {
+      command = relayCli.buildGoRunBinary(resolution, { env: process.env });
+      childArgs = [...args];
+    } catch (error) {
+      if (
+        error instanceof relayCli.GoToolchainMissingError ||
+        error instanceof relayCli.GoBuildFailedError
+      ) {
+        console.error(error.message);
+        process.exit(1);
+      }
+      throw error;
     }
   }
+
+  // stdio is inherited rather than piped: this shim is the terminal-facing
+  // entry point, so relayfile's own output (including binary payloads from
+  // `export --output -`) must pass through untouched. No cwd override: the
+  // child inherits the caller's, which is what relative paths must mean.
+  const result = spawnSync(command, childArgs, { stdio: "inherit" });
 
   if (result.error) {
     console.error(`Failed to launch relayfile: ${result.error.message}`);

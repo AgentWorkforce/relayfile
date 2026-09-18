@@ -48,6 +48,12 @@ export const RELEASE_PACKAGE_PATHS = [
   "packages/mount-darwin-x64/package.json",
   "packages/mount-linux-arm64/package.json",
   "packages/mount-linux-x64/package.json",
+  "packages/cli-darwin-arm64/package.json",
+  "packages/cli-darwin-x64/package.json",
+  "packages/cli-linux-arm64/package.json",
+  "packages/cli-linux-x64/package.json",
+  "packages/cli-win32-arm64/package.json",
+  "packages/cli-win32-x64/package.json",
 ];
 
 // The release workflow creates one commit from SOURCE_SHA after npm version,

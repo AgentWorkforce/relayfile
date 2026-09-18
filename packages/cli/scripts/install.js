@@ -1,58 +1,69 @@
 #!/usr/bin/env node
 
+// postinstall: put a runnable relayfile binary in this package's bin/.
+//
+// The platform mapping and binary file names come from @relayfile/sdk/relay-cli,
+// the same module run.js and `agent-relay file` use, so "which binary is this
+// host's" is decided in exactly one place.
+//
+// Source-checkout detection is the one thing that cannot come from there. This
+// script runs during `npm install`, and in a fresh clone that is before
+// packages/sdk/typescript/dist exists — importing the SDK to decide whether to
+// skip would fail the install before it could skip. So the two checkout markers
+// are tested locally, ahead of any SDK load. `install.test.js` pins this
+// predicate against the SDK's `findSourceCheckoutRoot`.
+
 const fs = require("fs");
 const path = require("path");
-const os = require("os");
 const https = require("https");
 
 const VERSION = require("../package.json").version;
 const BIN_DIR = path.join(__dirname, "..", "bin");
 
-const PLATFORM_MAP = {
-  darwin: "darwin",
-  linux: "linux",
-  win32: "windows",
-};
+const SDK_LOAD_HINT =
+  "@relayfile/sdk/relay-cli could not be loaded, so the relayfile binary name for this platform " +
+  "cannot be resolved. Reinstall relayfile, or in a source checkout run " +
+  "`npm run build --workspace=packages/sdk/typescript`.";
 
-const ARCH_MAP = {
-  x64: "amd64",
-  arm64: "arm64",
-};
-
-function getBinaryFilename() {
-  return os.platform() === "win32" ? "relayfile.exe" : "relayfile";
-}
-
-function getPlatformSuffix() {
-  const platform = PLATFORM_MAP[os.platform()];
-  const arch = ARCH_MAP[os.arch()];
-
-  if (!platform || !arch) {
-    console.error(
-      `Unsupported platform: ${os.platform()} ${os.arch()}`
-    );
+async function loadRelayCli() {
+  try {
+    return await import("@relayfile/sdk/relay-cli");
+  } catch (error) {
+    console.error(SDK_LOAD_HINT);
+    console.error(error && error.message ? error.message : String(error));
     process.exit(1);
   }
-
-  return `${platform}-${arch}`;
 }
 
-function getPackagedBinaryFilename() {
-  const suffix = getPlatformSuffix();
-  const ext = suffix.startsWith("windows-") ? ".exe" : "";
-  return `relayfile-cli-${suffix}${ext}`;
+/**
+ * Locate a relayfile source checkout above `start`: a directory with both
+ * `go.mod` and `cmd/relayfile-cli`.
+ *
+ * Same two markers as `findSourceCheckoutRoot` in @relayfile/sdk/relay-cli,
+ * duplicated here only because this runs before the SDK is built.
+ *
+ * @param {string} start - Directory to search upward from.
+ * @returns {string|null} The checkout root, or null when there is none.
+ */
+function findSourceCheckoutRoot(start) {
+  let current = path.resolve(start);
+  for (;;) {
+    if (
+      fs.existsSync(path.join(current, "go.mod")) &&
+      fs.existsSync(path.join(current, "cmd", "relayfile-cli"))
+    ) {
+      return current;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return null;
+    }
+    current = parent;
+  }
 }
 
-function getDownloadUrl() {
-  return `https://github.com/AgentWorkforce/relayfile/releases/download/v${VERSION}/${getPackagedBinaryFilename()}`;
-}
-
-function isSourceCheckout() {
-  const repoRoot = path.resolve(__dirname, "..", "..", "..");
-  return (
-    fs.existsSync(path.join(repoRoot, "go.mod")) &&
-    fs.existsSync(path.join(repoRoot, "cmd", "relayfile-cli"))
-  );
+function getDownloadUrl(packagedBinaryName) {
+  return `https://github.com/AgentWorkforce/relayfile/releases/download/v${VERSION}/${packagedBinaryName}`;
 }
 
 function download(url, dest) {
@@ -79,7 +90,26 @@ function download(url, dest) {
 }
 
 async function main() {
-  const binPath = path.join(BIN_DIR, getBinaryFilename());
+  // Before the SDK is touched: a fresh clone has no SDK dist/, and failing
+  // here would break `npm install` for the whole repo.
+  if (findSourceCheckoutRoot(__dirname)) {
+    // run.js falls back to `go run ./cmd/relayfile-cli` in a checkout, so the
+    // command still works without a downloaded binary.
+    console.log(
+      "Skipping relayfile binary install in source checkout; run npm run build --workspace=packages/cli to build package binaries."
+    );
+    return;
+  }
+
+  const { genericBinaryName, platformBinaryName } = await loadRelayCli();
+
+  const packagedBinaryName = platformBinaryName();
+  if (!packagedBinaryName) {
+    console.error(`Unsupported platform: ${process.platform} ${process.arch}`);
+    process.exit(1);
+  }
+
+  const binPath = path.join(BIN_DIR, genericBinaryName());
 
   fs.mkdirSync(BIN_DIR, { recursive: true });
 
@@ -89,14 +119,7 @@ async function main() {
     return;
   }
 
-  if (isSourceCheckout()) {
-    console.log(
-      "Skipping relayfile binary install in source checkout; run npm run build --workspace=packages/cli to build package binaries."
-    );
-    return;
-  }
-
-  const packagedBinPath = path.join(BIN_DIR, getPackagedBinaryFilename());
+  const packagedBinPath = path.join(BIN_DIR, packagedBinaryName);
 
   if (fs.existsSync(packagedBinPath)) {
     fs.copyFileSync(packagedBinPath, binPath);
@@ -105,7 +128,7 @@ async function main() {
     return;
   }
 
-  const url = getDownloadUrl();
+  const url = getDownloadUrl(packagedBinaryName);
   console.log(`Downloading relayfile v${VERSION}...`);
   try {
     await download(url, binPath);

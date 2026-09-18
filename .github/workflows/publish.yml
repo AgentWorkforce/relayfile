@@ -20,6 +20,12 @@ on:
           - mount-darwin-x64
           - mount-linux-arm64
           - mount-linux-x64
+          - cli-darwin-arm64
+          - cli-darwin-x64
+          - cli-linux-arm64
+          - cli-linux-x64
+          - cli-win32-arm64
+          - cli-win32-x64
         default: "all"
       version:
         description: "Version bump type"
@@ -96,7 +102,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$PACKAGE_INPUT" in
-            all|core|sdk|client|agents|cli|file-observer|local-mount|mount-darwin-arm64|mount-darwin-x64|mount-linux-arm64|mount-linux-x64)
+            all|core|sdk|client|agents|cli|file-observer|local-mount|mount-darwin-arm64|mount-darwin-x64|mount-linux-arm64|mount-linux-x64|cli-darwin-arm64|cli-darwin-x64|cli-linux-arm64|cli-linux-x64|cli-win32-arm64|cli-win32-x64)
               RELEASE_PACKAGE="$PACKAGE_INPUT"
               ;;
             *)
@@ -296,7 +302,13 @@ jobs:
             "packages/mount-darwin-arm64/package.json",
             "packages/mount-darwin-x64/package.json",
             "packages/mount-linux-arm64/package.json",
-            "packages/mount-linux-x64/package.json"
+            "packages/mount-linux-x64/package.json",
+            "packages/cli-darwin-arm64/package.json",
+            "packages/cli-darwin-x64/package.json",
+            "packages/cli-linux-arm64/package.json",
+            "packages/cli-linux-x64/package.json",
+            "packages/cli-win32-arm64/package.json",
+            "packages/cli-win32-x64/package.json"
           ]'
 
           if [ -n "$CUSTOM_VERSION" ]; then
@@ -443,6 +455,24 @@ jobs:
             packages/mount-linux-x64/package.json
             packages/mount-linux-x64/README.md
             packages/mount-linux-x64/bin/.gitkeep
+            packages/cli-darwin-arm64/package.json
+            packages/cli-darwin-arm64/README.md
+            packages/cli-darwin-arm64/bin/.gitkeep
+            packages/cli-darwin-x64/package.json
+            packages/cli-darwin-x64/README.md
+            packages/cli-darwin-x64/bin/.gitkeep
+            packages/cli-linux-arm64/package.json
+            packages/cli-linux-arm64/README.md
+            packages/cli-linux-arm64/bin/.gitkeep
+            packages/cli-linux-x64/package.json
+            packages/cli-linux-x64/README.md
+            packages/cli-linux-x64/bin/.gitkeep
+            packages/cli-win32-arm64/package.json
+            packages/cli-win32-arm64/README.md
+            packages/cli-win32-arm64/bin/.gitkeep
+            packages/cli-win32-x64/package.json
+            packages/cli-win32-x64/README.md
+            packages/cli-win32-x64/bin/.gitkeep
           retention-days: 1
 
   # Cross-compile relayfile-mount for every consumer-supported platform.
@@ -550,36 +580,71 @@ jobs:
           - package: core
             path: packages/core
             mount_binary: ""
+            cli_binary: ""
           - package: sdk
             path: packages/sdk/typescript
             mount_binary: ""
+            cli_binary: ""
           - package: client
             path: packages/client
             mount_binary: ""
+            cli_binary: ""
           - package: agents
             path: packages/agents
             mount_binary: ""
+            cli_binary: ""
           - package: cli
             path: packages/cli
             mount_binary: ""
+            cli_binary: ""
           - package: file-observer
             path: packages/file-observer
             mount_binary: ""
+            cli_binary: ""
           - package: local-mount
             path: packages/local-mount
             mount_binary: ""
+            cli_binary: ""
           - package: mount-darwin-arm64
             path: packages/mount-darwin-arm64
             mount_binary: relayfile-mount-darwin-arm64
+            cli_binary: ""
           - package: mount-darwin-x64
             path: packages/mount-darwin-x64
             mount_binary: relayfile-mount-darwin-amd64
+            cli_binary: ""
           - package: mount-linux-arm64
             path: packages/mount-linux-arm64
             mount_binary: relayfile-mount-linux-arm64
+            cli_binary: ""
           - package: mount-linux-x64
             path: packages/mount-linux-x64
             mount_binary: relayfile-mount-linux-amd64
+            cli_binary: ""
+          - package: cli-darwin-arm64
+            path: packages/cli-darwin-arm64
+            mount_binary: ""
+            cli_binary: relayfile-cli-darwin-arm64
+          - package: cli-darwin-x64
+            path: packages/cli-darwin-x64
+            mount_binary: ""
+            cli_binary: relayfile-cli-darwin-amd64
+          - package: cli-linux-arm64
+            path: packages/cli-linux-arm64
+            mount_binary: ""
+            cli_binary: relayfile-cli-linux-arm64
+          - package: cli-linux-x64
+            path: packages/cli-linux-x64
+            mount_binary: ""
+            cli_binary: relayfile-cli-linux-amd64
+          - package: cli-win32-arm64
+            path: packages/cli-win32-arm64
+            mount_binary: ""
+            cli_binary: relayfile-cli-windows-arm64.exe
+          - package: cli-win32-x64
+            path: packages/cli-win32-x64
+            mount_binary: ""
+            cli_binary: relayfile-cli-windows-amd64.exe
 
     steps:
       - name: Checkout code
@@ -607,7 +672,7 @@ jobs:
           path: .
 
       - name: Restore CLI binary permissions
-        if: matrix.package == 'cli'
+        if: matrix.package == 'cli' || matrix.cli_binary != ''
         run: chmod 755 packages/cli/bin/relayfile-cli-*
 
       - name: Download relayfile-mount binary
@@ -624,6 +689,21 @@ jobs:
           mkdir -p "${{ matrix.path }}/bin"
           cp "/tmp/relayfile-mount-binary/${{ matrix.mount_binary }}" "${{ matrix.path }}/bin/relayfile-mount"
           chmod 755 "${{ matrix.path }}/bin/relayfile-mount"
+
+      - name: Prepare cli platform package
+        if: matrix.cli_binary != ''
+        run: |
+          set -euo pipefail
+          # The build job already cross-compiled every relayfile-cli target
+          # into packages/cli/bin (packages/cli/scripts/build-binaries.js) and
+          # uploaded it in build-output, so there is nothing to download here.
+          # Runs on dry runs too: the binary is what makes the tarball real.
+          test -f "packages/cli/bin/${{ matrix.cli_binary }}"
+          mkdir -p "${{ matrix.path }}/bin"
+          BIN_NAME=relayfile-cli
+          case "${{ matrix.cli_binary }}" in *.exe) BIN_NAME=relayfile-cli.exe ;; esac
+          cp "packages/cli/bin/${{ matrix.cli_binary }}" "${{ matrix.path }}/bin/${BIN_NAME}"
+          chmod 755 "${{ matrix.path }}/bin/${BIN_NAME}"
 
       - name: Update npm for OIDC support
         run: npm install -g npm@11
@@ -669,36 +749,71 @@ jobs:
           - package: core
             path: packages/core
             mount_binary: ""
+            cli_binary: ""
           - package: sdk
             path: packages/sdk/typescript
             mount_binary: ""
+            cli_binary: ""
           - package: client
             path: packages/client
             mount_binary: ""
+            cli_binary: ""
           - package: agents
             path: packages/agents
             mount_binary: ""
+            cli_binary: ""
           - package: cli
             path: packages/cli
             mount_binary: ""
+            cli_binary: ""
           - package: file-observer
             path: packages/file-observer
             mount_binary: ""
+            cli_binary: ""
           - package: local-mount
             path: packages/local-mount
             mount_binary: ""
+            cli_binary: ""
           - package: mount-darwin-arm64
             path: packages/mount-darwin-arm64
             mount_binary: relayfile-mount-darwin-arm64
+            cli_binary: ""
           - package: mount-darwin-x64
             path: packages/mount-darwin-x64
             mount_binary: relayfile-mount-darwin-amd64
+            cli_binary: ""
           - package: mount-linux-arm64
             path: packages/mount-linux-arm64
             mount_binary: relayfile-mount-linux-arm64
+            cli_binary: ""
           - package: mount-linux-x64
             path: packages/mount-linux-x64
             mount_binary: relayfile-mount-linux-amd64
+            cli_binary: ""
+          - package: cli-darwin-arm64
+            path: packages/cli-darwin-arm64
+            mount_binary: ""
+            cli_binary: relayfile-cli-darwin-arm64
+          - package: cli-darwin-x64
+            path: packages/cli-darwin-x64
+            mount_binary: ""
+            cli_binary: relayfile-cli-darwin-amd64
+          - package: cli-linux-arm64
+            path: packages/cli-linux-arm64
+            mount_binary: ""
+            cli_binary: relayfile-cli-linux-arm64
+          - package: cli-linux-x64
+            path: packages/cli-linux-x64
+            mount_binary: ""
+            cli_binary: relayfile-cli-linux-amd64
+          - package: cli-win32-arm64
+            path: packages/cli-win32-arm64
+            mount_binary: ""
+            cli_binary: relayfile-cli-windows-arm64.exe
+          - package: cli-win32-x64
+            path: packages/cli-win32-x64
+            mount_binary: ""
+            cli_binary: relayfile-cli-windows-amd64.exe
 
     steps:
       - name: Checkout code
@@ -726,7 +841,7 @@ jobs:
           path: .
 
       - name: Restore CLI binary permissions
-        if: matrix.package == 'cli'
+        if: matrix.package == 'cli' || matrix.cli_binary != ''
         run: chmod 755 packages/cli/bin/relayfile-cli-*
 
       - name: Download relayfile-mount binary
@@ -743,6 +858,21 @@ jobs:
           mkdir -p "${{ matrix.path }}/bin"
           cp "/tmp/relayfile-mount-binary/${{ matrix.mount_binary }}" "${{ matrix.path }}/bin/relayfile-mount"
           chmod 755 "${{ matrix.path }}/bin/relayfile-mount"
+
+      - name: Prepare cli platform package
+        if: matrix.cli_binary != ''
+        run: |
+          set -euo pipefail
+          # The build job already cross-compiled every relayfile-cli target
+          # into packages/cli/bin (packages/cli/scripts/build-binaries.js) and
+          # uploaded it in build-output, so there is nothing to download here.
+          # Runs on dry runs too: the binary is what makes the tarball real.
+          test -f "packages/cli/bin/${{ matrix.cli_binary }}"
+          mkdir -p "${{ matrix.path }}/bin"
+          BIN_NAME=relayfile-cli
+          case "${{ matrix.cli_binary }}" in *.exe) BIN_NAME=relayfile-cli.exe ;; esac
+          cp "packages/cli/bin/${{ matrix.cli_binary }}" "${{ matrix.path }}/bin/${BIN_NAME}"
+          chmod 755 "${{ matrix.path }}/bin/${BIN_NAME}"
 
       # Pinned to the npm 11 line (OIDC needs >= 11.5.1): @latest broke
       # 2026-07-13 when npm 12 dropped support for the runner's node 22.14.
@@ -817,8 +947,11 @@ jobs:
           name: build-output
           path: .
 
+      # Unconditional: packages/cli/bin always arrives in build-output, and
+      # both `cli` and every `cli-<platform>-<arch>` package needs these
+      # executable. Which one is being released is only known after the next
+      # step, so this cannot be gated on it.
       - name: Restore CLI binary permissions
-        if: needs.build.outputs.release_package == 'cli'
         run: chmod 755 packages/cli/bin/relayfile-cli-*
 
       - name: Resolve package path
@@ -827,17 +960,23 @@ jobs:
           RELEASE_PACKAGE: ${{ needs.build.outputs.release_package }}
         run: |
           case "$RELEASE_PACKAGE" in
-            core) echo "path=packages/core" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
-            sdk) echo "path=packages/sdk/typescript" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
-            client) echo "path=packages/client" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
-            agents) echo "path=packages/agents" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
-            cli) echo "path=packages/cli" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
-            file-observer) echo "path=packages/file-observer" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
-            local-mount) echo "path=packages/local-mount" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT" ;;
-            mount-darwin-arm64) echo "path=packages/mount-darwin-arm64" >> "$GITHUB_OUTPUT"; echo "mount_binary=relayfile-mount-darwin-arm64" >> "$GITHUB_OUTPUT" ;;
-            mount-darwin-x64) echo "path=packages/mount-darwin-x64" >> "$GITHUB_OUTPUT"; echo "mount_binary=relayfile-mount-darwin-amd64" >> "$GITHUB_OUTPUT" ;;
-            mount-linux-arm64) echo "path=packages/mount-linux-arm64" >> "$GITHUB_OUTPUT"; echo "mount_binary=relayfile-mount-linux-arm64" >> "$GITHUB_OUTPUT" ;;
-            mount-linux-x64) echo "path=packages/mount-linux-x64" >> "$GITHUB_OUTPUT"; echo "mount_binary=relayfile-mount-linux-amd64" >> "$GITHUB_OUTPUT" ;;
+            core) echo "path=packages/core" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT"; echo "cli_binary=" >> "$GITHUB_OUTPUT" ;;
+            sdk) echo "path=packages/sdk/typescript" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT"; echo "cli_binary=" >> "$GITHUB_OUTPUT" ;;
+            client) echo "path=packages/client" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT"; echo "cli_binary=" >> "$GITHUB_OUTPUT" ;;
+            agents) echo "path=packages/agents" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT"; echo "cli_binary=" >> "$GITHUB_OUTPUT" ;;
+            cli) echo "path=packages/cli" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT"; echo "cli_binary=" >> "$GITHUB_OUTPUT" ;;
+            file-observer) echo "path=packages/file-observer" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT"; echo "cli_binary=" >> "$GITHUB_OUTPUT" ;;
+            local-mount) echo "path=packages/local-mount" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT"; echo "cli_binary=" >> "$GITHUB_OUTPUT" ;;
+            mount-darwin-arm64) echo "path=packages/mount-darwin-arm64" >> "$GITHUB_OUTPUT"; echo "mount_binary=relayfile-mount-darwin-arm64" >> "$GITHUB_OUTPUT"; echo "cli_binary=" >> "$GITHUB_OUTPUT" ;;
+            mount-darwin-x64) echo "path=packages/mount-darwin-x64" >> "$GITHUB_OUTPUT"; echo "mount_binary=relayfile-mount-darwin-amd64" >> "$GITHUB_OUTPUT"; echo "cli_binary=" >> "$GITHUB_OUTPUT" ;;
+            mount-linux-arm64) echo "path=packages/mount-linux-arm64" >> "$GITHUB_OUTPUT"; echo "mount_binary=relayfile-mount-linux-arm64" >> "$GITHUB_OUTPUT"; echo "cli_binary=" >> "$GITHUB_OUTPUT" ;;
+            mount-linux-x64) echo "path=packages/mount-linux-x64" >> "$GITHUB_OUTPUT"; echo "mount_binary=relayfile-mount-linux-amd64" >> "$GITHUB_OUTPUT"; echo "cli_binary=" >> "$GITHUB_OUTPUT" ;;
+            cli-darwin-arm64) echo "path=packages/cli-darwin-arm64" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT"; echo "cli_binary=relayfile-cli-darwin-arm64" >> "$GITHUB_OUTPUT" ;;
+            cli-darwin-x64) echo "path=packages/cli-darwin-x64" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT"; echo "cli_binary=relayfile-cli-darwin-amd64" >> "$GITHUB_OUTPUT" ;;
+            cli-linux-arm64) echo "path=packages/cli-linux-arm64" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT"; echo "cli_binary=relayfile-cli-linux-arm64" >> "$GITHUB_OUTPUT" ;;
+            cli-linux-x64) echo "path=packages/cli-linux-x64" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT"; echo "cli_binary=relayfile-cli-linux-amd64" >> "$GITHUB_OUTPUT" ;;
+            cli-win32-arm64) echo "path=packages/cli-win32-arm64" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT"; echo "cli_binary=relayfile-cli-windows-arm64.exe" >> "$GITHUB_OUTPUT" ;;
+            cli-win32-x64) echo "path=packages/cli-win32-x64" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT"; echo "cli_binary=relayfile-cli-windows-amd64.exe" >> "$GITHUB_OUTPUT" ;;
             *)
               echo "Unsupported package: $RELEASE_PACKAGE" >&2
               exit 1
@@ -858,6 +997,17 @@ jobs:
           mkdir -p "${{ steps.resolve-package.outputs.path }}/bin"
           cp "/tmp/relayfile-mount-binary/${{ steps.resolve-package.outputs.mount_binary }}" "${{ steps.resolve-package.outputs.path }}/bin/relayfile-mount"
           chmod 755 "${{ steps.resolve-package.outputs.path }}/bin/relayfile-mount"
+
+      - name: Prepare cli platform package
+        if: steps.resolve-package.outputs.cli_binary != ''
+        run: |
+          set -euo pipefail
+          test -f "packages/cli/bin/${{ steps.resolve-package.outputs.cli_binary }}"
+          mkdir -p "${{ steps.resolve-package.outputs.path }}/bin"
+          BIN_NAME=relayfile-cli
+          case "${{ steps.resolve-package.outputs.cli_binary }}" in *.exe) BIN_NAME=relayfile-cli.exe ;; esac
+          cp "packages/cli/bin/${{ steps.resolve-package.outputs.cli_binary }}" "${{ steps.resolve-package.outputs.path }}/bin/${BIN_NAME}"
+          chmod 755 "${{ steps.resolve-package.outputs.path }}/bin/${BIN_NAME}"
 
       # Pinned to the npm 11 line (OIDC needs >= 11.5.1): @latest broke
       # 2026-07-13 when npm 12 dropped support for the runner's node 22.14.
@@ -966,7 +1116,7 @@ jobs:
           done
           chmod +x mount-binaries/relayfile-mount-*
           test -d package-attestations
-          test "$(find package-attestations -type f -name '*.json' | wc -l | tr -d ' ')" -eq 11
+          test "$(find package-attestations -type f -name '*.json' | wc -l | tr -d ' ')" -eq 17
           for BINARY in \
             relayfile-mount-linux-amd64 \
             relayfile-mount-linux-arm64 \
@@ -1031,7 +1181,10 @@ jobs:
             packages/file-observer/package.json packages/file-observer/CHANGELOG.md \
             packages/local-mount/package.json packages/local-mount/CHANGELOG.md \
             packages/mount-darwin-arm64/package.json packages/mount-darwin-x64/package.json \
-            packages/mount-linux-arm64/package.json packages/mount-linux-x64/package.json
+            packages/mount-linux-arm64/package.json packages/mount-linux-x64/package.json \
+            packages/cli-darwin-arm64/package.json packages/cli-darwin-x64/package.json \
+            packages/cli-linux-arm64/package.json packages/cli-linux-x64/package.json \
+            packages/cli-win32-arm64/package.json packages/cli-win32-x64/package.json
           if ! git diff --staged --quiet; then
             git commit -m "chore(release): v${NEW_VERSION}"
           fi
@@ -1142,6 +1295,12 @@ jobs:
             - `@relayfile/mount-darwin-x64@${{ needs.build.outputs.new_version }}`
             - `@relayfile/mount-linux-arm64@${{ needs.build.outputs.new_version }}`
             - `@relayfile/mount-linux-x64@${{ needs.build.outputs.new_version }}`
+            - `@relayfile/cli-darwin-arm64@${{ needs.build.outputs.new_version }}`
+            - `@relayfile/cli-darwin-x64@${{ needs.build.outputs.new_version }}`
+            - `@relayfile/cli-linux-arm64@${{ needs.build.outputs.new_version }}`
+            - `@relayfile/cli-linux-x64@${{ needs.build.outputs.new_version }}`
+            - `@relayfile/cli-win32-arm64@${{ needs.build.outputs.new_version }}`
+            - `@relayfile/cli-win32-x64@${{ needs.build.outputs.new_version }}`
 
             ### Install
             ```bash

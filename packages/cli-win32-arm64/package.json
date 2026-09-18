@@ -1,0 +1,23 @@
+{
+  "name": "@relayfile/cli-win32-arm64",
+  "version": "0.10.56",
+  "description": "relayfile-cli binary for win32 arm64. Installed automatically as an optional dependency of @relayfile/sdk.",
+  "files": [
+    "bin"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AgentWorkforce/relayfile.git",
+    "directory": "packages/cli-win32-arm64"
+  },
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "arm64"
+  ]
+}

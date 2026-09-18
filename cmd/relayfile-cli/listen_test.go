@@ -1,6 +1,9 @@
 package main
 
 import (
+	"io"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -187,5 +190,244 @@ func TestListenRunDuplicateKeyRequiresStableIdentity(t *testing.T) {
 	})
 	if !strings.Contains(key, "hash:sha256:a") {
 		t.Fatalf("expected content hash in duplicate key, got %q", key)
+	}
+}
+
+// captureStderr runs fn with os.Stderr redirected, and returns what it wrote.
+//
+// The workspace-resolution warning below goes straight to os.Stderr rather
+// than through the io.Writer the command is handed, so there is no other seam
+// to read it from.
+func captureStderr(t *testing.T, fn func() error) (string, error) {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("open pipe: %v", err)
+	}
+	original := os.Stderr
+	os.Stderr = writer
+	fnErr := fn()
+	os.Stderr = original
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close pipe: %v", err)
+	}
+	captured, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read pipe: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("close pipe reader: %v", err)
+	}
+	return string(captured), fnErr
+}
+
+// TestListenReadsTheWorkspaceFromItsFirstPositional pins the behaviour the
+// command table has to declare. runListen takes the workspace as a positional
+// (`relayfile listen WORKSPACE`), but the table declared no args for `listen`
+// or for `dev`, which forwards its argv here — so `agent-relay file`, which
+// builds its parser from the emitted spec, refused a workspace-qualified
+// invocation before the binary ever saw it.
+//
+// HOME is empty, so the run stops at the local credential lookup and touches
+// no network. What it names on the way there is the proof.
+func TestListenReadsTheWorkspaceFromItsFirstPositional(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	const workspace = "listen-positional-probe"
+	withPositional, err := captureStderr(t, func() error {
+		return runListen([]string{workspace}, io.Discard)
+	})
+	if err == nil {
+		t.Fatal("expected a credential-resolution error with an empty HOME")
+	}
+	if !strings.Contains(withPositional, strconv.Quote(workspace)) {
+		t.Errorf("listen %s resolved no workspace; stderr = %q", workspace, withPositional)
+	}
+
+	withoutPositional, err := captureStderr(t, func() error {
+		return runListen(nil, io.Discard)
+	})
+	if err == nil {
+		t.Fatal("expected a credential-resolution error with an empty HOME")
+	}
+	if strings.Contains(withoutPositional, strconv.Quote(workspace)) {
+		t.Errorf("bare listen named a workspace it was never given; stderr = %q", withoutPositional)
+	}
+}
+
+// TestListenRejectsAFlagItDoesNotRegister is why the command table may not
+// advertise a listen flag that runListen has never parsed: `supervisor
+// install` embeds its argv into the unit's ExecStart as `relayfile listen
+// ...`, under Restart=on-failure. A flag like --interval — which the table
+// did advertise — makes that unit exit on every single start, forever.
+func TestListenRejectsAFlagItDoesNotRegister(t *testing.T) {
+	err := runListen([]string{"--interval", "30s", "-h"}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "flag provided but not defined: -interval") {
+		t.Fatalf("runListen --interval error = %v, want an undefined-flag error", err)
+	}
+}
+
+// TestSupervisorInstallFlagsReachAParsingListener closes that loop from the
+// other side: every flag the table declares for `supervisor install` must be
+// one runListen accepts.
+//
+// The trailing -h aborts the parse as soon as the flag before it is accepted,
+// so this exercises argument parsing only: no network, and no background
+// process for --background.
+func TestSupervisorInstallFlagsReachAParsingListener(t *testing.T) {
+	var install *cliCommandSpec
+	walkSpec(publicCommandSpec(), nil, func(path []string, command cliCommandSpec) {
+		if strings.Join(path, " ") == "supervisor install" {
+			declared := command
+			install = &declared
+		}
+	})
+	if install == nil {
+		t.Fatal("no `supervisor install` in the command table")
+	}
+	if len(install.Options) == 0 {
+		t.Fatal("`supervisor install` declares no options; it forwards listen's")
+	}
+
+	for _, option := range install.Options {
+		name := optionLongName(option.Flags)
+		if name == "" {
+			t.Errorf("option %q has no long flag", option.Flags)
+			continue
+		}
+		err := runListen([]string{"--" + name, "probe", "-h"}, io.Discard)
+		if err != nil && strings.Contains(err.Error(), "flag provided but not defined") {
+			t.Errorf("supervisor install declares --%s, but the listener it installs rejects it: %v", name, err)
+		}
+	}
+}
+
+// supervisorInstallSpec returns the `supervisor install` entry from the
+// emitted public command tree — the tree `agent-relay file` builds its parser
+// from, so it is the surface these assertions are about.
+func supervisorInstallSpec(t *testing.T) cliCommandSpec {
+	t.Helper()
+	var install *cliCommandSpec
+	walkSpec(publicCommandSpec(), nil, func(path []string, command cliCommandSpec) {
+		if strings.Join(path, " ") == "supervisor install" {
+			declared := command
+			install = &declared
+		}
+	})
+	if install == nil {
+		t.Fatal("no `supervisor install` in the command table")
+	}
+	return *install
+}
+
+// TestSupervisorInstallAdvertisesFiltersNotProcessModelFlags is the other half
+// of TestSupervisorInstallFlagsReachAParsingListener. That test only asks
+// whether runListen *parses* a declared flag; --background parses fine and
+// still breaks the service, because runListen re-execs a detached child and
+// returns, leaving launchd's KeepAlive relaunching a process that exits every
+// time and systemd killing the orphan with the unit's cgroup.
+//
+// So the surface must advertise listen's filters and withhold its
+// process-model flags — while `listen` itself, which is not supervised, keeps
+// advertising both.
+func TestSupervisorInstallAdvertisesFiltersNotProcessModelFlags(t *testing.T) {
+	declared := map[string]bool{}
+	for _, option := range supervisorInstallSpec(t).Options {
+		if name := optionLongName(option.Flags); name != "" {
+			declared[name] = true
+		}
+	}
+	if len(declared) == 0 {
+		t.Fatal("`supervisor install` declares no options; it forwards listen's filters")
+	}
+
+	for _, option := range listenProcessModelOptions() {
+		name := optionLongName(option.Flags)
+		if declared[name] {
+			t.Errorf("`supervisor install` advertises --%s; embedding it in ExecStart installs a service that detaches and exits on every start", name)
+		}
+	}
+	for _, option := range listenFilterOptions() {
+		name := optionLongName(option.Flags)
+		if !declared[name] {
+			t.Errorf("`supervisor install` no longer advertises the listen filter --%s", name)
+		}
+	}
+
+	var listenDeclared map[string]bool
+	walkSpec(publicCommandSpec(), nil, func(path []string, command cliCommandSpec) {
+		if strings.Join(path, " ") != "listen" {
+			return
+		}
+		listenDeclared = map[string]bool{}
+		for _, option := range command.Options {
+			if name := optionLongName(option.Flags); name != "" {
+				listenDeclared[name] = true
+			}
+		}
+	})
+	if listenDeclared == nil {
+		t.Fatal("no `listen` in the command table")
+	}
+	for _, option := range listenProcessModelOptions() {
+		name := optionLongName(option.Flags)
+		if !listenDeclared[name] {
+			t.Errorf("`listen` no longer advertises --%s; only the supervised copy withholds it", name)
+		}
+	}
+}
+
+// TestSupervisorInstallRejectsProcessModelFlags covers the same rule at the
+// binary's own boundary. The emitted spec stops `agent-relay file supervisor
+// install --background`, but `relayfile supervisor install --background` run
+// directly reaches supervisorInstall with that argv, and it used to write it
+// straight into ExecStart.
+//
+// HOME is a temp dir, so a unit written despite the rejection is visible as a
+// file. PATH is emptied as well: the guard returns before any supervisor
+// process runs, and if it ever stops doing so this test must fail on the
+// assertions below rather than enable a real service on the machine running
+// it.
+func TestSupervisorInstallRejectsProcessModelFlags(t *testing.T) {
+	for _, args := range [][]string{
+		{"--background"},
+		{"-background"},
+		{"--daemonized=true"},
+		{"--path", "/linear/**", "--background", "--run", "notify"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("PATH", t.TempDir())
+
+			err := supervisorInstall(args, io.Discard)
+			if err == nil {
+				t.Fatalf("supervisorInstall(%q) succeeded; it must refuse a process-model flag", args)
+			}
+			if !strings.Contains(err.Error(), "cannot embed") {
+				t.Fatalf("supervisorInstall(%q) error = %v, want a refusal naming the flag", args, err)
+			}
+
+			unit := filepath.Join(home, ".config", "systemd", "user")
+			if entries, readErr := os.ReadDir(unit); readErr == nil && len(entries) > 0 {
+				t.Fatalf("supervisorInstall(%q) wrote %d unit file(s) despite refusing", args, len(entries))
+			}
+			plist := filepath.Join(home, "Library", "LaunchAgents")
+			if entries, readErr := os.ReadDir(plist); readErr == nil && len(entries) > 0 {
+				t.Fatalf("supervisorInstall(%q) wrote %d plist(s) despite refusing", args, len(entries))
+			}
+		})
+	}
+}
+
+// TestSupervisorInstallAcceptsListenFilters is the negative control: the guard
+// must reject the process model only, not the filters the feature exists for.
+func TestSupervisorInstallAcceptsListenFilters(t *testing.T) {
+	for _, option := range listenFilterOptions() {
+		name := optionLongName(option.Flags)
+		if err := rejectSupervisorProcessModelFlags([]string{"--" + name, "value"}); err != nil {
+			t.Errorf("supervisor install refuses the listen filter --%s: %v", name, err)
+		}
 	}
 }

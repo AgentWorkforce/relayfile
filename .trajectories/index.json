@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-09-09T22:38:01.679Z",
+  "lastUpdated": "2026-09-18T14:07:19.400Z",
   "trajectories": {
     "traj_4pvrlmqfnzng": {
       "title": "Review PR #278 in AgentWorkforce/relayfile",
@@ -372,6 +372,41 @@
       "startedAt": "2026-09-09T22:35:53.204Z",
       "completedAt": "2026-09-09T22:38:01.543Z",
       "path": ".trajectories/completed/2026-09/traj_xq9s9vigbhum.json"
+    },
+    "traj_jcnhoywu08ve": {
+      "title": "Expose @relayfile/sdk/relay-cli CLI surface for agent-relay file",
+      "status": "completed",
+      "startedAt": "2026-09-17T21:00:11.799Z",
+      "completedAt": "2026-09-17T21:27:43.737Z",
+      "path": "/home/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-09/traj_jcnhoywu08ve.json"
+    },
+    "traj_r0q3qwvib91g": {
+      "title": "Ship relayfile-cli as per-platform npm packages so agent-relay file resolves a binary on a clean install",
+      "status": "completed",
+      "startedAt": "2026-09-17T22:41:57.895Z",
+      "completedAt": "2026-09-17T22:42:19.937Z",
+      "path": "/home/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-09/traj_r0q3qwvib91g.json"
+    },
+    "traj_brbbw28655f0": {
+      "title": "Fix Bugbot findings on PR #507 relay-cli surface",
+      "status": "completed",
+      "startedAt": "2026-09-17T23:29:02.805Z",
+      "completedAt": "2026-09-17T23:32:47.819Z",
+      "path": "/home/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-09/traj_brbbw28655f0.json"
+    },
+    "traj_3lyio30tipf8": {
+      "title": "Fix four Devin findings on relayfile PR #507 (CLI surface)",
+      "status": "completed",
+      "startedAt": "2026-09-18T06:29:04.757Z",
+      "completedAt": "2026-09-18T06:29:37.710Z",
+      "path": "/home/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-09/traj_3lyio30tipf8.json"
+    },
+    "traj_p2o6b2q8epj1": {
+      "title": "PR #507 round-3 bugbot: supervisor install detach flags + go-run build path races",
+      "status": "completed",
+      "startedAt": "2026-09-18T13:58:18.225Z",
+      "completedAt": "2026-09-18T14:07:19.346Z",
+      "path": "/home/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-09/traj_p2o6b2q8epj1.json"
     }
   }
 }

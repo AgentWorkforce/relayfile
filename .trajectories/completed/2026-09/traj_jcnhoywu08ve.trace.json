@@ -1,0 +1,636 @@
+{
+  "version": "1.0.0",
+  "id": "ad31b563-c747-4ace-9570-003fc77277b6",
+  "timestamp": "2026-09-17T21:27:43.795Z",
+  "trajectory": "traj_jcnhoywu08ve",
+  "files": [
+    {
+      "path": ".trajectories/active/traj_jcnhoywu08ve.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 46,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": ".trajectories/index.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 6,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            },
+            {
+              "start_line": 372,
+              "end_line": 383,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "cmd/relayfile-cli/commandspec.go",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 1025,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "cmd/relayfile-cli/commandspec_test.go",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 469,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "cmd/relayfile-cli/main.go",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 637,
+              "end_line": 656,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            },
+            {
+              "start_line": 857,
+              "end_line": 863,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            },
+            {
+              "start_line": 866,
+              "end_line": 872,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            },
+            {
+              "start_line": 915,
+              "end_line": 921,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            },
+            {
+              "start_line": 5611,
+              "end_line": 5633,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "cmd/relayfile-cli/main_test.go",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 405,
+              "end_line": 416,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "package-lock.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 25,
+              "end_line": 42,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            },
+            {
+              "start_line": 482,
+              "end_line": 491,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            },
+            {
+              "start_line": 4876,
+              "end_line": 4881,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            },
+            {
+              "start_line": 4897,
+              "end_line": 4902,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            },
+            {
+              "start_line": 4918,
+              "end_line": 4923,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            },
+            {
+              "start_line": 4939,
+              "end_line": 4944,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            },
+            {
+              "start_line": 4960,
+              "end_line": 4965,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            },
+            {
+              "start_line": 4981,
+              "end_line": 4986,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            },
+            {
+              "start_line": 5002,
+              "end_line": 5007,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            },
+            {
+              "start_line": 5023,
+              "end_line": 5028,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            },
+            {
+              "start_line": 5044,
+              "end_line": 5049,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            },
+            {
+              "start_line": 5065,
+              "end_line": 5070,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            },
+            {
+              "start_line": 5086,
+              "end_line": 5091,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            },
+            {
+              "start_line": 7633,
+              "end_line": 7641,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            },
+            {
+              "start_line": 8505,
+              "end_line": 8511,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/cli/CHANGELOG.md",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 6,
+              "end_line": 19,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/cli/package.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 34,
+              "end_line": 41,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/cli/scripts/cloud-auth.test.js",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 170,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/cli/scripts/cloud-preflight.js",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": []
+        }
+      ]
+    },
+    {
+      "path": "packages/cli/scripts/cloud-preflight.test.js",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": []
+        }
+      ]
+    },
+    {
+      "path": "packages/cli/scripts/install.js",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 35,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            },
+            {
+              "start_line": 56,
+              "end_line": 71,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            },
+            {
+              "start_line": 75,
+              "end_line": 90,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            },
+            {
+              "start_line": 93,
+              "end_line": 99,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/cli/scripts/run.js",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 12,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            },
+            {
+              "start_line": 17,
+              "end_line": 88,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/cli/scripts/run.test.js",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 61,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/typescript/CHANGELOG.md",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 6,
+              "end_line": 16,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/typescript/package.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 14,
+              "end_line": 23,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            },
+            {
+              "start_line": 50,
+              "end_line": 56,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            },
+            {
+              "start_line": 61,
+              "end_line": 69,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            },
+            {
+              "start_line": 77,
+              "end_line": 83,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/typescript/scripts/copy-relay-cli-assets.mjs",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 19,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/typescript/scripts/gen-command-spec.mjs",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 126,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/typescript/src/import-safety.test.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 24,
+              "end_line": 34,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/typescript/src/relay-cli/cloud-preflight.test.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 315,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/typescript/src/relay-cli/cloud-preflight.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 429,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/typescript/src/relay-cli/command-spec.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 1636,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/typescript/src/relay-cli/command-spec.test.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 80,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/typescript/src/relay-cli/index.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 269,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/typescript/src/relay-cli/resolve-binary.test.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 169,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/typescript/src/relay-cli/resolve-binary.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 239,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/typescript/src/relay-cli/surface.test.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 211,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/typescript/src/relay-cli/testing/build-binary.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 74,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/typescript/tsconfig.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 9,
+              "end_line": 19,
+              "revision": "c445600374ab7e31b48726d5814b48ad3ba6be65"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

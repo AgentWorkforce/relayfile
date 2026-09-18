@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased - Patch]
 
+### Added
+
+- Hidden `relayfile __command-spec --json` subcommand, which emits relayfile's command tree as JSON. It is how `@relayfile/sdk/relay-cli` — the surface the `agent-relay` CLI mounts as `agent-relay file` — knows relayfile's commands without the binary being present. `relayfile writeback retry` also accepts `--op-id` as a kebab-case alias for `--opId`, which stays supported.
+
+### Changed
+
+- The `relayfile` bin shim no longer carries its own copies of binary resolution or the Cloud sign-in preflight; both moved into `@relayfile/sdk/relay-cli` (a new dependency of this package) so the `relayfile` command and `agent-relay file` share one implementation and cannot diverge. `relayfile --version` still answers without any binary lookup, and every command keeps its existing behavior, stdio, and exit codes.
+
 ### Fixed
 
 - `relayfile-mount --once` now treats a per-cycle deadline during an incomplete bootstrap as resumable: it reports `mount bootstrapping: bootstrap incomplete (in progress)` and exits 0 so a later bounded run can resume. A root-context deadline remains a nonzero failure.

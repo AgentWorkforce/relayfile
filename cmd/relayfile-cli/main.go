@@ -637,77 +637,20 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		)
 	}
 
-	switch args[0] {
-	case "setup":
-		return runSetup(args[1:], stdin, stdout)
-	case "login":
-		return runLogin(args[1:], stdin, stdout)
-	case "logout":
-		return runLogout(args[1:], stdout)
-	case "workspace":
-		return runWorkspace(args[1:], stdin, stdout)
-	case "integration":
-		return runIntegration(args[1:], stdin, stdout)
-	case "ops":
-		return runOps(args[1:], stdin, stdout)
-	case "writeback":
-		return runWriteback(args[1:], stdout)
-	case "digest":
-		return runDigest(args[1:], stdout)
-	case "pull":
-		return runPull(args[1:], stdout)
-	case "mount", "start", "on":
-		// `start` and `on` are friendlier aliases for `mount`. Same flags,
-		// same foreground/background behavior; pass --background to detach.
-		// `on` migrates the agent-relay `relay on` mount UX into relayfile.
-		if len(args) > 1 && args[1] == "checkpoint-seal" {
-			return runMountCheckpointSeal(args[2:], stdout)
-		}
-		if len(args) > 1 && args[1] == "resume-seal" {
-			return runMountResumeSeal(args[2:], stdin, stdout)
-		}
-		if len(args) > 1 && args[1] == "verify-seal" {
-			return runMountVerifySeal(args[2:], stdin, stdout)
-		}
-		if len(args) > 1 && args[1] == "handback-seal" {
-			return runMountHandbackSeal(args[2:], stdin, stdout)
-		}
-		return runMount(args[1:])
-	case "restart":
-		return runRestart(args[1:], stdout)
-	case "supervisor":
-		return runSupervisor(args[1:], stdout)
-	case "tree", "ls":
-		return runTree(args[1:], stdout)
-	case "read", "cat":
-		return runRead(args[1:], stdout)
-	case "seed":
-		return runSeed(args[1:], stdout)
-	case "export":
-		return runExport(args[1:], stdout)
-	case "status":
-		return runStatus(args[1:], stdout)
-	case "stop", "off":
-		// `off` is the friendlier alias for `stop`, migrating the
-		// agent-relay `relay off` unmount UX into relayfile.
-		return runStop(args[1:], stdout)
-	case "logs":
-		return runLogs(args[1:], stdout)
-	case "observer":
-		return runObserver(args[1:], stdout)
-	case "listen", "watch":
-		return runListen(args[1:], stdout)
-	case "control-plane":
-		return runControlPlane(args[1:], stdout)
-	case "dev":
-		return runDev(args[1:], nil, stdout)
-	case "help", "-h", "--help":
-		printUsage(stdout)
-		return nil
-	default:
-		printUsage(stderr)
-		return fmt.Errorf("unknown subcommand %q", args[0])
+	// Dispatch through the declared command table in commandspec.go so the
+	// tree relayfile advertises (and that @relayfile/sdk/relay-cli snapshots
+	// for `agent-relay file`) cannot drift from the tree it actually routes.
+	if command, ok := lookupCommand(args[0]); ok {
+		return command.dispatch(cliInvocation{
+			args:   args[1:],
+			stdin:  stdin,
+			stdout: stdout,
+			stderr: stderr,
+		})
 	}
+
+	printUsage(stderr)
+	return fmt.Errorf("unknown subcommand %q", args[0])
 }
 
 func quickStartSetupArgs() []string {
@@ -801,7 +744,7 @@ func printHelpForArgs(args []string, stdout io.Writer) {
 	case "stop", "off":
 		fmt.Fprintln(stdout, "Usage: relayfile stop [WORKSPACE]")
 	case "supervisor":
-		fmt.Fprintln(stdout, "Usage: relayfile supervisor <install|uninstall|status> [WORKSPACE] [--interval 30s]")
+		fmt.Fprintln(stdout, "Usage: relayfile supervisor <install|uninstall|status> [WORKSPACE] [LISTEN_FILTERS...]")
 	case "logs":
 		fmt.Fprintln(stdout, "Usage: relayfile logs [WORKSPACE] [--lines N]")
 	case "observer":
@@ -914,7 +857,7 @@ func printWritebackUsage(w io.Writer, subcommand string) {
 	case "delete":
 		fmt.Fprintln(w, "Usage: relayfile writeback delete LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]")
 	case "retry":
-		fmt.Fprintln(w, "Usage: relayfile writeback retry --opId OP [WORKSPACE]")
+		fmt.Fprintln(w, "Usage: relayfile writeback retry --op-id OP [WORKSPACE]")
 	case "skip-stuck":
 		fmt.Fprintln(w, "Usage: relayfile writeback skip-stuck [WORKSPACE] [--workspace WS] [--max N] [--json]")
 	case "sweep-drafts":
@@ -923,7 +866,7 @@ func printWritebackUsage(w io.Writer, subcommand string) {
 		fmt.Fprintln(w, `Usage:
   relayfile writeback list --state pending|dead [--workspace WS] [--json]
   relayfile writeback status [WORKSPACE] [--json]
-  relayfile writeback retry --opId OP [WORKSPACE]
+  relayfile writeback retry --op-id OP [WORKSPACE]
   relayfile writeback push LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
   relayfile writeback update LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
   relayfile writeback delete LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
@@ -972,7 +915,7 @@ Usage:
   relayfile ops replay OPID [--workspace NAME]
   relayfile writeback list --state pending|dead [--workspace WS] [--json]
   relayfile writeback status [WORKSPACE] [--json]
-  relayfile writeback retry --opId OP [WORKSPACE]
+  relayfile writeback retry --op-id OP [WORKSPACE]
   relayfile writeback push LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
   relayfile writeback update LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
   relayfile writeback delete LOCAL_PATH [--workspace WS] [--json] [--timeout 90s]
@@ -985,7 +928,7 @@ Usage:
   relayfile stop [WORKSPACE]
   relayfile off [WORKSPACE]                         (alias for stop)
   relayfile restart [WORKSPACE] [--foreground]
-  relayfile supervisor install [WORKSPACE] [--interval 30s]
+  relayfile supervisor install [WORKSPACE] [LISTEN_FILTERS...]
   relayfile supervisor uninstall [WORKSPACE]
   relayfile supervisor status [WORKSPACE]
   relayfile tree [WORKSPACE] [PATH] [--depth N]
@@ -5668,15 +5611,23 @@ func runWritebackRetry(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("writeback retry", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	opID := fs.String("opId", "", "dead-lettered operation id")
+	// --op-id is the kebab-case spelling the relay CLI surface contract
+	// requires of a declared flag. --opId stays accepted so existing scripts
+	// keep working.
+	opIDKebab := fs.String("op-id", "", "dead-lettered operation id (alias for --opId)")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
-		"opId": true,
+		"opId":  true,
+		"op-id": true,
 	})); err != nil {
 		return err
 	}
 	if fs.NArg() > 1 {
-		return errors.New("usage: relayfile writeback retry --opId OP [WORKSPACE]")
+		return errors.New("usage: relayfile writeback retry --op-id OP [WORKSPACE]")
 	}
 	op := strings.TrimSpace(*opID)
+	if op == "" {
+		op = strings.TrimSpace(*opIDKebab)
+	}
 	if op == "" {
 		return errors.New("opId is required")
 	}
@@ -8775,7 +8726,7 @@ func runListen(args []string, stdout io.Writer) error {
 		if runCmd == "" && format == "text" {
 			fmt.Fprintln(stdout, "Tip: pass --run to execute a command per event.")
 			fmt.Fprintln(stdout, "     See 'relayfile help listen' for examples with Linear, Notion, HubSpot, and more.")
-			fmt.Fprintln(stdout, "     Add --background to detach; 'relayfile supervisor install --listen' to survive reboots.")
+			fmt.Fprintln(stdout, "     Add --background to detach; 'relayfile supervisor install' to survive reboots.")
 		}
 		fmt.Fprintln(stdout)
 	}
@@ -9056,7 +9007,7 @@ On Linux  it writes a systemd user unit (~/.config/systemd/user/relayfile-listen
 On macOS  it writes a launchd agent  (~/Library/LaunchAgents/com.relayfile.listen.plist).
 
 Usage:
-  relayfile supervisor install [LISTEN_FLAGS...]   install and start the service
+  relayfile supervisor install [LISTEN_FILTERS...] install and start the service
   relayfile supervisor uninstall                   stop, disable, and remove the service
   relayfile supervisor status                      show service status
 
@@ -9073,8 +9024,11 @@ Examples:
   relayfile supervisor status
   relayfile supervisor uninstall
 
-All flags accepted by 'relayfile listen' are accepted here and are embedded
-verbatim into the unit file. The service restarts automatically on failure.`)
+The filters accepted by 'relayfile listen' — --server, --token, --provider,
+--path, --event, --run, --format — are accepted here and embedded verbatim
+into the unit file. Its process-model flags (--background, --daemonized) are
+not: the service is what keeps the listener running, so a unit that detached
+would exit on every start. The service restarts automatically on failure.`)
 }
 
 const (
@@ -9118,7 +9072,39 @@ func runSupervisor(args []string, stdout io.Writer) error {
 	}
 }
 
+// rejectSupervisorProcessModelFlags refuses the `listen` flags that choose a
+// process model. supervisorInstall copies its argv verbatim into the unit's
+// ExecStart, and the supervisor is already the thing that keeps the listener
+// running: a unit that detaches exits on every start (see
+// listenProcessModelOptions). The command table no longer advertises these, so
+// a host parser built from the emitted spec rejects them first; this catches
+// the same argv arriving straight at the binary.
+func rejectSupervisorProcessModelFlags(listenArgs []string) error {
+	for _, arg := range listenArgs {
+		for _, name := range listenProcessModelFlagNames() {
+			if !argNamesFlag(arg, name) {
+				continue
+			}
+			return fmt.Errorf(
+				"supervisor install cannot embed --%s: it controls how `relayfile listen` runs, and the service already keeps the listener running; install the filters only and use 'relayfile supervisor status' to check on it",
+				name,
+			)
+		}
+	}
+	return nil
+}
+
+// argNamesFlag reports whether a single argv entry sets the named flag, in any
+// of the spellings Go's flag package accepts.
+func argNamesFlag(arg, name string) bool {
+	return arg == "--"+name || arg == "-"+name ||
+		strings.HasPrefix(arg, "--"+name+"=") || strings.HasPrefix(arg, "-"+name+"=")
+}
+
 func supervisorInstall(listenArgs []string, stdout io.Writer) error {
+	if err := rejectSupervisorProcessModelFlags(listenArgs); err != nil {
+		return err
+	}
 	executable, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("locate relayfile binary: %w", err)

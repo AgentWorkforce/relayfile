@@ -24,6 +24,11 @@ describe("default entry import safety", () => {
     expect([...graph.files].sort()).not.toContain(
       path.join(SDK_SRC_ROOT, "cloud-login.ts")
     )
+    // The relay-cli surface spawns the Go binary, so it must stay a subpath
+    // export: the host CLI imports it only when `agent-relay file` is invoked.
+    expect([...graph.files].sort()).not.toContain(
+      path.join(SDK_SRC_ROOT, "relay-cli", "index.ts")
+    )
     expect([...graph.nodeSpecifiers].sort()).toEqual([])
   })
 })

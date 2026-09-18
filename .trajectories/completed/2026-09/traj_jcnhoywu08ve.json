@@ -1,0 +1,99 @@
+{
+  "id": "traj_jcnhoywu08ve",
+  "version": 1,
+  "task": {
+    "title": "Expose @relayfile/sdk/relay-cli CLI surface for agent-relay file"
+  },
+  "status": "completed",
+  "startedAt": "2026-09-17T21:00:11.799Z",
+  "completedAt": "2026-09-17T21:27:43.737Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-09-17T21:23:08.808Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_yz8wjtt5nove",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-09-17T21:23:08.808Z",
+      "endedAt": "2026-09-17T21:27:43.737Z",
+      "events": [
+        {
+          "ts": 1789680188809,
+          "type": "decision",
+          "content": "Declarative Go command table drives run() dispatch; AST drift tests for nested levels: Declarative Go command table drives run() dispatch; AST drift tests for nested levels",
+          "raw": {
+            "question": "Declarative Go command table drives run() dispatch; AST drift tests for nested levels",
+            "chosen": "Declarative Go command table drives run() dispatch; AST drift tests for nested levels",
+            "alternatives": [],
+            "reasoning": "relayfile's Go CLI is a hand-rolled flag dispatcher, not cobra, so there is no command tree to walk. Making the table the dispatcher removes top-level drift structurally; parsing the per-group switches and each leaf FlagSet out of the source AST catches nested drift without rewriting 14.7k lines."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1789680463417,
+          "type": "reflection",
+          "content": "Deliverable complete and pushed: SDK relay-cli surface, single-homed binary resolver + cloud preflight, Go command-spec emitter with AST drift tests, real-binary E2E. Awaiting lead decision on mount-with-args+subcommands and PR.",
+          "raw": {
+            "confidence": 0.85
+          },
+          "significance": "high",
+          "tags": [
+            "confidence:0.85"
+          ]
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Added @relayfile/sdk/relay-cli CLI surface (23 top-level commands) for agent-relay file: declarative Go command table now drives run() dispatch and feeds a hidden __command-spec --json emitter snapshotted into the SDK; binary resolution and cloud preflight moved into the SDK as the single home, with run.js and install.js calling them; AST drift tests in Go, regenerate-and-diff snapshot test, and real-Go-binary E2E through surface.run()",
+    "approach": "Standard approach",
+    "confidence": 0.85
+  },
+  "commits": [
+    "c4456003"
+  ],
+  "filesChanged": [
+    ".trajectories/active/traj_jcnhoywu08ve.json",
+    ".trajectories/index.json",
+    "cmd/relayfile-cli/commandspec.go",
+    "cmd/relayfile-cli/commandspec_test.go",
+    "cmd/relayfile-cli/main.go",
+    "cmd/relayfile-cli/main_test.go",
+    "package-lock.json",
+    "packages/cli/CHANGELOG.md",
+    "packages/cli/package.json",
+    "packages/cli/scripts/cloud-auth.test.js",
+    "packages/cli/scripts/cloud-preflight.js",
+    "packages/cli/scripts/cloud-preflight.test.js",
+    "packages/cli/scripts/install.js",
+    "packages/cli/scripts/run.js",
+    "packages/cli/scripts/run.test.js",
+    "packages/sdk/typescript/CHANGELOG.md",
+    "packages/sdk/typescript/package.json",
+    "packages/sdk/typescript/scripts/copy-relay-cli-assets.mjs",
+    "packages/sdk/typescript/scripts/gen-command-spec.mjs",
+    "packages/sdk/typescript/src/import-safety.test.ts",
+    "packages/sdk/typescript/src/relay-cli/cloud-preflight.test.ts",
+    "packages/sdk/typescript/src/relay-cli/cloud-preflight.ts",
+    "packages/sdk/typescript/src/relay-cli/command-spec.json",
+    "packages/sdk/typescript/src/relay-cli/command-spec.test.ts",
+    "packages/sdk/typescript/src/relay-cli/index.ts",
+    "packages/sdk/typescript/src/relay-cli/resolve-binary.test.ts",
+    "packages/sdk/typescript/src/relay-cli/resolve-binary.ts",
+    "packages/sdk/typescript/src/relay-cli/surface.test.ts",
+    "packages/sdk/typescript/src/relay-cli/testing/build-binary.ts",
+    "packages/sdk/typescript/tsconfig.json"
+  ],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "672260b97dc48963b6125a37f6531a28abbc9a90",
+    "endRef": "c445600374ab7e31b48726d5814b48ad3ba6be65",
+    "traceId": "ad31b563-c747-4ace-9570-003fc77277b6"
+  }
+}
