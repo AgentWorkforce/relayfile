@@ -126,7 +126,11 @@ describe("stdout is byte-exact", () => {
     const throughSurface = await invoke(realBinDir, argv)
     const direct = spawnSync(
       path.join(realBinDir, process.platform === "win32" ? "relayfile.exe" : "relayfile"),
-      argv
+      argv,
+      // The surface sets this, so the baseline must too: the comparison is
+      // about bytes surviving the stdio path, not about how the binary names
+      // itself, which mounted output deliberately changes (relayfile#509).
+      { env: { ...process.env, RELAYFILE_PROGRAM_NAME: "agent-relay file" } }
     )
 
     expect(throughSurface.code).toBe(direct.status)
