@@ -24,6 +24,7 @@ import {
   RELEASE_BINARY_NAMES,
   RELEASE_PACKAGE_NAMES,
 } from "./create-release-attestation.mjs";
+import { RELEASE_PACKAGE_PATHS } from "./resolve-release-baseline.mjs";
 
 const VALID_INTEGRITY = `sha512-${"A".repeat(86)}==`;
 const VALID_SHASUM = "a".repeat(40);
@@ -73,6 +74,12 @@ const EXPECTED_PACKAGE_PATHS = [
   "packages/mount-darwin-x64/package.json",
   "packages/mount-linux-arm64/package.json",
   "packages/mount-linux-x64/package.json",
+  "packages/cli-darwin-arm64/package.json",
+  "packages/cli-darwin-x64/package.json",
+  "packages/cli-linux-arm64/package.json",
+  "packages/cli-linux-x64/package.json",
+  "packages/cli-win32-arm64/package.json",
+  "packages/cli-win32-x64/package.json",
 ];
 
 function dedent(block) {
@@ -757,6 +764,24 @@ test("the shared package list still covers every published package", () => {
       .replace(/'$/, ""),
   );
   assert.deepEqual(paths, EXPECTED_PACKAGE_PATHS);
+});
+
+test("the trust resolver and the attestation cover the release set the workflow ships", () => {
+  // A release commit that touches a package the resolver does not know about
+  // falls outside RELEASE_COMMIT_PATHS, so its tag stops being a trusted
+  // baseline and the next dispatch bumps back onto the already-tagged version.
+  assert.deepEqual(RELEASE_PACKAGE_PATHS, [
+    "package.json",
+    ...EXPECTED_PACKAGE_PATHS,
+  ]);
+  // Every versioned package is published and reconciled, so the attestation
+  // must name exactly as many packages as the release job demands records for.
+  assert.equal(RELEASE_PACKAGE_NAMES.length, EXPECTED_PACKAGE_PATHS.length);
+  const gate = WORKFLOW.match(
+    /find package-attestations -type f -name '\*\.json' \| wc -l \| tr -d ' '\)" -eq (\d+)/,
+  );
+  assert.ok(gate, "package attestation count gate not found");
+  assert.equal(Number(gate[1]), RELEASE_PACKAGE_NAMES.length);
 });
 
 test("the version-sync script consumes the shared list rather than its own copy", () => {

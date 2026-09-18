@@ -70,6 +70,12 @@ export const RELEASE_PACKAGE_NAMES = [
   "@relayfile/mount-darwin-x64",
   "@relayfile/mount-linux-arm64",
   "@relayfile/mount-linux-x64",
+  "@relayfile/cli-darwin-arm64",
+  "@relayfile/cli-darwin-x64",
+  "@relayfile/cli-linux-arm64",
+  "@relayfile/cli-linux-x64",
+  "@relayfile/cli-win32-arm64",
+  "@relayfile/cli-win32-x64",
 ];
 
 export const RELEASE_BINARY_NAMES = [
