@@ -1,7 +1,7 @@
 {
   "name": "@relayfile/sdk",
-  "version": "0.10.56",
-  "description": "TypeScript SDK for relayfile \u2014 real-time filesystem for humans and agents",
+  "version": "0.10.64",
+  "description": "TypeScript SDK for relayfile — real-time filesystem for humans and agents",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "module",
@@ -66,21 +66,21 @@
     "check:command-spec": "node scripts/gen-command-spec.mjs --check"
   },
   "dependencies": {
-    "@relayfile/core": "0.10.56",
+    "@relayfile/core": "0.10.64",
     "ignore": "^7.0.5",
     "tar": "^7.5.10"
   },
   "optionalDependencies": {
-    "@relayfile/cli-darwin-arm64": "0.10.56",
-    "@relayfile/cli-darwin-x64": "0.10.56",
-    "@relayfile/cli-linux-arm64": "0.10.56",
-    "@relayfile/cli-linux-x64": "0.10.56",
-    "@relayfile/cli-win32-arm64": "0.10.56",
-    "@relayfile/cli-win32-x64": "0.10.56",
-    "@relayfile/mount-darwin-arm64": "0.10.56",
-    "@relayfile/mount-darwin-x64": "0.10.56",
-    "@relayfile/mount-linux-arm64": "0.10.56",
-    "@relayfile/mount-linux-x64": "0.10.56"
+    "@relayfile/cli-darwin-arm64": "0.10.64",
+    "@relayfile/cli-darwin-x64": "0.10.64",
+    "@relayfile/cli-linux-arm64": "0.10.64",
+    "@relayfile/cli-linux-x64": "0.10.64",
+    "@relayfile/cli-win32-arm64": "0.10.64",
+    "@relayfile/cli-win32-x64": "0.10.64",
+    "@relayfile/mount-darwin-arm64": "0.10.64",
+    "@relayfile/mount-darwin-x64": "0.10.64",
+    "@relayfile/mount-linux-arm64": "0.10.64",
+    "@relayfile/mount-linux-x64": "0.10.64"
   },
   "devDependencies": {
     "@agent-relay/cli-surface": "^12.2.4",

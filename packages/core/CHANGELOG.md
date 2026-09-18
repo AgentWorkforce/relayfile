@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [0.10.64] - 2026-09-18
+
 - Fix `mount --once` so delayed or rate-limited realtime listeners cannot
   consume the polling/reconciliation deadline (#490).
 
@@ -613,7 +617,8 @@ _No user-visible changes in this release._
 ### Added
 - Optional `contentIdentity` on write operations, enabling server-side deduplication of identical payloads. ([#54])
 
-[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.10.56...HEAD
+[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.10.64...HEAD
+[0.10.64]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.64
 [0.10.56]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.56
 [0.10.55]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.55
 [0.10.54]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.54
