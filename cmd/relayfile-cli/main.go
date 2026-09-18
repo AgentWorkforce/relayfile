@@ -67,6 +67,24 @@ const (
 
 const setupIntent = "Relayfile setup. This signs you in, connects an integration, and prepares a local VFS mount."
 
+// programNameEnv lets a host that mounts this binary say how users reach it.
+//
+// `agent-relay file <cmd>` runs this binary through @relayfile/sdk's Relay CLI
+// surface. Someone who arrived that way installed `agent-relay`, not
+// `relayfile`, so telling them to "run relayfile login" sends them to a binary
+// they do not have. The surface sets this; direct users leave it unset and see
+// the name they actually typed.
+const programNameEnv = "RELAYFILE_PROGRAM_NAME"
+
+// programName is how the user invokes this binary, for messages that instruct
+// them to run something. Defaults to the binary's own name.
+func programName() string {
+	if name := strings.TrimSpace(os.Getenv(programNameEnv)); name != "" {
+		return name
+	}
+	return "relayfile"
+}
+
 var relayfileVersion = relayfileDefaultVersion
 
 var relayIntegrationBindingsMu sync.Mutex
@@ -119,13 +137,14 @@ func (e *agentRelayMessagingOnlyWorkspaceError) Error() string {
 	setupCommand := "relayfile setup --workspace <name>"
 	workspaceLabel := "active Agent Relay workspace"
 	if name != "" {
-		setupCommand = "relayfile setup --workspace " + strconv.Quote(name)
+		setupCommand = programName() + " setup --workspace " + strconv.Quote(name)
 		workspaceLabel = "Agent Relay workspace " + strconv.Quote(name)
 	}
 	return fmt.Sprintf(
-		"%s is messaging-only (Relaycast-only) and is not Relayfile-backed. Run `%s` to create a separate Relayfile-backed workspace, or rerun `relayfile login --provision-messaging-only` to provision one automatically. The messaging workspace and its key will remain unchanged.",
+		"%s is messaging-only (Relaycast-only) and is not Relayfile-backed. Run `%s` to create a separate Relayfile-backed workspace, or rerun `%s login --provision-messaging-only` to provision one automatically. The messaging workspace and its key will remain unchanged.",
 		workspaceLabel,
 		setupCommand,
+		programName(),
 	)
 }
 
@@ -1518,8 +1537,9 @@ func classifyAgentRelayActiveWorkspaceError(err error) error {
 		return &agentRelayInvalidWorkspaceKeyError{}
 	default:
 		return fmt.Errorf(
-			"the active Agent Relay workspace could not be resolved through Cloud, and Relaycast verification returned HTTP %d. Try again or run `relayfile setup --workspace <name>` to create a Relayfile-backed workspace",
+			"the active Agent Relay workspace could not be resolved through Cloud, and Relaycast verification returned HTTP %d. Try again or run `%s setup --workspace <name>` to create a Relayfile-backed workspace",
 			statusCode,
+			programName(),
 		)
 	}
 }
@@ -2598,7 +2618,7 @@ func bootstrapDelegatedCredentialsFromAgentRelayWithOptions(workspaceValue strin
 func provisionRelayfileWorkspaceForMessagingOnly(cloud cloudCredentials, name string, scopes []string) (workspaceRecord, string, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return workspaceRecord{}, "", errors.New("the messaging-only workspace did not include a name; run `relayfile setup --workspace <name>` to create a separate Relayfile-backed workspace")
+		return workspaceRecord{}, "", fmt.Errorf("the messaging-only workspace did not include a name; run `%s setup --workspace <name>` to create a separate Relayfile-backed workspace", programName())
 	}
 	// Keep the Relayfile-backed workspace visually distinct from the original
 	// Relaycast-only workspace. ensureWorkspaceForSetup deduplicates this name
@@ -11495,7 +11515,7 @@ func loadCredentials() (credentials, error) {
 	payload, err := os.ReadFile(credentialsPath())
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return creds, fmt.Errorf("credentials not found at %s; run relayfile login --api-key for self-hosted credentials or pass --token", credentialsPath())
+			return creds, fmt.Errorf("credentials not found at %s; run %s login --api-key for self-hosted credentials or pass --token", credentialsPath(), programName())
 		}
 		return creds, err
 	}
@@ -14181,12 +14201,13 @@ func waitForBackgroundMountRegistration(pidFile, localDir string, childPID int, 
 				logPath = registeredState.LogFile
 			}
 			return fmt.Errorf(
-				"background mount process %d did not register daemon state within %s for %s; child may still be initializing (pid file: %s, log: %s). If it remains stuck, run `relayfile stop %s` to release the mount",
+				"background mount process %d did not register daemon state within %s for %s; child may still be initializing (pid file: %s, log: %s). If it remains stuck, run `%s stop %s` to release the mount",
 				childPID,
 				backgroundMountRegistrationTimeout,
 				localDir,
 				pidFile,
 				logPath,
+				programName(),
 				workspaceNameForLocalDir(localDir),
 			)
 		}
