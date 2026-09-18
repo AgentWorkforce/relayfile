@@ -1,6 +1,8 @@
 package main
 
 import (
+	"io"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -187,5 +189,115 @@ func TestListenRunDuplicateKeyRequiresStableIdentity(t *testing.T) {
 	})
 	if !strings.Contains(key, "hash:sha256:a") {
 		t.Fatalf("expected content hash in duplicate key, got %q", key)
+	}
+}
+
+// captureStderr runs fn with os.Stderr redirected, and returns what it wrote.
+//
+// The workspace-resolution warning below goes straight to os.Stderr rather
+// than through the io.Writer the command is handed, so there is no other seam
+// to read it from.
+func captureStderr(t *testing.T, fn func() error) (string, error) {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("open pipe: %v", err)
+	}
+	original := os.Stderr
+	os.Stderr = writer
+	fnErr := fn()
+	os.Stderr = original
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close pipe: %v", err)
+	}
+	captured, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read pipe: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("close pipe reader: %v", err)
+	}
+	return string(captured), fnErr
+}
+
+// TestListenReadsTheWorkspaceFromItsFirstPositional pins the behaviour the
+// command table has to declare. runListen takes the workspace as a positional
+// (`relayfile listen WORKSPACE`), but the table declared no args for `listen`
+// or for `dev`, which forwards its argv here — so `agent-relay file`, which
+// builds its parser from the emitted spec, refused a workspace-qualified
+// invocation before the binary ever saw it.
+//
+// HOME is empty, so the run stops at the local credential lookup and touches
+// no network. What it names on the way there is the proof.
+func TestListenReadsTheWorkspaceFromItsFirstPositional(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	const workspace = "listen-positional-probe"
+	withPositional, err := captureStderr(t, func() error {
+		return runListen([]string{workspace}, io.Discard)
+	})
+	if err == nil {
+		t.Fatal("expected a credential-resolution error with an empty HOME")
+	}
+	if !strings.Contains(withPositional, strconv.Quote(workspace)) {
+		t.Errorf("listen %s resolved no workspace; stderr = %q", workspace, withPositional)
+	}
+
+	withoutPositional, err := captureStderr(t, func() error {
+		return runListen(nil, io.Discard)
+	})
+	if err == nil {
+		t.Fatal("expected a credential-resolution error with an empty HOME")
+	}
+	if strings.Contains(withoutPositional, strconv.Quote(workspace)) {
+		t.Errorf("bare listen named a workspace it was never given; stderr = %q", withoutPositional)
+	}
+}
+
+// TestListenRejectsAFlagItDoesNotRegister is why the command table may not
+// advertise a listen flag that runListen has never parsed: `supervisor
+// install` embeds its argv into the unit's ExecStart as `relayfile listen
+// ...`, under Restart=on-failure. A flag like --interval — which the table
+// did advertise — makes that unit exit on every single start, forever.
+func TestListenRejectsAFlagItDoesNotRegister(t *testing.T) {
+	err := runListen([]string{"--interval", "30s", "-h"}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "flag provided but not defined: -interval") {
+		t.Fatalf("runListen --interval error = %v, want an undefined-flag error", err)
+	}
+}
+
+// TestSupervisorInstallFlagsReachAParsingListener closes that loop from the
+// other side: every flag the table declares for `supervisor install` must be
+// one runListen accepts.
+//
+// The trailing -h aborts the parse as soon as the flag before it is accepted,
+// so this exercises argument parsing only: no network, and no background
+// process for --background.
+func TestSupervisorInstallFlagsReachAParsingListener(t *testing.T) {
+	var install *cliCommandSpec
+	walkSpec(publicCommandSpec(), nil, func(path []string, command cliCommandSpec) {
+		if strings.Join(path, " ") == "supervisor install" {
+			declared := command
+			install = &declared
+		}
+	})
+	if install == nil {
+		t.Fatal("no `supervisor install` in the command table")
+	}
+	if len(install.Options) == 0 {
+		t.Fatal("`supervisor install` declares no options; it forwards listen's")
+	}
+
+	for _, option := range install.Options {
+		name := longFlagName(option.Flags)
+		if name == "" {
+			t.Errorf("option %q has no long flag", option.Flags)
+			continue
+		}
+		err := runListen([]string{"--" + name, "probe", "-h"}, io.Discard)
+		if err != nil && strings.Contains(err.Error(), "flag provided but not defined") {
+			t.Errorf("supervisor install declares --%s, but the listener it installs rejects it: %v", name, err)
+		}
 	}
 }

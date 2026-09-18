@@ -264,6 +264,7 @@ func relayfileCommands() []cliCommandSpec {
 					Name:        "status",
 					Description: "Show sync status for a workspace",
 					flagSource:  "runWorkspaceStatus",
+					Args:        []cliArgSpec{workspaceArg},
 					Options:     []cliOptionSpec{workspaceFlagOption, jsonFlagOption},
 				},
 				{
@@ -623,12 +624,15 @@ func relayfileCommands() []cliCommandSpec {
 				{
 					Name:        "install",
 					Description: "Install the auto-restart service for a workspace mount",
-					Args:        []cliArgSpec{workspaceArg},
-					Options: []cliOptionSpec{
-						// supervisor install forwards its argv to
-						// `relayfile listen`, which owns these flags.
-						{Flags: "--interval <duration>", Description: "sync interval passed through to the supervised listen process"},
-					},
+					// supervisor install embeds its argv verbatim into the
+					// unit's ExecStart as `relayfile listen ...`, so it
+					// accepts exactly what runListen parses and nothing else:
+					// a flag declared here that runListen does not register
+					// installs a service that exits on every start and, under
+					// Restart=on-failure, restarts forever.
+					flagSource: "runListen",
+					Args:       []cliArgSpec{workspaceArg},
+					Options:    listenOptions(),
 				},
 				{
 					Name:        "uninstall",
@@ -769,6 +773,7 @@ func relayfileCommands() []cliCommandSpec {
 			Description: "Stream workspace file events, optionally running a command per event",
 			Aliases:     []string{"watch"},
 			flagSource:  "runListen",
+			Args:        []cliArgSpec{workspaceArg},
 			Options:     listenOptions(),
 			dispatch: func(inv cliInvocation) error {
 				return runListen(inv.args, inv.stdout)
@@ -797,8 +802,9 @@ func relayfileCommands() []cliCommandSpec {
 			Description: "Print workspace context, then stream file events like `listen`",
 			Hidden:      true,
 			// dev forwards its argv verbatim to runListen, so it accepts
-			// exactly listen's flags.
+			// exactly listen's flags and the same optional workspace.
 			flagSource: "runListen",
+			Args:       []cliArgSpec{workspaceArg},
 			Options:    listenOptions(),
 			dispatch: func(inv cliInvocation) error {
 				return runDev(inv.args, inv.stdin, inv.stdout)

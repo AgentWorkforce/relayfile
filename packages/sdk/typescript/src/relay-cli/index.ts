@@ -25,7 +25,9 @@ import {
   type EnsureCloudSession
 } from "./cloud-preflight.js"
 import {
-  GO_TOOLCHAIN_MISSING_MESSAGE,
+  buildGoRunBinary,
+  GoBuildFailedError,
+  GoToolchainMissingError,
   RelayfileBinaryNotFoundError,
   resolveRelayfileBinary,
   type RelayfileBinaryResolution,
@@ -235,9 +237,29 @@ export function createRelayCliSurface(
         io.stderr(`${error.message}\n`)
         return RELAY_CLI_EXIT_BINARY_NOT_FOUND
       }
-      const command = resolution.command
-      const childArgs = [...resolution.args, ...args]
-      const cwd = resolution.kind === "go-run" ? resolution.cwd : options.cwd
+      let command = resolution.command
+      let childArgs = [...resolution.args, ...args]
+      if (resolution.kind === "go-run") {
+        // `go run` would launch relayfile with the checkout as its working
+        // directory — `go` only finds the module from there — so every
+        // relative path in argv would resolve against the repository instead
+        // of wherever the caller ran. Build first, then spawn the result from
+        // the caller's directory.
+        try {
+          command = buildGoRunBinary(resolution, { env })
+          childArgs = [...args]
+        } catch (error) {
+          if (
+            error instanceof GoToolchainMissingError ||
+            error instanceof GoBuildFailedError
+          ) {
+            io.stderr(`${error.message}\n`)
+            return 1
+          }
+          throw error
+        }
+      }
+      const cwd = options.cwd
 
       return await new Promise<number>((resolve, reject) => {
         // stdin is inherited so interactive prompts (setup, login, delete
@@ -255,12 +277,9 @@ export function createRelayCliSurface(
         child.stdout?.on("data", (chunk: Buffer) => io.stdout(chunk))
         child.stderr?.on("data", (chunk: Buffer) => io.stderr(chunk))
 
+        // A missing Go toolchain is reported by buildGoRunBinary above, not
+        // here: by this point `command` is always a real binary.
         child.on("error", (error: NodeJS.ErrnoException) => {
-          if (error.code === "ENOENT" && resolution.kind === "go-run") {
-            io.stderr(`${GO_TOOLCHAIN_MISSING_MESSAGE}\n`)
-            resolve(1)
-            return
-          }
           reject(error)
         })
 
@@ -281,6 +300,10 @@ export function createRelayCliSurface(
 }
 
 export {
+  buildGoRunBinary,
+  goRunBinaryPath,
+  GoBuildFailedError,
+  GoToolchainMissingError,
   RelayfileBinaryNotFoundError,
   resolveRelayfileBinary,
   findSourceCheckoutRoot,
@@ -292,7 +315,9 @@ export {
   platformPackageNames,
   GO_TOOLCHAIN_MISSING_MESSAGE,
   RELAYFILE_CLI_BIN_ENV,
+  type BuildGoRunBinaryOptions,
   type RelayfileBinaryResolution,
+  type RelayfileGoRunResolution,
   type ResolveRelayfileBinaryOptions
 } from "./resolve-binary.js"
 

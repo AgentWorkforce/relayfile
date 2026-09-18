@@ -283,6 +283,13 @@
       {
         "name": "status",
         "description": "Show sync status for a workspace",
+        "args": [
+          {
+            "name": "workspace",
+            "description": "workspace name or id; defaults to the active workspace",
+            "required": false
+          }
+        ],
         "options": [
           {
             "flags": "--workspace <name>",
@@ -1277,8 +1284,43 @@
         ],
         "options": [
           {
-            "flags": "--interval <duration>",
-            "description": "sync interval passed through to the supervised listen process"
+            "flags": "--server <url>",
+            "description": "relayfile server URL override"
+          },
+          {
+            "flags": "--token <token>",
+            "description": "relayfile token override"
+          },
+          {
+            "flags": "--provider <provider>",
+            "description": "filter to a specific provider (e.g. linear, notion)"
+          },
+          {
+            "flags": "--path <glob>",
+            "description": "glob path filter (e.g. /linear/issues/**)"
+          },
+          {
+            "flags": "--event <type>",
+            "description": "event type filter: file.created, file.updated, file.deleted"
+          },
+          {
+            "flags": "--run <command>",
+            "description": "shell command per event; supports {{path}}, {{type}}, {{provider}}, {{revision}}, {{event}}"
+          },
+          {
+            "flags": "--format <format>",
+            "description": "output format when --run is not set: text or json",
+            "defaultValue": "text"
+          },
+          {
+            "flags": "--background",
+            "description": "run in background; logs to ~/.relayfile/listen.log",
+            "defaultValue": false
+          },
+          {
+            "flags": "--daemonized",
+            "description": "internal flag used by relayfile listen --background",
+            "defaultValue": false
           }
         ]
       },
@@ -1529,6 +1571,13 @@
     "aliases": [
       "watch"
     ],
+    "args": [
+      {
+        "name": "workspace",
+        "description": "workspace name or id; defaults to the active workspace",
+        "required": false
+      }
+    ],
     "options": [
       {
         "flags": "--server <url>",
@@ -1590,6 +1639,13 @@
   {
     "name": "dev",
     "description": "Print workspace context, then stream file events like `listen`",
+    "args": [
+      {
+        "name": "workspace",
+        "description": "workspace name or id; defaults to the active workspace",
+        "required": false
+      }
+    ],
     "options": [
       {
         "flags": "--server <url>",

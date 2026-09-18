@@ -66,23 +66,34 @@ async function main() {
     throw error;
   }
 
+  let command = resolution.command;
+  let childArgs = [...resolution.args, ...args];
+  if (resolution.kind === "go-run") {
+    // `go run` would hand relayfile the checkout as its working directory,
+    // so relative paths in argv would resolve against the repository rather
+    // than the directory the user ran in. Build first, run from here.
+    try {
+      command = relayCli.buildGoRunBinary(resolution, { env: process.env });
+      childArgs = [...args];
+    } catch (error) {
+      if (
+        error instanceof relayCli.GoToolchainMissingError ||
+        error instanceof relayCli.GoBuildFailedError
+      ) {
+        console.error(error.message);
+        process.exit(1);
+      }
+      throw error;
+    }
+  }
+
   // stdio is inherited rather than piped: this shim is the terminal-facing
   // entry point, so relayfile's own output (including binary payloads from
-  // `export --output -`) must pass through untouched.
-  const result = spawnSync(
-    resolution.command,
-    [...resolution.args, ...args],
-    {
-      cwd: resolution.kind === "go-run" ? resolution.cwd : undefined,
-      stdio: "inherit",
-    }
-  );
+  // `export --output -`) must pass through untouched. No cwd override: the
+  // child inherits the caller's, which is what relative paths must mean.
+  const result = spawnSync(command, childArgs, { stdio: "inherit" });
 
   if (result.error) {
-    if (result.error.code === "ENOENT" && resolution.kind === "go-run") {
-      console.error(relayCli.GO_TOOLCHAIN_MISSING_MESSAGE);
-      process.exit(1);
-    }
     console.error(`Failed to launch relayfile: ${result.error.message}`);
     process.exit(1);
   }

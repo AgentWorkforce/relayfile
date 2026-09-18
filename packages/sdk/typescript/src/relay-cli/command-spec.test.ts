@@ -69,6 +69,36 @@ describe("command-spec.json", () => {
     expect(offenders).toEqual([])
   })
 
+  it("declares the optional workspace positional `listen` and `dev` accept", () => {
+    // The host builds its parser from this tree, so an omitted positional is
+    // a rejected invocation, not a documentation gap: `agent-relay file listen
+    // my-workspace` was refused before the binary saw it, even though
+    // `relayfile listen my-workspace` has always worked.
+    for (const name of ["listen", "dev"]) {
+      const command = relayfileCommands().find((candidate) => candidate.name === name)
+      expect(command, `\`${name}\` is missing from the command tree`).toBeDefined()
+      expect(command?.args?.[0]?.name, `\`${name}\` declares no workspace`).toBe("workspace")
+      expect(command?.args?.[0]?.required).toBe(false)
+    }
+  })
+
+  it("advertises nothing under `supervisor install` that `listen` cannot parse", () => {
+    // `supervisor install` embeds its argv into the service unit verbatim as
+    // `relayfile listen ...`, under Restart=on-failure. A flag here that
+    // listen does not accept installs a service that exits on every start.
+    const flagsOf = (commandPath: readonly string[]): string[] => {
+      for (const { path: candidate, command } of walkCommands(relayfileCommands())) {
+        if (candidate.join(" ") === commandPath.join(" ")) {
+          return (command.options ?? []).map((option) => option.flags)
+        }
+      }
+      throw new Error(`no \`${commandPath.join(" ")}\` in the command tree`)
+    }
+
+    const listen = flagsOf(["listen"])
+    expect(flagsOf(["supervisor", "install"]).filter((flag) => !listen.includes(flag))).toEqual([])
+  })
+
   it("keeps the introspection hook out of the published tree", () => {
     const names = new Set<string>()
     for (const { command } of walkCommands(relayfileCommands())) {

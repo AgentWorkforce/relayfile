@@ -198,7 +198,7 @@ func TestOptionsMatchSourceFlagSets(t *testing.T) {
 	walkSpec(publicCommandSpec(), nil, func(path []string, command cliCommandSpec) {
 		label := strings.Join(path, " ")
 		if command.flagSource == "" {
-			if len(command.Options) > 0 && !isPassThroughCommand(path) {
+			if len(command.Options) > 0 {
 				t.Errorf("command %q declares options but names no flagSource", label)
 			}
 			return
@@ -235,15 +235,42 @@ func TestOptionsMatchSourceFlagSets(t *testing.T) {
 	})
 }
 
-func isMountCommand(path []string) bool {
-	return len(path) == 1 && path[0] == "mount"
+// TestDeclaredArgsCoverSourcePositionals parses each command's flag.FlagSet
+// out of the source and asserts that a command whose parser reads a positional
+// value declares at least one positional argument.
+//
+// TestOptionsMatchSourceFlagSets covers flags only, so a command could read
+// fs.Arg(0) while declaring no args — and `listen`, `dev` and
+// `workspace status` all did. The binary accepts those invocations (run()
+// forwards argv untouched), but a host that routes from the emitted spec —
+// `agent-relay file` builds its parser from it — rejects them before the
+// binary is ever reached, which is how the drift stayed invisible to every
+// relayfile-side test.
+//
+// Only this direction is checked. fs.NArg() is deliberately not treated as a
+// read: several commands call it solely to reject positionals. And a command
+// may legitimately declare args it consumes before parsing (runStop and
+// friends read args[0] directly), so "declares but no fs.Arg" is not drift.
+func TestDeclaredArgsCoverSourcePositionals(t *testing.T) {
+	sources := parseCommandSources(t)
+
+	walkSpec(publicCommandSpec(), nil, func(path []string, command cliCommandSpec) {
+		if command.flagSource == "" {
+			return
+		}
+		label := strings.Join(path, " ")
+		reads, ok := sources.readsPositional(command.flagSource)
+		if !ok {
+			t.Fatalf("command %q: flagSource %q not found in cmd/relayfile-cli", label, command.flagSource)
+		}
+		if reads && len(command.Args) == 0 {
+			t.Errorf("%s reads a positional argument but command %q declares none", command.flagSource, label)
+		}
+	})
 }
 
-// isPassThroughCommand reports whether a command forwards its argv to another
-// command rather than parsing flags itself, so its declared options describe
-// what the downstream command accepts.
-func isPassThroughCommand(path []string) bool {
-	return strings.Join(path, " ") == "supervisor install"
+func isMountCommand(path []string) bool {
+	return len(path) == 1 && path[0] == "mount"
 }
 
 func longFlagName(flags string) string {
@@ -375,6 +402,35 @@ func (s *commandSources) flagNames(function string) ([]string, bool) {
 		return true
 	})
 	return names, true
+}
+
+// readsPositional reports whether the named function reads a positional
+// argument off its FlagSet: fs.Arg(i) or fs.Args().
+func (s *commandSources) readsPositional(function string) (bool, bool) {
+	fn, ok := s.functions[function]
+	if !ok {
+		return false, false
+	}
+	reads := false
+	ast.Inspect(fn.Body, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		receiver, ok := selector.X.(*ast.Ident)
+		if !ok || !isFlagSetReceiver(receiver.Name) {
+			return true
+		}
+		if selector.Sel.Name == "Arg" || selector.Sel.Name == "Args" {
+			reads = true
+		}
+		return true
+	})
+	return reads, true
 }
 
 // isFlagSetReceiver reports whether an identifier is one of the FlagSet

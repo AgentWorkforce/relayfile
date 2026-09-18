@@ -21,8 +21,10 @@
  *    per-platform build from GitHub Releases.
  */
 
+import { spawnSync } from "node:child_process"
+import { createHash } from "node:crypto"
+import { existsSync, mkdirSync } from "node:fs"
 import { createRequire } from "node:module"
-import { existsSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -521,3 +523,109 @@ export function resolveRelayfileBinary(
 export const GO_TOOLCHAIN_MISSING_MESSAGE =
   "relayfile binary not found and Go is not installed to run from source. " +
   "Install Go or run `npm run build --workspace=packages/cli`."
+
+/** A `go-run` resolution: no binary was found, but a checkout was. */
+export type RelayfileGoRunResolution = Extract<
+  RelayfileBinaryResolution,
+  { kind: "go-run" }
+>
+
+/** Thrown by `buildGoRunBinary` when there is no `go` on PATH. */
+export class GoToolchainMissingError extends Error {
+  constructor() {
+    super(GO_TOOLCHAIN_MISSING_MESSAGE)
+    this.name = "GoToolchainMissingError"
+  }
+}
+
+/** Thrown by `buildGoRunBinary` when `go build` itself fails. */
+export class GoBuildFailedError extends Error {
+  /** `go build`'s exit code, or null when it was killed by a signal. */
+  readonly exitCode: number | null
+
+  constructor(exitCode: number | null, stderr: string) {
+    super(
+      `building relayfile from source failed (go build exited ${exitCode})` +
+        (stderr.trim() ? `\n${stderr.trim()}` : "")
+    )
+    this.name = "GoBuildFailedError"
+    this.exitCode = exitCode
+  }
+}
+
+export interface BuildGoRunBinaryOptions {
+  /** Environment for `go build`; also supplies the PATH it is found on. */
+  env?: NodeJS.ProcessEnv
+  /** Output path override, for tests. */
+  outputPath?: string
+}
+
+/**
+ * Where a source-checkout build is cached: outside the checkout, keyed by it.
+ *
+ * Not `<checkout>/bin`, which is `make build`'s output — a fallback launch
+ * must not write into someone's working tree, and a read-only checkout still
+ * has to work.
+ *
+ * @param checkout - The source checkout root.
+ * @param platform - Node platform id; defaults to this host's.
+ * @returns The absolute path to build to.
+ */
+export function goRunBinaryPath(
+  checkout: string,
+  platform: string = os.platform()
+): string {
+  const key = createHash("sha256").update(path.resolve(checkout)).digest("hex").slice(0, 16)
+  return path.join(
+    os.tmpdir(),
+    "relayfile-go-run",
+    key,
+    platformPackageBinaryName(platform)
+  )
+}
+
+/**
+ * Turn a `go-run` resolution into an executable binary.
+ *
+ * `go run` cannot be used directly, because the program it launches inherits
+ * the `go` command's own working directory — and `go` only finds the module
+ * from that directory, so it has to be the checkout. Every relative path in
+ * the caller's argv would then resolve against the repository instead of the
+ * directory the caller actually ran in (`--output report.json` writing into
+ * the checkout root). `go -C <checkout> run` has the same effect, and passing
+ * an absolute package path fails outright outside a module.
+ *
+ * Building first and spawning the result separates the two: the build runs in
+ * the checkout, where the module is, and the binary runs wherever the caller
+ * asked for. Go's build cache makes the repeat cost a relink.
+ *
+ * @param resolution - The `go-run` resolution to materialize.
+ * @param options - Environment and output overrides.
+ * @returns The absolute path of the built binary.
+ * @throws {GoToolchainMissingError} When `go` is not on PATH.
+ * @throws {GoBuildFailedError} When `go build` exits non-zero.
+ */
+export function buildGoRunBinary(
+  resolution: RelayfileGoRunResolution,
+  options: BuildGoRunBinaryOptions = {}
+): string {
+  const output = options.outputPath ?? goRunBinaryPath(resolution.cwd)
+  mkdirSync(path.dirname(output), { recursive: true })
+
+  const result = spawnSync("go", ["build", "-o", output, "./cmd/relayfile-cli"], {
+    cwd: resolution.cwd,
+    env: options.env ?? process.env,
+    encoding: "utf8"
+  })
+
+  if (result.error) {
+    if ((result.error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new GoToolchainMissingError()
+    }
+    throw result.error
+  }
+  if (result.status !== 0) {
+    throw new GoBuildFailedError(result.status, result.stderr ?? "")
+  }
+  return output
+}

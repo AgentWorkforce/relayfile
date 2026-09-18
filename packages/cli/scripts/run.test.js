@@ -36,6 +36,17 @@ test("the shim owns no copy of binary resolution or the Cloud preflight", () => 
   assert.doesNotMatch(source, /ensureCloudSession\(/);
 });
 
+test("the shim never relocates the child's working directory", () => {
+  // The source fallback used to spawn `go run` with the checkout as cwd,
+  // because that is the only directory `go` finds the module from — so a
+  // relative path in argv (`--output report.json`) resolved against the
+  // repository instead of wherever the user ran. The shim must materialize a
+  // binary through the SDK and spawn it with the caller's own cwd inherited.
+  const source = fs.readFileSync(shimPath, "utf8");
+  assert.match(source, /buildGoRunBinary/);
+  assert.doesNotMatch(source, /cwd:/);
+});
+
 test("the removed preflight module is not reintroduced", () => {
   assert.equal(fs.existsSync(path.join(__dirname, "cloud-preflight.js")), false);
 });
