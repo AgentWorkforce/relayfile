@@ -8652,9 +8652,7 @@ func runListen(args []string, stdout io.Writer) error {
 	}
 
 	if *background && !*daemonized {
-		logFile := listenLogFile()
-		pidFile := listenPIDFile()
-		return spawnBackgroundListenProcess(args, pidFile, logFile)
+		return spawnBackgroundListenProcess(args, listenLogFile())
 	}
 	if *daemonized {
 		if err := rotateLogFile(listenLogFile()); err != nil {
@@ -8881,23 +8879,22 @@ func runListenSession(rootCtx context.Context, cfg listenSessionConfig) (bool, e
 	}
 }
 
-func listenPIDFile() string {
-	return filepath.Join(configDir(), "listen.pid")
-}
-
 func listenLogFile() string {
 	return filepath.Join(configDir(), "listen.log")
 }
 
-func spawnBackgroundListenProcess(originalArgs []string, pidFile, logFile string) error {
-	if err := rotateLogFile(logFile); err != nil {
-		return err
-	}
-	executable, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	filtered := make([]string, 0, len(originalArgs))
+// backgroundListenChildArgs builds the argv `listen --background` re-invokes
+// itself with: the caller's own flags minus `--background`, plus the internal
+// `--daemonized` marker.
+//
+// Every flag here must be one `runListen` registers. Its flagset is
+// ContinueOnError with output discarded, so an unrecognised flag makes the
+// child exit immediately with nothing on a terminal, while the parent has
+// already printed "Listen started in background". `--pid-file` was passed for
+// exactly that reason and broke every background listen; nothing read the
+// listen pid file, so it was dropped rather than registered.
+func backgroundListenChildArgs(originalArgs []string) []string {
+	filtered := make([]string, 0, len(originalArgs)+1)
 	for _, arg := range originalArgs {
 		if arg == "--background" || arg == "-background" ||
 			strings.HasPrefix(arg, "--background=") || strings.HasPrefix(arg, "-background=") {
@@ -8905,8 +8902,18 @@ func spawnBackgroundListenProcess(originalArgs []string, pidFile, logFile string
 		}
 		filtered = append(filtered, arg)
 	}
-	childArgs := append([]string{"listen"}, filtered...)
-	childArgs = append(childArgs, "--daemonized", "--pid-file", pidFile)
+	return append(filtered, "--daemonized")
+}
+
+func spawnBackgroundListenProcess(originalArgs []string, logFile string) error {
+	if err := rotateLogFile(logFile); err != nil {
+		return err
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	childArgs := append([]string{"listen"}, backgroundListenChildArgs(originalArgs)...)
 	logHandle, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err

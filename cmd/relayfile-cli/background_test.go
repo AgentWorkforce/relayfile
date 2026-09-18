@@ -5,10 +5,12 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -839,5 +841,39 @@ func TestA14LogsCommandTailsBackgroundLog(t *testing.T) {
 		if !strings.Contains(got, line) {
 			t.Fatalf("expected %q in logs output, got %q", line, got)
 		}
+	}
+}
+
+// TestBackgroundListenChildArgsOnlyUseRegisteredFlags pins the contract that
+// broke `relayfile listen --background` entirely: the parent appended
+// `--pid-file`, which `runListen` never registered, so the child died at flag
+// parsing while the parent reported "Listen started in background".
+//
+// `runListen` parses with flag.ContinueOnError and a discarded output sink, so
+// an unknown flag produces no diagnostic anywhere the user looks. Asserting on
+// the parse outcome — rather than on a hardcoded argv — keeps any future flag
+// added to the child honest.
+func TestBackgroundListenChildArgsOnlyUseRegisteredFlags(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	args := backgroundListenChildArgs([]string{"--provider", "linear", "--background"})
+
+	if slices.Contains(args, "--background") {
+		t.Fatalf("child argv still carries --background: %v", args)
+	}
+	if !slices.Contains(args, "--daemonized") {
+		t.Fatalf("child argv is missing --daemonized: %v", args)
+	}
+
+	// runListen fails on credentials in a bare HOME, which is fine: the point
+	// is that it gets past flag parsing at all. Before the fix it returned
+	// "flag provided but not defined: -pid-file" and never reached the work.
+	err := runListen(args, io.Discard)
+	if err == nil {
+		return
+	}
+	if strings.Contains(err.Error(), "flag provided but not defined") {
+		t.Fatalf("child argv %v carries a flag runListen does not register: %v", args, err)
 	}
 }
