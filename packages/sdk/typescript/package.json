@@ -83,7 +83,7 @@
     "@relayfile/mount-linux-x64": "0.10.56"
   },
   "devDependencies": {
-    "@agent-relay/cli-surface": "^12.2.2",
+    "@agent-relay/cli-surface": "^12.2.4",
     "typescript": "^5.7.3",
     "vitest": "^3.0.0"
   },
