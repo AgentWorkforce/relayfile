@@ -1,0 +1,62 @@
+{
+  "id": "traj_p2o6b2q8epj1",
+  "version": 1,
+  "task": {
+    "title": "PR #507 round-3 bugbot: supervisor install detach flags + go-run build path races",
+    "source": {
+      "system": "plain",
+      "id": "PR-507"
+    }
+  },
+  "status": "active",
+  "startedAt": "2026-09-18T13:58:18.225Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-09-18T14:06:48.912Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_s1h2txrpnjjy",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-09-18T14:06:48.912Z",
+      "events": [
+        {
+          "ts": 1789740408912,
+          "type": "decision",
+          "content": "Split listenOptions into filters vs process-model; supervisor install advertises filters only and rejects the rest at runtime: Split listenOptions into filters vs process-model; supervisor install advertises filters only and rejects the rest at runtime",
+          "raw": {
+            "question": "Split listenOptions into filters vs process-model; supervisor install advertises filters only and rejects the rest at runtime",
+            "chosen": "Split listenOptions into filters vs process-model; supervisor install advertises filters only and rejects the rest at runtime",
+            "alternatives": [],
+            "reasoning": "runListen acts on --background/--daemonized before connecting, so they parse fine but break any unit that embeds them; the surface and the binary both have to say no"
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1789740409348,
+          "type": "decision",
+          "content": "buildGoRunBinary stages to a private sibling and publishes by rename, with a returned-fallback and an age-bounded sweep: buildGoRunBinary stages to a private sibling and publishes by rename, with a returned-fallback and an age-bounded sweep",
+          "raw": {
+            "question": "buildGoRunBinary stages to a private sibling and publishes by rename, with a returned-fallback and an age-bounded sweep",
+            "chosen": "buildGoRunBinary stages to a private sibling and publishes by rename, with a returned-fallback and an age-bounded sweep",
+            "alternatives": [],
+            "reasoning": "Shared path keyed by checkout alone is held open by long-running listen/mount; rename is atomic on POSIX and the fallback covers Windows, where replacing a running exe is impossible"
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "/home/khaliqgant/Projects/AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "690ed387a5f8e374a714c9d8e95a1d5bdfc643ef",
+    "endRef": "690ed387a5f8e374a714c9d8e95a1d5bdfc643ef"
+  }
+}

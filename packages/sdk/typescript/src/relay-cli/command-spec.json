@@ -1311,16 +1311,6 @@
             "flags": "--format <format>",
             "description": "output format when --run is not set: text or json",
             "defaultValue": "text"
-          },
-          {
-            "flags": "--background",
-            "description": "run in background; logs to ~/.relayfile/listen.log",
-            "defaultValue": false
-          },
-          {
-            "flags": "--daemonized",
-            "description": "internal flag used by relayfile listen --background",
-            "defaultValue": false
           }
         ]
       },

@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 )
 
@@ -74,6 +75,14 @@ type cliCommandSpec struct {
 	// command's subcommands. The drift test asserts Subcommands matches that
 	// switch's cases exactly.
 	dispatchSource string
+
+	// withheldFlags names flags that flagSource registers but this command
+	// deliberately does not advertise. The drift test otherwise requires the
+	// declared options to cover the flag set exactly; an entry here is the
+	// explicit, checked exception. The test asserts each name is really
+	// registered by flagSource and really undeclared, so the list cannot rot
+	// into a way of hiding genuine drift.
+	withheldFlags []string
 
 	// internal keeps a command out of the emitted spec. Reserved for
 	// introspection hooks that the host provides itself or that are not part
@@ -630,9 +639,17 @@ func relayfileCommands() []cliCommandSpec {
 					// a flag declared here that runListen does not register
 					// installs a service that exits on every start and, under
 					// Restart=on-failure, restarts forever.
-					flagSource: "runListen",
-					Args:       []cliArgSpec{workspaceArg},
-					Options:    listenOptions(),
+					//
+					// The converse also holds, which is why this takes
+					// listen's filters rather than all of listenOptions():
+					// runListen's process-model flags parse fine but make the
+					// supervised process detach or rotate the unit's own log,
+					// so they are withheld from the surface (and rejected at
+					// runtime by supervisorInstall).
+					flagSource:    "runListen",
+					Args:          []cliArgSpec{workspaceArg},
+					Options:       listenFilterOptions(),
+					withheldFlags: listenProcessModelFlagNames(),
 				},
 				{
 					Name:        "uninstall",
@@ -846,7 +863,12 @@ func writebackMutationOptions() []cliOptionSpec {
 	}
 }
 
-func listenOptions() []cliOptionSpec {
+// listenFilterOptions are the `listen` flags that describe *what* to stream
+// and where to stream it from. runListen turns every one of them into a
+// filter, a credential, or an output format, and none of them changes how the
+// process itself runs — so they are exactly the flags that can be embedded in
+// a launchd/systemd unit's ExecStart.
+func listenFilterOptions() []cliOptionSpec {
 	return []cliOptionSpec{
 		serverFlagOption,
 		tokenFlagOption,
@@ -855,9 +877,47 @@ func listenOptions() []cliOptionSpec {
 		{Flags: "--event <type>", Description: "event type filter: file.created, file.updated, file.deleted"},
 		{Flags: "--run <command>", Description: "shell command per event; supports {{path}}, {{type}}, {{provider}}, {{revision}}, {{event}}"},
 		{Flags: "--format <format>", Description: "output format when --run is not set: text or json", DefaultValue: "text"},
+	}
+}
+
+// listenProcessModelOptions are the `listen` flags that choose how the process
+// runs rather than what it streams, and runListen acts on both before it opens
+// a single connection:
+//
+//   - --background re-execs a detached `listen --daemonized` child and
+//     returns, so the process systemd/launchd is supervising exits
+//     immediately. systemd then tears the orphaned grandchild down with the
+//     unit's cgroup, and launchd's KeepAlive=true relaunches the exiting
+//     parent forever.
+//   - --daemonized is the internal marker that detached child is spawned
+//     with. It also rotates ~/.relayfile/listen.log, which is the same file
+//     the installed unit appends its own stdout and stderr to.
+//
+// Neither may be advertised on `supervisor install`, whose argv goes verbatim
+// into the unit. This is the same class of bug as advertising --interval
+// there: a flag that makes the supervised process wrong on every start.
+func listenProcessModelOptions() []cliOptionSpec {
+	return []cliOptionSpec{
 		{Flags: "--background", Description: "run in background; logs to ~/.relayfile/listen.log", DefaultValue: false},
 		{Flags: "--daemonized", Description: "internal flag used by relayfile listen --background", DefaultValue: false},
 	}
+}
+
+// listenProcessModelFlagNames is listenProcessModelOptions as bare long flag
+// names, for the places that match argv or withhold flags by name.
+func listenProcessModelFlagNames() []string {
+	options := listenProcessModelOptions()
+	names := make([]string, 0, len(options))
+	for _, option := range options {
+		if name := optionLongName(option.Flags); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+func listenOptions() []cliOptionSpec {
+	return append(listenFilterOptions(), listenProcessModelOptions()...)
 }
 
 func mountOptions() []cliOptionSpec {
@@ -976,6 +1036,19 @@ func lookupCommand(name string) (cliCommandSpec, bool) {
 	}
 	return cliCommandSpec{}, false
 }
+
+// optionLongName extracts the long flag name from a commander-style flag
+// string: "--path <glob>" yields "path". It returns "" when the string
+// declares no long flag.
+func optionLongName(flags string) string {
+	match := optionLongNameRe.FindStringSubmatch(flags)
+	if match == nil {
+		return ""
+	}
+	return match[1]
+}
+
+var optionLongNameRe = regexp.MustCompile(`--([A-Za-z0-9][A-Za-z0-9-]*)`)
 
 // publicCommandSpec strips the internal bookkeeping and the commands that are
 // not part of the product surface, leaving exactly what the contract describes.

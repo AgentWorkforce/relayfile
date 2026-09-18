@@ -744,7 +744,7 @@ func printHelpForArgs(args []string, stdout io.Writer) {
 	case "stop", "off":
 		fmt.Fprintln(stdout, "Usage: relayfile stop [WORKSPACE]")
 	case "supervisor":
-		fmt.Fprintln(stdout, "Usage: relayfile supervisor <install|uninstall|status> [WORKSPACE] [--interval 30s]")
+		fmt.Fprintln(stdout, "Usage: relayfile supervisor <install|uninstall|status> [WORKSPACE] [LISTEN_FILTERS...]")
 	case "logs":
 		fmt.Fprintln(stdout, "Usage: relayfile logs [WORKSPACE] [--lines N]")
 	case "observer":
@@ -928,7 +928,7 @@ Usage:
   relayfile stop [WORKSPACE]
   relayfile off [WORKSPACE]                         (alias for stop)
   relayfile restart [WORKSPACE] [--foreground]
-  relayfile supervisor install [WORKSPACE] [--interval 30s]
+  relayfile supervisor install [WORKSPACE] [LISTEN_FILTERS...]
   relayfile supervisor uninstall [WORKSPACE]
   relayfile supervisor status [WORKSPACE]
   relayfile tree [WORKSPACE] [PATH] [--depth N]
@@ -8726,7 +8726,7 @@ func runListen(args []string, stdout io.Writer) error {
 		if runCmd == "" && format == "text" {
 			fmt.Fprintln(stdout, "Tip: pass --run to execute a command per event.")
 			fmt.Fprintln(stdout, "     See 'relayfile help listen' for examples with Linear, Notion, HubSpot, and more.")
-			fmt.Fprintln(stdout, "     Add --background to detach; 'relayfile supervisor install --listen' to survive reboots.")
+			fmt.Fprintln(stdout, "     Add --background to detach; 'relayfile supervisor install' to survive reboots.")
 		}
 		fmt.Fprintln(stdout)
 	}
@@ -9007,7 +9007,7 @@ On Linux  it writes a systemd user unit (~/.config/systemd/user/relayfile-listen
 On macOS  it writes a launchd agent  (~/Library/LaunchAgents/com.relayfile.listen.plist).
 
 Usage:
-  relayfile supervisor install [LISTEN_FLAGS...]   install and start the service
+  relayfile supervisor install [LISTEN_FILTERS...] install and start the service
   relayfile supervisor uninstall                   stop, disable, and remove the service
   relayfile supervisor status                      show service status
 
@@ -9024,8 +9024,11 @@ Examples:
   relayfile supervisor status
   relayfile supervisor uninstall
 
-All flags accepted by 'relayfile listen' are accepted here and are embedded
-verbatim into the unit file. The service restarts automatically on failure.`)
+The filters accepted by 'relayfile listen' — --server, --token, --provider,
+--path, --event, --run, --format — are accepted here and embedded verbatim
+into the unit file. Its process-model flags (--background, --daemonized) are
+not: the service is what keeps the listener running, so a unit that detached
+would exit on every start. The service restarts automatically on failure.`)
 }
 
 const (
@@ -9069,7 +9072,39 @@ func runSupervisor(args []string, stdout io.Writer) error {
 	}
 }
 
+// rejectSupervisorProcessModelFlags refuses the `listen` flags that choose a
+// process model. supervisorInstall copies its argv verbatim into the unit's
+// ExecStart, and the supervisor is already the thing that keeps the listener
+// running: a unit that detaches exits on every start (see
+// listenProcessModelOptions). The command table no longer advertises these, so
+// a host parser built from the emitted spec rejects them first; this catches
+// the same argv arriving straight at the binary.
+func rejectSupervisorProcessModelFlags(listenArgs []string) error {
+	for _, arg := range listenArgs {
+		for _, name := range listenProcessModelFlagNames() {
+			if !argNamesFlag(arg, name) {
+				continue
+			}
+			return fmt.Errorf(
+				"supervisor install cannot embed --%s: it controls how `relayfile listen` runs, and the service already keeps the listener running; install the filters only and use 'relayfile supervisor status' to check on it",
+				name,
+			)
+		}
+	}
+	return nil
+}
+
+// argNamesFlag reports whether a single argv entry sets the named flag, in any
+// of the spellings Go's flag package accepts.
+func argNamesFlag(arg, name string) bool {
+	return arg == "--"+name || arg == "-"+name ||
+		strings.HasPrefix(arg, "--"+name+"=") || strings.HasPrefix(arg, "-"+name+"=")
+}
+
 func supervisorInstall(listenArgs []string, stdout io.Writer) error {
+	if err := rejectSupervisorProcessModelFlags(listenArgs); err != nil {
+		return err
+	}
 	executable, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("locate relayfile binary: %w", err)

@@ -70,7 +70,7 @@ func TestCommandSpecNamesAndFlagsSatisfyContract(t *testing.T) {
 			if !flagStringRe.MatchString(option.Flags) {
 				t.Errorf("command %q: flags %q is not a commander flag string", label, option.Flags)
 			}
-			long := longFlagName(option.Flags)
+			long := optionLongName(option.Flags)
 			if long == "" {
 				continue
 			}
@@ -192,6 +192,12 @@ func TestSubcommandsMatchSourceSwitches(t *testing.T) {
 // registers. Flags whose names are not kebab-case cannot be expressed by the
 // contract, so they are allowed to exist undeclared as long as a kebab-case
 // alias for them is declared (see --opId / --op-id).
+//
+// A command may also withhold a registered flag on purpose — `supervisor
+// install` shares runListen's flag set but must not advertise the flags that
+// detach the process it installs. Those are listed in withheldFlags and
+// checked from both sides below, so the exception cannot become a hiding
+// place for real drift.
 func TestOptionsMatchSourceFlagSets(t *testing.T) {
 	sources := parseCommandSources(t)
 
@@ -211,13 +217,24 @@ func TestOptionsMatchSourceFlagSets(t *testing.T) {
 
 		declared := map[string]bool{}
 		for _, option := range command.Options {
-			if long := longFlagName(option.Flags); long != "" {
+			if long := optionLongName(option.Flags); long != "" {
 				declared[long] = true
 			}
 		}
 
-		for _, name := range registered {
+		withheld := map[string]bool{}
+		for _, name := range command.withheldFlags {
+			withheld[name] = true
+			if !contains(registered, name) {
+				t.Errorf("command %q withholds --%s but %s does not register it", label, name, command.flagSource)
+			}
 			if declared[name] {
+				t.Errorf("command %q withholds --%s and declares it too", label, name)
+			}
+		}
+
+		for _, name := range registered {
+			if declared[name] || withheld[name] {
 				continue
 			}
 			if !commandNameRe.MatchString(name) {
@@ -271,14 +288,6 @@ func TestDeclaredArgsCoverSourcePositionals(t *testing.T) {
 
 func isMountCommand(path []string) bool {
 	return len(path) == 1 && path[0] == "mount"
-}
-
-func longFlagName(flags string) string {
-	match := regexp.MustCompile(`--([A-Za-z0-9][A-Za-z0-9-]*)`).FindStringSubmatch(flags)
-	if match == nil {
-		return ""
-	}
-	return match[1]
 }
 
 func contains(values []string, want string) bool {

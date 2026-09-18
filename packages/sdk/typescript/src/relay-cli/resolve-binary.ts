@@ -22,8 +22,15 @@
  */
 
 import { spawnSync } from "node:child_process"
-import { createHash } from "node:crypto"
-import { existsSync, mkdirSync } from "node:fs"
+import { createHash, randomBytes } from "node:crypto"
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync
+} from "node:fs"
 import { createRequire } from "node:module"
 import os from "node:os"
 import path from "node:path"
@@ -599,6 +606,17 @@ export function goRunBinaryPath(
  * the checkout, where the module is, and the binary runs wherever the caller
  * asked for. Go's build cache makes the repeat cost a relink.
  *
+ * The build never writes the shared path directly. That path is keyed by the
+ * checkout alone, so every process that falls back to source aims at the same
+ * file — and a `listen` or `mount` launched from it keeps running for hours.
+ * Writing it in place would mean overwriting a binary that is executing
+ * (impossible on Windows, and on Unix a window in which a concurrent build has
+ * replaced it with a partial file). So `go build` writes a private sibling and
+ * the result is published with one rename: atomic on POSIX, and an already
+ * running process keeps the inode it started from. If the rename cannot
+ * happen — Windows refuses to replace a running `.exe` — the caller gets the
+ * private path instead, which is just as runnable.
+ *
  * @param resolution - The `go-run` resolution to materialize.
  * @param options - Environment and output overrides.
  * @returns The absolute path of the built binary.
@@ -611,21 +629,121 @@ export function buildGoRunBinary(
 ): string {
   const output = options.outputPath ?? goRunBinaryPath(resolution.cwd)
   mkdirSync(path.dirname(output), { recursive: true })
+  sweepStaleBuildArtifacts(output)
 
-  const result = spawnSync("go", ["build", "-o", output, "./cmd/relayfile-cli"], {
+  // Same directory as the destination, so the publish below is a rename
+  // within one filesystem rather than a copy. pid plus random bytes: two
+  // builds in one process must not share it either. The destination's
+  // extension is kept last, because on Windows the fallback below hands this
+  // very path to the host to execute and that has to stay an `.exe`.
+  const staged =
+    `${buildArtifactPrefix(output)}${process.pid}-${randomBytes(6).toString("hex")}` +
+    path.extname(output)
+
+  const result = spawnSync("go", ["build", "-o", staged, "./cmd/relayfile-cli"], {
     cwd: resolution.cwd,
     env: options.env ?? process.env,
     encoding: "utf8"
   })
 
   if (result.error) {
+    discardBuildArtifact(staged)
     if ((result.error as NodeJS.ErrnoException).code === "ENOENT") {
       throw new GoToolchainMissingError()
     }
     throw result.error
   }
   if (result.status !== 0) {
+    discardBuildArtifact(staged)
     throw new GoBuildFailedError(result.status, result.stderr ?? "")
   }
+
+  try {
+    renameSync(staged, output)
+  } catch {
+    // The shared name is held by something that cannot be replaced — a
+    // running binary on Windows. The staged build is a complete binary, so
+    // run that instead of failing the command. sweepStaleBuildArtifacts
+    // collects it later.
+    return staged
+  }
   return output
+}
+
+/**
+ * Prefix that marks a file in the build directory as a staged build.
+ *
+ * Inserted before the destination's extension rather than after it, so a
+ * staged `relayfile-cli.exe` is still named `...exe`.
+ *
+ * @param output - The shared build path.
+ * @returns The absolute path prefix every staged build starts with.
+ */
+function buildArtifactPrefix(output: string): string {
+  const extension = path.extname(output)
+  return path.join(
+    path.dirname(output),
+    `${path.basename(output, extension)}.build-`
+  )
+}
+
+/** How long an unpublished staged build is left alone before it is swept. */
+const STALE_BUILD_ARTIFACT_MS = 24 * 60 * 60 * 1000
+
+/**
+ * Drop a staged build that was never published.
+ *
+ * Best effort throughout: a leftover artifact is wasted disk, never an error
+ * worth failing a command over.
+ *
+ * @param staged - The staged build path.
+ */
+function discardBuildArtifact(staged: string): void {
+  try {
+    rmSync(staged, { force: true })
+  } catch {
+    // Ignore.
+  }
+}
+
+/**
+ * Collect staged builds that were left behind.
+ *
+ * A staged build normally disappears into the rename that publishes it, and a
+ * failed build is removed on the spot. What is left is the case the rename
+ * could not happen (Windows, shared name in use) and the case a process died
+ * mid-build — neither of which cleans up after itself, and both of which
+ * would otherwise grow a binary-sized file per invocation forever.
+ *
+ * The age cutoff is what keeps this safe: a returned fallback binary may be
+ * executing right now, and only artifacts far older than any plausible build
+ * are removed. On Unix unlinking a running binary is harmless anyway; on
+ * Windows the delete simply fails and is ignored.
+ *
+ * @param output - The shared build path whose directory is swept.
+ */
+function sweepStaleBuildArtifacts(output: string): void {
+  const prefix = path.basename(buildArtifactPrefix(output))
+  const directory = path.dirname(output)
+  let entries: string[]
+  try {
+    entries = readdirSync(directory)
+  } catch {
+    return
+  }
+  const cutoff = Date.now() - STALE_BUILD_ARTIFACT_MS
+  for (const entry of entries) {
+    if (!entry.startsWith(prefix)) {
+      continue
+    }
+    const candidate = path.join(directory, entry)
+    try {
+      if (statSync(candidate).mtimeMs > cutoff) {
+        continue
+      }
+      rmSync(candidate, { force: true })
+    } catch {
+      // Ignore.
+    }
+  }
 }
