@@ -1,0 +1,251 @@
+{
+  "version": "1.0.0",
+  "id": "6819828e-17cf-4fd9-9bc6-46a72df12d40",
+  "timestamp": "2026-09-18T14:07:19.370Z",
+  "trajectory": "traj_p2o6b2q8epj1",
+  "files": [
+    {
+      "path": ".trajectories/active/traj_p2o6b2q8epj1.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 62,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": ".trajectories/index.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 6,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            },
+            {
+              "start_line": 400,
+              "end_line": 411,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "cmd/relayfile-cli/commandspec.go",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 6,
+              "end_line": 12,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            },
+            {
+              "start_line": 76,
+              "end_line": 89,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            },
+            {
+              "start_line": 639,
+              "end_line": 655,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            },
+            {
+              "start_line": 863,
+              "end_line": 874,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            },
+            {
+              "start_line": 877,
+              "end_line": 925,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            },
+            {
+              "start_line": 1037,
+              "end_line": 1055,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "cmd/relayfile-cli/commandspec_test.go",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 70,
+              "end_line": 76,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            },
+            {
+              "start_line": 192,
+              "end_line": 203,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            },
+            {
+              "start_line": 217,
+              "end_line": 240,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            },
+            {
+              "start_line": 290,
+              "end_line": 295,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "cmd/relayfile-cli/listen_test.go",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 3,
+              "end_line": 9,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            },
+            {
+              "start_line": 291,
+              "end_line": 297,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            },
+            {
+              "start_line": 302,
+              "end_line": 433,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "cmd/relayfile-cli/main.go",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 744,
+              "end_line": 750,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            },
+            {
+              "start_line": 928,
+              "end_line": 934,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            },
+            {
+              "start_line": 8726,
+              "end_line": 8732,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            },
+            {
+              "start_line": 9007,
+              "end_line": 9013,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            },
+            {
+              "start_line": 9024,
+              "end_line": 9034,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            },
+            {
+              "start_line": 9072,
+              "end_line": 9110,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/typescript/src/relay-cli/command-spec.json",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1311,
+              "end_line": 1316,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/typescript/src/relay-cli/go-run-build-path.test.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 1,
+              "end_line": 202,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "packages/sdk/typescript/src/relay-cli/resolve-binary.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 22,
+              "end_line": 36,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            },
+            {
+              "start_line": 606,
+              "end_line": 622,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            },
+            {
+              "start_line": 629,
+              "end_line": 749,
+              "revision": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

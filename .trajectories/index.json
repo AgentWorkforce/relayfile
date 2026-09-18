@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "lastUpdated": "2026-09-18T14:06:49.350Z",
+  "lastUpdated": "2026-09-18T14:07:19.400Z",
   "trajectories": {
     "traj_4pvrlmqfnzng": {
       "title": "Review PR #278 in AgentWorkforce/relayfile",
@@ -403,9 +403,10 @@
     },
     "traj_p2o6b2q8epj1": {
       "title": "PR #507 round-3 bugbot: supervisor install detach flags + go-run build path races",
-      "status": "active",
+      "status": "completed",
       "startedAt": "2026-09-18T13:58:18.225Z",
-      "path": "/home/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/active/traj_p2o6b2q8epj1.json"
+      "completedAt": "2026-09-18T14:07:19.346Z",
+      "path": "/home/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-09/traj_p2o6b2q8epj1.json"
     }
   }
 }

@@ -8,8 +8,9 @@
       "id": "PR-507"
     }
   },
-  "status": "active",
+  "status": "completed",
   "startedAt": "2026-09-18T13:58:18.225Z",
+  "completedAt": "2026-09-18T14:07:19.346Z",
   "agents": [
     {
       "name": "default",
@@ -23,6 +24,7 @@
       "title": "Work",
       "agentName": "default",
       "startedAt": "2026-09-18T14:06:48.912Z",
+      "endedAt": "2026-09-18T14:07:19.346Z",
       "events": [
         {
           "ts": 1789740408912,
@@ -51,12 +53,30 @@
       ]
     }
   ],
-  "commits": [],
-  "filesChanged": [],
+  "retrospective": {
+    "summary": "Split relayfile listen's spec into filters vs process-model flags so supervisor install cannot embed --background/--daemonized in a unit (plus a runtime refusal), and made the go-run source fallback build to a private sibling published by atomic rename, with a Windows fallback and an age-bounded sweep.",
+    "approach": "Standard approach",
+    "confidence": 0.85
+  },
+  "commits": [
+    "95bbfc3f"
+  ],
+  "filesChanged": [
+    ".trajectories/active/traj_p2o6b2q8epj1.json",
+    ".trajectories/index.json",
+    "cmd/relayfile-cli/commandspec.go",
+    "cmd/relayfile-cli/commandspec_test.go",
+    "cmd/relayfile-cli/listen_test.go",
+    "cmd/relayfile-cli/main.go",
+    "packages/sdk/typescript/src/relay-cli/command-spec.json",
+    "packages/sdk/typescript/src/relay-cli/go-run-build-path.test.ts",
+    "packages/sdk/typescript/src/relay-cli/resolve-binary.ts"
+  ],
   "projectId": "/home/khaliqgant/Projects/AgentWorkforce/relayfile",
   "tags": [],
   "_trace": {
     "startRef": "690ed387a5f8e374a714c9d8e95a1d5bdfc643ef",
-    "endRef": "690ed387a5f8e374a714c9d8e95a1d5bdfc643ef"
+    "endRef": "95bbfc3f3c7c07a263bdbaa4005ca8e05428f757",
+    "traceId": "6819828e-17cf-4fd9-9bc6-46a72df12d40"
   }
 }
