@@ -709,7 +709,7 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 			// (50 of 62 over three days). The retry budget is already there;
 			// the cycle just has to let the ticker use it.
 			if isBackpressureError(err) {
-				lastCycleErr = &cycleOutcomeError{cause: err, yielded: true}
+				lastCycleErr = &cycleOutcomeError{cause: err, yielded: true, backpressure: true}
 				log.Printf("mount sync cycle yielded to server backpressure (will retry): %v", err)
 				return nil
 			}
@@ -1059,6 +1059,23 @@ func finishInitialBootstrap(rootCtx context.Context, cfg mountConfig, run func(r
 				if rootErr := rootCtx.Err(); rootErr != nil {
 					return newResumableInitialBootstrapIncompleteError(state, "context cancelled after yielded initial cycle", rootErr)
 				}
+				// A deadline yield reaching here means the bootstrap finished
+				// (that branch only yields once a checkpoint exists), so the
+				// fall-through to success below is right for it. A 429 is NOT
+				// that: it can arrive before the first saveState, leaving
+				// nothing on disk and nothing synced. Falling through would
+				// exit 0 and tell Cloud an EMPTY mirror was bootstrapped —
+				// strictly worse than the hard failure this change set out to
+				// fix, because it fails silently. Report it as resumable
+				// instead, which exits initialBootstrapIncompleteExitCode and
+				// asks the caller to run us again.
+				if cycleBackpressure(err) {
+					return newResumableInitialBootstrapIncompleteError(
+						state,
+						"initial cycle yielded to server backpressure before any bootstrap progress",
+						err,
+					)
+				}
 			} else {
 				return newInitialBootstrapIncompleteError(state, "initial cycle failed", err)
 			}
@@ -1154,6 +1171,14 @@ type bootstrapResumeState struct {
 type cycleOutcomeError struct {
 	cause   error
 	yielded bool
+	// backpressure marks a yield caused by the SERVER asking us to slow down
+	// (HTTP 429) rather than by this process running out of per-cycle time.
+	// The two need different completion handling: a deadline yield only ever
+	// fires once a bootstrap checkpoint exists, so "not in progress" genuinely
+	// means finished, whereas a 429 can arrive before anything at all has been
+	// persisted — and reporting THAT as a completed bootstrap hands Cloud an
+	// empty mirror it believes is fully synced.
+	backpressure bool
 }
 
 func (e *cycleOutcomeError) Error() string {
@@ -1204,6 +1229,13 @@ func newInitialBootstrapIncompleteErrorWithResumable(state bootstrapResumeState,
 func isBackpressureError(err error) bool {
 	var httpErr *mountsync.HTTPError
 	return errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusTooManyRequests
+}
+
+// cycleBackpressure reports a yield that came from a server 429 rather than a
+// per-cycle deadline. See the field comment on cycleOutcomeError.
+func cycleBackpressure(err error) bool {
+	var outcome *cycleOutcomeError
+	return errors.As(err, &outcome) && outcome.backpressure
 }
 
 func cycleYielded(err error) bool {
