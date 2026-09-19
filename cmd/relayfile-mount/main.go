@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -697,6 +698,21 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 					return nil
 				}
 			}
+			// Server-advertised backpressure is a YIELD, not a cycle
+			// failure. The workspace Durable Object is single-threaded, so a
+			// busy workspace answers 429 workspace_busy with a Retry-After and
+			// means "come back shortly" — the mirror is fine, the server is
+			// saturated. Treating it as terminal made the FIRST cycle of an
+			// initial bootstrap fatal: the run died ~35s into a 210s budget
+			// having synced 0 files, surfacing to Cloud as BootstrapFailedError.
+			// That was 81% of proactive mount-bootstrap failures in production
+			// (50 of 62 over three days). The retry budget is already there;
+			// the cycle just has to let the ticker use it.
+			if isBackpressureError(err) {
+				lastCycleErr = &cycleOutcomeError{cause: err, yielded: true}
+				log.Printf("mount sync cycle yielded to server backpressure (will retry): %v", err)
+				return nil
+			}
 			lastCycleErr = &cycleOutcomeError{cause: err}
 			log.Printf("mount sync cycle failed: %v", err)
 			return nil
@@ -1179,6 +1195,15 @@ func newInitialBootstrapIncompleteErrorWithResumable(state bootstrapResumeState,
 		cause:     cause,
 		resumable: resumable,
 	}
+}
+
+// isBackpressureError reports a server telling us to slow down rather than a
+// sync that went wrong. Deliberately narrow: only HTTP 429. A 5xx is the server
+// being broken, not busy, and must stay a real cycle failure so a genuinely
+// unhealthy backend is not mistaken for a queue.
+func isBackpressureError(err error) bool {
+	var httpErr *mountsync.HTTPError
+	return errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusTooManyRequests
 }
 
 func cycleYielded(err error) bool {
