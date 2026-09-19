@@ -3023,6 +3023,103 @@ func TestGithubWorkingTreeSnapshotRejectsUnsupportedCompleteEntry(t *testing.T) 
 	}
 }
 
+type repeatedGithubTreeCursorClient struct {
+	*fakeClient
+	requestedCursors []string
+}
+
+func (c *repeatedGithubTreeCursorClient) ListTree(_ context.Context, _, _ string, _ int, cursor string) (TreeResponse, error) {
+	c.requestedCursors = append(c.requestedCursors, cursor)
+	next := "page-2"
+	return TreeResponse{NextCursor: &next}, nil
+}
+
+func TestGithubWorkingTreeSnapshotRejectsRepeatedCursor(t *testing.T) {
+	localDir := t.TempDir()
+	client := &repeatedGithubTreeCursorClient{fakeClient: &fakeClient{}}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_repeated_github_cursor", RemoteRoot: "/github/repos/o/r/contents",
+		LocalRoot: localDir, StateFile: filepath.Join(localDir, ".state.json"), WebSocket: boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+
+	_, _, err = syncer.githubWorkingTreeSnapshot(context.Background(), bootstrapProgress{}, true)
+	var paginationErr *MalformedPaginationError
+	if !errors.As(err, &paginationErr) {
+		t.Fatalf("error = %v, want MalformedPaginationError", err)
+	}
+	if !errors.Is(err, ErrMalformedPagination) {
+		t.Fatalf("error = %v, want ErrMalformedPagination", err)
+	}
+	if paginationErr.Feed != "github working-tree" || paginationErr.Cursor != "page-2" || paginationErr.NextCursor != "page-2" {
+		t.Fatalf("unexpected pagination error: %#v", paginationErr)
+	}
+	if got, want := client.requestedCursors, []string{"", "page-2"}; !slices.Equal(got, want) {
+		t.Fatalf("ListTree cursors = %#v, want %#v", got, want)
+	}
+}
+
+type repeatedGithubSnapshotCursorClient struct {
+	*fakeExportClient
+	snapshotCursors []string
+}
+
+func (c *repeatedGithubSnapshotCursorClient) ListTree(ctx context.Context, workspaceID, path string, depth int, cursor string) (TreeResponse, error) {
+	if depth == 200 {
+		c.snapshotCursors = append(c.snapshotCursors, cursor)
+		next := "page-2"
+		return TreeResponse{Path: path, NextCursor: &next}, nil
+	}
+	return c.fakeClient.ListTree(ctx, workspaceID, path, depth, cursor)
+}
+
+func TestReconcileFallsBackToBoundedTreeWhenGithubSnapshotCursorRepeats(t *testing.T) {
+	localDir := t.TempDir()
+	contentsRoot := "/github/repos/AgentWorkforce/cloud/contents"
+	headSHA := "head123"
+	readme := []byte("# Cloud\n")
+	readmeRemote := contentsRoot + "/README.md@" + headSHA + ".json"
+	sentinelPath := "/github/repos/AgentWorkforce/cloud/.relayfile/clone.json"
+	base := &fakeExportClient{fakeClient: &fakeClient{files: map[string]RemoteFile{
+		sentinelPath: {
+			Path: sentinelPath, Revision: "rev_1", ContentType: "application/json",
+			Content: `{"headSha":"` + headSHA + `","defaultBranch":"main","sourceProfile":"complete-v1","filesExpected":1,"eventsCursor":"evt_1"}`,
+		},
+		readmeRemote: {
+			Path: readmeRemote, Revision: "rev_2", ContentType: "application/json",
+			Content: string(readme), ContentHash: hashBytes(readme),
+		},
+	}}}
+	client := &repeatedGithubSnapshotCursorClient{fakeExportClient: base}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_repeated_github_cursor_fallback", RemoteRoot: contentsRoot,
+		LocalRoot: localDir, StateFile: filepath.Join(localDir, ".state.json"),
+		WebSocket: boolPtr(false), FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile should fall back to bounded tree traversal: %v", err)
+	}
+	if got, want := client.snapshotCursors, []string{"", "page-2"}; !slices.Equal(got, want) {
+		t.Fatalf("snapshot ListTree cursors = %#v, want %#v", got, want)
+	}
+	if client.tarCalls != 0 {
+		t.Fatalf("tar export must not run after its verification snapshot fails, got %d calls", client.tarCalls)
+	}
+	if base.listTreeCalls == 0 {
+		t.Fatal("bounded tree fallback did not run")
+	}
+	if !syncer.state.BootstrapComplete {
+		t.Fatal("bounded tree fallback did not complete bootstrap")
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "README.md"), string(readme))
+}
+
 func TestValidateSymlinkTargetAcceptsInRootSymlinkChain(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation requires developer mode or elevated privileges on Windows")
