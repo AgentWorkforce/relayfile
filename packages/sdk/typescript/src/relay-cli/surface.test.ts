@@ -183,7 +183,9 @@ describe("run", () => {
     // rather than trip the unknown-command guard.
     const result = await invoke(["--help"])
     expect(result.code).toBe(0)
-    expect(result.stdout).toContain("relayfile is the RelayFile CLI")
+    // Mounted, the binary names the host rather than itself (relayfile#509),
+    // so this also proves the program name reached the child.
+    expect(result.stdout).toContain("agent-relay file is the RelayFile CLI")
   })
 
   it("writes only through the injected io", async () => {

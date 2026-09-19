@@ -186,6 +186,12 @@ function exitCodeForSignal(signal: NodeJS.Signals): number {
  * @param options - Optional overrides for binary lookup, env, and cwd.
  * @returns A surface satisfying `@agent-relay/cli-surface`'s `RelayCliSurface`.
  */
+/**
+ * How users reach this binary when it is mounted, for messages that instruct
+ * them to run something. Matches the group name the host registers.
+ */
+const MOUNTED_PROGRAM_NAME = "agent-relay file"
+
 export function createRelayCliSurface(
   options: CreateRelayCliSurfaceOptions = {}
 ): RelayCliSurface {
@@ -268,7 +274,12 @@ export function createRelayCliSurface(
         // signal handlers are installed: the host owns them.
         const child = spawn(command, childArgs, {
           cwd,
-          env,
+          // The binary writes messages that tell users to run something. It
+          // has no way to know it was reached through a host, so left alone it
+          // says "run relayfile login", naming a binary someone who installed
+          // `agent-relay` does not have. Telling it how it was invoked keeps
+          // that advice followable; unset, direct users still see `relayfile`.
+          env: { ...env, RELAYFILE_PROGRAM_NAME: MOUNTED_PROGRAM_NAME },
           stdio: ["inherit", "pipe", "pipe"]
         })
 

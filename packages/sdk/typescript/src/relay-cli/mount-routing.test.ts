@@ -43,8 +43,22 @@ interface Capture {
   stderr: string
 }
 
+/**
+ * Env for a direct binary spawn used as the comparison baseline.
+ *
+ * RELAYFILE_PROGRAM_NAME matches what the surface sets, because these tests
+ * assert that argv *routes* identically — not that the binary names itself
+ * identically. Mounted, it deliberately says `agent-relay file` so its advice
+ * points at a binary the user actually has (relayfile#509). Without this the
+ * comparison fails on the one difference the mount is supposed to make.
+ */
 function childEnv(): NodeJS.ProcessEnv {
-  return { ...process.env, HOME: home, USERPROFILE: home }
+  return {
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    RELAYFILE_PROGRAM_NAME: "agent-relay file"
+  }
 }
 
 async function throughSurface(argv: readonly string[]): Promise<Capture> {
