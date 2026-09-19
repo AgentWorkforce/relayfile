@@ -62,7 +62,7 @@ var sensitiveLogQueryValue = regexp.MustCompile(`(?i)([?&](?:token|access_token|
 // version instead of treating the failure as a fatal sync error.
 var ErrSchemaValidation = errors.New("schema validation failed")
 
-// ErrMalformedPagination is returned when an events feed reports a non-empty
+// ErrMalformedPagination is returned when a paginated feed reports a non-empty
 // cursor that does not advance pagination. The mount fails closed instead of
 // retrying the same page until its reconcile context expires.
 var ErrMalformedPagination = errors.New("malformed pagination")
@@ -335,8 +335,8 @@ func (e *HTTPError) Error() string {
 	return fmt.Sprintf("http %d: %s", e.StatusCode, e.Message)
 }
 
-// MalformedPaginationError reports a server response that cannot make an
-// events pagination walk advance. Cursor values are included so operators can
+// MalformedPaginationError reports a server response that cannot make a
+// pagination walk advance. Cursor values are included so operators can
 // identify the broken response and repair the server or upgrade the backend.
 type MalformedPaginationError struct {
 	Feed       string
@@ -6954,8 +6954,10 @@ type githubTreeFile struct {
 func (s *Syncer) githubWorkingTreeSnapshot(ctx context.Context, prog bootstrapProgress, strictComplete bool) (map[string]githubTreeFile, string, error) {
 	files := map[string]githubTreeFile{}
 	cursor := ""
+	seenCursors := make(map[string]struct{})
 	maxObservedRevision := ""
 	for {
+		pageStartCursor := cursor
 		page, err := s.client.ListTree(ctx, s.workspace, s.githubWorkingTree.ContentsRoot, 200, cursor)
 		if err != nil {
 			return nil, "", err
@@ -6994,10 +6996,27 @@ func (s *Syncer) githubWorkingTreeSnapshot(ctx context.Context, prog bootstrapPr
 				Mode:        entry.Mode,
 			}
 		}
-		if page.NextCursor == nil || strings.TrimSpace(*page.NextCursor) == "" {
+		nextCursor := ""
+		if page.NextCursor != nil {
+			nextCursor = strings.TrimSpace(*page.NextCursor)
+		}
+		if nextCursor == "" {
 			break
 		}
-		cursor = strings.TrimSpace(*page.NextCursor)
+		reason := "next cursor did not advance"
+		if nextCursor != pageStartCursor {
+			reason = "next cursor repeated a previous page"
+		}
+		if _, seen := seenCursors[nextCursor]; seen || nextCursor == pageStartCursor {
+			return nil, "", &MalformedPaginationError{
+				Feed:       "github working-tree",
+				Cursor:     pageStartCursor,
+				NextCursor: nextCursor,
+				Reason:     reason,
+			}
+		}
+		seenCursors[nextCursor] = struct{}{}
+		cursor = nextCursor
 	}
 	return files, maxObservedRevision, nil
 }
