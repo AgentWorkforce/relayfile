@@ -7584,6 +7584,11 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 				}
 				continue
 			}
+			if strictCompleteGithubSource &&
+				(page.Entries[i].Type == remoteTypeFile || page.Entries[i].Type == remoteTypeSymlink) &&
+				s.githubWorkingTreeRemotePathHasStaleHead(page.Entries[i].Path) {
+				continue
+			}
 			if remainingFileBudget >= 0 && fileEntriesThisChunk >= remainingFileBudget {
 				entryEnd = i
 				break
@@ -7616,6 +7621,11 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 				s.markBootstrapTotalUnavailable(runtimeRoot)
 			}
 			if !isUnderRemoteRoot(s.remoteRoot, remotePath) {
+				continue
+			}
+			if strictCompleteGithubSource &&
+				(entry.Type == remoteTypeFile || entry.Type == remoteTypeSymlink) &&
+				s.githubWorkingTreeRemotePathHasStaleHead(remotePath) {
 				continue
 			}
 			if strictCompleteGithubSource && (entry.Type == remoteTypeFile || entry.Type == remoteTypeSymlink) && runtimeRoot == "" {
@@ -12119,6 +12129,24 @@ func (s *Syncer) githubWorkingTreeRemotePathMatchesHead(remotePath string) bool 
 		return false
 	}
 	return strings.HasSuffix(normalizeRemotePath(remotePath), "@"+headSHA+".json")
+}
+
+func (s *Syncer) githubWorkingTreeRemotePathHasStaleHead(remotePath string) bool {
+	if s.githubWorkingTree == nil {
+		return false
+	}
+	headSHA := strings.TrimSpace(s.githubWorkingTree.HeadSHA)
+	if headSHA == "" {
+		return false
+	}
+	normalized := normalizeRemotePath(remotePath)
+	if strings.HasSuffix(normalized, "@"+headSHA+".json") {
+		return false
+	}
+	if _, ok := s.githubWorkingTree.remotePathToWorkingTreeRel(normalized); !ok {
+		return false
+	}
+	return true
 }
 
 func safeLocalPath(localRoot, rel string) (string, error) {
