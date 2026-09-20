@@ -6565,9 +6565,14 @@ func (s *Syncer) pullRemoteFull(ctx context.Context, conflicted map[string]struc
 	if client, ok := s.client.(githubWorkingTreeTarClient); ok {
 		used, err := s.pullRemoteFullGithubTarSeed(ctx, client, conflicted, prog)
 		if used {
-			return err
+			if err == nil {
+				return nil
+			}
+			s.logf("github tar seed failed; falling back to resumable tree pull: %v", err)
+			seedErr = err
+		} else {
+			seedErr = err
 		}
-		seedErr = err
 	}
 	if !s.state.BootstrapComplete {
 		s.logf("skipping atomic export for initial bootstrap; using bounded resumable tree pull")

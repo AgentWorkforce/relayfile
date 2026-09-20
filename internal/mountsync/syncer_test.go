@@ -3001,6 +3001,81 @@ func TestPullRemoteFullGithubWorkingTreeTarSeedsAndStoresCursor(t *testing.T) {
 	}
 }
 
+func TestPullRemoteFullGithubWorkingTreeTarSeedFallsBackToTree(t *testing.T) {
+	localDir := t.TempDir()
+	contentsRoot := "/github/repos/AgentWorkforce/cloud/contents"
+	headSHA := "head123"
+	readme := []byte("# Cloud\n")
+	app := []byte("export const ok = true;\n")
+	readmeRemote := contentsRoot + "/README.md@" + headSHA + ".json"
+	appRemote := contentsRoot + "/src/app.ts@" + headSHA + ".json"
+	sentinelPath := "/github/repos/AgentWorkforce/cloud/.relayfile/clone.json"
+	client := &fakeExportClient{
+		fakeClient: &fakeClient{
+			files: map[string]RemoteFile{
+				sentinelPath: {
+					Path:        sentinelPath,
+					Revision:    "rev_1",
+					ContentType: "application/json",
+					Content:     `{"headSha":"` + headSHA + `","defaultBranch":"main","sourceProfile":"complete-v1","filesExpected":2}`,
+				},
+				readmeRemote: {
+					Path:        readmeRemote,
+					Revision:    "rev_2",
+					ContentType: "application/json",
+					Content:     string(readme),
+					ContentHash: hashBytes(readme),
+				},
+				appRemote: {
+					Path:        appRemote,
+					Revision:    "rev_3",
+					ContentType: "application/json",
+					Content:     string(app),
+					ContentHash: hashBytes(app),
+				},
+			},
+			events: []FilesystemEvent{
+				{EventID: "evt_1", Type: "file.created", Path: readmeRemote, Revision: "rev_2", ContentHash: hashBytes(readme)},
+				{EventID: "evt_2", Type: "file.updated", Path: sentinelPath, Revision: "rev_1"},
+			},
+		},
+		tarErr: errors.New("transient github tar seed export failure"),
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:   "ws_tar_seed_fallback",
+		RemoteRoot:    contentsRoot,
+		LocalRoot:     localDir,
+		StateFile:     filepath.Join(localDir, ".relayfile-mount-state.json"),
+		WebSocket:     boolPtr(false),
+		FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile should fall back to tree after tar seed failure: %v", err)
+	}
+	if client.tarCalls != 1 {
+		t.Fatalf("expected github tar export to be attempted once, got %d", client.tarCalls)
+	}
+	if client.listTreeCalls == 0 {
+		t.Fatal("expected fallback tree traversal after tar seed failure")
+	}
+	gotReadme, err := os.ReadFile(filepath.Join(localDir, "README.md"))
+	if err != nil {
+		t.Fatalf("read README from tree fallback: %v", err)
+	}
+	if !bytes.Equal(gotReadme, readme) {
+		t.Fatalf("unexpected README content from tree fallback: %q", string(gotReadme))
+	}
+	if got := syncer.state.EventsCursor; got != "evt_2" {
+		t.Fatalf("expected events cursor to advance after tree fallback, got %q", got)
+	}
+	if tracked := syncer.state.Files[appRemote]; tracked.Hash != hashBytes(app) || tracked.Revision != "rev_3" {
+		t.Fatalf("unexpected tracked app state after tree fallback: %+v", tracked)
+	}
+}
+
 type unsupportedGithubTreeClient struct{ *fakeClient }
 
 func (c *unsupportedGithubTreeClient) ListTree(context.Context, string, string, int, string) (TreeResponse, error) {
