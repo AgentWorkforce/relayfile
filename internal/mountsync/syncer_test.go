@@ -3398,6 +3398,73 @@ func TestGithubWorkingTreeLocalMappingPrefersCurrentHeadSHA(t *testing.T) {
 	}
 }
 
+func TestCompleteGithubTreeStrictTraversalIgnoresStaleHeadRecords(t *testing.T) {
+	localDir := t.TempDir()
+	contentsRoot := "/github/repos/AgentWorkforce/cloud/contents"
+	headSHA := "head123"
+	readme := []byte("# Cloud\n")
+	currentApp := []byte("export const ok = true;\n")
+	staleApp := []byte("export const ok = false;\n")
+	readmeRemote := contentsRoot + "/README.md@" + headSHA + ".json"
+	currentAppRemote := contentsRoot + "/src/app.ts@" + headSHA + ".json"
+	staleAppRemote := contentsRoot + "/src/app.ts@oldsha.json"
+	client := &fakeClient{files: map[string]RemoteFile{
+		readmeRemote: {
+			Path:        readmeRemote,
+			Revision:    "rev_1",
+			Content:     string(readme),
+			ContentHash: hashBytes(readme),
+		},
+		currentAppRemote: {
+			Path:        currentAppRemote,
+			Revision:    "rev_2",
+			Content:     string(currentApp),
+			ContentHash: hashBytes(currentApp),
+		},
+		staleAppRemote: {
+			Path:        staleAppRemote,
+			Revision:    "rev_999",
+			Content:     string(staleApp),
+			ContentHash: hashBytes(staleApp),
+		},
+	}}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:   "ws_complete_strict_stale_head",
+		RemoteRoot:    contentsRoot,
+		LocalRoot:     localDir,
+		StateFile:     filepath.Join(localDir, ".relayfile-mount-state.json"),
+		WebSocket:     boolPtr(false),
+		FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+	syncer.githubWorkingTree.HeadSHA = headSHA
+	expected := 2
+	syncer.state.GithubWorkingTreeSourceProfile = "complete-v1"
+	syncer.state.GithubWorkingTreeFilesExpected = &expected
+
+	if err := syncer.pullRemoteFullTree(context.Background(), nil, bootstrapProgress{}); err != nil {
+		t.Fatalf("strict complete-v1 traversal should ignore stale head records: %v", err)
+	}
+	if !syncer.state.BootstrapComplete {
+		t.Fatal("strict complete-v1 traversal did not complete")
+	}
+	if _, tracked := syncer.state.Files[staleAppRemote]; tracked {
+		t.Fatalf("stale head record was tracked in mount state")
+	}
+	if got := len(syncer.state.Files); got != expected {
+		t.Fatalf("tracked file count=%d, want %d", got, expected)
+	}
+	gotApp, err := os.ReadFile(filepath.Join(localDir, "src", "app.ts"))
+	if err != nil {
+		t.Fatalf("read app.ts: %v", err)
+	}
+	if !bytes.Equal(gotApp, currentApp) {
+		t.Fatalf("app.ts content = %q, want current head content %q", string(gotApp), string(currentApp))
+	}
+}
+
 func TestGithubWorkingTreeTarSeedRejectsDuplicateEntries(t *testing.T) {
 	localDir := t.TempDir()
 	contentsRoot := "/github/repos/AgentWorkforce/cloud/contents"
