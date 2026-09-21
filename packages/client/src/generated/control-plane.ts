@@ -334,6 +334,16 @@ export interface components {
             /** Format: uri */
             url: string;
             pathGlobs: string[];
+            /** Whether `/pulls/<n>/**` identity expansion (title slugs, reviews, comments, checks via resource_ref) is enabled for this subscription. */
+            githubPrIdentityAuthorized?: boolean;
+            health?: {
+                /** Format: date-time */
+                lastDeliveryAt?: string | null;
+                /** Format: date-time */
+                lastSuccessAt?: string | null;
+                lastError?: string | null;
+                consecutiveFailures?: number;
+            };
         };
         ErrorEnvelope: {
             error: {

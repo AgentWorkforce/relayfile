@@ -381,6 +381,10 @@ func TestControlPlaneCloudIntegrationConformance(t *testing.T) {
 		listedSubscriptions.Subscriptions[0].PathGlobs[0] != "/github/repos/acme/widgets/issues/**" {
 		t.Fatalf("unexpected webhook subscription list: %#v", listedSubscriptions)
 	}
+	if listedSubscriptions.Subscriptions[0].Health == nil ||
+		listedSubscriptions.Subscriptions[0].Health.ConsecutiveFailures != 0 {
+		t.Fatalf("expected webhook subscription health to pass through: %#v", listedSubscriptions.Subscriptions[0].Health)
+	}
 
 	var deleted map[string]bool
 	status = controlPlaneJSON(t, client, http.MethodDelete, baseURL+"/v1/integrations/webhook-subscriptions", deleteWebhookSubscriptionRequest{

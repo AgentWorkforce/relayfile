@@ -611,6 +611,13 @@ describe('RelayfileControlPlaneClient integration webhook subscriptions', () => 
           subscriptionId: 'whsub_123',
           url: 'https://cast.test/v1/integrations/relayfile/inbound/ws/ch',
           pathGlobs: ['/github/repos/acme/widgets/issues/**'],
+          githubPrIdentityAuthorized: true,
+          health: {
+            lastDeliveryAt: '2026-09-21T00:00:00.000Z',
+            lastSuccessAt: '2026-09-21T00:00:00.000Z',
+            lastError: null,
+            consecutiveFailures: 0,
+          },
         },
       ],
     });
@@ -622,6 +629,13 @@ describe('RelayfileControlPlaneClient integration webhook subscriptions', () => 
           subscriptionId: 'whsub_123',
           url: 'https://cast.test/v1/integrations/relayfile/inbound/ws/ch',
           pathGlobs: ['/github/repos/acme/widgets/issues/**'],
+          githubPrIdentityAuthorized: true,
+          health: {
+            lastDeliveryAt: '2026-09-21T00:00:00.000Z',
+            lastSuccessAt: '2026-09-21T00:00:00.000Z',
+            lastError: null,
+            consecutiveFailures: 0,
+          },
         },
       ],
     });
