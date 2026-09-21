@@ -158,7 +158,7 @@ type webhookSubscriptionHealth struct {
 	LastDeliveryAt      *string `json:"lastDeliveryAt"`
 	LastSuccessAt       *string `json:"lastSuccessAt"`
 	LastError           *string `json:"lastError"`
-	ConsecutiveFailures int     `json:"consecutiveFailures"`
+	ConsecutiveFailures *int    `json:"consecutiveFailures,omitempty"`
 }
 
 type webhookSubscriptionSummary struct {
