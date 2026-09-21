@@ -1,6 +1,6 @@
 {
   "name": "@relayfile/cli-win32-x64",
-  "version": "0.10.56",
+  "version": "0.10.69",
   "description": "relayfile-cli binary for win32 x64. Installed automatically as an optional dependency of @relayfile/sdk.",
   "files": [
     "bin"
