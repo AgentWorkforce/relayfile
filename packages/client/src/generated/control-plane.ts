@@ -334,7 +334,7 @@ export interface components {
             /** Format: uri */
             url: string;
             pathGlobs: string[];
-            /** Whether `/pulls/<n>/**` identity expansion (title slugs, reviews, comments, checks via resource_ref) is enabled for this subscription. */
+            /** @description Whether `/pulls/<n>/**` identity expansion (title slugs, reviews, comments, checks via resource_ref) is enabled for this subscription. */
             githubPrIdentityAuthorized?: boolean;
             health?: {
                 /** Format: date-time */
