@@ -381,6 +381,11 @@ func TestControlPlaneCloudIntegrationConformance(t *testing.T) {
 		listedSubscriptions.Subscriptions[0].PathGlobs[0] != "/github/repos/acme/widgets/issues/**" {
 		t.Fatalf("unexpected webhook subscription list: %#v", listedSubscriptions)
 	}
+	if listedSubscriptions.Subscriptions[0].Health == nil ||
+		listedSubscriptions.Subscriptions[0].Health.ConsecutiveFailures == nil ||
+		*listedSubscriptions.Subscriptions[0].Health.ConsecutiveFailures != 0 {
+		t.Fatalf("expected webhook subscription health to pass through: %#v", listedSubscriptions.Subscriptions[0].Health)
+	}
 
 	var deleted map[string]bool
 	status = controlPlaneJSON(t, client, http.MethodDelete, baseURL+"/v1/integrations/webhook-subscriptions", deleteWebhookSubscriptionRequest{
@@ -418,6 +423,38 @@ func TestControlPlaneCloudIntegrationConformance(t *testing.T) {
 	}, &unpinnedGone)
 	if status != http.StatusNotFound {
 		t.Fatalf("unpinned delete of missing subscription status = %d, want 404", status)
+	}
+}
+
+func TestWebhookSubscriptionHealthOmitsAbsentConsecutiveFailures(t *testing.T) {
+	var omitted webhookSubscriptionHealth
+	if err := json.Unmarshal([]byte(`{"lastDeliveryAt":null,"lastSuccessAt":null,"lastError":null}`), &omitted); err != nil {
+		t.Fatalf("unmarshal omitted consecutiveFailures: %v", err)
+	}
+	if omitted.ConsecutiveFailures != nil {
+		t.Fatalf("expected omitted consecutiveFailures to stay nil, got %#v", omitted.ConsecutiveFailures)
+	}
+	raw, err := json.Marshal(omitted)
+	if err != nil {
+		t.Fatalf("marshal omitted consecutiveFailures: %v", err)
+	}
+	if strings.Contains(string(raw), "consecutiveFailures") {
+		t.Fatalf("omitempty should drop absent consecutiveFailures: %s", raw)
+	}
+
+	var present webhookSubscriptionHealth
+	if err := json.Unmarshal([]byte(`{"consecutiveFailures":0}`), &present); err != nil {
+		t.Fatalf("unmarshal zero consecutiveFailures: %v", err)
+	}
+	if present.ConsecutiveFailures == nil || *present.ConsecutiveFailures != 0 {
+		t.Fatalf("expected confirmed zero consecutiveFailures, got %#v", present.ConsecutiveFailures)
+	}
+	raw, err = json.Marshal(present)
+	if err != nil {
+		t.Fatalf("marshal zero consecutiveFailures: %v", err)
+	}
+	if !strings.Contains(string(raw), `"consecutiveFailures":0`) {
+		t.Fatalf("confirmed zero consecutiveFailures should serialize as 0: %s", raw)
 	}
 }
 

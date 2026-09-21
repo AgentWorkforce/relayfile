@@ -154,10 +154,19 @@ type listWebhookSubscriptionsResponse struct {
 	WorkspaceID   string                       `json:"workspaceId,omitempty"`
 }
 
+type webhookSubscriptionHealth struct {
+	LastDeliveryAt      *string `json:"lastDeliveryAt"`
+	LastSuccessAt       *string `json:"lastSuccessAt"`
+	LastError           *string `json:"lastError"`
+	ConsecutiveFailures *int    `json:"consecutiveFailures,omitempty"`
+}
+
 type webhookSubscriptionSummary struct {
-	SubscriptionID string   `json:"subscriptionId"`
-	URL            string   `json:"url"`
-	PathGlobs      []string `json:"pathGlobs"`
+	SubscriptionID             string                     `json:"subscriptionId"`
+	URL                        string                     `json:"url"`
+	PathGlobs                  []string                   `json:"pathGlobs"`
+	GithubPrIdentityAuthorized *bool                      `json:"githubPrIdentityAuthorized,omitempty"`
+	Health                     *webhookSubscriptionHealth `json:"health,omitempty"`
 }
 
 func runControlPlane(args []string, stdout io.Writer) error {
@@ -514,9 +523,11 @@ func handleControlPlaneWebhookSubscription(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		var upstream []struct {
-			ID        string   `json:"id"`
-			URL       string   `json:"url"`
-			PathGlobs []string `json:"pathGlobs"`
+			ID                         string                     `json:"id"`
+			URL                        string                     `json:"url"`
+			PathGlobs                  []string                   `json:"pathGlobs"`
+			GithubPrIdentityAuthorized *bool                      `json:"githubPrIdentityAuthorized"`
+			Health                     *webhookSubscriptionHealth `json:"health"`
 		}
 		if err := commandClient.client.getJSON(
 			r.Context(),
@@ -529,9 +540,11 @@ func handleControlPlaneWebhookSubscription(w http.ResponseWriter, r *http.Reques
 		subscriptions := make([]webhookSubscriptionSummary, 0, len(upstream))
 		for _, item := range upstream {
 			subscriptions = append(subscriptions, webhookSubscriptionSummary{
-				SubscriptionID: item.ID,
-				URL:            item.URL,
-				PathGlobs:      item.PathGlobs,
+				SubscriptionID:             item.ID,
+				URL:                        item.URL,
+				PathGlobs:                  item.PathGlobs,
+				GithubPrIdentityAuthorized: item.GithubPrIdentityAuthorized,
+				Health:                     item.Health,
 			})
 		}
 		writeControlPlaneJSON(w, http.StatusOK, listWebhookSubscriptionsResponse{

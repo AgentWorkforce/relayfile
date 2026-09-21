@@ -617,6 +617,25 @@ components:
           type: array
           items:
             type: string
+        githubPrIdentityAuthorized:
+          type: boolean
+          description: Whether `/pulls/<n>/**` identity expansion (title slugs, reviews, comments, checks via resource_ref) is enabled for this subscription.
+        health:
+          type: object
+          properties:
+            lastDeliveryAt:
+              type: string
+              format: date-time
+              nullable: true
+            lastSuccessAt:
+              type: string
+              format: date-time
+              nullable: true
+            lastError:
+              type: string
+              nullable: true
+            consecutiveFailures:
+              type: integer
     ErrorEnvelope:
       type: object
       required: [error]
