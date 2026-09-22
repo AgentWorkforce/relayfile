@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestResolveMountStatePathUsesStateDirAndStableMountID(t *testing.T) {
@@ -250,5 +251,120 @@ func TestQuarantineLegacyMountStateOnlyMovesExactPrivateStateFiles(t *testing.T)
 		if _, err := os.Stat(filepath.Join(localDir, name)); err != nil {
 			t.Fatalf("expected %s to remain, stat err=%v", name, err)
 		}
+	}
+}
+
+func TestNewSyncerRemountPrunesOnlyStalePrivateStateTemps(t *testing.T) {
+	now := time.Now()
+	localDir := t.TempDir()
+	stateDir := t.TempDir()
+	opts := SyncerOptions{
+		WorkspaceID:   "rw_remount",
+		RemoteRoot:    "/github/repos/AgentWorkforce/relayfile",
+		LocalRoot:     localDir,
+		StateDir:      stateDir,
+		MountKind:     MountKindDaemon,
+		ValidateState: true,
+	}
+	resolved, err := ResolveMountStatePath(MountStatePathOptions{
+		WorkspaceID:     opts.WorkspaceID,
+		RemoteRoot:      opts.RemoteRoot,
+		LocalRoot:       opts.LocalRoot,
+		StateDir:        opts.StateDir,
+		MountKind:       opts.MountKind,
+		ValidateOutside: true,
+	})
+	if err != nil {
+		t.Fatalf("resolve private state path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(resolved.StateFile), 0o755); err != nil {
+		t.Fatalf("mkdir private state directory: %v", err)
+	}
+	validState := []byte(`{"bootstrapComplete":true}`)
+	if err := os.WriteFile(resolved.StateFile, validState, 0o644); err != nil {
+		t.Fatalf("write reusable private state: %v", err)
+	}
+
+	activeTemp, err := os.CreateTemp(filepath.Dir(resolved.StateFile), atomicTempPattern(resolved.StateFile))
+	if err != nil {
+		t.Fatalf("create active state save: %v", err)
+	}
+	t.Cleanup(func() { _ = activeTemp.Close() })
+	if _, err := activeTemp.WriteString(`{"inProgress":true}`); err != nil {
+		t.Fatalf("write active state save: %v", err)
+	}
+
+	unrelated := filepath.Join(filepath.Dir(resolved.StateFile), ".unrelated.tmp-old")
+	if err := os.WriteFile(unrelated, []byte("keep"), 0o644); err != nil {
+		t.Fatalf("write unrelated temp: %v", err)
+	}
+	old := now.Add(-staleMountStateTempAge - time.Hour)
+	if err := os.Chtimes(unrelated, old, old); err != nil {
+		t.Fatalf("age unrelated temp: %v", err)
+	}
+
+	legacyTemp := filepath.Join(localDir, LegacyMountStateFileName+".tmp-recoverable")
+	if err := os.WriteFile(legacyTemp, []byte("recoverable"), 0o644); err != nil {
+		t.Fatalf("write legacy migration candidate: %v", err)
+	}
+	if err := os.Chtimes(legacyTemp, old, old); err != nil {
+		t.Fatalf("age legacy migration candidate: %v", err)
+	}
+
+	for remount := 1; remount <= 3; remount++ {
+		staleTemp, err := os.CreateTemp(filepath.Dir(resolved.StateFile), atomicTempPattern(resolved.StateFile))
+		if err != nil {
+			t.Fatalf("remount %d create stale state temp: %v", remount, err)
+		}
+		stalePath := staleTemp.Name()
+		if _, err := staleTemp.WriteString(`{"abandoned":true}`); err != nil {
+			_ = staleTemp.Close()
+			t.Fatalf("remount %d write stale state temp: %v", remount, err)
+		}
+		if err := staleTemp.Close(); err != nil {
+			t.Fatalf("remount %d close stale state temp: %v", remount, err)
+		}
+		if err := os.Chtimes(stalePath, old, old); err != nil {
+			t.Fatalf("remount %d age stale state temp: %v", remount, err)
+		}
+
+		if _, err := NewSyncer(&fakeClient{}, opts); err != nil {
+			t.Fatalf("remount %d NewSyncer failed: %v", remount, err)
+		}
+		if _, err := os.Stat(stalePath); !os.IsNotExist(err) {
+			t.Fatalf("remount %d left stale state temp %s, stat err=%v", remount, stalePath, err)
+		}
+		if _, err := os.Stat(activeTemp.Name()); err != nil {
+			t.Fatalf("remount %d removed active concurrent state save: %v", remount, err)
+		}
+		if _, err := os.Stat(unrelated); err != nil {
+			t.Fatalf("remount %d removed unrelated temp: %v", remount, err)
+		}
+		if payload, err := os.ReadFile(resolved.StateFile); err != nil {
+			t.Fatalf("remount %d removed reusable private state: %v", remount, err)
+		} else if string(payload) != string(validState) {
+			t.Fatalf("remount %d changed reusable private state: got %q", remount, payload)
+		}
+	}
+
+	if _, err := os.Stat(legacyTemp); !os.IsNotExist(err) {
+		t.Fatalf("legacy migration candidate was not quarantined, stat err=%v", err)
+	}
+	quarantineEntries, err := os.ReadDir(filepath.Join(stateDir, "quarantine"))
+	if err != nil {
+		t.Fatalf("read legacy quarantine: %v", err)
+	}
+	foundRecoverable := false
+	for _, entry := range quarantineEntries {
+		payload, err := os.ReadFile(filepath.Join(stateDir, "quarantine", entry.Name()))
+		if err != nil {
+			t.Fatalf("read quarantined legacy state: %v", err)
+		}
+		if string(payload) == "recoverable" {
+			foundRecoverable = true
+		}
+	}
+	if !foundRecoverable {
+		t.Fatal("legacy migration candidate was cleaned instead of preserved in quarantine")
 	}
 }
