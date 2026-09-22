@@ -127,6 +127,40 @@ func TestResolveCLIRequestedLocalLayoutRefusesAllScopedRoutes(t *testing.T) {
 	}
 }
 
+func TestMountRefusesRepeatedRemotePathsWithScopedLayoutBeforeSideEffects(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+
+	localRoot := filepath.Join(t.TempDir(), "mirror")
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, "scoped mounts must be rejected before contacting the server", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	err := run([]string{
+		"mount", "ws_demo", localRoot,
+		"--server", server.URL,
+		"--token", testJWTWithWorkspace("ws_demo"),
+		"--remote-path", "/github",
+		"--remote-path", "/slack",
+		"--local-layout", "scoped",
+		"--once",
+	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil ||
+		!strings.Contains(err.Error(), "--local-layout=scoped") ||
+		!strings.Contains(err.Error(), "temporarily unavailable") {
+		t.Fatalf("expected scoped-layout refusal for repeated remote paths, got %v", err)
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("scoped multi-path mount contacted server %d times before refusal", got)
+	}
+	if _, statErr := os.Stat(localRoot); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("scoped multi-path mount initialized mirror before refusal: %v", statErr)
+	}
+}
+
 // skipUntilScopedOperatorSurfacesReady keeps the scoped-runtime coverage
 // dormant only while the CLI guard is active. When the guard is removed, the
 // helper stops skipping these tests automatically; if the guard is deleted
