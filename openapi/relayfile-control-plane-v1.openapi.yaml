@@ -229,21 +229,18 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/WritebackSecret"
-  /v1/integrations/webhook-subscriptions:
+  /v1/workspaces/{workspaceId}/webhooks:
+    parameters:
+      - $ref: "#/components/parameters/WorkspaceId"
     get:
       operationId: listWebhookSubscriptions
-      summary: List server-side relayfile webhook subscriptions
+      summary: List outbound webhook subscriptions for a workspace
       description: >-
-        Lists the workspace's inbound webhook subscriptions so callers can
+        Lists the workspace's outbound webhook subscriptions so callers can
         reconcile subscriptions created by runs that crashed before persisting
         the server-assigned id.
       parameters:
         - $ref: "#/components/parameters/ApiVersionHeader"
-        - name: workspace
-          in: query
-          required: false
-          schema:
-            type: string
       responses:
         "200":
           description: Webhook subscriptions for the workspace
@@ -253,7 +250,57 @@ paths:
                 $ref: "#/components/schemas/ListWebhookSubscriptionsResponse"
     post:
       operationId: createWebhookSubscription
-      summary: Create a server-side relayfile webhook subscription
+      summary: Create an outbound webhook subscription for a workspace
+      description: |
+        Relayfile generates a per-subscription secret and returns it only in
+        this create response. Store it securely; it is not included when
+        subscriptions are listed.
+
+        Outbound deliveries include `X-Relay-Signature`,
+        `X-Relay-Timestamp`, and `X-Relay-Event-Id`. The signature is the
+        lowercase-hex HMAC-SHA256 of `timestamp + "." + rawBody`, keyed by the
+        per-subscription secret. Receivers must verify the exact raw body bytes,
+        use a constant-time comparison, reject timestamps outside their replay
+        window, and deduplicate on `X-Relay-Event-Id` because delivery is
+        at-least-once.
+
+        Example Node.js/Express verification, where `req.body` is a `Buffer`
+        captured before JSON parsing and `processOnce` durably deduplicates the
+        event ID:
+
+        ```js
+        const signature = req.get("X-Relay-Signature");
+        const timestamp = req.get("X-Relay-Timestamp");
+        const eventId = req.get("X-Relay-Event-Id");
+        if (!signature || !timestamp || !eventId || !/^\d+$/.test(timestamp)) {
+          return res.sendStatus(400);
+        }
+        const sentAt = Number(timestamp);
+        if (!Number.isSafeInteger(sentAt) ||
+            Math.abs(Math.floor(Date.now() / 1000) - sentAt) > 300) {
+          return res.sendStatus(401);
+        }
+        const expected = crypto
+          .createHmac("sha256", subscriptionSecret)
+          .update(`${timestamp}.`, "utf8")
+          .update(req.body)
+          .digest();
+        const valid = /^[0-9a-f]{64}$/.test(signature) &&
+          crypto.timingSafeEqual(expected, Buffer.from(signature, "hex"));
+        if (!valid) return res.sendStatus(401);
+        await processOnce(eventId, () => handleRelayfileEvent(req.body));
+        ```
+
+        Each attempt has a 5-second timeout. Failed deliveries are retried up
+        to 3 total attempts with exponential backoff (10 seconds, then 20
+        seconds), capped at 600 seconds and adjusted by plus or minus 20%
+        jitter. Redirects and all other HTTP statuses of 300 or greater are
+        failures. After the third failure, the delivery is dead-lettered.
+
+        This outbound partner scheme is distinct from internal Relayfile
+        ingress, which signs `timestamp + "\n" + body` with
+        `INTERNAL_HMAC_SECRET` even though it also uses an
+        `X-Relay-Signature` header.
       parameters:
         - $ref: "#/components/parameters/ApiVersionHeader"
       requestBody:
@@ -271,7 +318,7 @@ paths:
                 $ref: "#/components/schemas/WebhookSubscriptionResponse"
     delete:
       operationId: deleteWebhookSubscription
-      summary: Delete a server-side relayfile webhook subscription
+      summary: Delete an outbound webhook subscription for a workspace
       description: >-
         Idempotent: deleting a subscription that no longer exists succeeds, so
         retried cleanups of a known-deleted id observe progress instead of an
@@ -293,6 +340,13 @@ paths:
                 $ref: "#/components/schemas/DeleteWebhookSubscriptionResponse"
 components:
   parameters:
+    WorkspaceId:
+      name: workspaceId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
     ApiVersionHeader:
       name: X-Relayfile-API-Version
       in: header
@@ -553,10 +607,8 @@ components:
           type: string
     WebhookSubscriptionRequest:
       type: object
-      required: [url, pathGlobs, secret]
+      required: [url, pathGlobs]
       properties:
-        workspace:
-          type: string
         url:
           type: string
           format: uri
@@ -565,11 +617,9 @@ components:
           minItems: 1
           items:
             type: string
-        secret:
-          type: string
     WebhookSubscriptionResponse:
       type: object
-      required: [subscriptionId]
+      required: [subscriptionId, secret]
       properties:
         workspaceId:
           type: string
@@ -580,12 +630,14 @@ components:
           type: string
         secret:
           type: string
+          description: >-
+            Server-generated per-subscription signing secret. Returned only by
+            the create operation; store it securely because it cannot be
+            retrieved by listing subscriptions.
     DeleteWebhookSubscriptionRequest:
       type: object
       required: [subscriptionId]
       properties:
-        workspace:
-          type: string
         subscriptionId:
           type: string
     DeleteWebhookSubscriptionResponse:
