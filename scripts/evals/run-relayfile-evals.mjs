@@ -25,7 +25,9 @@ import { createRelayfileExecutor } from "./relayfile-executor.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const SUITES_DIR = path.join(ROOT, "evals", "suites");
-const RUNS_DIR = path.join(ROOT, ".relayfile", "evals", "runs");
+const RUNS_DIR = process.env.RELAYFILE_EVAL_RUNS_DIR
+  ? path.resolve(ROOT, process.env.RELAYFILE_EVAL_RUNS_DIR)
+  : path.join(ROOT, ".relayfile", "evals", "runs");
 const DEFAULT_OPENROUTER_MODEL = "openai/gpt-oss-120b:free";
 const OPENROUTER_CHAT_COMPLETIONS_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 
