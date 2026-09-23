@@ -956,6 +956,16 @@ paths:
             also recorded as a pollable job for the jobs endpoint.
           schema:
             type: string
+        - name: sourceProfile
+          in: query
+          required: false
+          description: |
+            Source profile for the import. `complete-v1` must use the
+            asynchronous fetch endpoint so Relayfile can return strict file
+            accounting for Cloud sandbox materialization.
+          schema:
+            type: string
+            enum: [filtered-v1, complete-v1]
       requestBody:
         required: true
         content:
@@ -4870,6 +4880,13 @@ components:
         bytesWritten:
           type: integer
           minimum: 0
+        filesExpected:
+          type: integer
+          minimum: 0
+          description: Exact imported file count for complete-v1 imports.
+        sourceProfile:
+          type: string
+          enum: [filtered-v1, complete-v1]
         correlationId:
           type: string
 
@@ -4893,6 +4910,14 @@ components:
           type: string
           format: uri
           description: Absolute http(s) URL of the GitHub source tarball.
+        sourceProfile:
+          type: string
+          enum: [filtered-v1, complete-v1]
+          default: filtered-v1
+          description: |
+            `complete-v1` preserves tracked dotfiles, supported binary files,
+            executable modes, and safe symlinks, and returns strict
+            `filesExpected` accounting.
 
     GithubTarballImportJob:
       type: object
@@ -4931,6 +4956,13 @@ components:
         bytesWritten:
           type: integer
           minimum: 0
+        filesExpected:
+          type: integer
+          minimum: 0
+          description: Exact imported file count for complete-v1 jobs.
+        sourceProfile:
+          type: string
+          enum: [filtered-v1, complete-v1]
         lastError:
           type: string
         createdAt:
