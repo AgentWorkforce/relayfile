@@ -379,6 +379,20 @@ class RelayfileMountProcessInstance
           await this.restartOnceMount()
           continue
         }
+        // A successful foreground --once process can exit immediately after
+        // publishing its final state. If the readiness poll overlaps that
+        // publication, give the state file the remainder of the existing
+        // readiness budget to become observable instead of reporting a false
+        // early-exit failure.
+        if (
+          this.input.background === false &&
+          this.exitCode === 0 &&
+          !this.stopping &&
+          this.now() < timeoutAt
+        ) {
+          await delay(this.readyPollIntervalMs)
+          continue
+        }
         throw this.buildEarlyExitError()
       }
 
