@@ -65,9 +65,11 @@ export interface ContentIdentity {
 }
 
 export interface RelayFileReadCacheOptions {
-  /** Cache TTL in ms. Default: 5000. */
+  /** Maximum decoded content bytes retained by the content-addressed LRU. Default: 32 MiB. */
+  maxBytes?: number;
+  /** @deprecated Content-hash entries are revalidated on every read. */
   ttlMs?: number;
-  /** Max cached entries before LRU eviction. Default: 500. */
+  /** @deprecated Eviction is byte-capped; use maxBytes. */
   maxEntries?: number;
 }
 
@@ -76,6 +78,8 @@ export interface FileReadResponse {
   revision: string;
   contentType: string;
   content: string;
+  /** SHA-256 content identity returned by Relayfile. */
+  contentHash?: string;
   encoding?: "utf-8" | "base64";
   provider?: string;
   providerObjectId?: string;

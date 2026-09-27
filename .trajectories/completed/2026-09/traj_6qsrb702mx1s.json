@@ -1,0 +1,65 @@
+{
+  "id": "traj_6qsrb702mx1s",
+  "version": 1,
+  "task": {
+    "title": "Implement content-hash client cache and jittered Retry-After handling"
+  },
+  "status": "completed",
+  "startedAt": "2026-09-27T19:55:27.193Z",
+  "completedAt": "2026-09-27T20:01:45.765Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-09-27T19:55:27.421Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_yvjv91bjz5w9",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-09-27T19:55:27.421Z",
+      "endedAt": "2026-09-27T20:01:45.765Z",
+      "events": [
+        {
+          "ts": 1790538927421,
+          "type": "decision",
+          "content": "Use content hashes rather than the existing revision ETag for conditional cache identity: Use content hashes rather than the existing revision ETag for conditional cache identity",
+          "raw": {
+            "question": "Use content hashes rather than the existing revision ETag for conditional cache identity",
+            "chosen": "Use content hashes rather than the existing revision ETag for conditional cache identity",
+            "alternatives": [],
+            "reasoning": "Current ETag semantics are revision-based while contentHash is already in response bodies and tree entries."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1790538927631,
+          "type": "decision",
+          "content": "Include the FUSE websocket invalidator but defer unrelated write and control-plane retry loops: Include the FUSE websocket invalidator but defer unrelated write and control-plane retry loops",
+          "raw": {
+            "question": "Include the FUSE websocket invalidator but defer unrelated write and control-plane retry loops",
+            "chosen": "Include the FUSE websocket invalidator but defer unrelated write and control-plane retry loops",
+            "alternatives": [],
+            "reasoning": "FUSE reproduces the shipped reconnect-storm path; setup retries, agents reconnect, outbox writes, and polite polling are outside the read fan-in failure mode."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Added SDK content-hash caches, persistent mount object reuse, polite full-jitter retries, bounded bootstrap fan-out, and cursor-safe listen reconnects",
+    "approach": "Standard approach",
+    "confidence": 0.85
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "2d32cfddbfc06e9e371462a50bebd0373e7343a6",
+    "endRef": "2d32cfddbfc06e9e371462a50bebd0373e7343a6"
+  }
+}

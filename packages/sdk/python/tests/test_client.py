@@ -17,6 +17,7 @@ from relayfile import (
     QueueFullError,
     RelayFileApiError,
     RelayFileClient,
+    RelayFileReadCacheOptions,
     RetryOptions,
     RevisionConflictError,
     WritebackItem,
@@ -84,6 +85,23 @@ class TestRelayFileClient:
         client = self._client()
         res = client.read_file("ws_acme", "/f.json")
         assert res["content"] == '{"id":1}'
+
+    @respx.mock
+    def test_read_file_revalidates_with_content_hash_and_handles_304(self) -> None:
+        digest = "a" * 64
+        route = respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/file").mock(
+            side_effect=[
+                httpx.Response(200, json={"path": "/f", "revision": "rev_1", "contentType": "text/plain", "content": "hello", "contentHash": digest}),
+                httpx.Response(304),
+            ]
+        )
+        client = RelayFileClient(BASE, "tok", read_cache=RelayFileReadCacheOptions(max_bytes=5))
+
+        first = client.read_file("ws_acme", "/f")
+        second = client.read_file("ws_acme", "/f")
+
+        assert second == first
+        assert route.calls[1].request.headers["If-None-Match"] == f'"{digest}"'
 
     @respx.mock
     def test_write_file(self) -> None:

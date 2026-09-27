@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand"
 	"mime"
 	"net"
 	"net/http"
@@ -191,7 +192,7 @@ const (
 	defaultIncrementalReadNotReadyTTL = 5 * time.Minute
 	defaultCursorResolutionAttempts   = 3
 	defaultCursorRetryBaseDelay       = 250 * time.Millisecond
-	defaultBootstrapReadWorkers       = 16
+	defaultBootstrapReadWorkers       = 4
 	// Bulk bootstrap reads deliberately match the tree checkpoint size. One
 	// request therefore replaces at most 32 point reads without creating a new
 	// unbounded response surface. The decoded aggregate stays below 32 MiB and
@@ -205,7 +206,7 @@ const (
 	defaultBulkReadMaxPathBytes           = 4096
 	defaultBulkReadMaxPathsBytes          = 32 << 10
 	defaultBulkReadMaxRequestBytes  int64 = 64 << 10
-	defaultIncrementalReadWorkers         = 16
+	defaultIncrementalReadWorkers         = 4
 	defaultReceiptSettlementWorkers       = 16
 	// fullTreeTraversalDepth bounds each tree request so the client can see and
 	// prune a reserved .relay directory before the server reaches deep
@@ -326,13 +327,18 @@ type HTTPError struct {
 	Code       string
 	Message    string
 	Action     string
+	Reason     string
 }
 
 func (e *HTTPError) Error() string {
-	if e.Code != "" {
-		return fmt.Sprintf("http %d %s: %s", e.StatusCode, e.Code, e.Message)
+	reason := ""
+	if e.Reason != "" {
+		reason = " (reason: " + e.Reason + ")"
 	}
-	return fmt.Sprintf("http %d: %s", e.StatusCode, e.Message)
+	if e.Code != "" {
+		return fmt.Sprintf("http %d %s: %s%s", e.StatusCode, e.Code, e.Message, reason)
+	}
+	return fmt.Sprintf("http %d: %s%s", e.StatusCode, e.Message, reason)
 }
 
 // MalformedPaginationError reports a server response that cannot make a
@@ -1289,12 +1295,16 @@ func (c *HTTPClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID
 			Code    string `json:"code"`
 			Message string `json:"message"`
 			Action  string `json:"action"`
+			Details struct {
+				Reason string `json:"reason"`
+			} `json:"details"`
 		}
 		_ = json.Unmarshal(payloadBytes, &errPayload)
 		return GithubWorkingTreeTar{}, &HTTPError{
 			StatusCode: resp.StatusCode,
 			Code:       errPayload.Code,
 			Message:    errPayload.Message,
+			Reason:     errPayload.Details.Reason,
 		}
 	}
 }
@@ -1449,6 +1459,9 @@ func (c *HTTPClient) doBytesWithLimit(ctx context.Context, method, requestPath s
 			Code    string `json:"code"`
 			Message string `json:"message"`
 			Action  string `json:"action"`
+			Details struct {
+				Reason string `json:"reason"`
+			} `json:"details"`
 		}
 		_ = json.Unmarshal(payloadBytes, &errPayload)
 
@@ -1494,6 +1507,7 @@ func (c *HTTPClient) doBytesWithLimit(ctx context.Context, method, requestPath s
 			Code:       errPayload.Code,
 			Message:    errPayload.Message,
 			Action:     errPayload.Action,
+			Reason:     errPayload.Details.Reason,
 		}
 	}
 }
@@ -1535,14 +1549,17 @@ func (c *HTTPClient) refreshTokenAfterUnauthorized(attemptedToken string) bool {
 }
 
 type SyncerOptions struct {
-	WorkspaceID   string
-	RemoteRoot    string
-	LocalRoot     string
-	StateFile     string
-	StateDir      string
-	MountKind     string
-	ValidateState bool
-	EventProvider string
+	// ObjectCacheRoot overrides the content-addressed cache directory. The
+	// default HTTP mount cache is ~/.relayfile/cache/objects.
+	ObjectCacheRoot string
+	WorkspaceID     string
+	RemoteRoot      string
+	LocalRoot       string
+	StateFile       string
+	StateDir        string
+	MountKind       string
+	ValidateState   bool
+	EventProvider   string
 	// ScopedChild identifies a Syncer whose local root is one child beneath a
 	// catalog root. Provider paths that resemble catalog-only artifacts are
 	// ordinary content there; exact mounts keep those artifacts reserved.
@@ -1747,6 +1764,7 @@ func formatBytes(value uint64) string {
 
 type Syncer struct {
 	client               RemoteClient
+	objectCache          *objectCache
 	workspace            string
 	remoteRoot           string
 	localRoot            string
@@ -2609,8 +2627,15 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		}
 	}
 	githubWorkingTree := detectGithubWorkingTreeMount(remoteRoot)
+	var cache *objectCache
+	if root := strings.TrimSpace(opts.ObjectCacheRoot); root != "" {
+		cache = &objectCache{root: root}
+	} else if _, ok := client.(*HTTPClient); ok {
+		cache = defaultObjectCache()
+	}
 	return &Syncer{
 		client:                    client,
+		objectCache:               cache,
 		workspace:                 workspace,
 		remoteRoot:                remoteRoot,
 		localRoot:                 localRoot,
@@ -5976,9 +6001,6 @@ func (s *Syncer) scheduleWebSocketReconnectLocked(retryAfter time.Duration) {
 	if delay <= 0 {
 		delay = websocketReconnectDelay(s.wsReconnectFailures)
 	}
-	if delay > defaultWebSocketReconnectMax {
-		delay = defaultWebSocketReconnectMax
-	}
 	s.wsNextAttempt = time.Now().Add(delay)
 }
 
@@ -6007,15 +6029,7 @@ func websocketReconnectDelay(failures int) time.Duration {
 			break
 		}
 	}
-	jitter := time.Duration(time.Now().UnixNano()%int64(defaultWebSocketReconnectJitter*2)) - defaultWebSocketReconnectJitter
-	delay += jitter
-	if delay < defaultWebSocketReconnectBase {
-		return defaultWebSocketReconnectBase
-	}
-	if delay > defaultWebSocketReconnectMax {
-		return defaultWebSocketReconnectMax
-	}
-	return delay
+	return time.Duration(rand.Float64() * float64(delay))
 }
 
 // listenerHealthLocked returns listener state independently of LastEventAt.
@@ -7721,6 +7735,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 				Index:      len(readJobs),
 				RemotePath: remotePath,
 				Size:       entry.Size,
+				Entry:      entry,
 			})
 		}
 		var readErr error
@@ -7938,6 +7953,7 @@ type bootstrapReadJob struct {
 	RemotePath     string
 	Size           int64
 	ForcePointRead bool
+	Entry          TreeEntry
 }
 
 type bootstrapReadResult struct {
@@ -8026,6 +8042,24 @@ func (s *Syncer) readBootstrapFilesEach(ctx context.Context, jobs []bootstrapRea
 	if len(jobs) == 0 {
 		return nil
 	}
+	remaining := make([]bootstrapReadJob, 0, len(jobs))
+	for _, job := range jobs {
+		cached, ok := s.objectCache.get(job.Entry.ContentHash)
+		if !ok {
+			remaining = append(remaining, job)
+			continue
+		}
+		cached.Path, cached.Revision = job.RemotePath, job.Entry.Revision
+		cached.Type, cached.Target, cached.Mode = job.Entry.Type, job.Entry.Target, job.Entry.Mode
+		prog.touch()
+		if err := handle(bootstrapReadResult{Index: job.Index, RemotePath: job.RemotePath, File: cached}); err != nil {
+			return err
+		}
+	}
+	jobs = remaining
+	if len(jobs) == 0 {
+		return nil
+	}
 	// Keep the watchdog progress hook on both bulk and compatibility paths.
 	// Once a server has returned 501, future cycles dispatch directly to the
 	// individual reader and must still refresh liveness while a body streams.
@@ -8102,20 +8136,16 @@ func (s *Syncer) readBootstrapFilesBulkEach(ctx context.Context, client bulkRead
 				continue
 			}
 			prog.touch()
+			file := RemoteFile{
+				Path: result.Path, Type: result.Type, Target: result.Target, Mode: result.Mode,
+				Revision: result.Revision, ContentType: result.ContentType, Content: result.Content,
+				Encoding: result.Encoding, ContentHash: result.ContentHash,
+			}
+			s.objectCache.put(file)
 			if callbackErr := handle(bootstrapReadResult{
 				Index:      job.Index,
 				RemotePath: job.RemotePath,
-				File: RemoteFile{
-					Path:        result.Path,
-					Type:        result.Type,
-					Target:      result.Target,
-					Mode:        result.Mode,
-					Revision:    result.Revision,
-					ContentType: result.ContentType,
-					Content:     result.Content,
-					Encoding:    result.Encoding,
-					ContentHash: result.ContentHash,
-				},
+				File:       file,
 			}); callbackErr != nil {
 				return callbackErr
 			}
@@ -8276,8 +8306,16 @@ func (s *Syncer) readBootstrapFilesIndividuallyBatchEach(ctx context.Context, jo
 		go func() {
 			defer wg.Done()
 			for job := range jobCh {
+				if cached, ok := s.objectCache.get(job.Entry.ContentHash); ok {
+					cached.Path, cached.Revision = job.RemotePath, job.Entry.Revision
+					cached.Type, cached.Target, cached.Mode = job.Entry.Type, job.Entry.Target, job.Entry.Mode
+					prog.touch()
+					resultCh <- bootstrapReadResult{Index: job.Index, RemotePath: job.RemotePath, File: cached}
+					continue
+				}
 				file, err := s.client.ReadFile(readCtx, s.workspace, job.RemotePath)
 				if err == nil {
+					s.objectCache.put(file)
 					prog.touch()
 				}
 				resultCh <- bootstrapReadResult{
@@ -8315,8 +8353,8 @@ func bootstrapReadWorkers() int {
 	if err != nil || v <= 0 {
 		return defaultBootstrapReadWorkers
 	}
-	if v > 64 {
-		return 64
+	if v > 4 {
+		return 4
 	}
 	return v
 }
@@ -9325,8 +9363,8 @@ func incrementalReadWorkers() int {
 	if err != nil || workers <= 0 {
 		return defaultIncrementalReadWorkers
 	}
-	if workers > 64 {
-		return 64
+	if workers > 4 {
+		return 4
 	}
 	return workers
 }
@@ -12495,12 +12533,7 @@ func (c *HTTPClient) retryDelay(attempt int, retryAfterHeader string) time.Durat
 	if maxDelay <= 0 {
 		maxDelay = defaultRetryAfterMaxDelay
 	}
-	if retryAfter := parseRetryAfter(retryAfterHeader); retryAfter > 0 {
-		if retryAfter > maxDelay {
-			return maxDelay
-		}
-		return retryAfter
-	}
+	retryAfter := parseRetryAfter(retryAfterHeader)
 	delay := c.baseDelay
 	if delay <= 0 {
 		delay = 100 * time.Millisecond
@@ -12508,13 +12541,18 @@ func (c *HTTPClient) retryDelay(attempt int, retryAfterHeader string) time.Durat
 	for i := 1; i < attempt; i++ {
 		delay *= 2
 		if delay >= maxDelay {
-			return maxDelay
+			delay = maxDelay
+			break
 		}
 	}
 	if delay > maxDelay {
-		return maxDelay
+		delay = maxDelay
 	}
-	return delay
+	jittered := time.Duration(rand.Float64() * float64(delay))
+	if retryAfter > jittered {
+		return retryAfter
+	}
+	return jittered
 }
 
 func parseRetryAfter(header string) time.Duration {

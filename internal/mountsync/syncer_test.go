@@ -65,8 +65,8 @@ func TestHTTPClientRetryDelayHonorsRetryAfter(t *testing.T) {
 	if got := client.retryDelay(1, "30"); got != 30*time.Second {
 		t.Fatalf("expected Retry-After 30s, got %s", got)
 	}
-	if got := client.retryDelay(1, "999"); got != defaultRetryAfterMaxDelay {
-		t.Fatalf("expected Retry-After cap %s, got %s", defaultRetryAfterMaxDelay, got)
+	if got := client.retryDelay(1, "999"); got != 999*time.Second {
+		t.Fatalf("expected Retry-After floor 999s, got %s", got)
 	}
 }
 
@@ -155,10 +155,10 @@ func TestRedactSensitiveLogQueryValues(t *testing.T) {
 }
 
 func TestWebSocketReconnectDelayBounds(t *testing.T) {
-	if got := websocketReconnectDelay(1); got < defaultWebSocketReconnectBase || got > defaultWebSocketReconnectBase+defaultWebSocketReconnectJitter {
+	if got := websocketReconnectDelay(1); got < 0 || got > defaultWebSocketReconnectBase {
 		t.Fatalf("first reconnect delay out of bounds: %s", got)
 	}
-	if got := websocketReconnectDelay(20); got < defaultWebSocketReconnectMax-defaultWebSocketReconnectJitter || got > defaultWebSocketReconnectMax {
+	if got := websocketReconnectDelay(20); got < 0 || got > defaultWebSocketReconnectMax {
 		t.Fatalf("capped reconnect delay out of bounds: %s", got)
 	}
 }
@@ -14083,11 +14083,13 @@ func TestTreeBootstrapPersistsWithinPageBeforeDeadlineAndResumes(t *testing.T) {
 	localDir := t.TempDir()
 
 	first, err := NewSyncer(client, SyncerOptions{
-		WorkspaceID:               "ws_neon_checkpoint",
-		RemoteRoot:                "/neon/advisors/by-project",
-		LocalRoot:                 localDir,
-		StateFile:                 stateFile,
-		BootstrapTimeout:          210 * time.Millisecond,
+		WorkspaceID: "ws_neon_checkpoint",
+		RemoteRoot:  "/neon/advisors/by-project",
+		LocalRoot:   localDir,
+		StateFile:   stateFile,
+		// Four polite bootstrap workers need eight 60ms waves to cross the
+		// 32-file durable checkpoint without completing the 140-file page.
+		BootstrapTimeout:          550 * time.Millisecond,
 		BootstrapMaxFilesPerCycle: -1,
 		FullPullEvery:             -1,
 	})

@@ -1466,6 +1466,44 @@ describe("RelayFileClient — existing methods", () => {
       expect(res.content).toBe('{"id":48291}');
       expect(res.revision).toBe("rev_3");
     });
+
+    it("revalidates cached content by hash and serves a 304 from the byte cache", async () => {
+      const contentHash = "a".repeat(64);
+      const payload: FileReadResponse = {
+        path: "/cached.txt",
+        revision: "rev_1",
+        contentType: "text/plain",
+        content: "cached",
+        contentHash,
+      };
+      const f = vi.fn()
+        .mockResolvedValueOnce(jsonResponse(payload))
+        .mockResolvedValueOnce(jsonResponse(undefined, 304));
+      const client = makeClient(f);
+
+      await client.readFile("ws_acme", payload.path);
+      const cached = await client.readFile("ws_acme", payload.path);
+
+      expect(cached).toEqual(payload);
+      expect((f.mock.calls[1]![1] as RequestInit).headers).toMatchObject({
+        "If-None-Match": `"${contentHash}"`,
+      });
+    });
+
+    it("evicts least-recently-used content when the decoded byte cap is exceeded", async () => {
+      const files = ["a", "b", "a"].map((name) => ({
+        path: `/${name}.txt`, revision: "rev_1", contentType: "text/plain",
+        content: name.repeat(4), contentHash: name.repeat(64),
+      } satisfies FileReadResponse));
+      const f = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse(files.shift())));
+      const client = new RelayFileClient({ baseUrl: "https://relay.test", token: "tok", fetchImpl: f, readCache: { maxBytes: 4 } });
+
+      await client.readFile("ws", "/a.txt");
+      await client.readFile("ws", "/b.txt");
+      await client.readFile("ws", "/a.txt");
+
+      expect((f.mock.calls[2]![1] as RequestInit).headers).not.toHaveProperty("If-None-Match");
+    });
   });
 
   // ---- writeFile ----

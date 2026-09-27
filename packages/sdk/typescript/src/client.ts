@@ -375,48 +375,64 @@ const changeLogSettings = new WeakMap<RelayFileClient, NormalizedChangeLogOption
 const pendingChangeHydrations = new WeakMap<RelayFileClient, Map<string, Map<string, Promise<CachedChangeRecord | null>>>>();
 const fileReadCaches = new WeakMap<RelayFileClient, FileReadCache | false>();
 
-const DEFAULT_READ_CACHE_TTL_MS = 5_000;
-const DEFAULT_READ_CACHE_MAX_ENTRIES = 500;
+const DEFAULT_READ_CACHE_MAX_BYTES = 32 * 1024 * 1024;
 
 interface ReadCacheEntry {
   value: FileReadResponse;
-  expiresAt: number;
+  bytes: number;
 }
 
 class FileReadCache {
-  private readonly ttlMs: number;
-  private readonly maxEntries: number;
-  private readonly entries = new Map<string, ReadCacheEntry>();
+  private readonly maxBytes: number;
+  private totalBytes = 0;
+  private readonly objects = new Map<string, ReadCacheEntry>();
+  private readonly paths = new Map<string, string>();
   private readonly inFlight = new Map<string, Promise<FileReadResponse>>();
 
   constructor(options?: RelayFileReadCacheOptions) {
-    this.ttlMs = options?.ttlMs ?? DEFAULT_READ_CACHE_TTL_MS;
-    this.maxEntries = options?.maxEntries ?? DEFAULT_READ_CACHE_MAX_ENTRIES;
+    this.maxBytes = Math.max(0, Math.floor(options?.maxBytes ?? DEFAULT_READ_CACHE_MAX_BYTES));
   }
 
   get(key: string): FileReadResponse | undefined {
-    const entry = this.entries.get(key);
+    const hash = this.paths.get(key);
+    if (!hash) return undefined;
+    const entry = this.objects.get(hash);
     if (!entry) return undefined;
-    if (Date.now() > entry.expiresAt) {
-      this.entries.delete(key);
-      return undefined;
-    }
+    this.objects.delete(hash);
+    this.objects.set(hash, entry);
     return entry.value;
   }
 
   set(key: string, value: FileReadResponse): void {
-    if (this.entries.size >= this.maxEntries && !this.entries.has(key)) {
-      const oldest = this.entries.keys().next().value;
-      if (oldest !== undefined) {
-        this.entries.delete(oldest);
-      }
+    const hash = normalizeContentHash(value.contentHash) ?? `legacy:${key}`;
+    if (this.maxBytes === 0) return;
+    const bytes = value.encoding === "base64"
+      ? Math.floor(value.content.length * 3 / 4) - (value.content.endsWith("==") ? 2 : value.content.endsWith("=") ? 1 : 0)
+      : new TextEncoder().encode(value.content).byteLength;
+    const previous = this.objects.get(hash);
+    if (previous) {
+      this.totalBytes -= previous.bytes;
+      this.objects.delete(hash);
     }
-    this.entries.set(key, { value, expiresAt: Date.now() + this.ttlMs });
+    this.objects.set(hash, { value, bytes });
+    this.totalBytes += bytes;
+    this.paths.set(key, hash);
+    while (this.totalBytes > this.maxBytes && this.objects.size > 0) {
+      const oldest = this.objects.keys().next().value;
+      if (oldest === undefined) break;
+      const evicted = this.objects.get(oldest)!;
+      this.objects.delete(oldest);
+      this.totalBytes -= evicted.bytes;
+    }
   }
 
   evict(workspaceId: string, path: string): void {
-    this.entries.delete(`${workspaceId}:${path}`);
-    this.inFlight.delete(`${workspaceId}:${path}`);
+    for (const key of this.paths.keys()) {
+      if (key.startsWith(`${workspaceId}:`) && key.endsWith(`:${path}`)) this.paths.delete(key);
+    }
+    for (const key of this.inFlight.keys()) {
+      if (key.startsWith(`${workspaceId}:`) && key.endsWith(`:${path}`)) this.inFlight.delete(key);
+    }
   }
 
   getInFlight(key: string): Promise<FileReadResponse> | undefined {
@@ -439,6 +455,11 @@ class FileReadCache {
       }
     );
   }
+}
+
+function normalizeContentHash(hash: string | undefined): string | undefined {
+  const value = hash?.trim().replace(/^sha256:/i, "").toLowerCase();
+  return value && /^[a-f0-9]{64}$/.test(value) ? value : undefined;
 }
 
 function getFileReadCache(client: RelayFileClient): FileReadCache | false {
@@ -1758,23 +1779,25 @@ export class RelayFileClient {
     const cacheRaw = getFileReadCache(this);
     // Skip cache for fork-scoped reads (isolated state) and when cache is disabled.
     const cache: FileReadCache | undefined = cacheRaw !== false ? cacheRaw : undefined;
-    const cacheKey = (cache && !input.forkId) ? `${input.workspaceId}:${input.path}` : undefined;
+    const cacheKey = cache ? `${input.workspaceId}:${input.forkId ?? ""}:${input.path}` : undefined;
 
     if (cache && cacheKey) {
-      const hit = cache.get(cacheKey);
-      if (hit) return hit;
       const pending = cache.getInFlight(cacheKey);
       if (pending) return pending;
     }
 
     const query = buildQuery({ path: input.path, forkId: input.forkId });
-    const fetch = this.request<FileReadResponse>({
+    const cached = cache && cacheKey ? cache.get(cacheKey) : undefined;
+    if (cached && !normalizeContentHash(cached.contentHash)) return cached;
+    const fetch = this.performRequest({
       method: "GET",
       path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/file${query}`,
+      headers: cached?.contentHash ? { "If-None-Match": `"${normalizeContentHash(cached.contentHash) ?? cached.contentHash}"` } : undefined,
       correlationId: input.correlationId,
       signal: input.signal,
-      tokenOverride: (input as ReadFileInput & { token?: string }).token
-    });
+      tokenOverride: (input as ReadFileInput & { token?: string }).token,
+      allowNotModified: Boolean(cached)
+    }).then(async (response) => response.status === 304 && cached ? cached : await this.readPayload(response) as FileReadResponse);
 
     if (cache && cacheKey) {
       cache.setInFlight(cacheKey, fetch);
@@ -2845,6 +2868,7 @@ export class RelayFileClient {
     signal?: AbortSignal;
     accept?: string;
     tokenOverride?: string;
+    allowNotModified?: boolean;
   }): Promise<Response> {
     const existingCorrelationId = getHeaderValue(params.headers, "X-Correlation-Id");
     const correlationId = existingCorrelationId ?? params.correlationId ?? generateCorrelationId();
@@ -2893,7 +2917,7 @@ export class RelayFileClient {
         throw error;
       }
 
-      if (response.ok) {
+      if (response.ok || (params.allowNotModified && response.status === 304)) {
         return response;
       }
 
@@ -2948,10 +2972,8 @@ export class RelayFileClient {
     // unchanged (bounded by our own `maxDelayMs`). Only when the header is
     // absent or unparseable do we consult the body below, so a body hint never
     // silently overrides a shorter, explicit header the server already sent.
-    const retryAfterMs = this.parseRetryAfterMs(retryAfterHeader);
-    if (retryAfterMs !== null) {
-      return Math.min(this.retryOptions.maxDelayMs, retryAfterMs);
-    }
+    const retryAfterMs = this.parseRetryAfterMs(retryAfterHeader)
+      ?? this.parseRetryAfterSecondsFromBody(payload);
     // With no usable header, a 429 body can still advertise an explicit
     // backpressure delay as `details.retryAfterSeconds` (e.g. `workspace_busy`
     // when the workspace durable object is overloaded, or `queue_full`). Honor
@@ -2959,15 +2981,10 @@ export class RelayFileClient {
     // to `maxDelayMs`, which governs our own exponential backoff. Truncating it
     // (maxDelayMs defaults to 2s vs. a typical 5s advertised delay) retries
     // into the still-busy resource and exhausts the retry budget.
-    const advertisedMs = this.parseRetryAfterSecondsFromBody(payload);
-    if (advertisedMs !== null) {
-      return Math.max(0, Math.min(RETRY_AFTER_MAX_MS, advertisedMs));
-    }
     const backoff = this.retryOptions.baseDelayMs * Math.pow(2, Math.max(0, retryAttempt - 1));
     const capped = Math.min(this.retryOptions.maxDelayMs, backoff);
-    const jitter = this.retryOptions.jitterRatio;
-    const factor = 1 + (Math.random() * 2 - 1) * jitter;
-    return Math.max(0, Math.round(capped * factor));
+    const jittered = Math.round(Math.random() * capped);
+    return Math.max(retryAfterMs ?? 0, jittered);
   }
 
   /**

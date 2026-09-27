@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Bootstrap point reads are capped at four concurrent requests and reuse verified objects from `~/.relayfile/cache/objects/<sha256>`. HTTP and WebSocket overload retries use full jitter without shortening `Retry-After`.
+
 ### Fixed
 
 - Mount event pagination now fails closed with an actionable malformed-pagination error when the server repeats or cycles a non-empty `nextCursor`, instead of spinning until the reconcile timeout.
