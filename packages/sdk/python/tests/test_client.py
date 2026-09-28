@@ -1124,3 +1124,65 @@ class TestIntegrationSetupAsync:
                 await client.set_integration_metadata(
                     "ws_acme", "jira", {"cloudId": "cloud-1"}
                 )
+
+
+def _cache_consistent(cache) -> None:
+    for key, (_meta, object_key, _etag) in cache.paths.items():
+        assert object_key in cache.objects
+        assert key in cache.objects[object_key][2]
+    for object_key, (_content, _size, refs) in cache.objects.items():
+        for key in refs:
+            assert cache.paths[key][1] == object_key
+    assert cache.total_bytes == sum(item[1] for item in cache.objects.values())
+
+
+def test_read_cache_put_is_atomic_against_interleaved_put_for_same_path() -> None:
+    from relayfile.client import _FileReadCache
+
+    cache = _FileReadCache(RelayFileReadCacheOptions(max_bytes=1024))
+    hash_a, hash_b = "a" * 64, "b" * 64
+    value_a = {"path": "/f", "revision": "r1", "contentHash": hash_a, "content": "AAAA"}
+    value_b = {"path": "/f", "revision": "r2", "contentHash": hash_b, "content": "BBBB"}
+
+    prepare = cache._prepare
+    interleaved = False
+
+    def racing_prepare(value, etag):
+        nonlocal interleaved
+        if not interleaved:
+            interleaved = True
+            # A concurrent reader stores a different body for the same path
+            # while this put is validating outside the lock.
+            cache.put("ws:/f", value_b, '"b"')
+        return prepare(value, etag)
+
+    cache._prepare = racing_prepare
+    cache.put("ws:/f", value_a, '"a"')
+    cache._prepare = prepare
+
+    _cache_consistent(cache)
+    hit = cache.get("ws:/f")
+    assert hit is not None and hit[0]["revision"] == "r1"
+    assert list(cache.objects) == [f"{hash_a}:utf-8"]
+
+    # Evicting any other object must never drop the live path entry.
+    cache.put("ws:/other", {**value_b, "path": "/other"}, '"o"')
+    cache._delete_object(f"{hash_b}:utf-8")
+    _cache_consistent(cache)
+    assert cache.get("ws:/f") is not None
+
+
+def test_read_cache_eviction_ignores_stale_path_references() -> None:
+    from relayfile.client import _FileReadCache
+
+    cache = _FileReadCache(RelayFileReadCacheOptions(max_bytes=1024))
+    live = {"path": "/f", "revision": "r2", "contentHash": "b" * 64, "content": "BBBB"}
+    cache.put("ws:/f", live, '"b"')
+    # Plant a stale object that still (wrongly) references the live path.
+    cache.objects[f"{'a' * 64}:utf-8"] = ("AAAA", 4, {"ws:/f"})
+    cache.total_bytes += 4
+
+    cache._delete_object(f"{'a' * 64}:utf-8")
+
+    hit = cache.get("ws:/f")
+    assert hit is not None and hit[0]["revision"] == "r2"

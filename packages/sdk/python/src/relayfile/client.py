@@ -80,15 +80,35 @@ class _FileReadCache:
         # The server ETag is opaque: it is stored exactly as returned and echoed
         # verbatim in If-None-Match, never derived from contentHash. Responses
         # without an ETag cannot be revalidated and are not cached.
+        entry = self._prepare(value, etag)
+        # Invalidate and insert under one lock hold: releasing it in between
+        # lets a concurrent put for the same path leave a stale object
+        # reference whose later eviction would drop the live path entry.
         with self.lock:
             self._delete_path(key)
-        if not etag:
-            return
+            if entry is None:
+                return
+            object_key, content, size, meta = entry
+            item = self.objects.pop(object_key, None)
+            if item is None:
+                item = (content, size, set())
+                self.total_bytes += size
+            item[2].add(key)
+            self.objects[object_key] = item
+            self.paths[key] = (meta, object_key, etag or "")
+            while self.total_bytes > self.max_bytes and self.objects:
+                oldest = next(iter(self.objects))
+                self._delete_object(oldest)
+
+    def _prepare(
+        self, value: dict[str, Any], etag: str | None
+    ) -> tuple[str, str, int, dict[str, Any]] | None:
+        """Validate and size a response outside the lock; None = don't cache."""
+        if not etag or self.max_bytes == 0:
+            return None
         digest = str(value.get("contentHash", "")).removeprefix("sha256:").lower()
         if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
-            return
-        if self.max_bytes == 0:
-            return
+            return None
         content = str(value.get("content", ""))
         encoding = str(value.get("encoding") or "utf-8")
         if encoding == "base64":
@@ -96,22 +116,11 @@ class _FileReadCache:
             try:
                 size = len(base64.b64decode(content, validate=True))
             except ValueError:
-                return
+                return None
         else:
             size = len(content.encode())
-        object_key = f"{digest}:{encoding}"
         meta = {k: v for k, v in value.items() if k != "content"}
-        with self.lock:
-            item = self.objects.pop(object_key, None)
-            if item is None:
-                item = (content, size, set())
-                self.total_bytes += size
-            item[2].add(key)
-            self.objects[object_key] = item
-            self.paths[key] = (meta, object_key, etag)
-            while self.total_bytes > self.max_bytes and self.objects:
-                oldest = next(iter(self.objects))
-                self._delete_object(oldest)
+        return f"{digest}:{encoding}", content, size, meta
 
     def _delete_path(self, key: str) -> None:
         entry = self.paths.pop(key, None)
@@ -130,7 +139,10 @@ class _FileReadCache:
             return
         self.total_bytes -= item[1]
         for key in item[2]:
-            self.paths.pop(key, None)
+            entry = self.paths.get(key)
+            # Only drop paths that still point at this object.
+            if entry is not None and entry[1] == object_key:
+                del self.paths[key]
 
 
 # ---------------------------------------------------------------------------
