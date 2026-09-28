@@ -2,7 +2,7 @@
 
 Python SDK for the RelayFile virtual filesystem API.
 
-File reads use a 32 MiB content-addressed cache by default and revalidate cached hashes with `If-None-Match`. Configure it with `RelayFileReadCacheOptions(max_bytes=...)`, or pass `read_cache=False` to either client to disable it. Retry delays use full jitter and never retry before a valid server `Retry-After` value.
+File reads use a 32 MiB content-addressed cache by default and revalidate cached entries by echoing the server's opaque `ETag` verbatim in `If-None-Match`. Configure it with `RelayFileReadCacheOptions(max_bytes=...)`, or pass `read_cache=False` to either client to disable it. Retry delays use full jitter and never retry before a valid server `Retry-After` value.
 
 ## Install
 

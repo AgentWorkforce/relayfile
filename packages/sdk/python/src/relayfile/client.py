@@ -58,26 +58,32 @@ class _FileReadCache:
         self.total_bytes = 0
         # object key -> (content, decoded size, referencing path keys)
         self.objects: OrderedDict[str, tuple[str, int, set[str]]] = OrderedDict()
-        # path key -> (metadata without content, object key)
-        self.paths: dict[str, tuple[dict[str, Any], str]] = {}
+        # path key -> (metadata without content, object key, server ETag)
+        self.paths: dict[str, tuple[dict[str, Any], str, str]] = {}
         self.lock = threading.RLock()
 
-    def get(self, key: str) -> dict[str, Any] | None:
+    def get(self, key: str) -> tuple[dict[str, Any], str] | None:
+        """Return (cached response, exact server ETag) for a path key."""
         with self.lock:
             entry = self.paths.get(key)
             if entry is None:
                 return None
-            meta, object_key = entry
+            meta, object_key, etag = entry
             item = self.objects.get(object_key)
             if item is None:
                 self.paths.pop(key, None)
                 return None
             self.objects.move_to_end(object_key)
-            return {**meta, "content": item[0]}
+            return {**meta, "content": item[0]}, etag
 
-    def put(self, key: str, value: dict[str, Any]) -> None:
+    def put(self, key: str, value: dict[str, Any], etag: str | None) -> None:
+        # The server ETag is opaque: it is stored exactly as returned and echoed
+        # verbatim in If-None-Match, never derived from contentHash. Responses
+        # without an ETag cannot be revalidated and are not cached.
         with self.lock:
             self._delete_path(key)
+        if not etag:
+            return
         digest = str(value.get("contentHash", "")).removeprefix("sha256:").lower()
         if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
             return
@@ -102,7 +108,7 @@ class _FileReadCache:
                 self.total_bytes += size
             item[2].add(key)
             self.objects[object_key] = item
-            self.paths[key] = (meta, object_key)
+            self.paths[key] = (meta, object_key, etag)
             while self.total_bytes > self.max_bytes and self.objects:
                 oldest = next(iter(self.objects))
                 self._delete_object(oldest)
@@ -506,8 +512,9 @@ class RelayFileClient:
     ) -> dict[str, Any]:
         query = _build_query({"path": path})
         key = f"{workspace_id}:{path}"
-        cached = self._read_cache.get(key) if self._read_cache else None
-        headers = {"If-None-Match": f'"{str(cached["contentHash"]).removeprefix("sha256:")}"'} if cached and cached.get("contentHash") else None
+        hit = self._read_cache.get(key) if self._read_cache else None
+        cached, etag = hit if hit else (None, None)
+        headers = {"If-None-Match": etag} if etag else None
         response = self._request_response(
             "GET",
             f"/v1/workspaces/{_enc(workspace_id)}/fs/file{query}",
@@ -515,10 +522,12 @@ class RelayFileClient:
             correlation_id=correlation_id,
         )
         if response.status_code == 304 and cached is not None:
+            if self._read_cache:
+                self._read_cache.put(key, cached, response.headers.get("ETag") or etag)
             return cached
         value = _read_payload(response)
         if self._read_cache and isinstance(value, dict):
-            self._read_cache.put(key, value)
+            self._read_cache.put(key, value, response.headers.get("ETag"))
         return value
 
     def query_files(
@@ -1218,8 +1227,9 @@ class AsyncRelayFileClient:
     ) -> dict[str, Any]:
         query = _build_query({"path": path})
         key = f"{workspace_id}:{path}"
-        cached = self._read_cache.get(key) if self._read_cache else None
-        headers = {"If-None-Match": f'"{str(cached["contentHash"]).removeprefix("sha256:")}"'} if cached and cached.get("contentHash") else None
+        hit = self._read_cache.get(key) if self._read_cache else None
+        cached, etag = hit if hit else (None, None)
+        headers = {"If-None-Match": etag} if etag else None
         response = await self._request_response(
             "GET",
             f"/v1/workspaces/{_enc(workspace_id)}/fs/file{query}",
@@ -1227,10 +1237,12 @@ class AsyncRelayFileClient:
             correlation_id=correlation_id,
         )
         if response.status_code == 304 and cached is not None:
+            if self._read_cache:
+                self._read_cache.put(key, cached, response.headers.get("ETag") or etag)
             return cached
         value = _read_payload(response)
         if self._read_cache and isinstance(value, dict):
-            self._read_cache.put(key, value)
+            self._read_cache.put(key, value, response.headers.get("ETag"))
         return value
 
     async def query_files(

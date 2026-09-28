@@ -87,11 +87,14 @@ class TestRelayFileClient:
         assert res["content"] == '{"id":1}'
 
     @respx.mock
-    def test_read_file_revalidates_with_content_hash_and_handles_304(self) -> None:
+    def test_read_file_revalidates_with_opaque_etag_and_handles_304(self) -> None:
         digest = "a" * 64
+        # The server ETag is opaque (not the bare content hash); echo it verbatim.
+        etag = f'"{digest}:rev_1"'
         route = respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/file").mock(
             side_effect=[
-                httpx.Response(200, json={"path": "/f", "revision": "rev_1", "contentType": "text/plain", "content": "hello", "contentHash": digest}),
+                httpx.Response(200, json={"path": "/f", "revision": "rev_1", "contentType": "text/plain", "content": "hello", "contentHash": digest}, headers={"ETag": etag}),
+                httpx.Response(304, headers={"ETag": etag}),
                 httpx.Response(304),
             ]
         )
@@ -99,20 +102,35 @@ class TestRelayFileClient:
 
         first = client.read_file("ws_acme", "/f")
         second = client.read_file("ws_acme", "/f")
+        third = client.read_file("ws_acme", "/f")
 
-        assert second == first
-        assert route.calls[1].request.headers["If-None-Match"] == f'"{digest}"'
+        assert second == first == third
+        assert route.calls[1].request.headers["If-None-Match"] == etag
+        assert route.calls[2].request.headers["If-None-Match"] == etag
+
+    @respx.mock
+    def test_read_file_without_etag_is_not_revalidated_from_cache(self) -> None:
+        payload = {"path": "/f", "revision": "rev_1", "contentType": "text/plain", "content": "hi", "contentHash": "d" * 64}
+        route = respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/file").mock(
+            side_effect=[httpx.Response(200, json=payload), httpx.Response(200, json=payload)]
+        )
+        client = RelayFileClient(BASE, "tok")
+
+        client.read_file("ws_acme", "/f")
+        client.read_file("ws_acme", "/f")
+
+        assert "If-None-Match" not in route.calls[1].request.headers
 
     @respx.mock
     def test_read_file_cache_keeps_per_path_metadata_for_identical_bytes(self) -> None:
         digest = "b" * 64
         a = {"path": "/a", "revision": "rev_a", "contentType": "text/plain", "content": "hello", "contentHash": digest}
         b = {"path": "/b", "revision": "rev_b", "contentType": "text/markdown", "content": "hello", "contentHash": digest}
-        respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/file", params={"path": "/a"}).mock(
-            side_effect=[httpx.Response(200, json=a), httpx.Response(304)]
+        a_route = respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/file", params={"path": "/a"}).mock(
+            side_effect=[httpx.Response(200, json=a, headers={"ETag": '"etag-a"'}), httpx.Response(304)]
         )
-        respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/file", params={"path": "/b"}).mock(
-            side_effect=[httpx.Response(200, json=b), httpx.Response(304)]
+        b_route = respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/file", params={"path": "/b"}).mock(
+            side_effect=[httpx.Response(200, json=b, headers={"ETag": '"etag-b"'}), httpx.Response(304)]
         )
         client = RelayFileClient(BASE, "tok")
 
@@ -121,13 +139,15 @@ class TestRelayFileClient:
 
         assert client.read_file("ws_acme", "/a") == a
         assert client.read_file("ws_acme", "/b") == b
+        assert a_route.calls[1].request.headers["If-None-Match"] == '"etag-a"'
+        assert b_route.calls[1].request.headers["If-None-Match"] == '"etag-b"'
 
     @respx.mock
     def test_read_file_never_serves_hashless_responses_from_cache(self) -> None:
         route = respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/file").mock(
             side_effect=[
-                httpx.Response(200, json={"path": "/f", "revision": "rev_1", "contentType": "text/plain", "content": "old"}),
-                httpx.Response(200, json={"path": "/f", "revision": "rev_2", "contentType": "text/plain", "content": "new"}),
+                httpx.Response(200, json={"path": "/f", "revision": "rev_1", "contentType": "text/plain", "content": "old"}, headers={"ETag": '"rev_1"'}),
+                httpx.Response(200, json={"path": "/f", "revision": "rev_2", "contentType": "text/plain", "content": "new"}, headers={"ETag": '"rev_2"'}),
             ]
         )
         client = RelayFileClient(BASE, "tok")

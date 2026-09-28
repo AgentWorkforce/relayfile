@@ -389,7 +389,15 @@ interface ReadCacheObject {
 interface ReadCachePathEntry {
   meta: Omit<FileReadResponse, "content">;
   objectKey: string;
+  /** Exact ETag the server returned for this path; opaque, echoed verbatim. */
+  etag: string;
 }
+
+// The ETag a read response arrived with. The server's ETag is opaque (it may
+// encode more than the content hash, e.g. the revision), so the client never
+// derives it from `contentHash`; it stores the header it was given and sends
+// it back unchanged in If-None-Match.
+const readResponseEtags = new WeakMap<FileReadResponse, string>();
 
 class FileReadCache {
   private readonly maxBytes: number;
@@ -402,7 +410,7 @@ class FileReadCache {
     this.maxBytes = Math.max(0, Math.floor(options?.maxBytes ?? DEFAULT_READ_CACHE_MAX_BYTES));
   }
 
-  get(key: string): FileReadResponse | undefined {
+  get(key: string): { value: FileReadResponse; etag: string } | undefined {
     const entry = this.paths.get(key);
     if (!entry) return undefined;
     const object = this.objects.get(entry.objectKey);
@@ -412,16 +420,17 @@ class FileReadCache {
     }
     this.objects.delete(entry.objectKey);
     this.objects.set(entry.objectKey, object);
-    return { ...entry.meta, content: object.content };
+    return { value: { ...entry.meta, content: object.content }, etag: entry.etag };
   }
 
-  set(key: string, value: FileReadResponse): void {
+  set(key: string, value: FileReadResponse, etag: string | undefined): void {
     this.deletePath(key);
-    // Only responses carrying a verifiable content hash are retained: they are
-    // revalidated with If-None-Match on every read. Hashless (legacy) responses
-    // cannot be revalidated, so they are never served from the cache.
+    // Only responses carrying both a server ETag (to revalidate with
+    // If-None-Match on every read) and a content hash (to key the byte store)
+    // are retained. Anything else cannot be revalidated, so it is never served
+    // from the cache.
     const hash = normalizeContentHash(value.contentHash);
-    if (!hash || this.maxBytes === 0) return;
+    if (!hash || !etag || this.maxBytes === 0) return;
     const objectKey = `${hash}:${value.encoding ?? "utf-8"}`;
     let object = this.objects.get(objectKey);
     if (object) {
@@ -436,7 +445,7 @@ class FileReadCache {
     object.refs.add(key);
     this.objects.set(objectKey, object);
     const { content: _content, ...meta } = value;
-    this.paths.set(key, { meta, objectKey });
+    this.paths.set(key, { meta, objectKey, etag });
     while (this.totalBytes > this.maxBytes && this.objects.size > 0) {
       const oldest = this.objects.keys().next().value;
       if (oldest === undefined) break;
@@ -481,7 +490,7 @@ class FileReadCache {
       (result) => {
         if (this.inFlight.get(key) === promise) {
           this.inFlight.delete(key);
-          this.set(key, result);
+          this.set(key, result, readResponseEtags.get(result));
         }
       },
       () => {
@@ -1827,12 +1836,21 @@ export class RelayFileClient {
     const fetch = this.performRequest({
       method: "GET",
       path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/file${query}`,
-      headers: cached?.contentHash ? { "If-None-Match": `"${normalizeContentHash(cached.contentHash)}"` } : undefined,
+      headers: cached ? { "If-None-Match": cached.etag } : undefined,
       correlationId: input.correlationId,
       signal: input.signal,
       tokenOverride: (input as ReadFileInput & { token?: string }).token,
       allowNotModified: Boolean(cached)
-    }).then(async (response) => response.status === 304 && cached ? cached : await this.readPayload(response) as FileReadResponse);
+    }).then(async (response) => {
+      const etag = response.headers.get("ETag") ?? undefined;
+      if (response.status === 304 && cached) {
+        readResponseEtags.set(cached.value, etag ?? cached.etag);
+        return cached.value;
+      }
+      const value = await this.readPayload(response) as FileReadResponse;
+      if (etag && value && typeof value === "object") readResponseEtags.set(value, etag);
+      return value;
+    });
 
     if (cache && cacheKey) {
       cache.setInFlight(cacheKey, fetch);

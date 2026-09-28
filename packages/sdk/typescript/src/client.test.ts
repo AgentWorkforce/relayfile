@@ -1467,7 +1467,7 @@ describe("RelayFileClient — existing methods", () => {
       expect(res.revision).toBe("rev_3");
     });
 
-    it("revalidates cached content by hash and serves a 304 from the byte cache", async () => {
+    it("revalidates with the server's opaque ETag verbatim and serves a 304 from the byte cache", async () => {
       const contentHash = "a".repeat(64);
       const payload: FileReadResponse = {
         path: "/cached.txt",
@@ -1476,18 +1476,38 @@ describe("RelayFileClient — existing methods", () => {
         content: "cached",
         contentHash,
       };
+      // The ETag is opaque: it is not the bare content hash, and the client
+      // must echo it exactly rather than derive one from `contentHash`.
+      const etag = `"${contentHash}:rev_1"`;
       const f = vi.fn()
-        .mockResolvedValueOnce(jsonResponse(payload))
-        .mockResolvedValueOnce(jsonResponse(undefined, 304));
+        .mockResolvedValueOnce(jsonResponse(payload, 200, { ETag: etag }))
+        .mockResolvedValueOnce(jsonResponse(undefined, 304, { ETag: etag }))
+        .mockResolvedValueOnce(jsonResponse(undefined, 304, { ETag: etag }));
       const client = makeClient(f);
 
       await client.readFile("ws_acme", payload.path);
       const cached = await client.readFile("ws_acme", payload.path);
+      await client.readFile("ws_acme", payload.path);
 
       expect(cached).toEqual(payload);
-      expect((f.mock.calls[1]![1] as RequestInit).headers).toMatchObject({
-        "If-None-Match": `"${contentHash}"`,
-      });
+      for (const call of [1, 2]) {
+        expect((f.mock.calls[call]![1] as RequestInit).headers).toMatchObject({ "If-None-Match": etag });
+      }
+    });
+
+    it("sends no If-None-Match when the server returned no ETag", async () => {
+      const payload: FileReadResponse = {
+        path: "/no-etag.txt", revision: "rev_1", contentType: "text/plain", content: "x", contentHash: "d".repeat(64),
+      };
+      const f = vi.fn()
+        .mockResolvedValueOnce(jsonResponse(payload))
+        .mockResolvedValueOnce(jsonResponse(payload));
+      const client = makeClient(f);
+
+      await client.readFile("ws_acme", payload.path);
+      await client.readFile("ws_acme", payload.path);
+
+      expect((f.mock.calls[1]![1] as RequestInit).headers).not.toHaveProperty("If-None-Match");
     });
 
     it("keeps per-path metadata separate when two paths share identical bytes", async () => {
@@ -1495,8 +1515,8 @@ describe("RelayFileClient — existing methods", () => {
       const a: FileReadResponse = { path: "/a.txt", revision: "rev_a", contentType: "text/plain", content: "hello", contentHash };
       const b: FileReadResponse = { path: "/b.txt", revision: "rev_b", contentType: "text/markdown", content: "hello", contentHash };
       const f = vi.fn()
-        .mockResolvedValueOnce(jsonResponse(a))
-        .mockResolvedValueOnce(jsonResponse(b))
+        .mockResolvedValueOnce(jsonResponse(a, 200, { ETag: '"etag-a"' }))
+        .mockResolvedValueOnce(jsonResponse(b, 200, { ETag: '"etag-b"' }))
         .mockResolvedValueOnce(jsonResponse(undefined, 304))
         .mockResolvedValueOnce(jsonResponse(undefined, 304));
       const client = makeClient(f);
@@ -1508,14 +1528,16 @@ describe("RelayFileClient — existing methods", () => {
 
       expect(againA).toEqual(a);
       expect(againB).toEqual(b);
+      expect((f.mock.calls[2]![1] as RequestInit).headers).toMatchObject({ "If-None-Match": '"etag-a"' });
+      expect((f.mock.calls[3]![1] as RequestInit).headers).toMatchObject({ "If-None-Match": '"etag-b"' });
     });
 
     it("never serves hashless responses from the cache", async () => {
       const first: FileReadResponse = { path: "/legacy.txt", revision: "rev_1", contentType: "text/plain", content: "old" };
       const second: FileReadResponse = { path: "/legacy.txt", revision: "rev_2", contentType: "text/plain", content: "new" };
       const f = vi.fn()
-        .mockResolvedValueOnce(jsonResponse(first))
-        .mockResolvedValueOnce(jsonResponse(second));
+        .mockResolvedValueOnce(jsonResponse(first, 200, { ETag: '"rev_1"' }))
+        .mockResolvedValueOnce(jsonResponse(second, 200, { ETag: '"rev_2"' }));
       const client = makeClient(f);
 
       await client.readFile("ws_acme", "/legacy.txt");
@@ -1531,7 +1553,10 @@ describe("RelayFileClient — existing methods", () => {
         path: `/${name}.txt`, revision: "rev_1", contentType: "text/plain",
         content: name.repeat(4), contentHash: name.repeat(64),
       } satisfies FileReadResponse));
-      const f = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse(files.shift())));
+      const f = vi.fn().mockImplementation(() => {
+        const file = files.shift()!;
+        return Promise.resolve(jsonResponse(file, 200, { ETag: `"${file.contentHash}:${file.revision}"` }));
+      });
       const client = new RelayFileClient({ baseUrl: "https://relay.test", token: "tok", fetchImpl: f, readCache: { maxBytes: 4 } });
 
       await client.readFile("ws", "/a.txt");
@@ -1637,7 +1662,7 @@ describe("RelayFileClient — existing methods", () => {
       const f = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
         if (init.method === "GET") {
           unconditionalReads.push(!isConditional(init));
-          return Promise.resolve(isConditional(init) ? jsonResponse(undefined, 304) : jsonResponse(staleFile));
+          return Promise.resolve(isConditional(init) ? jsonResponse(undefined, 304) : jsonResponse(staleFile, 200, { ETag: '"stale-etag"' }));
         }
         return Promise.resolve(jsonResponse(conflict, 409));
       });
@@ -1739,7 +1764,7 @@ describe("RelayFileClient — existing methods", () => {
       const f = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
         if (init.method === "GET") {
           unconditionalReads.push(!isConditional(init));
-          return Promise.resolve(isConditional(init) ? jsonResponse(undefined, 304) : jsonResponse(staleFile));
+          return Promise.resolve(isConditional(init) ? jsonResponse(undefined, 304) : jsonResponse(staleFile, 200, { ETag: '"stale-etag"' }));
         }
         return Promise.resolve(jsonResponse(conflict, 409));
       });
