@@ -1466,6 +1466,105 @@ describe("RelayFileClient — existing methods", () => {
       expect(res.content).toBe('{"id":48291}');
       expect(res.revision).toBe("rev_3");
     });
+
+    it("revalidates with the server's opaque ETag verbatim and serves a 304 from the byte cache", async () => {
+      const contentHash = "a".repeat(64);
+      const payload: FileReadResponse = {
+        path: "/cached.txt",
+        revision: "rev_1",
+        contentType: "text/plain",
+        content: "cached",
+        contentHash,
+      };
+      // The ETag is opaque: it is not the bare content hash, and the client
+      // must echo it exactly rather than derive one from `contentHash`.
+      const etag = `"${contentHash}:rev_1"`;
+      const f = vi.fn()
+        .mockResolvedValueOnce(jsonResponse(payload, 200, { ETag: etag }))
+        .mockResolvedValueOnce(jsonResponse(undefined, 304, { ETag: etag }))
+        .mockResolvedValueOnce(jsonResponse(undefined, 304, { ETag: etag }));
+      const client = makeClient(f);
+
+      await client.readFile("ws_acme", payload.path);
+      const cached = await client.readFile("ws_acme", payload.path);
+      await client.readFile("ws_acme", payload.path);
+
+      expect(cached).toEqual(payload);
+      for (const call of [1, 2]) {
+        expect((f.mock.calls[call]![1] as RequestInit).headers).toMatchObject({ "If-None-Match": etag });
+      }
+    });
+
+    it("sends no If-None-Match when the server returned no ETag", async () => {
+      const payload: FileReadResponse = {
+        path: "/no-etag.txt", revision: "rev_1", contentType: "text/plain", content: "x", contentHash: "d".repeat(64),
+      };
+      const f = vi.fn()
+        .mockResolvedValueOnce(jsonResponse(payload))
+        .mockResolvedValueOnce(jsonResponse(payload));
+      const client = makeClient(f);
+
+      await client.readFile("ws_acme", payload.path);
+      await client.readFile("ws_acme", payload.path);
+
+      expect((f.mock.calls[1]![1] as RequestInit).headers).not.toHaveProperty("If-None-Match");
+    });
+
+    it("keeps per-path metadata separate when two paths share identical bytes", async () => {
+      const contentHash = "b".repeat(64);
+      const a: FileReadResponse = { path: "/a.txt", revision: "rev_a", contentType: "text/plain", content: "hello", contentHash };
+      const b: FileReadResponse = { path: "/b.txt", revision: "rev_b", contentType: "text/markdown", content: "hello", contentHash };
+      const f = vi.fn()
+        .mockResolvedValueOnce(jsonResponse(a, 200, { ETag: '"etag-a"' }))
+        .mockResolvedValueOnce(jsonResponse(b, 200, { ETag: '"etag-b"' }))
+        .mockResolvedValueOnce(jsonResponse(undefined, 304))
+        .mockResolvedValueOnce(jsonResponse(undefined, 304));
+      const client = makeClient(f);
+
+      await client.readFile("ws_acme", "/a.txt");
+      await client.readFile("ws_acme", "/b.txt");
+      const againA = await client.readFile("ws_acme", "/a.txt");
+      const againB = await client.readFile("ws_acme", "/b.txt");
+
+      expect(againA).toEqual(a);
+      expect(againB).toEqual(b);
+      expect((f.mock.calls[2]![1] as RequestInit).headers).toMatchObject({ "If-None-Match": '"etag-a"' });
+      expect((f.mock.calls[3]![1] as RequestInit).headers).toMatchObject({ "If-None-Match": '"etag-b"' });
+    });
+
+    it("never serves hashless responses from the cache", async () => {
+      const first: FileReadResponse = { path: "/legacy.txt", revision: "rev_1", contentType: "text/plain", content: "old" };
+      const second: FileReadResponse = { path: "/legacy.txt", revision: "rev_2", contentType: "text/plain", content: "new" };
+      const f = vi.fn()
+        .mockResolvedValueOnce(jsonResponse(first, 200, { ETag: '"rev_1"' }))
+        .mockResolvedValueOnce(jsonResponse(second, 200, { ETag: '"rev_2"' }));
+      const client = makeClient(f);
+
+      await client.readFile("ws_acme", "/legacy.txt");
+      const again = await client.readFile("ws_acme", "/legacy.txt");
+
+      expect(f).toHaveBeenCalledTimes(2);
+      expect((f.mock.calls[1]![1] as RequestInit).headers).not.toHaveProperty("If-None-Match");
+      expect(again).toEqual(second);
+    });
+
+    it("evicts least-recently-used content when the decoded byte cap is exceeded", async () => {
+      const files = ["a", "b", "a"].map((name) => ({
+        path: `/${name}.txt`, revision: "rev_1", contentType: "text/plain",
+        content: name.repeat(4), contentHash: name.repeat(64),
+      } satisfies FileReadResponse));
+      const f = vi.fn().mockImplementation(() => {
+        const file = files.shift()!;
+        return Promise.resolve(jsonResponse(file, 200, { ETag: `"${file.contentHash}:${file.revision}"` }));
+      });
+      const client = new RelayFileClient({ baseUrl: "https://relay.test", token: "tok", fetchImpl: f, readCache: { maxBytes: 4 } });
+
+      await client.readFile("ws", "/a.txt");
+      await client.readFile("ws", "/b.txt");
+      await client.readFile("ws", "/a.txt");
+
+      expect((f.mock.calls[2]![1] as RequestInit).headers).not.toHaveProperty("If-None-Match");
+    });
   });
 
   // ---- writeFile ----
@@ -1545,7 +1644,12 @@ describe("RelayFileClient — existing methods", () => {
       revision: "rev_loser",
       contentType: "application/json",
       content: '{"pulls":["loser"]}',
+      contentHash: "c".repeat(64),
     };
+    // Cached reads are revalidated with If-None-Match; an unconditional GET
+    // after a failed write proves the cache entry was invalidated.
+    const isConditional = (init: RequestInit) =>
+      Boolean((init.headers as Record<string, string> | undefined)?.["If-None-Match"]);
     const conflict = {
       code: "revision_conflict",
       message: "Conflict",
@@ -1554,11 +1658,11 @@ describe("RelayFileClient — existing methods", () => {
     };
 
     it("makes a real read request after a conflicting write instead of serving the populated cache", async () => {
-      let readRequests = 0;
+      const unconditionalReads: boolean[] = [];
       const f = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
         if (init.method === "GET") {
-          readRequests += 1;
-          return Promise.resolve(jsonResponse(staleFile));
+          unconditionalReads.push(!isConditional(init));
+          return Promise.resolve(isConditional(init) ? jsonResponse(undefined, 304) : jsonResponse(staleFile, 200, { ETag: '"stale-etag"' }));
         }
         return Promise.resolve(jsonResponse(conflict, 409));
       });
@@ -1566,7 +1670,7 @@ describe("RelayFileClient — existing methods", () => {
 
       await client.readFile(workspaceId, path);
       await client.readFile(workspaceId, path);
-      expect(readRequests).toBe(1);
+      expect(unconditionalReads).toEqual([true, false]);
 
       await expect(client.writeFile({
         workspaceId,
@@ -1577,7 +1681,7 @@ describe("RelayFileClient — existing methods", () => {
       })).rejects.toThrow(RevisionConflictError);
 
       await client.readFile(workspaceId, path);
-      expect(readRequests).toBe(2);
+      expect(unconditionalReads).toEqual([true, false, true]);
     });
 
     it("observes the winning revision on an immediate read after a conflicting write", async () => {
@@ -1656,11 +1760,11 @@ describe("RelayFileClient — existing methods", () => {
         }),
       },
     ])("$name invalidates a populated cache when the request fails", async ({ attempt }) => {
-      let readRequests = 0;
+      const unconditionalReads: boolean[] = [];
       const f = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
         if (init.method === "GET") {
-          readRequests += 1;
-          return Promise.resolve(jsonResponse(staleFile));
+          unconditionalReads.push(!isConditional(init));
+          return Promise.resolve(isConditional(init) ? jsonResponse(undefined, 304) : jsonResponse(staleFile, 200, { ETag: '"stale-etag"' }));
         }
         return Promise.resolve(jsonResponse(conflict, 409));
       });
@@ -1668,12 +1772,12 @@ describe("RelayFileClient — existing methods", () => {
 
       await client.readFile(workspaceId, path);
       await client.readFile(workspaceId, path);
-      expect(readRequests).toBe(1);
+      expect(unconditionalReads).toEqual([true, false]);
 
       await expect(attempt(client)).rejects.toThrow();
       await client.readFile(workspaceId, path);
 
-      expect(readRequests).toBe(2);
+      expect(unconditionalReads).toEqual([true, false, true]);
     });
   });
 

@@ -3,10 +3,13 @@ package mountfuse
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,6 +32,15 @@ type wsEvent struct {
 	Type string `json:"type"`
 	Path string `json:"path"`
 }
+
+type wsDialError struct {
+	err        error
+	status     int
+	retryAfter time.Duration
+}
+
+func (e *wsDialError) Error() string { return e.err.Error() }
+func (e *wsDialError) Unwrap() error { return e.err }
 
 // WSInvalidator connects to the relayfile WebSocket event stream and
 // invalidates cached entries in fsState when files change remotely.
@@ -98,12 +110,17 @@ func (w *WSInvalidator) Run(ctx context.Context) {
 			return
 		}
 
-		w.logger.Printf("mountfuse: ws disconnected: %v; reconnecting in %v", err, backoff)
+		delay := time.Duration(rand.Float64() * float64(backoff))
+		var dialErr *wsDialError
+		if errors.As(err, &dialErr) && dialErr.retryAfter > delay {
+			delay = dialErr.retryAfter
+		}
+		w.logger.Printf("mountfuse: ws disconnected: %v; reconnecting in %v", err, delay)
 
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(backoff):
+		case <-time.After(delay):
 		}
 
 		backoff *= 2
@@ -119,6 +136,10 @@ func isAuthError(err error) bool {
 	if err == nil {
 		return false
 	}
+	var dialErr *wsDialError
+	if errors.As(err, &dialErr) {
+		return dialErr.status == http.StatusUnauthorized || dialErr.status == http.StatusForbidden
+	}
 	msg := err.Error()
 	return strings.Contains(msg, "status = 401") ||
 		strings.Contains(msg, "status = 403") ||
@@ -132,12 +153,15 @@ func (w *WSInvalidator) listenOnce(ctx context.Context) error {
 		return fmt.Errorf("building ws url: %w", err)
 	}
 
-	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
+	conn, response, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
 		HTTPHeader: http.Header{
 			"Authorization": []string{"Bearer " + w.currentToken()},
 		},
 	})
 	if err != nil {
+		if response != nil {
+			return &wsDialError{err: fmt.Errorf("ws dial: %w", err), status: response.StatusCode, retryAfter: parseWSRetryAfter(response.Header.Get("Retry-After"))}
+		}
 		return fmt.Errorf("ws dial: %w", err)
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
@@ -159,6 +183,19 @@ func (w *WSInvalidator) listenOnce(ctx context.Context) error {
 
 		w.handleEvent(event)
 	}
+}
+
+func parseWSRetryAfter(value string) time.Duration {
+	value = strings.TrimSpace(value)
+	if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if timestamp, err := http.ParseTime(value); err == nil {
+		if delay := time.Until(timestamp); delay > 0 {
+			return delay
+		}
+	}
+	return 0
 }
 
 func (w *WSInvalidator) handleEvent(event wsEvent) {

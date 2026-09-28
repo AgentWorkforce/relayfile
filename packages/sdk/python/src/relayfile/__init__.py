@@ -1,4 +1,4 @@
-from .client import RelayFileClient, AsyncRelayFileClient, RetryOptions
+from .client import AsyncRelayFileClient, RelayFileClient, RelayFileReadCacheOptions, RetryOptions
 from .errors import (
     CloudApiError,
     IntegrationConnectionTimeoutError,
@@ -94,6 +94,7 @@ __all__ = [
     "RelayFileClient",
     "AsyncRelayFileClient",
     "RetryOptions",
+    "RelayFileReadCacheOptions",
     "RelayfileSetup",
     "WorkspaceHandle",
     "WORKSPACE_INTEGRATION_PROVIDERS",

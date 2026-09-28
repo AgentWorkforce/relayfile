@@ -375,48 +375,109 @@ const changeLogSettings = new WeakMap<RelayFileClient, NormalizedChangeLogOption
 const pendingChangeHydrations = new WeakMap<RelayFileClient, Map<string, Map<string, Promise<CachedChangeRecord | null>>>>();
 const fileReadCaches = new WeakMap<RelayFileClient, FileReadCache | false>();
 
-const DEFAULT_READ_CACHE_TTL_MS = 5_000;
-const DEFAULT_READ_CACHE_MAX_ENTRIES = 500;
+const DEFAULT_READ_CACHE_MAX_BYTES = 32 * 1024 * 1024;
 
-interface ReadCacheEntry {
-  value: FileReadResponse;
-  expiresAt: number;
+// Content bytes are deduplicated by (hash, encoding); everything else in a
+// read response (revision, path, semantics, ...) is per-path metadata and is
+// kept per cache key so two paths with identical bytes never swap metadata.
+interface ReadCacheObject {
+  content: string;
+  bytes: number;
+  refs: Set<string>;
 }
 
+interface ReadCachePathEntry {
+  meta: Omit<FileReadResponse, "content">;
+  objectKey: string;
+  /** Exact ETag the server returned for this path; opaque, echoed verbatim. */
+  etag: string;
+}
+
+// The ETag a read response arrived with. The server's ETag is opaque (it may
+// encode more than the content hash, e.g. the revision), so the client never
+// derives it from `contentHash`; it stores the header it was given and sends
+// it back unchanged in If-None-Match.
+const readResponseEtags = new WeakMap<FileReadResponse, string>();
+
 class FileReadCache {
-  private readonly ttlMs: number;
-  private readonly maxEntries: number;
-  private readonly entries = new Map<string, ReadCacheEntry>();
+  private readonly maxBytes: number;
+  private totalBytes = 0;
+  private readonly objects = new Map<string, ReadCacheObject>();
+  private readonly paths = new Map<string, ReadCachePathEntry>();
   private readonly inFlight = new Map<string, Promise<FileReadResponse>>();
 
   constructor(options?: RelayFileReadCacheOptions) {
-    this.ttlMs = options?.ttlMs ?? DEFAULT_READ_CACHE_TTL_MS;
-    this.maxEntries = options?.maxEntries ?? DEFAULT_READ_CACHE_MAX_ENTRIES;
+    this.maxBytes = Math.max(0, Math.floor(options?.maxBytes ?? DEFAULT_READ_CACHE_MAX_BYTES));
   }
 
-  get(key: string): FileReadResponse | undefined {
-    const entry = this.entries.get(key);
+  get(key: string): { value: FileReadResponse; etag: string } | undefined {
+    const entry = this.paths.get(key);
     if (!entry) return undefined;
-    if (Date.now() > entry.expiresAt) {
-      this.entries.delete(key);
+    const object = this.objects.get(entry.objectKey);
+    if (!object) {
+      this.paths.delete(key);
       return undefined;
     }
-    return entry.value;
+    this.objects.delete(entry.objectKey);
+    this.objects.set(entry.objectKey, object);
+    return { value: { ...entry.meta, content: object.content }, etag: entry.etag };
   }
 
-  set(key: string, value: FileReadResponse): void {
-    if (this.entries.size >= this.maxEntries && !this.entries.has(key)) {
-      const oldest = this.entries.keys().next().value;
-      if (oldest !== undefined) {
-        this.entries.delete(oldest);
-      }
+  set(key: string, value: FileReadResponse, etag: string | undefined): void {
+    this.deletePath(key);
+    // Only responses carrying both a server ETag (to revalidate with
+    // If-None-Match on every read) and a content hash (to key the byte store)
+    // are retained. Anything else cannot be revalidated, so it is never served
+    // from the cache.
+    const hash = normalizeContentHash(value.contentHash);
+    if (!hash || !etag || this.maxBytes === 0) return;
+    const objectKey = `${hash}:${value.encoding ?? "utf-8"}`;
+    let object = this.objects.get(objectKey);
+    if (object) {
+      this.objects.delete(objectKey);
+    } else {
+      const bytes = value.encoding === "base64"
+        ? Math.floor(value.content.length * 3 / 4) - (value.content.endsWith("==") ? 2 : value.content.endsWith("=") ? 1 : 0)
+        : new TextEncoder().encode(value.content).byteLength;
+      object = { content: value.content, bytes, refs: new Set() };
+      this.totalBytes += bytes;
     }
-    this.entries.set(key, { value, expiresAt: Date.now() + this.ttlMs });
+    object.refs.add(key);
+    this.objects.set(objectKey, object);
+    const { content: _content, ...meta } = value;
+    this.paths.set(key, { meta, objectKey, etag });
+    while (this.totalBytes > this.maxBytes && this.objects.size > 0) {
+      const oldest = this.objects.keys().next().value;
+      if (oldest === undefined) break;
+      this.deleteObject(oldest);
+    }
+  }
+
+  private deletePath(key: string): void {
+    const entry = this.paths.get(key);
+    if (!entry) return;
+    this.paths.delete(key);
+    const object = this.objects.get(entry.objectKey);
+    if (!object) return;
+    object.refs.delete(key);
+    if (object.refs.size === 0) this.deleteObject(entry.objectKey);
+  }
+
+  private deleteObject(objectKey: string): void {
+    const object = this.objects.get(objectKey);
+    if (!object) return;
+    this.objects.delete(objectKey);
+    this.totalBytes -= object.bytes;
+    for (const key of object.refs) this.paths.delete(key);
   }
 
   evict(workspaceId: string, path: string): void {
-    this.entries.delete(`${workspaceId}:${path}`);
-    this.inFlight.delete(`${workspaceId}:${path}`);
+    for (const key of [...this.paths.keys()]) {
+      if (key.startsWith(`${workspaceId}:`) && key.endsWith(`:${path}`)) this.deletePath(key);
+    }
+    for (const key of this.inFlight.keys()) {
+      if (key.startsWith(`${workspaceId}:`) && key.endsWith(`:${path}`)) this.inFlight.delete(key);
+    }
   }
 
   getInFlight(key: string): Promise<FileReadResponse> | undefined {
@@ -429,7 +490,7 @@ class FileReadCache {
       (result) => {
         if (this.inFlight.get(key) === promise) {
           this.inFlight.delete(key);
-          this.set(key, result);
+          this.set(key, result, readResponseEtags.get(result));
         }
       },
       () => {
@@ -439,6 +500,11 @@ class FileReadCache {
       }
     );
   }
+}
+
+function normalizeContentHash(hash: string | undefined): string | undefined {
+  const value = hash?.trim().replace(/^sha256:/i, "").toLowerCase();
+  return value && /^[a-f0-9]{64}$/.test(value) ? value : undefined;
 }
 
 function getFileReadCache(client: RelayFileClient): FileReadCache | false {
@@ -1758,22 +1824,32 @@ export class RelayFileClient {
     const cacheRaw = getFileReadCache(this);
     // Skip cache for fork-scoped reads (isolated state) and when cache is disabled.
     const cache: FileReadCache | undefined = cacheRaw !== false ? cacheRaw : undefined;
-    const cacheKey = (cache && !input.forkId) ? `${input.workspaceId}:${input.path}` : undefined;
+    const cacheKey = cache ? `${input.workspaceId}:${input.forkId ?? ""}:${input.path}` : undefined;
 
     if (cache && cacheKey) {
-      const hit = cache.get(cacheKey);
-      if (hit) return hit;
       const pending = cache.getInFlight(cacheKey);
       if (pending) return pending;
     }
 
     const query = buildQuery({ path: input.path, forkId: input.forkId });
-    const fetch = this.request<FileReadResponse>({
+    const cached = cache && cacheKey ? cache.get(cacheKey) : undefined;
+    const fetch = this.performRequest({
       method: "GET",
       path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/file${query}`,
+      headers: cached ? { "If-None-Match": cached.etag } : undefined,
       correlationId: input.correlationId,
       signal: input.signal,
-      tokenOverride: (input as ReadFileInput & { token?: string }).token
+      tokenOverride: (input as ReadFileInput & { token?: string }).token,
+      allowNotModified: Boolean(cached)
+    }).then(async (response) => {
+      const etag = response.headers.get("ETag") ?? undefined;
+      if (response.status === 304 && cached) {
+        readResponseEtags.set(cached.value, etag ?? cached.etag);
+        return cached.value;
+      }
+      const value = await this.readPayload(response) as FileReadResponse;
+      if (etag && value && typeof value === "object") readResponseEtags.set(value, etag);
+      return value;
     });
 
     if (cache && cacheKey) {
@@ -2845,6 +2921,7 @@ export class RelayFileClient {
     signal?: AbortSignal;
     accept?: string;
     tokenOverride?: string;
+    allowNotModified?: boolean;
   }): Promise<Response> {
     const existingCorrelationId = getHeaderValue(params.headers, "X-Correlation-Id");
     const correlationId = existingCorrelationId ?? params.correlationId ?? generateCorrelationId();
@@ -2893,7 +2970,7 @@ export class RelayFileClient {
         throw error;
       }
 
-      if (response.ok) {
+      if (response.ok || (params.allowNotModified && response.status === 304)) {
         return response;
       }
 
@@ -2948,10 +3025,8 @@ export class RelayFileClient {
     // unchanged (bounded by our own `maxDelayMs`). Only when the header is
     // absent or unparseable do we consult the body below, so a body hint never
     // silently overrides a shorter, explicit header the server already sent.
-    const retryAfterMs = this.parseRetryAfterMs(retryAfterHeader);
-    if (retryAfterMs !== null) {
-      return Math.min(this.retryOptions.maxDelayMs, retryAfterMs);
-    }
+    const retryAfterMs = this.parseRetryAfterMs(retryAfterHeader)
+      ?? this.parseRetryAfterSecondsFromBody(payload);
     // With no usable header, a 429 body can still advertise an explicit
     // backpressure delay as `details.retryAfterSeconds` (e.g. `workspace_busy`
     // when the workspace durable object is overloaded, or `queue_full`). Honor
@@ -2959,15 +3034,10 @@ export class RelayFileClient {
     // to `maxDelayMs`, which governs our own exponential backoff. Truncating it
     // (maxDelayMs defaults to 2s vs. a typical 5s advertised delay) retries
     // into the still-busy resource and exhausts the retry budget.
-    const advertisedMs = this.parseRetryAfterSecondsFromBody(payload);
-    if (advertisedMs !== null) {
-      return Math.max(0, Math.min(RETRY_AFTER_MAX_MS, advertisedMs));
-    }
     const backoff = this.retryOptions.baseDelayMs * Math.pow(2, Math.max(0, retryAttempt - 1));
     const capped = Math.min(this.retryOptions.maxDelayMs, backoff);
-    const jitter = this.retryOptions.jitterRatio;
-    const factor = 1 + (Math.random() * 2 - 1) * jitter;
-    return Math.max(0, Math.round(capped * factor));
+    const jittered = Math.round(Math.random() * capped);
+    return Math.max(retryAfterMs ?? 0, jittered);
   }
 
   /**

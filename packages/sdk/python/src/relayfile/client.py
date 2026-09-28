@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import random
+import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable, Union
 from urllib.parse import quote, urlencode
@@ -37,6 +39,110 @@ class RetryOptions:
     base_delay_ms: int = 100
     max_delay_ms: int = 2000
     jitter_ratio: float = 0.2
+
+
+@dataclass
+class RelayFileReadCacheOptions:
+    """Byte-capped content-addressed read cache configuration."""
+
+    max_bytes: int = 32 * 1024 * 1024
+
+
+class _FileReadCache:
+    """Content bytes are deduplicated by (hash, encoding); all other response
+    fields (revision, path, ...) are per-path metadata kept per cache key, so
+    two paths with identical bytes never swap metadata."""
+
+    def __init__(self, options: RelayFileReadCacheOptions | None) -> None:
+        self.max_bytes = max(0, (options or RelayFileReadCacheOptions()).max_bytes)
+        self.total_bytes = 0
+        # object key -> (content, decoded size, referencing path keys)
+        self.objects: OrderedDict[str, tuple[str, int, set[str]]] = OrderedDict()
+        # path key -> (metadata without content, object key, server ETag)
+        self.paths: dict[str, tuple[dict[str, Any], str, str]] = {}
+        self.lock = threading.RLock()
+
+    def get(self, key: str) -> tuple[dict[str, Any], str] | None:
+        """Return (cached response, exact server ETag) for a path key."""
+        with self.lock:
+            entry = self.paths.get(key)
+            if entry is None:
+                return None
+            meta, object_key, etag = entry
+            item = self.objects.get(object_key)
+            if item is None:
+                self.paths.pop(key, None)
+                return None
+            self.objects.move_to_end(object_key)
+            return {**meta, "content": item[0]}, etag
+
+    def put(self, key: str, value: dict[str, Any], etag: str | None) -> None:
+        # The server ETag is opaque: it is stored exactly as returned and echoed
+        # verbatim in If-None-Match, never derived from contentHash. Responses
+        # without an ETag cannot be revalidated and are not cached.
+        entry = self._prepare(value, etag)
+        # Invalidate and insert under one lock hold: releasing it in between
+        # lets a concurrent put for the same path leave a stale object
+        # reference whose later eviction would drop the live path entry.
+        with self.lock:
+            self._delete_path(key)
+            if entry is None:
+                return
+            object_key, content, size, meta = entry
+            item = self.objects.pop(object_key, None)
+            if item is None:
+                item = (content, size, set())
+                self.total_bytes += size
+            item[2].add(key)
+            self.objects[object_key] = item
+            self.paths[key] = (meta, object_key, etag or "")
+            while self.total_bytes > self.max_bytes and self.objects:
+                oldest = next(iter(self.objects))
+                self._delete_object(oldest)
+
+    def _prepare(
+        self, value: dict[str, Any], etag: str | None
+    ) -> tuple[str, str, int, dict[str, Any]] | None:
+        """Validate and size a response outside the lock; None = don't cache."""
+        if not etag or self.max_bytes == 0:
+            return None
+        digest = str(value.get("contentHash", "")).removeprefix("sha256:").lower()
+        if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            return None
+        content = str(value.get("content", ""))
+        encoding = str(value.get("encoding") or "utf-8")
+        if encoding == "base64":
+            import base64
+            try:
+                size = len(base64.b64decode(content, validate=True))
+            except ValueError:
+                return None
+        else:
+            size = len(content.encode())
+        meta = {k: v for k, v in value.items() if k != "content"}
+        return f"{digest}:{encoding}", content, size, meta
+
+    def _delete_path(self, key: str) -> None:
+        entry = self.paths.pop(key, None)
+        if entry is None:
+            return
+        item = self.objects.get(entry[1])
+        if item is None:
+            return
+        item[2].discard(key)
+        if not item[2]:
+            self._delete_object(entry[1])
+
+    def _delete_object(self, object_key: str) -> None:
+        item = self.objects.pop(object_key, None)
+        if item is None:
+            return
+        self.total_bytes -= item[1]
+        for key in item[2]:
+            entry = self.paths.get(key)
+            # Only drop paths that still point at this object.
+            if entry is not None and entry[1] == object_key:
+                del self.paths[key]
 
 
 # ---------------------------------------------------------------------------
@@ -137,12 +243,9 @@ def _parse_retry_after_ms(header: str | None) -> float | None:
 
 def _compute_delay(retry: RetryOptions, attempt: int, retry_after: str | None) -> float:
     parsed = _parse_retry_after_ms(retry_after)
-    if parsed is not None:
-        return min(retry.max_delay_ms, parsed)
     backoff = retry.base_delay_ms * (2 ** max(0, attempt - 1))
     capped = min(retry.max_delay_ms, backoff)
-    factor = 1 + (random.random() * 2 - 1) * retry.jitter_ratio
-    return max(0, round(capped * factor))
+    return max(parsed or 0, round(random.random() * capped))
 
 
 def _should_retry(status: int, retries: int, max_retries: int) -> bool:
@@ -283,6 +386,7 @@ class RelayFileClient:
         retry: RetryOptions | None = None,
         http_client: httpx.Client | None = None,
         cloud_base_url: str | None = None,
+        read_cache: RelayFileReadCacheOptions | bool = RelayFileReadCacheOptions(),
     ) -> None:
         self._base_url = base_url.rstrip("/")
         # Integration setup verbs (list_accessible_resources +
@@ -298,6 +402,7 @@ class RelayFileClient:
         self._retry = _normalize_retry(retry)
         self._client = http_client or httpx.Client(timeout=timeout)
         self._owns_client = http_client is None
+        self._read_cache = None if read_cache is False else _FileReadCache(read_cache if isinstance(read_cache, RelayFileReadCacheOptions) else None)
 
     def close(self) -> None:
         if self._owns_client:
@@ -373,7 +478,7 @@ class RelayFileClient:
                     continue
                 raise
 
-            if resp.is_success:
+            if resp.is_success or resp.status_code == 304:
                 return resp
 
             payload = _read_payload(resp)
@@ -418,11 +523,24 @@ class RelayFileClient:
         correlation_id: str | None = None,
     ) -> dict[str, Any]:
         query = _build_query({"path": path})
-        return self._request(
+        key = f"{workspace_id}:{path}"
+        hit = self._read_cache.get(key) if self._read_cache else None
+        cached, etag = hit if hit else (None, None)
+        headers = {"If-None-Match": etag} if etag else None
+        response = self._request_response(
             "GET",
             f"/v1/workspaces/{_enc(workspace_id)}/fs/file{query}",
+            headers=headers,
             correlation_id=correlation_id,
         )
+        if response.status_code == 304 and cached is not None:
+            if self._read_cache:
+                self._read_cache.put(key, cached, response.headers.get("ETag") or etag)
+            return cached
+        value = _read_payload(response)
+        if self._read_cache and isinstance(value, dict):
+            self._read_cache.put(key, value, response.headers.get("ETag"))
+        return value
 
     def query_files(
         self,
@@ -982,6 +1100,7 @@ class AsyncRelayFileClient:
         retry: RetryOptions | None = None,
         http_client: httpx.AsyncClient | None = None,
         cloud_base_url: str | None = None,
+        read_cache: RelayFileReadCacheOptions | bool = RelayFileReadCacheOptions(),
     ) -> None:
         self._base_url = base_url.rstrip("/")
         # See the sync client for why integration setup verbs target a
@@ -994,6 +1113,7 @@ class AsyncRelayFileClient:
         self._retry = _normalize_retry(retry)
         self._client = http_client or httpx.AsyncClient(timeout=timeout)
         self._owns_client = http_client is None
+        self._read_cache = None if read_cache is False else _FileReadCache(read_cache if isinstance(read_cache, RelayFileReadCacheOptions) else None)
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -1073,7 +1193,7 @@ class AsyncRelayFileClient:
                     continue
                 raise
 
-            if resp.is_success:
+            if resp.is_success or resp.status_code == 304:
                 return resp
 
             payload = _read_payload(resp)
@@ -1118,11 +1238,24 @@ class AsyncRelayFileClient:
         correlation_id: str | None = None,
     ) -> dict[str, Any]:
         query = _build_query({"path": path})
-        return await self._request(
+        key = f"{workspace_id}:{path}"
+        hit = self._read_cache.get(key) if self._read_cache else None
+        cached, etag = hit if hit else (None, None)
+        headers = {"If-None-Match": etag} if etag else None
+        response = await self._request_response(
             "GET",
             f"/v1/workspaces/{_enc(workspace_id)}/fs/file{query}",
+            headers=headers,
             correlation_id=correlation_id,
         )
+        if response.status_code == 304 and cached is not None:
+            if self._read_cache:
+                self._read_cache.put(key, cached, response.headers.get("ETag") or etag)
+            return cached
+        value = _read_payload(response)
+        if self._read_cache and isinstance(value, dict):
+            self._read_cache.put(key, value, response.headers.get("ETag"))
+        return value
 
     async def query_files(
         self,

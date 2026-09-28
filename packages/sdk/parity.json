@@ -416,12 +416,14 @@
     },
     {
       "id": "client-read-cache",
-      "status": "planned",
+      "status": "both",
       "summary": "Client-side read cache with write-through invalidation.",
       "tsExports": [
         "RelayFileReadCacheOptions"
       ],
-      "pyExports": []
+      "pyExports": [
+        "RelayFileReadCacheOptions"
+      ]
     },
     {
       "id": "sync-socket-manager",

@@ -8785,25 +8785,34 @@ func runListen(args []string, stdout io.Writer) error {
 	)
 	backoff := baseBackoff
 	everConnected := false
+	lastCursor := ""
 	for {
-		connected, err := runListenSession(rootCtx, cfg)
-		if connected {
+		cfg.dialURL = listenDialURLWithCursor(cfg.dialURL, lastCursor)
+		result, err := runListenSession(rootCtx, cfg)
+		if result.cursor != "" {
+			lastCursor = result.cursor
+		}
+		if result.connected {
 			everConnected = true
 			backoff = baseBackoff
 		}
 		if err == nil {
 			return nil
 		}
-		if !everConnected {
+		if !everConnected && result.status != http.StatusTooManyRequests && result.status != http.StatusServiceUnavailable {
 			return fmt.Errorf("connect to event stream: %w", err)
 		}
+		delay := time.Duration(mathrand.Float64() * float64(backoff))
+		if result.retryAfter > delay {
+			delay = result.retryAfter
+		}
 		if !*daemonized {
-			fmt.Fprintf(os.Stderr, "listen: stream error (%v); reconnecting in %s\n", err, backoff)
+			fmt.Fprintf(os.Stderr, "listen: stream error (%v); reconnecting in %s\n", err, delay)
 		}
 		select {
 		case <-rootCtx.Done():
 			return nil
-		case <-time.After(backoff):
+		case <-time.After(delay):
 		}
 		if backoff < maxBackoff {
 			backoff *= 2
@@ -8812,6 +8821,18 @@ func runListen(args []string, stdout io.Writer) error {
 			}
 		}
 	}
+}
+
+func listenDialURLWithCursor(rawURL, cursor string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || strings.TrimSpace(cursor) == "" {
+		return rawURL
+	}
+	q := u.Query()
+	q.Del("from")
+	q.Set("cursor", strings.TrimSpace(cursor))
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 // listenSessionConfig carries the per-session inputs for runListenSession so a
@@ -8833,15 +8854,27 @@ type listenSessionConfig struct {
 // bool reports whether the websocket was successfully established, so the
 // caller can tell a first-attempt dial failure (fatal) from a mid-flight
 // disconnect (retryable).
-func runListenSession(rootCtx context.Context, cfg listenSessionConfig) (bool, error) {
-	conn, _, err := websocket.Dial(rootCtx, cfg.dialURL, &websocket.DialOptions{
+type listenSessionResult struct {
+	connected  bool
+	cursor     string
+	status     int
+	retryAfter time.Duration
+}
+
+func runListenSession(rootCtx context.Context, cfg listenSessionConfig) (listenSessionResult, error) {
+	conn, response, err := websocket.Dial(rootCtx, cfg.dialURL, &websocket.DialOptions{
 		HTTPClient: cfg.httpClient,
 		HTTPHeader: http.Header{
 			"Authorization": []string{"Bearer " + cfg.token},
 		},
 	})
 	if err != nil {
-		return false, err
+		result := listenSessionResult{}
+		if response != nil {
+			result.status = response.StatusCode
+			result.retryAfter = parseRetryAfter(response.Header.Get("Retry-After"))
+		}
+		return result, err
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
@@ -8852,6 +8885,7 @@ func runListenSession(rootCtx context.Context, cfg listenSessionConfig) (bool, e
 	conn.SetReadLimit(8 << 20) // 8 MiB
 
 	stdout := cfg.stdout
+	lastCursor := ""
 	for {
 		var raw json.RawMessage
 		if err := wsjson.Read(rootCtx, conn, &raw); err != nil {
@@ -8863,14 +8897,17 @@ func runListenSession(rootCtx context.Context, cfg listenSessionConfig) (bool, e
 			// would exit 0 and a `Restart=on-failure` supervisor unit would
 			// not bring the listener back.
 			if errors.Is(err, context.Canceled) || rootCtx.Err() != nil {
-				return true, nil
+				return listenSessionResult{connected: true, cursor: lastCursor}, nil
 			}
-			return true, fmt.Errorf("event stream error: %w", err)
+			return listenSessionResult{connected: true, cursor: lastCursor}, fmt.Errorf("event stream error: %w", err)
 		}
 
 		var evt listenEvent
 		if err := json.Unmarshal(raw, &evt); err != nil || evt.Type == "" || evt.Type == "pong" {
 			continue
+		}
+		if cursor := strings.TrimSpace(evt.EventID); cursor != "" {
+			lastCursor = cursor
 		}
 		if cfg.typeFilter != "" && evt.Type != cfg.typeFilter {
 			continue

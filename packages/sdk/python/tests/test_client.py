@@ -17,6 +17,7 @@ from relayfile import (
     QueueFullError,
     RelayFileApiError,
     RelayFileClient,
+    RelayFileReadCacheOptions,
     RetryOptions,
     RevisionConflictError,
     WritebackItem,
@@ -84,6 +85,78 @@ class TestRelayFileClient:
         client = self._client()
         res = client.read_file("ws_acme", "/f.json")
         assert res["content"] == '{"id":1}'
+
+    @respx.mock
+    def test_read_file_revalidates_with_opaque_etag_and_handles_304(self) -> None:
+        digest = "a" * 64
+        # The server ETag is opaque (not the bare content hash); echo it verbatim.
+        etag = f'"{digest}:rev_1"'
+        route = respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/file").mock(
+            side_effect=[
+                httpx.Response(200, json={"path": "/f", "revision": "rev_1", "contentType": "text/plain", "content": "hello", "contentHash": digest}, headers={"ETag": etag}),
+                httpx.Response(304, headers={"ETag": etag}),
+                httpx.Response(304),
+            ]
+        )
+        client = RelayFileClient(BASE, "tok", read_cache=RelayFileReadCacheOptions(max_bytes=5))
+
+        first = client.read_file("ws_acme", "/f")
+        second = client.read_file("ws_acme", "/f")
+        third = client.read_file("ws_acme", "/f")
+
+        assert second == first == third
+        assert route.calls[1].request.headers["If-None-Match"] == etag
+        assert route.calls[2].request.headers["If-None-Match"] == etag
+
+    @respx.mock
+    def test_read_file_without_etag_is_not_revalidated_from_cache(self) -> None:
+        payload = {"path": "/f", "revision": "rev_1", "contentType": "text/plain", "content": "hi", "contentHash": "d" * 64}
+        route = respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/file").mock(
+            side_effect=[httpx.Response(200, json=payload), httpx.Response(200, json=payload)]
+        )
+        client = RelayFileClient(BASE, "tok")
+
+        client.read_file("ws_acme", "/f")
+        client.read_file("ws_acme", "/f")
+
+        assert "If-None-Match" not in route.calls[1].request.headers
+
+    @respx.mock
+    def test_read_file_cache_keeps_per_path_metadata_for_identical_bytes(self) -> None:
+        digest = "b" * 64
+        a = {"path": "/a", "revision": "rev_a", "contentType": "text/plain", "content": "hello", "contentHash": digest}
+        b = {"path": "/b", "revision": "rev_b", "contentType": "text/markdown", "content": "hello", "contentHash": digest}
+        a_route = respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/file", params={"path": "/a"}).mock(
+            side_effect=[httpx.Response(200, json=a, headers={"ETag": '"etag-a"'}), httpx.Response(304)]
+        )
+        b_route = respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/file", params={"path": "/b"}).mock(
+            side_effect=[httpx.Response(200, json=b, headers={"ETag": '"etag-b"'}), httpx.Response(304)]
+        )
+        client = RelayFileClient(BASE, "tok")
+
+        client.read_file("ws_acme", "/a")
+        client.read_file("ws_acme", "/b")
+
+        assert client.read_file("ws_acme", "/a") == a
+        assert client.read_file("ws_acme", "/b") == b
+        assert a_route.calls[1].request.headers["If-None-Match"] == '"etag-a"'
+        assert b_route.calls[1].request.headers["If-None-Match"] == '"etag-b"'
+
+    @respx.mock
+    def test_read_file_never_serves_hashless_responses_from_cache(self) -> None:
+        route = respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/file").mock(
+            side_effect=[
+                httpx.Response(200, json={"path": "/f", "revision": "rev_1", "contentType": "text/plain", "content": "old"}, headers={"ETag": '"rev_1"'}),
+                httpx.Response(200, json={"path": "/f", "revision": "rev_2", "contentType": "text/plain", "content": "new"}, headers={"ETag": '"rev_2"'}),
+            ]
+        )
+        client = RelayFileClient(BASE, "tok")
+
+        client.read_file("ws_acme", "/f")
+        second = client.read_file("ws_acme", "/f")
+
+        assert second["content"] == "new"
+        assert "If-None-Match" not in route.calls[1].request.headers
 
     @respx.mock
     def test_write_file(self) -> None:
@@ -1051,3 +1124,65 @@ class TestIntegrationSetupAsync:
                 await client.set_integration_metadata(
                     "ws_acme", "jira", {"cloudId": "cloud-1"}
                 )
+
+
+def _cache_consistent(cache) -> None:
+    for key, (_meta, object_key, _etag) in cache.paths.items():
+        assert object_key in cache.objects
+        assert key in cache.objects[object_key][2]
+    for object_key, (_content, _size, refs) in cache.objects.items():
+        for key in refs:
+            assert cache.paths[key][1] == object_key
+    assert cache.total_bytes == sum(item[1] for item in cache.objects.values())
+
+
+def test_read_cache_put_is_atomic_against_interleaved_put_for_same_path() -> None:
+    from relayfile.client import _FileReadCache
+
+    cache = _FileReadCache(RelayFileReadCacheOptions(max_bytes=1024))
+    hash_a, hash_b = "a" * 64, "b" * 64
+    value_a = {"path": "/f", "revision": "r1", "contentHash": hash_a, "content": "AAAA"}
+    value_b = {"path": "/f", "revision": "r2", "contentHash": hash_b, "content": "BBBB"}
+
+    prepare = cache._prepare
+    interleaved = False
+
+    def racing_prepare(value, etag):
+        nonlocal interleaved
+        if not interleaved:
+            interleaved = True
+            # A concurrent reader stores a different body for the same path
+            # while this put is validating outside the lock.
+            cache.put("ws:/f", value_b, '"b"')
+        return prepare(value, etag)
+
+    cache._prepare = racing_prepare
+    cache.put("ws:/f", value_a, '"a"')
+    cache._prepare = prepare
+
+    _cache_consistent(cache)
+    hit = cache.get("ws:/f")
+    assert hit is not None and hit[0]["revision"] == "r1"
+    assert list(cache.objects) == [f"{hash_a}:utf-8"]
+
+    # Evicting any other object must never drop the live path entry.
+    cache.put("ws:/other", {**value_b, "path": "/other"}, '"o"')
+    cache._delete_object(f"{hash_b}:utf-8")
+    _cache_consistent(cache)
+    assert cache.get("ws:/f") is not None
+
+
+def test_read_cache_eviction_ignores_stale_path_references() -> None:
+    from relayfile.client import _FileReadCache
+
+    cache = _FileReadCache(RelayFileReadCacheOptions(max_bytes=1024))
+    live = {"path": "/f", "revision": "r2", "contentHash": "b" * 64, "content": "BBBB"}
+    cache.put("ws:/f", live, '"b"')
+    # Plant a stale object that still (wrongly) references the live path.
+    cache.objects[f"{'a' * 64}:utf-8"] = ("AAAA", 4, {"ws:/f"})
+    cache.total_bytes += 4
+
+    cache._delete_object(f"{'a' * 64}:utf-8")
+
+    hit = cache.get("ws:/f")
+    assert hit is not None and hit[0]["revision"] == "r2"
