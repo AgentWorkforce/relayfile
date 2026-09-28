@@ -6,7 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Bootstrap point reads are capped at four concurrent requests and reuse verified objects from `~/.relayfile/cache/objects/<sha256>`. HTTP and WebSocket overload retries use full jitter without shortening `Retry-After`.
+- Bootstrap point reads are capped at four concurrent requests and reuse verified objects from `~/.relayfile/cache/objects/<sha256>`. The store holds raw bytes only (no paths or other workspace metadata) and is capped at 1 GiB with least-recently-used eviction. HTTP and WebSocket overload retries use full jitter without shortening `Retry-After`.
 
 ### Fixed
 

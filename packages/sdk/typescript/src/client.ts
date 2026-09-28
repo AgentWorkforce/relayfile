@@ -377,16 +377,25 @@ const fileReadCaches = new WeakMap<RelayFileClient, FileReadCache | false>();
 
 const DEFAULT_READ_CACHE_MAX_BYTES = 32 * 1024 * 1024;
 
-interface ReadCacheEntry {
-  value: FileReadResponse;
+// Content bytes are deduplicated by (hash, encoding); everything else in a
+// read response (revision, path, semantics, ...) is per-path metadata and is
+// kept per cache key so two paths with identical bytes never swap metadata.
+interface ReadCacheObject {
+  content: string;
   bytes: number;
+  refs: Set<string>;
+}
+
+interface ReadCachePathEntry {
+  meta: Omit<FileReadResponse, "content">;
+  objectKey: string;
 }
 
 class FileReadCache {
   private readonly maxBytes: number;
   private totalBytes = 0;
-  private readonly objects = new Map<string, ReadCacheEntry>();
-  private readonly paths = new Map<string, string>();
+  private readonly objects = new Map<string, ReadCacheObject>();
+  private readonly paths = new Map<string, ReadCachePathEntry>();
   private readonly inFlight = new Map<string, Promise<FileReadResponse>>();
 
   constructor(options?: RelayFileReadCacheOptions) {
@@ -394,41 +403,68 @@ class FileReadCache {
   }
 
   get(key: string): FileReadResponse | undefined {
-    const hash = this.paths.get(key);
-    if (!hash) return undefined;
-    const entry = this.objects.get(hash);
+    const entry = this.paths.get(key);
     if (!entry) return undefined;
-    this.objects.delete(hash);
-    this.objects.set(hash, entry);
-    return entry.value;
+    const object = this.objects.get(entry.objectKey);
+    if (!object) {
+      this.paths.delete(key);
+      return undefined;
+    }
+    this.objects.delete(entry.objectKey);
+    this.objects.set(entry.objectKey, object);
+    return { ...entry.meta, content: object.content };
   }
 
   set(key: string, value: FileReadResponse): void {
-    const hash = normalizeContentHash(value.contentHash) ?? `legacy:${key}`;
-    if (this.maxBytes === 0) return;
-    const bytes = value.encoding === "base64"
-      ? Math.floor(value.content.length * 3 / 4) - (value.content.endsWith("==") ? 2 : value.content.endsWith("=") ? 1 : 0)
-      : new TextEncoder().encode(value.content).byteLength;
-    const previous = this.objects.get(hash);
-    if (previous) {
-      this.totalBytes -= previous.bytes;
-      this.objects.delete(hash);
+    this.deletePath(key);
+    // Only responses carrying a verifiable content hash are retained: they are
+    // revalidated with If-None-Match on every read. Hashless (legacy) responses
+    // cannot be revalidated, so they are never served from the cache.
+    const hash = normalizeContentHash(value.contentHash);
+    if (!hash || this.maxBytes === 0) return;
+    const objectKey = `${hash}:${value.encoding ?? "utf-8"}`;
+    let object = this.objects.get(objectKey);
+    if (object) {
+      this.objects.delete(objectKey);
+    } else {
+      const bytes = value.encoding === "base64"
+        ? Math.floor(value.content.length * 3 / 4) - (value.content.endsWith("==") ? 2 : value.content.endsWith("=") ? 1 : 0)
+        : new TextEncoder().encode(value.content).byteLength;
+      object = { content: value.content, bytes, refs: new Set() };
+      this.totalBytes += bytes;
     }
-    this.objects.set(hash, { value, bytes });
-    this.totalBytes += bytes;
-    this.paths.set(key, hash);
+    object.refs.add(key);
+    this.objects.set(objectKey, object);
+    const { content: _content, ...meta } = value;
+    this.paths.set(key, { meta, objectKey });
     while (this.totalBytes > this.maxBytes && this.objects.size > 0) {
       const oldest = this.objects.keys().next().value;
       if (oldest === undefined) break;
-      const evicted = this.objects.get(oldest)!;
-      this.objects.delete(oldest);
-      this.totalBytes -= evicted.bytes;
+      this.deleteObject(oldest);
     }
   }
 
+  private deletePath(key: string): void {
+    const entry = this.paths.get(key);
+    if (!entry) return;
+    this.paths.delete(key);
+    const object = this.objects.get(entry.objectKey);
+    if (!object) return;
+    object.refs.delete(key);
+    if (object.refs.size === 0) this.deleteObject(entry.objectKey);
+  }
+
+  private deleteObject(objectKey: string): void {
+    const object = this.objects.get(objectKey);
+    if (!object) return;
+    this.objects.delete(objectKey);
+    this.totalBytes -= object.bytes;
+    for (const key of object.refs) this.paths.delete(key);
+  }
+
   evict(workspaceId: string, path: string): void {
-    for (const key of this.paths.keys()) {
-      if (key.startsWith(`${workspaceId}:`) && key.endsWith(`:${path}`)) this.paths.delete(key);
+    for (const key of [...this.paths.keys()]) {
+      if (key.startsWith(`${workspaceId}:`) && key.endsWith(`:${path}`)) this.deletePath(key);
     }
     for (const key of this.inFlight.keys()) {
       if (key.startsWith(`${workspaceId}:`) && key.endsWith(`:${path}`)) this.inFlight.delete(key);
@@ -1788,11 +1824,10 @@ export class RelayFileClient {
 
     const query = buildQuery({ path: input.path, forkId: input.forkId });
     const cached = cache && cacheKey ? cache.get(cacheKey) : undefined;
-    if (cached && !normalizeContentHash(cached.contentHash)) return cached;
     const fetch = this.performRequest({
       method: "GET",
       path: `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/fs/file${query}`,
-      headers: cached?.contentHash ? { "If-None-Match": `"${normalizeContentHash(cached.contentHash) ?? cached.contentHash}"` } : undefined,
+      headers: cached?.contentHash ? { "If-None-Match": `"${normalizeContentHash(cached.contentHash)}"` } : undefined,
       correlationId: input.correlationId,
       signal: input.signal,
       tokenOverride: (input as ReadFileInput & { token?: string }).token,

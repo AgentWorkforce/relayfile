@@ -49,28 +49,43 @@ class RelayFileReadCacheOptions:
 
 
 class _FileReadCache:
+    """Content bytes are deduplicated by (hash, encoding); all other response
+    fields (revision, path, ...) are per-path metadata kept per cache key, so
+    two paths with identical bytes never swap metadata."""
+
     def __init__(self, options: RelayFileReadCacheOptions | None) -> None:
         self.max_bytes = max(0, (options or RelayFileReadCacheOptions()).max_bytes)
         self.total_bytes = 0
-        self.objects: OrderedDict[str, tuple[dict[str, Any], int]] = OrderedDict()
-        self.paths: dict[str, str] = {}
+        # object key -> (content, decoded size, referencing path keys)
+        self.objects: OrderedDict[str, tuple[str, int, set[str]]] = OrderedDict()
+        # path key -> (metadata without content, object key)
+        self.paths: dict[str, tuple[dict[str, Any], str]] = {}
         self.lock = threading.RLock()
 
     def get(self, key: str) -> dict[str, Any] | None:
         with self.lock:
-            digest = self.paths.get(key)
-            item = self.objects.get(digest or "")
-            if item is None:
+            entry = self.paths.get(key)
+            if entry is None:
                 return None
-            self.objects.move_to_end(digest)
-            return dict(item[0])
+            meta, object_key = entry
+            item = self.objects.get(object_key)
+            if item is None:
+                self.paths.pop(key, None)
+                return None
+            self.objects.move_to_end(object_key)
+            return {**meta, "content": item[0]}
 
     def put(self, key: str, value: dict[str, Any]) -> None:
+        with self.lock:
+            self._delete_path(key)
         digest = str(value.get("contentHash", "")).removeprefix("sha256:").lower()
         if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
             return
+        if self.max_bytes == 0:
+            return
         content = str(value.get("content", ""))
-        if value.get("encoding") == "base64":
+        encoding = str(value.get("encoding") or "utf-8")
+        if encoding == "base64":
             import base64
             try:
                 size = len(base64.b64decode(content, validate=True))
@@ -78,16 +93,38 @@ class _FileReadCache:
                 return
         else:
             size = len(content.encode())
+        object_key = f"{digest}:{encoding}"
+        meta = {k: v for k, v in value.items() if k != "content"}
         with self.lock:
-            old = self.objects.pop(digest, None)
-            if old:
-                self.total_bytes -= old[1]
-            self.objects[digest] = (dict(value), size)
-            self.paths[key] = digest
-            self.total_bytes += size
+            item = self.objects.pop(object_key, None)
+            if item is None:
+                item = (content, size, set())
+                self.total_bytes += size
+            item[2].add(key)
+            self.objects[object_key] = item
+            self.paths[key] = (meta, object_key)
             while self.total_bytes > self.max_bytes and self.objects:
-                _, (_, removed_size) = self.objects.popitem(last=False)
-                self.total_bytes -= removed_size
+                oldest = next(iter(self.objects))
+                self._delete_object(oldest)
+
+    def _delete_path(self, key: str) -> None:
+        entry = self.paths.pop(key, None)
+        if entry is None:
+            return
+        item = self.objects.get(entry[1])
+        if item is None:
+            return
+        item[2].discard(key)
+        if not item[2]:
+            self._delete_object(entry[1])
+
+    def _delete_object(self, object_key: str) -> None:
+        item = self.objects.pop(object_key, None)
+        if item is None:
+            return
+        self.total_bytes -= item[1]
+        for key in item[2]:
+            self.paths.pop(key, None)
 
 
 # ---------------------------------------------------------------------------

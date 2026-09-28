@@ -8032,6 +8032,20 @@ func (s *Syncer) readBootstrapFiles(ctx context.Context, jobs []bootstrapReadJob
 	return results
 }
 
+// cachedBootstrapFile materializes a bootstrap job from the local
+// content-addressed store when the authorizing tree entry names a hash the
+// store already holds. The store holds bytes only; every piece of path
+// metadata comes from this mount's own tree entry.
+func (s *Syncer) cachedBootstrapFile(job bootstrapReadJob) (RemoteFile, bool) {
+	cached, ok := s.objectCache.get(job.Entry.ContentHash, job.Entry.Encoding)
+	if !ok {
+		return RemoteFile{}, false
+	}
+	cached.Path, cached.Revision = job.RemotePath, job.Entry.Revision
+	cached.Type, cached.Target, cached.Mode = job.Entry.Type, job.Entry.Target, job.Entry.Mode
+	return cached, true
+}
+
 // readBootstrapFilesEach dispatches bulk reads and oversized point reads in
 // index order. Oversized point reads are each passed as a singleton, so their
 // response body is released before the next oversized read begins. The
@@ -8044,13 +8058,11 @@ func (s *Syncer) readBootstrapFilesEach(ctx context.Context, jobs []bootstrapRea
 	}
 	remaining := make([]bootstrapReadJob, 0, len(jobs))
 	for _, job := range jobs {
-		cached, ok := s.objectCache.get(job.Entry.ContentHash)
+		cached, ok := s.cachedBootstrapFile(job)
 		if !ok {
 			remaining = append(remaining, job)
 			continue
 		}
-		cached.Path, cached.Revision = job.RemotePath, job.Entry.Revision
-		cached.Type, cached.Target, cached.Mode = job.Entry.Type, job.Entry.Target, job.Entry.Mode
 		prog.touch()
 		if err := handle(bootstrapReadResult{Index: job.Index, RemotePath: job.RemotePath, File: cached}); err != nil {
 			return err
@@ -8306,9 +8318,7 @@ func (s *Syncer) readBootstrapFilesIndividuallyBatchEach(ctx context.Context, jo
 		go func() {
 			defer wg.Done()
 			for job := range jobCh {
-				if cached, ok := s.objectCache.get(job.Entry.ContentHash); ok {
-					cached.Path, cached.Revision = job.RemotePath, job.Entry.Revision
-					cached.Type, cached.Target, cached.Mode = job.Entry.Type, job.Entry.Target, job.Entry.Mode
+				if cached, ok := s.cachedBootstrapFile(job); ok {
 					prog.touch()
 					resultCh <- bootstrapReadResult{Index: job.Index, RemotePath: job.RemotePath, File: cached}
 					continue

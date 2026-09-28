@@ -104,6 +104,41 @@ class TestRelayFileClient:
         assert route.calls[1].request.headers["If-None-Match"] == f'"{digest}"'
 
     @respx.mock
+    def test_read_file_cache_keeps_per_path_metadata_for_identical_bytes(self) -> None:
+        digest = "b" * 64
+        a = {"path": "/a", "revision": "rev_a", "contentType": "text/plain", "content": "hello", "contentHash": digest}
+        b = {"path": "/b", "revision": "rev_b", "contentType": "text/markdown", "content": "hello", "contentHash": digest}
+        respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/file", params={"path": "/a"}).mock(
+            side_effect=[httpx.Response(200, json=a), httpx.Response(304)]
+        )
+        respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/file", params={"path": "/b"}).mock(
+            side_effect=[httpx.Response(200, json=b), httpx.Response(304)]
+        )
+        client = RelayFileClient(BASE, "tok")
+
+        client.read_file("ws_acme", "/a")
+        client.read_file("ws_acme", "/b")
+
+        assert client.read_file("ws_acme", "/a") == a
+        assert client.read_file("ws_acme", "/b") == b
+
+    @respx.mock
+    def test_read_file_never_serves_hashless_responses_from_cache(self) -> None:
+        route = respx.get(f"{BASE}/v1/workspaces/ws_acme/fs/file").mock(
+            side_effect=[
+                httpx.Response(200, json={"path": "/f", "revision": "rev_1", "contentType": "text/plain", "content": "old"}),
+                httpx.Response(200, json={"path": "/f", "revision": "rev_2", "contentType": "text/plain", "content": "new"}),
+            ]
+        )
+        client = RelayFileClient(BASE, "tok")
+
+        client.read_file("ws_acme", "/f")
+        second = client.read_file("ws_acme", "/f")
+
+        assert second["content"] == "new"
+        assert "If-None-Match" not in route.calls[1].request.headers
+
+    @respx.mock
     def test_write_file(self) -> None:
         payload = {"opId": "op_1", "status": "queued", "targetRevision": "rev_4"}
         respx.put(f"{BASE}/v1/workspaces/ws_acme/fs/file").mock(
