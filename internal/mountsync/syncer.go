@@ -1805,6 +1805,11 @@ type Syncer struct {
 	localMutationMu           sync.Mutex
 	websocket                 bool
 	rootCtx                   context.Context
+	backgroundCtx             context.Context
+	backgroundCancel          context.CancelFunc
+	backgroundMu              sync.Mutex
+	backgroundClosed          bool
+	backgroundWG              sync.WaitGroup
 	wsConn                    *websocket.Conn
 	wsCancel                  context.CancelFunc
 	wsNextAttempt             time.Time
@@ -2633,6 +2638,10 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	} else if _, ok := client.(*HTTPClient); ok {
 		cache = defaultObjectCache()
 	}
+	// Create the owned lifecycle context only after every constructor path that
+	// can still return an error. From here it is transferred directly to the
+	// Syncer and released by Close.
+	backgroundCtx, backgroundCancel := context.WithCancel(rootCtx)
 	return &Syncer{
 		client:                    client,
 		objectCache:               cache,
@@ -2653,6 +2662,8 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		websocket:                 websocketEnabled,
 		recoverStartupDrift:       true,
 		rootCtx:                   rootCtx,
+		backgroundCtx:             backgroundCtx,
+		backgroundCancel:          backgroundCancel,
 		logger:                    opts.Logger,
 		denialLogPath:             filepath.Join(localRoot, ".relay", "permissions-denied.log"),
 		bulkFlushThreshold:        bulkFlushThreshold,
@@ -2691,6 +2702,60 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 			Files:       map[string]trackedFile{},
 		},
 	}, nil
+}
+
+// Close cancels and joins every deferred receipt and checkpoint writer owned by
+// the Syncer. Callers must stop admitting foreground work before calling Close.
+// Close is idempotent and does not return until no owned background task can
+// write beneath the mount root.
+func (s *Syncer) Close() {
+	if s == nil {
+		return
+	}
+	s.backgroundMu.Lock()
+	if !s.backgroundClosed {
+		s.backgroundClosed = true
+		if s.backgroundCancel != nil {
+			s.backgroundCancel()
+		}
+	}
+	s.backgroundMu.Unlock()
+	// A websocket reader owns a second receive goroutine and may be blocked in
+	// the transport even after its context is canceled. Closing the connection
+	// wakes that read; both goroutines are joined through backgroundWG below.
+	s.ResetWebSocket()
+
+	// Prevent a pending checkpoint timer from becoming a writer after shutdown.
+	// Timers whose callbacks already started remain counted in backgroundWG and
+	// are joined below.
+	s.checkpointMu.Lock()
+	s.checkpointVersion++
+	if s.checkpointTimer != nil && s.checkpointTimer.Stop() {
+		s.backgroundWG.Done()
+	}
+	s.checkpointTimer = nil
+	s.checkpointStarted = time.Time{}
+	s.checkpointMu.Unlock()
+
+	s.backgroundWG.Wait()
+}
+
+func (s *Syncer) startBackground(run func(context.Context)) bool {
+	s.backgroundMu.Lock()
+	defer s.backgroundMu.Unlock()
+	if s.backgroundClosed {
+		return false
+	}
+	ctx := s.backgroundCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.backgroundWG.Add(1)
+	go func() {
+		defer s.backgroundWG.Done()
+		run(ctx)
+	}()
+	return true
 }
 
 // Circuit returns the cloud-error breaker for tests and status reporters.
@@ -4382,16 +4447,12 @@ func (s *Syncer) scheduleOutboxReceiptSettlements(records []outboxRecord) {
 		sem := s.receiptSem
 		s.receiptMu.Unlock()
 
-		go func() {
+		started := s.startBackground(func(root context.Context) {
 			defer func() {
 				s.receiptMu.Lock()
 				delete(s.receiptActive, opID)
 				s.receiptMu.Unlock()
 			}()
-			root := s.rootCtx
-			if root == nil {
-				root = context.Background()
-			}
 			select {
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
@@ -4430,7 +4491,12 @@ func (s *Syncer) scheduleOutboxReceiptSettlements(records []outboxRecord) {
 			// derived state document instead of making every receipt worker hold
 			// the main state mutex through a full outbox summary scan.
 			s.scheduleLocalWriteCheckpoint()
-		}()
+		})
+		if !started {
+			s.receiptMu.Lock()
+			delete(s.receiptActive, opID)
+			s.receiptMu.Unlock()
+		}
 	}
 }
 
@@ -4452,9 +4518,21 @@ func (s *Syncer) scheduleLocalWriteCheckpoint() {
 		delay = time.Nanosecond
 	}
 	if s.checkpointTimer != nil {
-		s.checkpointTimer.Stop()
+		if s.checkpointTimer.Stop() {
+			s.backgroundWG.Done()
+		}
 	}
+	s.backgroundMu.Lock()
+	if s.backgroundClosed {
+		s.backgroundMu.Unlock()
+		s.checkpointTimer = nil
+		s.checkpointStarted = time.Time{}
+		return
+	}
+	s.backgroundWG.Add(1)
+	s.backgroundMu.Unlock()
 	s.checkpointTimer = time.AfterFunc(delay, func() {
+		defer s.backgroundWG.Done()
 		s.checkpointMu.Lock()
 		if s.checkpointVersion != version {
 			s.checkpointMu.Unlock()
@@ -4464,6 +4542,7 @@ func (s *Syncer) scheduleLocalWriteCheckpoint() {
 		s.checkpointStarted = time.Time{}
 		s.checkpointMu.Unlock()
 
+		s.runCheckpointTestHook("local-write-checkpoint-before-save")
 		s.mu.Lock()
 		// Match the WebSocket checkpoint contract: persist only the private
 		// recovery cursor/state on the burst path. The public .relay/state.json
@@ -5487,7 +5566,7 @@ func (s *Syncer) connectWebSocket(ctx context.Context) error {
 	}
 	conn.SetReadLimit(maxWebSocketMessageBytes)
 
-	readCtx, cancel := context.WithCancel(s.rootCtx)
+	readCtx, cancel := context.WithCancel(s.backgroundCtx)
 
 	s.mu.Lock()
 	if s.wsGeneration != generation || s.wsConn != nil {
@@ -5507,16 +5586,25 @@ func (s *Syncer) connectWebSocket(ctx context.Context) error {
 	s.wsLastConnectedAt = time.Now().UTC()
 	s.mu.Unlock()
 
-	go s.readWebSocketLoop(readCtx, conn)
+	if !s.startBackground(func(context.Context) {
+		s.readWebSocketLoop(readCtx, conn)
+	}) {
+		cancel()
+		s.ResetWebSocket()
+	}
 	return nil
 }
 
 func (s *Syncer) readWebSocketLoop(ctx context.Context, conn *websocket.Conn) {
 	defer s.handleWebSocketDisconnect(conn)
+	ctx, cancelReader := context.WithCancel(ctx)
 
 	eventCh := make(chan websocketEvent, webSocketApplyQueueSize)
 	readErrCh := make(chan error, 1)
+	var readerWG sync.WaitGroup
+	readerWG.Add(1)
 	go func() {
+		defer readerWG.Done()
 		for {
 			var event websocketEvent
 			if err := wsjson.Read(ctx, conn, &event); err != nil {
@@ -5532,6 +5620,13 @@ func (s *Syncer) readWebSocketLoop(ctx context.Context, conn *websocket.Conn) {
 				return
 			}
 		}
+	}()
+	defer func() {
+		// The apply loop can stop before the transport read does (for example,
+		// after a persistence failure). Cancel first, then join, so the nested
+		// reader cannot survive the lifecycle owner or deadlock its return path.
+		cancelReader()
+		readerWG.Wait()
 	}()
 
 	var checkpointTimer *time.Timer
@@ -6167,7 +6262,9 @@ func (s *Syncer) bootstrapContext(parent context.Context) (context.Context, cont
 		pollEvery = 10 * time.Millisecond
 	}
 	done := make(chan struct{})
+	stopped := make(chan struct{})
 	go func() {
+		defer close(stopped)
 		ticker := time.NewTicker(pollEvery)
 		defer ticker.Stop()
 		for {
@@ -6192,6 +6289,7 @@ func (s *Syncer) bootstrapContext(parent context.Context) (context.Context, cont
 	wrapped := func() {
 		close(done)
 		cancel()
+		<-stopped
 	}
 	return ctx, wrapped, prog, nil
 }
