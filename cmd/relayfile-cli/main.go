@@ -14353,6 +14353,10 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 }
 
 func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer, localDir, workspaceID, serverURL, delegatedCredsFile string, timeout, interval time.Duration, intervalJitter float64, websocketEnabled, once, daemonized bool, pidFile, logFile string, authMu *sync.Mutex) error {
+	// The loop owns every deferred receipt/checkpoint task admitted by this
+	// Syncer. Join them on every exit path before the mount directory can be
+	// removed or handed to another process.
+	defer syncer.Close()
 	interval = enforcePollIntervalFloor(interval)
 	httpClient, _ := syncerClient(syncer)
 	record, _ := workspaceRecordByID(workspaceID)

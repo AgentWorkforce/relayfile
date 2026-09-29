@@ -336,7 +336,9 @@ func (fw *FileWatcher) Start(ctx context.Context) error {
 	fw.healthy.Store(true)
 
 	// Event loop
+	fw.wg.Add(1)
 	go func() {
+		defer fw.wg.Done()
 		defer fw.healthy.Store(false)
 		for {
 			select {
@@ -658,6 +660,9 @@ func (fw *FileWatcher) Close() error {
 	fw.mu.Unlock()
 
 	err := fw.watcher.Close()
+	// Closing the backend terminates the fsnotify event loop. Join both that
+	// loop and every admitted debounce callback before returning so callers can
+	// safely remove the watched tree immediately after Close.
 	fw.wg.Wait()
 	return err
 }
