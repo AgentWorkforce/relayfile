@@ -26,9 +26,11 @@ type delayedIncrementalReadClient struct {
 
 type blockingReceiptClient struct {
 	*fakeClient
-	started chan struct{}
-	release chan struct{}
-	once    sync.Once
+	started  chan struct{}
+	canceled chan struct{}
+	release  chan struct{}
+	once     sync.Once
+	cancel   sync.Once
 }
 
 func TestUntrackedAtomicSaveStagingFileNeverWritesBack(t *testing.T) {
@@ -72,12 +74,12 @@ func TestUntrackedAtomicSaveStagingFileNeverWritesBack(t *testing.T) {
 
 func (c *blockingReceiptClient) GetOperation(ctx context.Context, workspaceID, opID string) (OperationStatus, error) {
 	c.once.Do(func() { close(c.started) })
-	select {
-	case <-c.release:
-		return c.fakeClient.GetOperation(ctx, workspaceID, opID)
-	case <-ctx.Done():
-		return OperationStatus{}, ctx.Err()
+	if c.canceled != nil {
+		<-ctx.Done()
+		c.cancel.Do(func() { close(c.canceled) })
 	}
+	<-c.release
+	return c.fakeClient.GetOperation(context.Background(), workspaceID, opID)
 }
 
 func (c *delayedIncrementalReadClient) ReadFile(ctx context.Context, workspaceID, path string) (RemoteFile, error) {
@@ -414,8 +416,9 @@ func TestHandleLocalChangesBatchesElevenFilesAndDefersPendingReceipts(t *testing
 			files:      map[string]RemoteFile{},
 			operations: map[string]OperationStatus{},
 		},
-		started: make(chan struct{}),
-		release: make(chan struct{}),
+		started:  make(chan struct{}),
+		canceled: make(chan struct{}),
+		release:  make(chan struct{}),
 	}
 	client.bulkWriteResponseFunc = func(_ context.Context, _ string, files []BulkWriteFile) (BulkWriteResponse, error) {
 		results := make([]BulkWriteResult, 0, len(files))
@@ -473,16 +476,87 @@ func TestHandleLocalChangesBatchesElevenFilesAndDefersPendingReceipts(t *testing
 	if client.getOperationCalls != 0 {
 		t.Fatalf("blocked receipt unexpectedly completed: calls=%d", client.getOperationCalls)
 	}
+
+	// Shutdown must cancel and join the blocked receipt worker as well as the
+	// checkpoint callback it would otherwise leave behind. Returning from Close
+	// is the boundary that makes immediate TempDir cleanup safe.
+	closed := make(chan struct{})
+	go func() {
+		syncer.Close()
+		close(closed)
+	}()
+	select {
+	case <-client.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("syncer Close did not cancel deferred receipt work")
+	}
+	select {
+	case <-closed:
+		t.Fatal("syncer Close returned before the receipt writer terminated")
+	default:
+	}
 	close(client.release)
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		syncer.receiptMu.Lock()
-		active := len(syncer.receiptActive)
-		syncer.receiptMu.Unlock()
-		if active == 0 {
-			break
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("syncer Close did not join the terminated receipt writer")
+	}
+	syncer.receiptMu.Lock()
+	active := len(syncer.receiptActive)
+	syncer.receiptMu.Unlock()
+	if active != 0 {
+		t.Fatalf("receipt workers still active after Close: %d", active)
+	}
+}
+
+func TestSyncerCloseJoinsRunningCheckpointWriter(t *testing.T) {
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(&fakeClient{files: map[string]RemoteFile{}}, SyncerOptions{
+		WorkspaceID: "ws_checkpoint_close",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	syncer.checkpointTestHook = func(stage string) {
+		if stage == "local-write-checkpoint-before-save" {
+			close(started)
+			<-release
 		}
-		time.Sleep(time.Millisecond)
+	}
+	syncer.scheduleLocalWriteCheckpoint()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("checkpoint writer did not start")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		syncer.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+		t.Fatal("syncer Close returned while checkpoint writer was running")
+	default:
+	}
+	close(release)
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("syncer Close did not join checkpoint writer")
+	}
+
+	if err := os.RemoveAll(localDir); err != nil {
+		t.Fatalf("remove mount after Close: %v", err)
+	}
+	if _, err := os.Stat(localDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("mount root recreated after Close: %v", err)
 	}
 }
 
