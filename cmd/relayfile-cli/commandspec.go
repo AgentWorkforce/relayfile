@@ -936,6 +936,7 @@ func mountOptions() []cliOptionSpec {
 		{Flags: "--mode <mode>", Description: "mount mode: poll (recommended) or fuse"},
 		{Flags: "--interval <duration>", Description: "sync interval"},
 		{Flags: "--interval-jitter <ratio>", Description: "sync interval jitter ratio (0.0-1.0)"},
+		{Flags: "--startup-jitter <duration>", Description: "maximum random delay before the first sync cycle, so mounts started together (scheduled sandboxes, scoped siblings) do not bootstrap in lockstep (0 disables)"},
 		{Flags: "--timeout <duration>", Description: "per-sync timeout"},
 		{Flags: "--bootstrap-timeout <duration>", Description: "hard cap for the one-time/full-tree bootstrap pull (0 = unbounded while making progress)"},
 		{Flags: "--bootstrap-max-files-per-cycle <n>", Description: "maximum files materialized per resumable tree-bootstrap cycle (-1 = legacy unbounded tree behavior)"},

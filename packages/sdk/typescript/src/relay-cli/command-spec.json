@@ -1077,6 +1077,10 @@
         "description": "sync interval jitter ratio (0.0-1.0)"
       },
       {
+        "flags": "--startup-jitter <duration>",
+        "description": "maximum random delay before the first sync cycle, so mounts started together (scheduled sandboxes, scoped siblings) do not bootstrap in lockstep (0 disables)"
+      },
+      {
         "flags": "--timeout <duration>",
         "description": "per-sync timeout"
       },
