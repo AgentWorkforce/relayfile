@@ -6747,7 +6747,11 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 	var files []RemoteFile
 	var err error
 	s.runFullPullIO(func() {
-		files, err = client.ExportFiles(exportCtx, s.workspace, s.remoteRoot)
+		err = fullPullReadGate.do(exportCtx, func() error {
+			var exportErr error
+			files, exportErr = client.ExportFiles(exportCtx, s.workspace, s.remoteRoot)
+			return exportErr
+		})
 	})
 	if err != nil {
 		if exportSnapshotUnsupported(err) {
@@ -6977,7 +6981,12 @@ func (s *Syncer) githubWorkingTreeSnapshot(ctx context.Context, prog bootstrapPr
 	maxObservedRevision := ""
 	for {
 		pageStartCursor := cursor
-		page, err := s.client.ListTree(ctx, s.workspace, s.githubWorkingTree.ContentsRoot, 200, cursor)
+		var page TreeResponse
+		err := fullPullReadGate.do(ctx, func() error {
+			var listErr error
+			page, listErr = s.client.ListTree(ctx, s.workspace, s.githubWorkingTree.ContentsRoot, 200, cursor)
+			return listErr
+		})
 		if err != nil {
 			return nil, "", err
 		}
@@ -7497,7 +7506,11 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		if !pageLoaded || loadedDirectory != currentDirectory || loadedCursor != cursor {
 			var err error
 			s.runFullPullIO(func() {
-				page, err = s.client.ListTree(ctx, s.workspace, currentDirectory, fullTreeTraversalDepth, cursor)
+				err = fullPullReadGate.do(ctx, func() error {
+					var listErr error
+					page, listErr = s.client.ListTree(ctx, s.workspace, currentDirectory, fullTreeTraversalDepth, cursor)
+					return listErr
+				})
 			})
 			metrics.listCalls++
 			if err != nil {
@@ -8097,7 +8110,12 @@ func (s *Syncer) readBootstrapFilesBulkEach(ctx context.Context, client bulkRead
 		for index, job := range batch {
 			paths[index] = job.RemotePath
 		}
-		response, err := client.ReadFilesBulk(ctx, s.workspace, paths)
+		var response BulkReadResponse
+		err := fullPullReadGate.do(ctx, func() error {
+			var readErr error
+			response, readErr = client.ReadFilesBulk(ctx, s.workspace, paths)
+			return readErr
+		})
 		if err != nil {
 			if isBulkReadUnsupported(err) {
 				unsupported = &bulkReadUnsupportedError{remaining: append([]bootstrapReadJob(nil), remaining...)}
@@ -8323,7 +8341,12 @@ func (s *Syncer) readBootstrapFilesIndividuallyBatchEach(ctx context.Context, jo
 					resultCh <- bootstrapReadResult{Index: job.Index, RemotePath: job.RemotePath, File: cached}
 					continue
 				}
-				file, err := s.client.ReadFile(readCtx, s.workspace, job.RemotePath)
+				var file RemoteFile
+				err := fullPullReadGate.do(readCtx, func() error {
+					var readErr error
+					file, readErr = s.client.ReadFile(readCtx, s.workspace, job.RemotePath)
+					return readErr
+				})
 				if err == nil {
 					s.objectCache.put(file)
 					prog.touch()
