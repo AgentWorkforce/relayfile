@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	mathrand "math/rand/v2"
 	"mime"
 	"net/http"
@@ -7357,6 +7358,7 @@ func runMount(args []string) error {
 	mode := fs.String("mode", envOrDefault("RELAYFILE_MOUNT_MODE", defaultMountMode), "mount mode: poll (recommended) or fuse")
 	interval := fs.Duration("interval", durationEnv("RELAYFILE_MOUNT_INTERVAL", defaultMountInterval), "sync interval")
 	intervalJitter := fs.Float64("interval-jitter", floatEnv("RELAYFILE_MOUNT_INTERVAL_JITTER", 0.2), "sync interval jitter ratio (0.0-1.0)")
+	startupJitter := fs.Duration("startup-jitter", durationEnv("RELAYFILE_MOUNT_STARTUP_JITTER", defaultStartupJitter), "maximum random delay before the first sync cycle, so mounts started together (scheduled sandboxes, scoped siblings) do not bootstrap in lockstep (0 disables)")
 	timeout := fs.Duration("timeout", durationEnv("RELAYFILE_MOUNT_TIMEOUT", defaultMountTimeout), "per-sync timeout")
 	bootstrapTimeout := fs.Duration("bootstrap-timeout", durationEnv("RELAYFILE_BOOTSTRAP_TIMEOUT", 0), "hard cap for the one-time/full-tree bootstrap pull (0 = unbounded while making progress)")
 	bootstrapMaxFiles := fs.Int("bootstrap-max-files-per-cycle", intEnv("RELAYFILE_BOOTSTRAP_MAX_FILES_PER_CYCLE", 2000), "maximum files materialized per resumable tree-bootstrap cycle (-1 = legacy unbounded tree behavior)")
@@ -7820,6 +7822,7 @@ func runMount(args []string) error {
 		*timeout = defaultMountTimeout
 	}
 	*intervalJitter = clampJitterRatio(*intervalJitter)
+	*startupJitter = clampStartupJitter(*startupJitter)
 
 	registerPID := shouldRegisterMountPID(*daemonized, *once)
 	if *daemonized {
@@ -7935,6 +7938,7 @@ func runMount(args []string) error {
 			*timeout,
 			*interval,
 			*intervalJitter,
+			*startupJitter,
 			*websocketEnabled,
 			*once,
 			*daemonized,
@@ -14095,6 +14099,42 @@ func boolPtr(value bool) *bool {
 	return &value
 }
 
+// defaultStartupJitter spreads the first (possibly full-tree) sync of mounts
+// that start in the same instant — scheduled sandboxes at a cron boundary, and
+// every scoped runner of one mount — so they do not all hit the
+// single-threaded workspace Durable Object in the same second. Mirrors
+// cmd/relayfile-mount.
+const (
+	defaultStartupJitter = 5 * time.Second
+	maxStartupJitter     = 5 * time.Minute
+)
+
+// startupSplaySample draws the uniform sample for the startup splay; tests pin
+// it so a wait can be asserted without depending on a random draw.
+var startupSplaySample = mathrand.Float64
+
+func clampStartupJitter(value time.Duration) time.Duration {
+	if value < 0 {
+		return 0
+	}
+	if value > maxStartupJitter {
+		return maxStartupJitter
+	}
+	return value
+}
+
+// startupSplayDelay maps a uniform sample in [0,1) onto [0, max).
+func startupSplayDelay(max time.Duration, sample float64) time.Duration {
+	max = clampStartupJitter(max)
+	if max == 0 || sample <= 0 {
+		return 0
+	}
+	if sample >= 1 {
+		sample = math.Nextafter(1, 0)
+	}
+	return time.Duration(sample * float64(max))
+}
+
 func clampJitterRatio(value float64) float64 {
 	if value < 0 {
 		return 0
@@ -14343,6 +14383,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 		timeout,
 		interval,
 		intervalJitter,
+		0,
 		websocketEnabled,
 		once,
 		daemonized,
@@ -14352,7 +14393,7 @@ func runMountLoop(rootCtx context.Context, syncer *mountsync.Syncer, localDir, w
 	)
 }
 
-func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer, localDir, workspaceID, serverURL, delegatedCredsFile string, timeout, interval time.Duration, intervalJitter float64, websocketEnabled, once, daemonized bool, pidFile, logFile string, authMu *sync.Mutex) error {
+func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer, localDir, workspaceID, serverURL, delegatedCredsFile string, timeout, interval time.Duration, intervalJitter float64, startupJitter time.Duration, websocketEnabled, once, daemonized bool, pidFile, logFile string, authMu *sync.Mutex) error {
 	interval = enforcePollIntervalFloor(interval)
 	httpClient, _ := syncerClient(syncer)
 	record, _ := workspaceRecordByID(workspaceID)
@@ -14719,6 +14760,23 @@ func runMountLoopWithAuthLock(rootCtx context.Context, syncer *mountsync.Syncer,
 	}
 
 	log.Print(mountStartBanner(localDir, interval, intervalJitter))
+	// Each runner (one per scope) draws its own splay. The watcher is already
+	// admitting local edits, so only the first remote cycle waits.
+	if delay := startupSplayDelay(startupJitter, startupSplaySample()); delay > 0 {
+		log.Printf("mount startup splay: waiting %s before first sync", delay.Round(time.Millisecond))
+		splay := time.NewTimer(delay)
+		select {
+		case <-splay.C:
+		case <-rootCtx.Done():
+			splay.Stop()
+			if once {
+				return fmt.Errorf("initial sync cancelled before first cycle: %w", rootCtx.Err())
+			}
+			log.Printf("mount sync stopping: %v", rootCtx.Err())
+			writeSnapshot()
+			return nil
+		}
+	}
 	initialErr := runCycle(true)
 	logStuckEventSummary(syncer, initialErr)
 	if mountsync.IsBootstrapTerminalError(initialErr) {
