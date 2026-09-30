@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"math/rand"
 	"net/http"
 	"os"
@@ -66,6 +67,7 @@ type mountConfig struct {
 	syncMode              string
 	interval              time.Duration
 	intervalJitter        float64
+	startupJitter         time.Duration
 	timeout               time.Duration
 	bootstrapTimeout      time.Duration
 	bootstrapMaxFiles     int
@@ -122,6 +124,7 @@ func main() {
 	syncModeFlag := flag.String("sync-mode", envOrDefault("RELAYFILE_MOUNT_SYNC_MODE", syncModeMirror), "sync behavior: mirror (pull and push), pull-only (poll mode only; mirror remote changes without writeback), or write-only (push local changes without mirroring provider history)")
 	interval := flag.Duration("interval", durationEnv("RELAYFILE_MOUNT_INTERVAL", 30*time.Second), "sync interval")
 	intervalJitter := flag.Float64("interval-jitter", floatEnv("RELAYFILE_MOUNT_INTERVAL_JITTER", 0.2), "sync interval jitter ratio (0.0-1.0)")
+	startupJitter := flag.Duration("startup-jitter", durationEnv("RELAYFILE_MOUNT_STARTUP_JITTER", defaultStartupJitter), "maximum random delay before the first sync cycle, so mounts started together (scheduled sandboxes, scoped siblings) do not bootstrap in lockstep (0 disables)")
 	timeout := flag.Duration("timeout", durationEnv("RELAYFILE_MOUNT_TIMEOUT", 15*time.Second), "per-sync timeout")
 	bootstrapTimeout := flag.Duration("bootstrap-timeout", durationEnv("RELAYFILE_BOOTSTRAP_TIMEOUT", 0), "hard cap for the one-time/full-tree bootstrap pull (0 = unbounded while making progress)")
 	bootstrapMaxFiles := flag.Int("bootstrap-max-files-per-cycle", intEnv("RELAYFILE_BOOTSTRAP_MAX_FILES_PER_CYCLE", 2000), "maximum files materialized per resumable tree-bootstrap cycle (-1 = legacy unbounded tree behavior)")
@@ -193,6 +196,7 @@ func main() {
 	}
 	allRemotePaths := append(remotePaths.Values(), fileRemotePaths...)
 	*intervalJitter = clampJitterRatio(*intervalJitter)
+	*startupJitter = clampStartupJitter(*startupJitter)
 	resolvedMode, err := resolveMountMode(*mode, *fuse)
 	if err != nil {
 		log.Fatalf("invalid mount mode: %v", err)
@@ -233,6 +237,7 @@ func main() {
 		syncMode:              resolvedSyncMode,
 		interval:              *interval,
 		intervalJitter:        *intervalJitter,
+		startupJitter:         *startupJitter,
 		timeout:               *timeout,
 		bootstrapTimeout:      *bootstrapTimeout,
 		bootstrapMaxFiles:     *bootstrapMaxFiles,
@@ -727,7 +732,23 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 	// "just finished as part of this attempt."
 	priorBootstrapComplete := bootstrapAlreadyComplete(cfg.localDir)
 
-	if err := run(true); err != nil {
+	flushedDuringSplay, err := waitStartupSplay(rootCtx, startupSplayDelay(cfg.startupJitter, startupSplaySample()), cfg.flushReq)
+	if err != nil {
+		if cfg.once {
+			return fmt.Errorf("initial sync cancelled before first cycle: %w", err)
+		}
+		log.Printf("mount sync stopping: %v", err)
+		return nil
+	}
+	if flushedDuringSplay {
+		// An explicit flush ends the splay: the operator asked for a sync
+		// now, and the notifier stops waiting for an ack long before a
+		// full-length splay would elapse. The kicked reconcile is the first
+		// cycle.
+		if err := serviceFlushRequest(rootCtx, cfg, syncer); err != nil {
+			return err
+		}
+	} else if err := run(true); err != nil {
 		return err
 	}
 	if cfg.once {
@@ -791,16 +812,8 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 			log.Printf("mount sync stopping: %v", rootCtx.Err())
 			return nil
 		case <-cfg.flushReq:
-			kickErr := kickReconcile(rootCtx, cfg, syncer)
-			if recErr := recordFlushAck(cfg, kickErr); recErr != nil {
-				log.Printf("mount flush ack failed: %v", recErr)
-			} else if kickErr != nil {
-				log.Printf("mount flush requested via SIGUSR1; failed: %v", kickErr)
-			} else {
-				log.Printf("mount flush requested via SIGUSR1; ack recorded")
-			}
-			if kickErr != nil && mountsync.IsBootstrapTerminalError(kickErr) {
-				return kickErr
+			if err := serviceFlushRequest(rootCtx, cfg, syncer); err != nil {
+				return err
 			}
 		case <-wsTicker.C:
 			if mountWebSocketEnabled(cfg) {
@@ -1530,6 +1543,62 @@ func mountWatchesLocalChanges(cfg mountConfig) bool {
 
 func mountReconcileUsesWebSocketCadence(cfg mountConfig, watcherActive bool) bool {
 	return mountWebSocketEnabled(cfg) && (cfg.syncMode == syncModePullOnly || watcherActive)
+}
+
+// defaultStartupJitter spreads the first (possibly full-tree) sync of mounts
+// that start in the same instant. Scheduled sandboxes launch together at cron
+// boundaries and every scoped sibling starts its own Syncer at once; without a
+// splay they all hit the single-threaded workspace Durable Object in the same
+// second. Five seconds is small against the bootstrap readiness budget.
+const (
+	defaultStartupJitter = 5 * time.Second
+	maxStartupJitter     = 5 * time.Minute
+)
+
+// startupSplaySample draws the uniform sample for the startup splay; tests pin
+// it so a wait can be asserted without depending on a random draw.
+var startupSplaySample = rand.Float64
+
+func clampStartupJitter(value time.Duration) time.Duration {
+	if value < 0 {
+		return 0
+	}
+	if value > maxStartupJitter {
+		return maxStartupJitter
+	}
+	return value
+}
+
+// startupSplayDelay maps a uniform sample in [0,1) onto [0, max).
+func startupSplayDelay(max time.Duration, sample float64) time.Duration {
+	max = clampStartupJitter(max)
+	if max == 0 || sample <= 0 {
+		return 0
+	}
+	if sample >= 1 {
+		sample = math.Nextafter(1, 0)
+	}
+	return time.Duration(sample * float64(max))
+}
+
+// waitStartupSplay waits out the splay unless ctx ends or a flush request
+// arrives first; flushed reports the latter so the caller services it.
+func waitStartupSplay(ctx context.Context, delay time.Duration, flushReq <-chan struct{}) (flushed bool, err error) {
+	if delay <= 0 {
+		return false, ctx.Err()
+	}
+	log.Printf("mount startup splay: waiting %s before first sync", delay.Round(time.Millisecond))
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return false, nil
+	case <-flushReq:
+		log.Printf("mount startup splay: flush requested; starting first sync now")
+		return true, nil
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
 }
 
 func clampJitterRatio(value float64) float64 {
