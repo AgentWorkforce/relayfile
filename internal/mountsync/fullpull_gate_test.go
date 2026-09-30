@@ -212,3 +212,92 @@ func TestGithubTarSeedHoldsFullPullSlotUntilBodyClosed(t *testing.T) {
 		t.Fatal("a full-pull slot was free while the github tar body was still streaming, want the seed to hold it until close")
 	}
 }
+
+// githubSeedTreeHookClient runs onTreeListed after each tree page, while the
+// page's own gate slot is still held.
+type githubSeedTreeHookClient struct {
+	*githubSeedGateClient
+	onTreeListed func()
+}
+
+func (c *githubSeedTreeHookClient) ListTree(ctx context.Context, workspaceID, path string, depth int, cursor string) (TreeResponse, error) {
+	page, err := c.githubSeedGateClient.ListTree(ctx, workspaceID, path, depth, cursor)
+	if c.onTreeListed != nil {
+		c.onTreeListed()
+	}
+	return page, err
+}
+
+// Waiting for a tar-stream slot must not hold the Syncer mutex: sibling
+// scopes can own every slot for a whole stream, and local writeback, outbox
+// and watcher handling all need that mutex in the meantime.
+func TestGithubTarSeedWaitsForSlotWithoutHoldingSyncerMutex(t *testing.T) {
+	const (
+		contentsRoot = "/github/repos/acme/widgets/contents"
+		headSHA      = "head123"
+		sentinelPath = "/github/repos/acme/widgets/.relayfile/clone.json"
+	)
+	body := []byte("# readme\n")
+	remotePath := contentsRoot + "/README.md@" + headSHA + ".json"
+	gate := withFullPullReadGate(t, 1)
+	base := &githubSeedGateClient{
+		fakeExportClient: &fakeExportClient{
+			fakeClient: &fakeClient{files: map[string]RemoteFile{
+				sentinelPath: {Path: sentinelPath, Revision: "rev_1", ContentType: "application/json",
+					Content: `{"headSha":"` + headSHA + `","eventsCursor":"evt_seed"}`},
+				remotePath: {Path: remotePath, Revision: "rev_2", ContentType: "text/markdown",
+					Content: string(body), ContentHash: hashBytes(body)},
+			}},
+			tarFiles: map[string][]byte{"README.md": body},
+		},
+		manifestPath: sentinelPath,
+		bodyOpen:     make(chan struct{}),
+		bodyRelease:  make(chan struct{}),
+	}
+	close(base.bodyRelease)
+	// Queue a sibling for the only slot while the tree page still holds it,
+	// so it wins the slot the moment the page releases and the seed then
+	// waits for its tar slot.
+	siblingHolding := make(chan struct{})
+	siblingRelease := make(chan struct{})
+	var once sync.Once
+	client := &githubSeedTreeHookClient{githubSeedGateClient: base, onTreeListed: func() {
+		once.Do(func() {
+			go func() {
+				_ = gate.do(context.Background(), func() error { close(siblingHolding); <-siblingRelease; return nil })
+			}()
+			time.Sleep(20 * time.Millisecond) // let the sibling block on the gate first
+		})
+	}}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_github_tar_gate_mutex", RemoteRoot: contentsRoot, LocalRoot: t.TempDir(),
+		WebSocket: boolPtr(false), FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- syncer.SyncOnce(context.Background()) }()
+	select {
+	case <-siblingHolding:
+	case <-time.After(2 * time.Second):
+		close(siblingRelease)
+		<-done
+		t.Fatal("sibling never took the slot after the tree snapshot")
+	}
+	time.Sleep(50 * time.Millisecond) // the seed is now waiting for its tar slot
+
+	locked := make(chan struct{})
+	go func() { syncer.WebSocketConnected(); close(locked) }()
+	select {
+	case <-locked:
+	case <-time.After(500 * time.Millisecond):
+		close(siblingRelease)
+		<-done
+		t.Fatal("Syncer mutex was held while the github tar seed waited for a full-pull slot")
+	}
+	close(siblingRelease)
+	if err := <-done; err != nil {
+		t.Fatalf("SyncOnce: %v", err)
+	}
+}

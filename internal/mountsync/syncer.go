@@ -6685,14 +6685,16 @@ func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubW
 
 	// The tar stream is the largest full-pull read: hold one process-wide slot
 	// from the export request until its body is closed, not just until the
-	// response headers arrive.
-	releaseTarSlot, err := fullPullReadGate.acquire(ctx)
-	if err != nil {
-		return true, err
-	}
-	defer releaseTarSlot()
+	// response headers arrive. Wait for the slot inside runFullPullIO so the
+	// Syncer mutex is free while sibling scopes own every slot.
 	var tarBody GithubWorkingTreeTar
+	var releaseTarSlot func()
+	var slotErr error
 	s.runFullPullIO(func() {
+		releaseTarSlot, slotErr = fullPullReadGate.acquire(ctx)
+		if slotErr != nil {
+			return
+		}
 		tarBody, err = client.ExportGithubWorkingTreeTar(ctx, s.workspace, GithubWorkingTreeSeedRequest{
 			Owner:         s.githubWorkingTree.Owner,
 			Repo:          s.githubWorkingTree.Repo,
@@ -6702,6 +6704,10 @@ func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubW
 			Gzip:          false,
 		})
 	})
+	if slotErr != nil {
+		return true, slotErr
+	}
+	defer releaseTarSlot()
 	if err != nil {
 		if exportSnapshotUnsupported(err) {
 			return false, nil
