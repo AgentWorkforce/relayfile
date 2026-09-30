@@ -732,14 +732,23 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 	// "just finished as part of this attempt."
 	priorBootstrapComplete := bootstrapAlreadyComplete(cfg.localDir)
 
-	if err := waitStartupSplay(rootCtx, startupSplayDelay(cfg.startupJitter, rand.Float64())); err != nil {
+	flushedDuringSplay, err := waitStartupSplay(rootCtx, startupSplayDelay(cfg.startupJitter, startupSplaySample()), cfg.flushReq)
+	if err != nil {
 		if cfg.once {
 			return fmt.Errorf("initial sync cancelled before first cycle: %w", err)
 		}
 		log.Printf("mount sync stopping: %v", err)
 		return nil
 	}
-	if err := run(true); err != nil {
+	if flushedDuringSplay {
+		// An explicit flush ends the splay: the operator asked for a sync
+		// now, and the notifier stops waiting for an ack long before a
+		// full-length splay would elapse. The kicked reconcile is the first
+		// cycle.
+		if err := serviceFlushRequest(rootCtx, cfg, syncer); err != nil {
+			return err
+		}
+	} else if err := run(true); err != nil {
 		return err
 	}
 	if cfg.once {
@@ -803,16 +812,8 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 			log.Printf("mount sync stopping: %v", rootCtx.Err())
 			return nil
 		case <-cfg.flushReq:
-			kickErr := kickReconcile(rootCtx, cfg, syncer)
-			if recErr := recordFlushAck(cfg, kickErr); recErr != nil {
-				log.Printf("mount flush ack failed: %v", recErr)
-			} else if kickErr != nil {
-				log.Printf("mount flush requested via SIGUSR1; failed: %v", kickErr)
-			} else {
-				log.Printf("mount flush requested via SIGUSR1; ack recorded")
-			}
-			if kickErr != nil && mountsync.IsBootstrapTerminalError(kickErr) {
-				return kickErr
+			if err := serviceFlushRequest(rootCtx, cfg, syncer); err != nil {
+				return err
 			}
 		case <-wsTicker.C:
 			if mountWebSocketEnabled(cfg) {
@@ -1554,6 +1555,10 @@ const (
 	maxStartupJitter     = 5 * time.Minute
 )
 
+// startupSplaySample draws the uniform sample for the startup splay; tests pin
+// it so a wait can be asserted without depending on a random draw.
+var startupSplaySample = rand.Float64
+
 func clampStartupJitter(value time.Duration) time.Duration {
 	if value < 0 {
 		return 0
@@ -1576,18 +1581,23 @@ func startupSplayDelay(max time.Duration, sample float64) time.Duration {
 	return time.Duration(sample * float64(max))
 }
 
-func waitStartupSplay(ctx context.Context, delay time.Duration) error {
+// waitStartupSplay waits out the splay unless ctx ends or a flush request
+// arrives first; flushed reports the latter so the caller services it.
+func waitStartupSplay(ctx context.Context, delay time.Duration, flushReq <-chan struct{}) (flushed bool, err error) {
 	if delay <= 0 {
-		return ctx.Err()
+		return false, ctx.Err()
 	}
 	log.Printf("mount startup splay: waiting %s before first sync", delay.Round(time.Millisecond))
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	select {
 	case <-timer.C:
-		return nil
+		return false, nil
+	case <-flushReq:
+		log.Printf("mount startup splay: flush requested; starting first sync now")
+		return true, nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return false, ctx.Err()
 	}
 }
 

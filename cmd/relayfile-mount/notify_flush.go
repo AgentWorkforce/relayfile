@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log"
 	"os"
 	"time"
 
@@ -13,6 +14,24 @@ func kickReconcile(rootCtx context.Context, cfg mountConfig, syncer *mountsync.S
 	ctx, cancel := context.WithTimeout(rootCtx, cfg.timeout)
 	defer cancel()
 	return syncer.Reconcile(ctx)
+}
+
+// serviceFlushRequest runs the reconcile a SIGUSR1 flush asked for and
+// records its ack. Only a terminal bootstrap error is returned; any other
+// failure is reported through the ack.
+func serviceFlushRequest(rootCtx context.Context, cfg mountConfig, syncer *mountsync.Syncer) error {
+	kickErr := kickReconcile(rootCtx, cfg, syncer)
+	if recErr := recordFlushAck(cfg, kickErr); recErr != nil {
+		log.Printf("mount flush ack failed: %v", recErr)
+	} else if kickErr != nil {
+		log.Printf("mount flush requested via SIGUSR1; failed: %v", kickErr)
+	} else {
+		log.Printf("mount flush requested via SIGUSR1; ack recorded")
+	}
+	if kickErr != nil && mountsync.IsBootstrapTerminalError(kickErr) {
+		return kickErr
+	}
+	return nil
 }
 
 func recordFlushAck(cfg mountConfig, kickErr error) error {
