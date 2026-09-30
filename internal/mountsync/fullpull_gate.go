@@ -5,10 +5,12 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // defaultFullPullReadConcurrency caps in-flight full-tree remote reads (tree
-// pages, bulk reads, bootstrap point reads, export snapshots) across EVERY
+// pages, bulk reads, bootstrap point reads, export snapshots, GitHub clone
+// manifests and tar seed streams) across EVERY
 // Syncer in this process. A scoped mount runs one Syncer per remote path, and
 // each Syncer already bounds itself to defaultBootstrapReadWorkers; without a
 // process-wide gate, N scopes bootstrapping together multiplied that to 4N
@@ -39,13 +41,25 @@ func newReadGate(limit int) *readGate {
 // ctx.Err() exactly as if the request itself had been cancelled, which the
 // bootstrap runner already treats as a resumable yield.
 func (g *readGate) do(ctx context.Context, fn func() error) error {
+	release, err := g.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return fn()
+}
+
+// acquire takes one slot for a read whose lifetime outlives a single call — a
+// streamed response that is consumed after the request returns. The caller
+// must call release exactly once, when the stream is closed.
+func (g *readGate) acquire(ctx context.Context) (release func(), err error) {
 	select {
 	case g.slots <- struct{}{}:
 	case <-ctx.Done():
-		return ctx.Err()
+		return nil, ctx.Err()
 	}
-	defer func() { <-g.slots }()
-	return fn()
+	var once sync.Once
+	return func() { once.Do(func() { <-g.slots }) }, nil
 }
 
 func fullPullReadConcurrency() int {

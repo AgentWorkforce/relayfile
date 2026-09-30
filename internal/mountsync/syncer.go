@@ -6622,7 +6622,11 @@ func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubW
 	var manifest githubCloneManifest
 	var err error
 	s.runFullPullIO(func() {
-		manifest, err = s.readGithubCloneManifest(ctx)
+		err = fullPullReadGate.do(ctx, func() error {
+			var readErr error
+			manifest, readErr = s.readGithubCloneManifest(ctx)
+			return readErr
+		})
 	})
 	if err != nil {
 		if exportSnapshotUnsupported(err) {
@@ -6679,6 +6683,14 @@ func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubW
 		return true, fmt.Errorf("github tar seed verification failed: tree listed %d entries, clone manifest expected %d", len(tree), *manifest.FilesExpected)
 	}
 
+	// The tar stream is the largest full-pull read: hold one process-wide slot
+	// from the export request until its body is closed, not just until the
+	// response headers arrive.
+	releaseTarSlot, err := fullPullReadGate.acquire(ctx)
+	if err != nil {
+		return true, err
+	}
+	defer releaseTarSlot()
 	var tarBody GithubWorkingTreeTar
 	s.runFullPullIO(func() {
 		tarBody, err = client.ExportGithubWorkingTreeTar(ctx, s.workspace, GithubWorkingTreeSeedRequest{
