@@ -5,6 +5,7 @@ import {
   copyFileSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -489,4 +490,71 @@ test("a rerun attestation with a new attempt cannot replace immutable tag metada
   assert.equal(result.latestTag, "");
   assert.equal(result.resumableVersion, "");
   rmSync(cwd, { recursive: true, force: true });
+});
+
+// gh >= 2.101 rejects --signer-repo together with --signer-workflow ("if any
+// flags in the group [cert-identity cert-identity-regex signer-repo
+// signer-workflow] are set none of the others can be"). The verifier passed
+// both, every verification errored, the error was swallowed as "untrusted",
+// and publish.yml fell back to package.json (0.10.56) so `version=patch`
+// collided with the existing v0.10.57 tag. The shim below enforces that gh
+// rule and records the verify argv; the verifier must still pin the signer
+// workflow (which names the repository), the attested repo, and the source
+// commit.
+test("attestation verification uses flags current gh accepts and keeps every binding", () => {
+  const dir = mkdtempSync(join(tmpdir(), "relayfile-verify-flags-"));
+  try {
+    const bin = join(dir, "bin");
+    mkdirSync(bin);
+    const argvLog = join(dir, "verify-argv.json");
+    writeFileSync(
+      join(bin, "gh"),
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const args = process.argv.slice(2);
+if (args[0] === "release" && args[1] === "download") {
+  const out = args[args.indexOf("--dir") + 1];
+  fs.writeFileSync(path.join(out, "release-attestation.json"), "{}");
+  process.exit(0);
+}
+if (args[0] === "attestation" && args[1] === "verify") {
+  fs.writeFileSync(${JSON.stringify(argvLog)}, JSON.stringify(args));
+  const group = ["--cert-identity", "--cert-identity-regex", "--signer-repo", "--signer-workflow"];
+  if (group.filter((flag) => args.includes(flag)).length > 1) {
+    process.stderr.write("if any flags in the group [cert-identity cert-identity-regex signer-repo signer-workflow] are set none of the others can be");
+    process.exit(1);
+  }
+  process.stdout.write("[]");
+  process.exit(0);
+}
+process.exit(2);
+`,
+    );
+    execFileSync("chmod", ["+x", join(bin, "gh")]);
+    const parent = "b".repeat(40);
+    // Run the verifier in a child whose PATH starts with the shim: command
+    // lookup for execFileSync uses the environment the process started with.
+    const child = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `import { verifyReleaseTagAttestation } from ${JSON.stringify(join(SCRIPTS_DIRECTORY, "resolve-release-baseline.mjs"))};
+verifyReleaseTagAttestation({ cwd: ${JSON.stringify(dir)}, candidate: { tag: "v9.9.9", parent: ${JSON.stringify(parent)}, metadata: null }, sourceSha: ${JSON.stringify(parent)} });`,
+      ],
+      { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, encoding: "utf8" },
+    );
+    assert.equal(child.status, 0, child.stderr);
+    const argv = JSON.parse(readFileSync(argvLog, "utf8"));
+    const value = (flag) => argv[argv.indexOf(flag) + 1];
+    const identityFlags = ["--cert-identity", "--cert-identity-regex", "--signer-repo", "--signer-workflow"]
+      .filter((flag) => argv.includes(flag));
+    assert.deepEqual(identityFlags, ["--signer-workflow"]);
+    assert.equal(value("--signer-workflow"), `${RELEASE_REPOSITORY}/${RELEASE_WORKFLOW_PATH}`);
+    assert.equal(value("--repo"), RELEASE_REPOSITORY);
+    assert.equal(value("--source-digest"), parent);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

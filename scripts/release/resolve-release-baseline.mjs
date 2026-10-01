@@ -562,8 +562,10 @@ export function verifyReleaseTagAttestation({
           artifact,
           "--repo",
           repository,
-          "--signer-repo",
-          repository,
+          // gh >= 2.101 rejects --signer-repo alongside --signer-workflow, and
+          // the error was swallowed below, so no release verified. The signer
+          // workflow names the repository as well as the workflow, so it is
+          // the stricter of the two identity checks; nothing is relaxed.
           "--signer-workflow",
           `${repository}/${workflowPath}`,
           "--source-digest",
@@ -593,7 +595,13 @@ export function verifyReleaseTagAttestation({
     })
       ? attestation
       : null;
-  } catch {
+  } catch (error) {
+    // Still untrusted, but say why: a silent failure here pinned every
+    // release baseline to package.json without anyone noticing.
+    const detail = String(error?.stderr ?? error?.message ?? "").trim();
+    console.error(
+      `release attestation for ${candidate.tag} did not verify${detail ? `: ${detail.slice(0, 300)}` : ""}`,
+    );
     return null;
   } finally {
     rmSync(directory, { recursive: true, force: true });
