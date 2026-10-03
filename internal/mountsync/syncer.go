@@ -7215,6 +7215,7 @@ func stripTarPathComponents(name string, count int) (string, error) {
 }
 
 func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTar, tree map[string]githubTreeFile, conflicted map[string]struct{}, prog bootstrapProgress, strictComplete bool) (map[string]struct{}, error) {
+	const maxAbandonedStagingEntries = 100000
 	// Keep the unverified tree outside the visible mount root. Besides making
 	// publication explicit, this prevents the watcher from observing staging
 	// writes and avoids following a user-controlled infrastructure symlink.
@@ -7224,9 +7225,10 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 	)
 	// The name is stable per mount root, so a restart after SIGKILL reclaims
 	// the abandoned tree instead of accumulating another full repository copy.
-	// RemoveAll does not follow a staging-root symlink; subsequent secure writes
-	// also open every directory component with O_NOFOLLOW.
-	if err := os.RemoveAll(stagingRoot); err != nil {
+	// Cleanup first verifies ownership and a fixed entry budget without following
+	// symlinks; subsequent secure writes also open every directory component
+	// with O_NOFOLLOW.
+	if err := removeOwnedStagingTreeBounded(stagingRoot, maxAbandonedStagingEntries); err != nil {
 		return nil, fmt.Errorf("remove abandoned github tar staging directory: %w", err)
 	}
 	if err := os.Mkdir(stagingRoot, 0o700); err != nil {
@@ -7474,12 +7476,13 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 			continue
 		}
 		if entry.stagedPath != "" {
-			if err := movePathAtomicSecure(stagingRoot, entry.stagedPath, s.localRoot, entry.localPath); err != nil {
+			if err := movePathAtomicSecure(stagingRoot, entry.stagedPath, s.localRoot, entry.localPath, localPermissionsForMode(entry.canWrite, entry.mode)); err != nil {
 				return nil, err
 			}
-		}
-		if err := s.applyLocalPermissionsForMode(entry.localPath, entry.canWrite, entry.mode); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, err
+		} else {
+			if err := s.applyLocalPermissionsForMode(entry.localPath, entry.canWrite, entry.mode); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
 		}
 		s.state.Files[entry.remotePath] = entry.state
 		prog.touch()
@@ -10189,6 +10192,10 @@ func (s *Syncer) applyLocalPermissionsForMode(localPath string, canWrite bool, r
 		// symlink, even when a remote event races a local type replacement.
 		return nil
 	}
+	return os.Chmod(localPath, localPermissionsForMode(canWrite, remoteMode))
+}
+
+func localPermissionsForMode(canWrite bool, remoteMode uint32) os.FileMode {
 	mode := os.FileMode(remoteMode & 0o7777)
 	if mode.Perm() == 0 {
 		mode = 0o644
@@ -10196,7 +10203,7 @@ func (s *Syncer) applyLocalPermissionsForMode(localPath string, canWrite bool, r
 	if !canWrite {
 		mode &^= 0o222
 	}
-	return os.Chmod(localPath, mode.Perm())
+	return mode.Perm()
 }
 
 // enforceSyncModePermissionsOnTransition applies the current scope-derived
