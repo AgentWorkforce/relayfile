@@ -9,7 +9,10 @@ info:
 
     Security model:
     - Agent and service access uses Bearer JWT with workspace and scope claims.
-    - Internal relay-cloud -> relayfile ingress uses HMAC-signed requests.
+    - Internal relay-cloud -> relayfile ingress signs `timestamp + "\n" + body`
+      with `INTERNAL_HMAC_SECRET`. This is distinct from outbound subscription
+      delivery, which signs `timestamp + "." + rawBody` with a per-subscription
+      secret even though both protocols use `X-Relay-Signature`.
     - Correlation IDs are required for traceability and audit.
 servers:
   - url: https://relayfile.agent-relay.com
@@ -1950,7 +1953,10 @@ paths:
       summary: Internal relay-cloud ingestion endpoint for normalized envelopes
       description: |
         Internal endpoint intended for relay-cloud only.
-        Request must be HMAC signed and timestamp bounded to prevent replay.
+        Request must be HMAC-SHA256 signed over
+        `timestamp + "\n" + body` using `INTERNAL_HMAC_SECRET`, and timestamp
+        bounded to prevent replay. This is not the outbound partner webhook
+        scheme, which uses a per-subscription secret and a period separator.
       security:
         - InternalHmacAuth: []
       parameters:
@@ -2467,6 +2473,81 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /v1/workspaces/{workspaceId}/webhooks/dlq:
+    get:
+      tags: [Subscriptions]
+      operationId: listWebhookDeliveryDeadLetters
+      summary: List dead-lettered outbound webhook deliveries
+      description: |
+        Lists outbound subscription deliveries that failed all 3 attempts.
+        Each delivery attempt has a 5-second timeout. Retries use exponential
+        backoff of 10 seconds and then 20 seconds, capped at 600 seconds, with
+        plus or minus 20% jitter. Redirects and all other HTTP statuses of 300
+        or greater count as failures.
+
+        Retry intervals are computed when retries are scheduled and are not
+        persisted. Dead-letter records retain the final `failedAt` timestamp.
+        This queue is separate from `/sync/dead-letter`, which contains inbound
+        webhook envelopes rather than outbound subscription deliveries.
+      security:
+        - BearerAuth: [sync:read]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Outbound webhook delivery dead-letter list
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                description: >-
+                  Deployed DLQ response. Each entry identifies a delivery and
+                  includes its final failedAt timestamp.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/workspaces/{workspaceId}/webhooks/dlq/{deliveryId}/replay:
+    post:
+      tags: [Subscriptions]
+      operationId: replayWebhookDeliveryDeadLetter
+      summary: Replay a dead-lettered outbound webhook delivery
+      description: |
+        Requeues an outbound subscription delivery from the webhook delivery
+        DLQ. Delivery is at-least-once, including manual replay, so receivers
+        must deduplicate using `X-Relay-Event-Id`.
+      security:
+        - BearerAuth: [sync:trigger]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: deliveryId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        '202':
+          description: Delivery accepted for replay
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /v1/workspaces/{workspaceId}/writeback/pending:
     get:
       tags: [Sync]
@@ -2705,8 +2786,11 @@ components:
       in: header
       name: X-Relay-Signature
       description: |
-        HMAC SHA-256 signature of canonical request body using shared internal secret.
-        Must be accompanied by X-Relay-Timestamp and replay window checks.
+        Internal ingress only: HMAC-SHA256 over
+        `timestamp + "\n" + body` using `INTERNAL_HMAC_SECRET`. Must be
+        accompanied by X-Relay-Timestamp and replay-window checks. Do not use
+        this scheme to verify outbound partner deliveries; those use a
+        per-subscription secret and sign `timestamp + "." + rawBody`.
 
   parameters:
     WorkspaceId:
@@ -2757,7 +2841,9 @@ components:
       schema:
         type: string
         minLength: 16
-      description: HMAC signature of request payload.
+      description: >-
+        Internal ingress HMAC-SHA256 over timestamp + newline + body, keyed by
+        INTERNAL_HMAC_SECRET. This is not the outbound subscription signature.
 
   responses:
     BadRequest:
