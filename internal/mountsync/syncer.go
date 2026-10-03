@@ -6999,6 +6999,7 @@ func (s *Syncer) resolveGithubCloneManifestCursor(ctx context.Context, manifest 
 	}
 	if client, ok := s.client.(descendingEventClient); ok {
 		cursor := ""
+		seenCursors := make(map[string]struct{})
 		for {
 			feed, err := client.ListEventsDescending(ctx, s.workspace, s.eventProvider, cursor, 200)
 			if err != nil {
@@ -7015,10 +7016,27 @@ func (s *Syncer) resolveGithubCloneManifestCursor(ctx context.Context, manifest 
 					return strings.TrimSpace(event.EventID), nil
 				}
 			}
-			if feed.NextCursor == nil || strings.TrimSpace(*feed.NextCursor) == "" {
+			nextCursor := ""
+			if feed.NextCursor != nil {
+				nextCursor = strings.TrimSpace(*feed.NextCursor)
+			}
+			if nextCursor == "" {
 				return "", nil
 			}
-			cursor = strings.TrimSpace(*feed.NextCursor)
+			reason := "next cursor did not advance"
+			if nextCursor != cursor {
+				reason = "next cursor repeated a previous page"
+			}
+			if _, seen := seenCursors[nextCursor]; seen || nextCursor == cursor {
+				return "", &MalformedPaginationError{
+					Feed:       "github clone manifest events",
+					Cursor:     cursor,
+					NextCursor: nextCursor,
+					Reason:     reason,
+				}
+			}
+			seenCursors[nextCursor] = struct{}{}
+			cursor = nextCursor
 		}
 	}
 	cursor := ""

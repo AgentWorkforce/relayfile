@@ -3025,14 +3025,20 @@ func TestResolveGithubCloneManifestCursorSearchesNewestEventsFirst(t *testing.T)
 	older := "older-page"
 	client := &descendingManifestEventClient{
 		fakeClient: &fakeClient{},
-		feeds: []EventFeed{{
-			Events: []FilesystemEvent{
-				{EventID: "evt_500", Path: "/github/repos/AgentWorkforce/other/.relayfile/clone.json"},
-				{EventID: "evt_499", Path: sentinelPath, Revision: "rev_newer"},
-				{EventID: "evt_498", Path: sentinelPath, Revision: "rev_manifest"},
+		feeds: []EventFeed{
+			{
+				Events: []FilesystemEvent{
+					{EventID: "evt_500", Path: "/github/repos/AgentWorkforce/other/.relayfile/clone.json"},
+					{EventID: "evt_499", Path: sentinelPath, Revision: "rev_newer"},
+				},
+				NextCursor: &older,
 			},
-			NextCursor: &older,
-		}},
+			{
+				Events: []FilesystemEvent{
+					{EventID: "evt_498", Path: sentinelPath, Revision: "rev_manifest"},
+				},
+			},
+		},
 	}
 	syncer, err := NewSyncer(client, SyncerOptions{
 		WorkspaceID: "ws_manifest_cursor",
@@ -3054,11 +3060,43 @@ func TestResolveGithubCloneManifestCursorSearchesNewestEventsFirst(t *testing.T)
 	if cursor != "evt_498" {
 		t.Fatalf("cursor = %q, want evt_498", cursor)
 	}
-	if len(client.requestedCursors) != 1 || client.requestedCursors[0] != "" {
-		t.Fatalf("descending cursors = %#v, want one request at the tip", client.requestedCursors)
+	if len(client.requestedCursors) != 2 || client.requestedCursors[0] != "" || client.requestedCursors[1] != older {
+		t.Fatalf("descending cursors = %#v, want tip then %q", client.requestedCursors, older)
 	}
 	if client.listEventsCalls != 0 {
 		t.Fatalf("legacy oldest-first feed was called %d time(s)", client.listEventsCalls)
+	}
+}
+
+func TestResolveGithubCloneManifestCursorRejectsRepeatedDescendingCursor(t *testing.T) {
+	repeated := "repeat"
+	client := &descendingManifestEventClient{
+		fakeClient: &fakeClient{},
+		feeds: []EventFeed{
+			{NextCursor: &repeated},
+			{NextCursor: &repeated},
+		},
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_manifest_cursor_cycle",
+		RemoteRoot:  "/github/repos/AgentWorkforce/cloud/contents",
+		LocalRoot:   t.TempDir(),
+		WebSocket:   boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+
+	_, err = syncer.resolveGithubCloneManifestCursor(context.Background(), githubCloneManifest{
+		Path:     "/github/repos/AgentWorkforce/cloud/.relayfile/clone.json",
+		Revision: "rev_manifest",
+	})
+	var paginationErr *MalformedPaginationError
+	if !errors.As(err, &paginationErr) {
+		t.Fatalf("error = %v, want MalformedPaginationError", err)
+	}
+	if len(client.requestedCursors) != 2 {
+		t.Fatalf("descending cursors = %#v, want two bounded requests", client.requestedCursors)
 	}
 }
 
