@@ -1,0 +1,23 @@
+{
+  "id": "traj_60dloiqfxbjn",
+  "version": 1,
+  "task": {
+    "title": "Implement backend-neutral Relayfile conformance and E2E suite",
+    "source": {
+      "system": "plain",
+      "id": "relayfile-durable-actors-e2e"
+    }
+  },
+  "status": "active",
+  "startedAt": "2026-10-03T06:34:33.099Z",
+  "agents": [],
+  "chapters": [],
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "aa95991113ec78a6c2ee04460ba401d0c0853640",
+    "endRef": "aa95991113ec78a6c2ee04460ba401d0c0853640"
+  }
+}
