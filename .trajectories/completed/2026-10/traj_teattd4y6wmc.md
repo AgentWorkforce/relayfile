@@ -10,9 +10,11 @@
 
 ## Summary
 
-Closed PR #523's F1-F7 evidence gates with a 16-case conforming/mutant adapter matrix, Go large-effect coverage, stable N/A auth reporting, restored digest non-regeneration proof, runtime-native Terse verification, dead-letter identity contract, CI summaries, and documented porting prerequisites.
+Implemented PR #523's F1-F7 evidence gates with a 16-case conforming/mutant adapter matrix, Go large-effect coverage, stable N/A auth reporting, restored digest non-regeneration proof, runtime-native Terse verification, dead-letter identity contract, CI summaries, and documented porting prerequisites.
 
-**Approach:** Delivered and pushed each review slice independently, ran the deterministic matrix and full Go oracle locally after each material integration, merged current main to restore mergeability, and fixed the final failover-barrier race found by review.
+**Validation note:** This trajectory contains no captured validation commands or output. The local matrix and Go-oracle results are self-reported and non-gating; CI/check-run artifacts are authoritative.
+
+**Approach:** Delivered and pushed each review slice independently, merged current main to restore mergeability, and fixed the final failover-barrier race found by review. The deterministic matrix and full Go-oracle runs were performed outside this trajectory's capture and therefore are not treated as evidence in this record.
 
 ---
 
@@ -45,5 +47,5 @@ Closed PR #523's F1-F7 evidence gates with a 16-case conforming/mutant adapter m
 
 ## Artifacts
 
-**Commits:** 1bef41f9, f79ad4e2, d79eb1bf, 8d4e6b94, ce7d626b, ff0cade1
+**Commits:** 1bef41f9, f79ad4e2, d79eb1bf, 8d4e6b94, ce7d626b, ff0cade1, 1c5c053a
 **Files changed:** 21
