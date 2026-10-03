@@ -6,7 +6,7 @@ Status legend: **CI** runs in this repository; **configured** has a checked-in t
 
 | Contract area | Invariant IDs | Go durable-local oracle | Hosted Cloudflare DO | TerseAI durable-actors v0.7.9 |
 | --- | --- | --- | --- | --- |
-| Public auth and tenant/path isolation | `RF-AUTH-001`–`RF-AUTH-004`, `RF-MODE-001`; Terse-only `RF-AUTH-005` | public cases CI | public cases configured, black-box | configured; gateway must derive actor ID from verified claim; `RF-AUTH-005` verifies the shared-secret hop fails closed |
+| Public auth and tenant/path isolation | `RF-AUTH-001`–`RF-AUTH-005`, `RF-MODE-001` | public cases CI; `RF-AUTH-005` explicit N/A | public cases configured, black-box; `RF-AUTH-005` explicit N/A | configured; gateway must derive actor ID from verified claim; `RF-AUTH-005` verifies the shared-secret hop fails closed |
 | Webhook idempotency and ordering | `RF-ING-*` | CI | configured, black-box | configured; adapter provider stub for full fault cases |
 | Retry, backpressure, DLQ/replay, poison isolation | `RF-QUEUE-*` | API baseline; time/fault cases skip explicitly | adapter | risk: no actor alarm API; external durable scheduler required |
 | File/digest projection and echo suppression | `RF-PROJ-*`, `RF-TIMER-*` | `RF-ING-*` cover ingest projection; digest/echo/timer cases skip explicitly | adapter | risk: no alarm API for digest rollover |
@@ -18,6 +18,6 @@ Status legend: **CI** runs in this repository; **configured** has a checked-in t
 | OpenAPI and error envelopes | `RF-OAS-*` | CI, every harness response validated | configured, public gateway only | configured, public gateway only; actor-internal errors are not the contract |
 | Evidence and redaction | harness self-tests | CI | generated per run | generated per run |
 
-The plain `cloudflare-hosted` target intentionally declares only observable public capabilities, so it can qualify the current hosted edge without private runtime hooks. `cloudflare-controlled` declares every backend-neutral capability that applies to Cloudflare and fails unless all corresponding adapter controls are present. `RF-AUTH-005` and `runtime-auth-probe` apply only to Terse's shared-secret actor hop. The `npm run test:conformance:terse` command selects the full profile; missing scheduler, lifecycle, migration, failover, or mount behavior is then a failure rather than an optimistic pass.
+The plain `cloudflare-hosted` target intentionally declares only observable public capabilities, so it can qualify the current hosted edge without private runtime hooks. `cloudflare-controlled` declares every backend-neutral capability that applies to Cloudflare and fails unless all corresponding adapter controls are present. Every target registers `RF-AUTH-005`; non-Terse runtimes record it as not applicable rather than silently omitting it. The `runtime-auth-probe` behavior itself applies only to Terse's shared-secret actor hop. The `npm run test:conformance:terse` command selects the full profile; missing scheduler, lifecycle, migration, failover, or mount behavior is then a failure rather than an optimistic pass.
 
 See [backend-neutral-conformance.md](backend-neutral-conformance.md) for commands, environment variables, exact adapter behavior, and evidence format.

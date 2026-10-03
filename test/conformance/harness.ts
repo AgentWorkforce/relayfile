@@ -27,6 +27,7 @@ export interface RequestOptions {
 export interface HarnessOptions {
   includeCaseIds?: ReadonlySet<string>;
   maxPollTimeoutMs?: number;
+  registerOnly?: boolean;
 }
 
 interface RuntimeResponse<T = unknown> {
@@ -85,6 +86,19 @@ export class Harness {
     run: () => Promise<void>,
   ): Promise<void> {
     if (this.options.includeCaseIds && !this.options.includeCaseIds.has(id)) return;
+    if (this.options.registerOnly) {
+      this.cases.push({
+        id,
+        name,
+        status: "skipped",
+        durationMs: 0,
+        requiredCapabilities,
+        correlationIds: [],
+        skipReason: "registration audit",
+        skipKind: "not-applicable",
+      });
+      return;
+    }
     const missing = requiredCapabilities.filter((capability) => !this.target.capabilities.has(capability));
     if (missing.length > 0) {
       const reason = `target ${this.target.id} lacks ${missing.join(", ")}`;

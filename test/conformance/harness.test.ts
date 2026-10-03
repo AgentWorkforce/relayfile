@@ -10,6 +10,7 @@ import { assertFullRunSafety, loadTarget } from "./config.js";
 import { redact, redactEnvironmentText, writeEvidence } from "./evidence.js";
 import { Harness, RequestTransportError } from "./harness.js";
 import { validateOpenApiResponse } from "./openapi-validator.js";
+import { CONFORMANCE_CASE_IDS, runScenarios } from "./scenarios.js";
 import type { EvidenceSummary, ResolvedTarget } from "./types.js";
 
 test("go-local target descriptor is valid", async () => {
@@ -72,6 +73,24 @@ test("only the locally spawned Go oracle bypasses remote full-profile safety", a
 
 test("Terse target fails closed when its actor shared secret is unset", async () => {
   await assert.rejects(() => loadTarget("terse", remoteEnvironment()), /must fail closed/u);
+});
+
+test("all target descriptors register the same stable case IDs", async () => {
+  const expected = [...CONFORMANCE_CASE_IDS].sort();
+  for (const name of ["go-local", "cloudflare-hosted", "cloudflare-controlled", "terse"]) {
+    const env = name === "go-local" ? {} : remoteEnvironment({ terse: name === "terse" });
+    const { target } = await loadTarget(name, env);
+    const harness = new Harness(target, "full", "registration-audit", undefined, { registerOnly: true });
+    await runScenarios(harness);
+    assert.deepEqual(harness.cases.map((result) => result.id).sort(), expected, `${name} registered a different case set`);
+    const runtimeAuth = harness.cases.find((result) => result.id === "RF-AUTH-005");
+    assert(runtimeAuth, `${name} omitted RF-AUTH-005`);
+    if (target.runtime.kind !== "terse-durable-actors") {
+      assert.equal(runtimeAuth.status, "skipped");
+      assert.equal(runtimeAuth.skipKind, "not-applicable");
+      assert.equal(runtimeAuth.skipReason, `not applicable to ${target.runtime.kind}`);
+    }
+  }
 });
 
 test("unknown capabilities are rejected", async () => {
@@ -363,7 +382,7 @@ function fakeTarget(): ResolvedTarget {
   };
 }
 
-function remoteEnvironment(): NodeJS.ProcessEnv {
+function remoteEnvironment(options: { terse?: boolean } = {}): NodeJS.ProcessEnv {
   return {
     RELAYFILE_BASE_URL: "https://relayfile.example.test",
     RELAYFILE_WORKSPACE_PRIMARY: "primary",
@@ -376,5 +395,13 @@ function remoteEnvironment(): NodeJS.ProcessEnv {
     RELAYFILE_SHA: "relayfile-sha",
     RELAYFILE_CONFORMANCE_CONTROL_URL: "https://control.example.test",
     RELAYFILE_CONFORMANCE_CONTROL_TOKEN: "control-token",
+    ...(options.terse ? {
+      RELAYFILE_TERSE_SHARED_SECRET: "runtime-shared-secret",
+      RELAYFILE_TERSE_RUNTIME_URL: "https://terse.example.test",
+      RELAYFILE_TERSE_ADMIN_KEY: "terse-admin-key",
+      RELAYFILE_TERSE_PROJECT_ID: "project",
+      RELAYFILE_TERSE_ACTOR_NAME: "RelayfileWorkspace",
+      RELAYFILE_TERSE_ACTOR_ID: "primary",
+    } : {}),
   };
 }
