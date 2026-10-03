@@ -3,6 +3,7 @@ package mountsync
 import (
 	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto"
 	"crypto/rand"
@@ -2951,6 +2952,9 @@ func TestPullRemoteFullGithubWorkingTreeTarSeedsAndStoresCursor(t *testing.T) {
 	if client.lastTarSeed.SourceProfile != "complete-v1" {
 		t.Fatalf("expected complete source profile on tar export, got %q", client.lastTarSeed.SourceProfile)
 	}
+	if !client.lastTarSeed.SourceArchive || !client.lastTarSeed.Gzip {
+		t.Fatalf("expected native gzip source archive request, got %+v", client.lastTarSeed)
+	}
 	gotReadme, err := os.ReadFile(filepath.Join(localDir, "README.md"))
 	if err != nil {
 		t.Fatalf("read seeded README: %v", err)
@@ -3750,6 +3754,159 @@ func TestGithubWorkingTreeTarSeedRejectsDuplicateEntries(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "duplicate file README.md") {
 		t.Fatalf("expected duplicate tar entry error, got %v", err)
 	}
+}
+
+func TestGithubWorkingTreeSourceArchiveStripsTopLevelDirectory(t *testing.T) {
+	localDir := t.TempDir()
+	contentsRoot := "/github/repos/AgentWorkforce/cloud/contents"
+	headSHA := "head123"
+	body := []byte("# Cloud\n")
+	remotePath := contentsRoot + "/README.md@" + headSHA + ".json"
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_source_archive", RemoteRoot: contentsRoot, LocalRoot: localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := tw.WriteHeader(&tar.Header{Name: "cloud-head123/README.md", Mode: 0o644, Size: int64(len(body))}); err != nil {
+		t.Fatalf("write tar header: %v", err)
+	}
+	if _, err := tw.Write(body); err != nil {
+		t.Fatalf("write tar body: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	remotePaths, err := syncer.applyGithubWorkingTreeTarSeedStrict(GithubWorkingTreeTar{
+		Body: io.NopCloser(bytes.NewReader(buf.Bytes())), ContentType: "application/x-tar", StripComponents: 1,
+	}, map[string]githubTreeFile{
+		"README.md": {RemotePath: remotePath, Revision: "rev_1", ContentHash: hashBytes(body), Type: remoteTypeFile, Mode: 0o644},
+	}, nil, bootstrapProgress{}, true)
+	if err != nil {
+		t.Fatalf("apply source archive: %v", err)
+	}
+	if _, ok := remotePaths[remotePath]; !ok {
+		t.Fatalf("source archive did not materialize %s", remotePath)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "README.md"), string(body))
+	if _, err := os.Stat(filepath.Join(localDir, "cloud-head123")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("top-level archive directory leaked into mount: %v", err)
+	}
+}
+
+func TestGithubWorkingTreeTarSeedStagesBeforePublishing(t *testing.T) {
+	localDir := t.TempDir()
+	contentsRoot := "/github/repos/AgentWorkforce/cloud/contents"
+	headSHA := "head123"
+	firstBody := []byte("first\n")
+	secondBody := []byte("corrupt\n")
+	firstRemote := contentsRoot + "/first.txt@" + headSHA + ".json"
+	secondRemote := contentsRoot + "/second.txt@" + headSHA + ".json"
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_staged_archive", RemoteRoot: contentsRoot, LocalRoot: localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, entry := range []struct {
+		name string
+		body []byte
+	}{{"cloud-head123/first.txt", firstBody}, {"cloud-head123/second.txt", secondBody}} {
+		if err := tw.WriteHeader(&tar.Header{Name: entry.name, Mode: 0o644, Size: int64(len(entry.body))}); err != nil {
+			t.Fatalf("write %s header: %v", entry.name, err)
+		}
+		if _, err := tw.Write(entry.body); err != nil {
+			t.Fatalf("write %s body: %v", entry.name, err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	_, err = syncer.applyGithubWorkingTreeTarSeedStrict(GithubWorkingTreeTar{
+		Body: io.NopCloser(bytes.NewReader(buf.Bytes())), ContentType: "application/x-tar", StripComponents: 1,
+	}, map[string]githubTreeFile{
+		"first.txt":  {RemotePath: firstRemote, Revision: "rev_1", ContentHash: hashBytes(firstBody), Type: remoteTypeFile, Mode: 0o644},
+		"second.txt": {RemotePath: secondRemote, Revision: "rev_2", ContentHash: hashBytes([]byte("expected\n")), Type: remoteTypeFile, Mode: 0o644},
+	}, nil, bootstrapProgress{}, true)
+	if err == nil || !strings.Contains(err.Error(), "contentHash mismatch for second.txt") {
+		t.Fatalf("expected late hash mismatch, got %v", err)
+	}
+	for _, name := range []string{"first.txt", "second.txt"} {
+		if _, statErr := os.Stat(filepath.Join(localDir, name)); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("%s became visible before archive verification completed: %v", name, statErr)
+		}
+	}
+	if len(syncer.state.Files) != 0 {
+		t.Fatalf("mount state changed before archive verification completed: %#v", syncer.state.Files)
+	}
+	stages, err := filepath.Glob(filepath.Join(filepath.Dir(localDir), ".relayfile-github-tar-stage-*"))
+	if err != nil {
+		t.Fatalf("glob staging directories: %v", err)
+	}
+	if len(stages) != 0 {
+		t.Fatalf("failed archive left staging directories: %v", stages)
+	}
+}
+
+func TestGithubWorkingTreeSourceArchiveMaterializesRealisticTree(t *testing.T) {
+	const fileCount = 5_884
+	localDir := t.TempDir()
+	contentsRoot := "/github/repos/AgentWorkforce/cloud/contents"
+	headSHA := "head-realistic"
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_realistic_archive", RemoteRoot: contentsRoot, LocalRoot: localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	tree := make(map[string]githubTreeFile, fileCount)
+	for index := 0; index < fileCount; index++ {
+		rel := fmt.Sprintf("src/file-%04d.txt", index)
+		body := []byte(fmt.Sprintf("content-%04d\n", index))
+		if err := tw.WriteHeader(&tar.Header{
+			Name: "cloud-head-realistic/" + rel, Mode: 0o644, Size: int64(len(body)),
+		}); err != nil {
+			t.Fatalf("write tar header %d: %v", index, err)
+		}
+		if _, err := tw.Write(body); err != nil {
+			t.Fatalf("write tar body %d: %v", index, err)
+		}
+		tree[rel] = githubTreeFile{
+			RemotePath: contentsRoot + "/" + rel + "@" + headSHA + ".json",
+			Revision:   fmt.Sprintf("rev_%d", index+1), ContentHash: hashBytes(body),
+			Type: remoteTypeFile, Mode: 0o644,
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("close gzip: %v", err)
+	}
+
+	remotePaths, err := syncer.applyGithubWorkingTreeTarSeedStrict(GithubWorkingTreeTar{
+		Body: io.NopCloser(bytes.NewReader(buf.Bytes())), ContentType: "application/gzip", StripComponents: 1,
+	}, tree, nil, bootstrapProgress{}, true)
+	if err != nil {
+		t.Fatalf("apply realistic source archive: %v", err)
+	}
+	if len(remotePaths) != fileCount || len(syncer.state.Files) != fileCount {
+		t.Fatalf("materialized=%d tracked=%d, want %d", len(remotePaths), len(syncer.state.Files), fileCount)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "src", "file-0000.txt"), "content-0000\n")
+	assertLocalFileContent(t, filepath.Join(localDir, "src", "file-5883.txt"), "content-5883\n")
 }
 
 func TestReconcileBootstrapSkipsMatchingKeptMirrorBeforePushLocal(t *testing.T) {
