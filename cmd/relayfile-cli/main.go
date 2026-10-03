@@ -9402,7 +9402,7 @@ func plistEscapeXML(s string) string {
 	return s
 }
 
-func runTree(args []string, stdout io.Writer) error {
+func runTree(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("tree", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	server := fs.String("server", "", "relayfile server URL override")
@@ -9410,12 +9410,14 @@ func runTree(args []string, stdout io.Writer) error {
 	pathFlag := fs.String("path", "/", "remote path to list")
 	depth := fs.Int("depth", 1, "tree depth")
 	jsonOutput := fs.Bool("json", false, "print the raw JSON response")
+	noRetry := fs.Bool("no-retry", false, "do not retry transient read failures")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
-		"server": true,
-		"token":  true,
-		"path":   true,
-		"depth":  true,
-		"json":   false,
+		"server":   true,
+		"token":    true,
+		"path":     true,
+		"depth":    true,
+		"json":     false,
+		"no-retry": false,
 	})); err != nil {
 		return err
 	}
@@ -9452,7 +9454,7 @@ func runTree(args []string, stdout io.Writer) error {
 	query := url.Values{}
 	query.Set("path", remotePath)
 	query.Set("depth", strconv.Itoa(*depth))
-	body, _, err := commandClient.getWorkspaceBytes(context.Background(), func(workspaceID string) string {
+	body, _, err := defaultOneShotGETRetryPolicy(!*noRetry, stderr).getWorkspaceBytes(context.Background(), commandClient, func(workspaceID string) string {
 		return fmt.Sprintf("/v1/workspaces/%s/fs/tree?%s", url.PathEscape(workspaceID), query.Encode())
 	})
 	if err != nil {
@@ -9552,18 +9554,20 @@ func knownRemoteRootSegment(segment string) bool {
 	}
 }
 
-func runRead(args []string, stdout io.Writer) error {
+func runRead(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("read", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	server := fs.String("server", "", "relayfile server URL override")
 	token := fs.String("token", "", "relayfile token override")
 	output := fs.String("output", "-", "output file path or - for stdout")
 	jsonOutput := fs.Bool("json", false, "print the raw JSON response")
+	noRetry := fs.Bool("no-retry", false, "do not retry transient read failures")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
-		"server": true,
-		"token":  true,
-		"output": true,
-		"json":   false,
+		"server":   true,
+		"token":    true,
+		"output":   true,
+		"json":     false,
+		"no-retry": false,
 	})); err != nil {
 		return err
 	}
@@ -9589,7 +9593,7 @@ func runRead(args []string, stdout io.Writer) error {
 
 	query := url.Values{}
 	query.Set("path", remotePath)
-	body, _, err := commandClient.getWorkspaceBytes(context.Background(), func(workspaceID string) string {
+	body, _, err := defaultOneShotGETRetryPolicy(!*noRetry, stderr).getWorkspaceBytes(context.Background(), commandClient, func(workspaceID string) string {
 		return fmt.Sprintf("/v1/workspaces/%s/fs/file?%s", url.PathEscape(workspaceID), query.Encode())
 	})
 	if err != nil {
@@ -9696,18 +9700,20 @@ func runSeed(args []string, stdout io.Writer) error {
 	return nil
 }
 
-func runExport(args []string, stdout io.Writer) error {
+func runExport(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("export", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	server := fs.String("server", "", "relayfile server URL override")
 	token := fs.String("token", "", "relayfile token override")
 	format := fs.String("format", "json", "export format: tar, json, or patch")
 	output := fs.String("output", "-", "output file path or - for stdout")
+	noRetry := fs.Bool("no-retry", false, "do not retry transient read failures")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
-		"server": true,
-		"token":  true,
-		"format": true,
-		"output": true,
+		"server":   true,
+		"token":    true,
+		"format":   true,
+		"output":   true,
+		"no-retry": false,
 	})); err != nil {
 		return err
 	}
@@ -9724,7 +9730,7 @@ func runExport(args []string, stdout io.Writer) error {
 		return err
 	}
 	exportFormat := url.QueryEscape(strings.ToLower(strings.TrimSpace(*format)))
-	body, _, err := commandClient.getWorkspaceBytes(context.Background(), func(workspaceID string) string {
+	body, _, err := defaultOneShotGETRetryPolicy(!*noRetry, stderr).getWorkspaceBytes(context.Background(), commandClient, func(workspaceID string) string {
 		return fmt.Sprintf("/v1/workspaces/%s/fs/export?format=%s", url.PathEscape(workspaceID), exportFormat)
 	})
 	if err != nil {
@@ -9743,16 +9749,18 @@ func runExport(args []string, stdout io.Writer) error {
 	return os.WriteFile(*output, body, 0o644)
 }
 
-func runStatus(args []string, stdout io.Writer) error {
+func runStatus(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	server := fs.String("server", "", "relayfile server URL override")
 	token := fs.String("token", "", "relayfile token override")
 	jsonOutput := fs.Bool("json", false, "emit JSON")
+	noRetry := fs.Bool("no-retry", false, "do not retry transient read failures")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
-		"server": true,
-		"token":  true,
-		"json":   false,
+		"server":   true,
+		"token":    true,
+		"json":     false,
+		"no-retry": false,
 	})); err != nil {
 		return err
 	}
@@ -9769,7 +9777,8 @@ func runStatus(args []string, stdout io.Writer) error {
 		return err
 	}
 	var status syncStatusResponse
-	err = commandClient.getWorkspaceJSON(context.Background(), func(workspaceID string) string {
+	retryPolicy := defaultOneShotGETRetryPolicy(!*noRetry, stderr)
+	err = retryPolicy.getWorkspaceJSON(context.Background(), commandClient, func(workspaceID string) string {
 		return fmt.Sprintf("/v1/workspaces/%s/sync/status", url.PathEscape(workspaceID))
 	}, &status)
 	if err != nil {
@@ -9781,7 +9790,7 @@ func runStatus(args []string, stdout io.Writer) error {
 	var ingress *syncIngressStatusResponse
 	if statusNeedsIngressDiagnostics(status) {
 		var ingressStatus syncIngressStatusResponse
-		if err := commandClient.getWorkspaceJSON(context.Background(), func(workspaceID string) string {
+		if err := retryPolicy.getWorkspaceJSON(context.Background(), commandClient, func(workspaceID string) string {
 			return fmt.Sprintf("/v1/workspaces/%s/sync/ingress", url.PathEscape(workspaceID))
 		}, &ingressStatus); err == nil {
 			ingress = &ingressStatus

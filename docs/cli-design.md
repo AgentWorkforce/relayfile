@@ -348,7 +348,7 @@ relayfile mount <workspace> [local-dir]
 List a remote workspace path without mounting.
 
 ```
-relayfile tree <workspace> [path] [--depth n] [--json]
+relayfile tree <workspace> [path] [--depth n] [--json] [--no-retry]
 ```
 
 | Argument | Required | Default | Description |
@@ -360,12 +360,14 @@ relayfile tree <workspace> [path] [--depth n] [--json]
 |------|---------|-------------|
 | `--depth` | `1` | Maximum tree depth |
 | `--json` | `false` | Pretty-print the raw API response |
+| `--no-retry` | `false` | Fail immediately instead of retrying transient `429`/`503` responses |
 
 **Behavior:**
 
 1. Calls `GET /v1/workspaces/{workspaceId}/fs/tree?path=<path>&depth=<depth>`.
 2. Prints a compact human-readable tree by default.
 3. With `--json`, prints the raw response formatted as JSON for scripts.
+4. By default, retries transient `429`/`503` responses up to three attempts, honoring `Retry-After` with bounded jitter and reporting waits on stderr.
 
 ---
 
@@ -374,7 +376,7 @@ relayfile tree <workspace> [path] [--depth n] [--json]
 Read one remote file without mounting.
 
 ```
-relayfile read <workspace> <path> [--output file] [--json]
+relayfile read <workspace> <path> [--output file] [--json] [--no-retry]
 relayfile cat <workspace> <path>
 ```
 
@@ -387,6 +389,7 @@ relayfile cat <workspace> <path>
 |------|---------|-------------|
 | `--output` | `-` | Output file path or stdout |
 | `--json` | `false` | Pretty-print the raw API response |
+| `--no-retry` | `false` | Fail immediately instead of retrying transient `429`/`503` responses |
 
 **Behavior:**
 
@@ -394,6 +397,7 @@ relayfile cat <workspace> <path>
 2. Prints file content to stdout by default.
 3. Decodes `encoding: "base64"` content before writing to stdout or `--output`.
 4. With `--json`, prints the raw response formatted as JSON.
+5. By default, retries transient `429`/`503` responses up to three attempts, honoring `Retry-After`; retry notices go to stderr and never mix with file content.
 
 ---
 
@@ -432,7 +436,7 @@ relayfile seed <workspace> [dir]
 Download a workspace snapshot.
 
 ```
-relayfile export <workspace> [--format tar|json|patch] [--output file]
+relayfile export <workspace> [--format tar|json|patch] [--output file] [--no-retry]
 ```
 
 | Flag | Default | Description |
@@ -440,6 +444,7 @@ relayfile export <workspace> [--format tar|json|patch] [--output file]
 | `--format` | `tar` | Export format |
 | `--output` | stdout | Output file path (or `-` for stdout) |
 | `--path` | `/` | Export only files under this path |
+| `--no-retry` | `false` | Fail immediately instead of retrying transient `429`/`503` responses |
 
 **Behavior:**
 
@@ -447,6 +452,7 @@ relayfile export <workspace> [--format tar|json|patch] [--output file]
 2. `GET /v1/workspaces/{workspaceId}/fs/export?format=<format>&path=<path>`.
 3. Stream response to `--output` or stdout.
 4. Print to stderr: `[export] downloaded 42 files (1.3 MB) from ws_abc123`.
+5. By default, retry transient `429`/`503` responses up to three attempts, honoring `Retry-After`.
 
 **Uses the Workspace Export API** defined in `docs/bulk-export-design.md`.
 
@@ -457,17 +463,22 @@ relayfile export <workspace> [--format tar|json|patch] [--output file]
 Show workspace sync status including per-provider state.
 
 ```
-relayfile status [workspace] [--json]
+relayfile status [workspace] [--json] [--no-retry]
 ```
 
 | Argument | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `workspace` | No | default workspace | Workspace name or ID |
 
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--no-retry` | `false` | Fail immediately instead of retrying transient `429`/`503` responses |
+
 **Behavior:**
 
 1. Resolve workspace (uses default if omitted).
 2. Read Cloud `/sync` endpoint and local `.relay/state.json`.
+   Transient `429`/`503` responses are retried up to three attempts by default, including the optional ingress-diagnostics read.
 3. Print one-screen summary:
    ```
    workspace ws_abc (my-project)   mode: poll   lag: 4s

@@ -680,9 +680,10 @@ func relayfileCommands() []cliCommandSpec {
 				{Flags: "--path <path>", Description: "remote path to list", DefaultValue: "/"},
 				{Flags: "--depth <n>", Description: "tree depth", DefaultValue: 1},
 				{Flags: "--json", Description: "print the raw JSON response", DefaultValue: false},
+				{Flags: "--no-retry", Description: "do not retry transient read failures", DefaultValue: false},
 			},
 			dispatch: func(inv cliInvocation) error {
-				return runTree(inv.args, inv.stdout)
+				return runTree(inv.args, inv.stdout, inv.stderr)
 			},
 		},
 		{
@@ -703,9 +704,10 @@ func relayfileCommands() []cliCommandSpec {
 				tokenFlagOption,
 				{Flags: "--output <file>", Description: "output file path or - for stdout", DefaultValue: "-"},
 				{Flags: "--json", Description: "print the raw JSON response", DefaultValue: false},
+				{Flags: "--no-retry", Description: "do not retry transient read failures", DefaultValue: false},
 			},
 			dispatch: func(inv cliInvocation) error {
-				return runRead(inv.args, inv.stdout)
+				return runRead(inv.args, inv.stdout, inv.stderr)
 			},
 		},
 		{
@@ -731,9 +733,10 @@ func relayfileCommands() []cliCommandSpec {
 				tokenFlagOption,
 				{Flags: "--format <format>", Description: "export format: tar, json, or patch", DefaultValue: "json"},
 				{Flags: "--output <file>", Description: "output file path or - for stdout", DefaultValue: "-"},
+				{Flags: "--no-retry", Description: "do not retry transient read failures", DefaultValue: false},
 			},
 			dispatch: func(inv cliInvocation) error {
-				return runExport(inv.args, inv.stdout)
+				return runExport(inv.args, inv.stdout, inv.stderr)
 			},
 		},
 		{
@@ -741,9 +744,9 @@ func relayfileCommands() []cliCommandSpec {
 			Description: "Show sync status and local mirror state for a workspace",
 			flagSource:  "runStatus",
 			Args:        []cliArgSpec{workspaceArg},
-			Options:     []cliOptionSpec{serverFlagOption, tokenFlagOption, jsonFlagOption},
+			Options:     []cliOptionSpec{serverFlagOption, tokenFlagOption, jsonFlagOption, {Flags: "--no-retry", Description: "do not retry transient read failures", DefaultValue: false}},
 			dispatch: func(inv cliInvocation) error {
-				return runStatus(inv.args, inv.stdout)
+				return runStatus(inv.args, inv.stdout, inv.stderr)
 			},
 		},
 		{
