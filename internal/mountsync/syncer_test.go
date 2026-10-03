@@ -3100,6 +3100,70 @@ func TestResolveGithubCloneManifestCursorRejectsRepeatedDescendingCursor(t *test
 	}
 }
 
+func TestResolveGithubCloneManifestCursorWithoutRevisionUsesLatestLegacyMatch(t *testing.T) {
+	sentinelPath := "/github/repos/AgentWorkforce/cloud/.relayfile/clone.json"
+	client := &descendingManifestEventClient{
+		fakeClient: &fakeClient{events: []FilesystemEvent{
+			{EventID: "evt_1", Path: sentinelPath, Revision: "rev_1"},
+			{EventID: "evt_2", Path: sentinelPath, Revision: "rev_2"},
+		}},
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_manifest_cursor_no_revision",
+		RemoteRoot:  "/github/repos/AgentWorkforce/cloud/contents",
+		LocalRoot:   t.TempDir(),
+		WebSocket:   boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+
+	cursor, err := syncer.resolveGithubCloneManifestCursor(context.Background(), githubCloneManifest{Path: sentinelPath})
+	if err != nil {
+		t.Fatalf("resolveGithubCloneManifestCursor failed: %v", err)
+	}
+	if cursor != "evt_2" {
+		t.Fatalf("cursor = %q, want latest legacy match evt_2", cursor)
+	}
+	if len(client.requestedCursors) != 0 {
+		t.Fatalf("descending feed used without an exact manifest revision: %#v", client.requestedCursors)
+	}
+	if client.listEventsCalls != 1 {
+		t.Fatalf("legacy feed calls = %d, want 1", client.listEventsCalls)
+	}
+}
+
+func TestResolveGithubCloneManifestCursorRejectsRepeatedLegacyCursor(t *testing.T) {
+	repeated := "repeat"
+	client := &scriptedEventFeedClient{
+		fakeClient: &fakeClient{},
+		feeds: []EventFeed{
+			{NextCursor: &repeated},
+			{NextCursor: &repeated},
+		},
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_manifest_cursor_legacy_cycle",
+		RemoteRoot:  "/github/repos/AgentWorkforce/cloud/contents",
+		LocalRoot:   t.TempDir(),
+		WebSocket:   boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+
+	_, err = syncer.resolveGithubCloneManifestCursor(context.Background(), githubCloneManifest{
+		Path: "/github/repos/AgentWorkforce/cloud/.relayfile/clone.json",
+	})
+	var paginationErr *MalformedPaginationError
+	if !errors.As(err, &paginationErr) {
+		t.Fatalf("error = %v, want MalformedPaginationError", err)
+	}
+	if len(client.requestedCursors) != 2 {
+		t.Fatalf("legacy cursors = %#v, want two bounded requests", client.requestedCursors)
+	}
+}
+
 func TestPullRemoteFullGithubWorkingTreeTarSeedFallsBackToTree(t *testing.T) {
 	localDir := t.TempDir()
 	contentsRoot := "/github/repos/AgentWorkforce/cloud/contents"

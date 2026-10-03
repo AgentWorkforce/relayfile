@@ -630,11 +630,12 @@ type RemoteClient interface {
 }
 
 // descendingEventClient is an optional extension used when a bootstrap needs
-// the event cursor for one specific file. Newer Relayfile servers support
-// descending event pagination, which lets the mount find a recently-written
-// clone sentinel from the tip instead of walking the retained feed from its
-// oldest page. Keep this optional so older/custom RemoteClient
-// implementations remain source-compatible.
+// the event cursor for one specific file. Implementations must honor
+// newest-first pagination. Newer Relayfile servers support this directly,
+// which lets the mount find a recently-written clone sentinel from the tip
+// instead of walking the retained feed from its oldest page. Keep this
+// optional so older/custom RemoteClient implementations remain
+// source-compatible.
 type descendingEventClient interface {
 	ListEventsDescending(ctx context.Context, workspaceID, provider, cursor string, limit int) (EventFeed, error)
 }
@@ -6990,14 +6991,18 @@ func (s *Syncer) resolveGithubCloneManifestCursor(ctx context.Context, manifest 
 	if manifestPath == "/" {
 		return "", nil
 	}
+	manifestRevision := strings.TrimSpace(manifest.Revision)
 	matchesManifest := func(event FilesystemEvent) bool {
 		if normalizeRemotePath(event.Path) != manifestPath || strings.TrimSpace(event.EventID) == "" {
 			return false
 		}
-		manifestRevision := strings.TrimSpace(manifest.Revision)
 		return manifestRevision == "" || strings.TrimSpace(event.Revision) == manifestRevision
 	}
-	if client, ok := s.client.(descendingEventClient); ok {
+	// Without an exact revision, a server that silently ignores direction=desc
+	// could make the first path match the oldest sentinel event. Preserve the
+	// legacy full scan in that compatibility case so it selects the latest
+	// matching event instead.
+	if client, ok := s.client.(descendingEventClient); ok && manifestRevision != "" {
 		cursor := ""
 		seenCursors := make(map[string]struct{})
 		for {
@@ -7041,6 +7046,7 @@ func (s *Syncer) resolveGithubCloneManifestCursor(ctx context.Context, manifest 
 	}
 	cursor := ""
 	latest := ""
+	seenCursors := make(map[string]struct{})
 	for {
 		feed, err := s.client.ListEvents(ctx, s.workspace, s.eventProvider, cursor, 200)
 		if err != nil {
@@ -7051,10 +7057,27 @@ func (s *Syncer) resolveGithubCloneManifestCursor(ctx context.Context, manifest 
 				latest = strings.TrimSpace(event.EventID)
 			}
 		}
-		if feed.NextCursor == nil || strings.TrimSpace(*feed.NextCursor) == "" {
+		nextCursor := ""
+		if feed.NextCursor != nil {
+			nextCursor = strings.TrimSpace(*feed.NextCursor)
+		}
+		if nextCursor == "" {
 			break
 		}
-		cursor = strings.TrimSpace(*feed.NextCursor)
+		reason := "next cursor did not advance"
+		if nextCursor != cursor {
+			reason = "next cursor repeated a previous page"
+		}
+		if _, seen := seenCursors[nextCursor]; seen || nextCursor == cursor {
+			return "", &MalformedPaginationError{
+				Feed:       "github clone manifest events",
+				Cursor:     cursor,
+				NextCursor: nextCursor,
+				Reason:     reason,
+			}
+		}
+		seenCursors[nextCursor] = struct{}{}
+		cursor = nextCursor
 	}
 	return latest, nil
 }
