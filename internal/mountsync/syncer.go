@@ -629,6 +629,17 @@ type RemoteClient interface {
 	MergeFile(ctx context.Context, workspaceID, path, strategy, baseRevision, baseContent, content, contentType string) (MergeResult, error)
 }
 
+// descendingEventClient is an optional extension used when a bootstrap needs
+// the event cursor for one specific file. Implementations must honor
+// newest-first pagination. Newer Relayfile servers support this directly,
+// which lets the mount find a recently-written clone sentinel from the tip
+// instead of walking the retained feed from its oldest page. Keep this
+// optional so older/custom RemoteClient implementations remain
+// source-compatible.
+type descendingEventClient interface {
+	ListEventsDescending(ctx context.Context, workspaceID, provider, cursor string, limit int) (EventFeed, error)
+}
+
 // bulkReadClient is optional so custom RemoteClient implementations and old
 // servers remain source-compatible. The mount only falls back to ReadFile when
 // the server explicitly answers 501 bulk_read_unsupported; ordinary 404s,
@@ -937,6 +948,23 @@ func (c *HTTPClient) ListEvents(ctx context.Context, workspaceID, provider, curs
 	if limit > 0 {
 		q.Set("limit", fmt.Sprintf("%d", limit))
 	}
+	var out EventFeed
+	err := c.doJSON(ctx, http.MethodGet, fmt.Sprintf("/v1/workspaces/%s/fs/events?%s", url.PathEscape(workspaceID), q.Encode()), nil, nil, &out)
+	return out, err
+}
+
+func (c *HTTPClient) ListEventsDescending(ctx context.Context, workspaceID, provider, cursor string, limit int) (EventFeed, error) {
+	q := url.Values{}
+	if strings.TrimSpace(provider) != "" {
+		q.Set("provider", strings.TrimSpace(provider))
+	}
+	if strings.TrimSpace(cursor) != "" {
+		q.Set("cursor", strings.TrimSpace(cursor))
+	}
+	if limit > 0 {
+		q.Set("limit", fmt.Sprintf("%d", limit))
+	}
+	q.Set("direction", "desc")
 	var out EventFeed
 	err := c.doJSON(ctx, http.MethodGet, fmt.Sprintf("/v1/workspaces/%s/fs/events?%s", url.PathEscape(workspaceID), q.Encode()), nil, nil, &out)
 	return out, err
@@ -6613,6 +6641,7 @@ type githubCloneManifest struct {
 	SourceProfile string
 	FilesExpected *int
 	Path          string
+	Revision      string
 }
 
 func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubWorkingTreeTarClient, conflicted map[string]struct{}, prog bootstrapProgress) (bool, error) {
@@ -6898,6 +6927,7 @@ func (s *Syncer) readGithubCloneManifest(ctx context.Context) (githubCloneManife
 			continue
 		}
 		manifest.Path = manifestPath
+		manifest.Revision = strings.TrimSpace(file.Revision)
 		return manifest, nil
 	}
 	if lastErr != nil {
@@ -6961,22 +6991,93 @@ func (s *Syncer) resolveGithubCloneManifestCursor(ctx context.Context, manifest 
 	if manifestPath == "/" {
 		return "", nil
 	}
+	manifestRevision := strings.TrimSpace(manifest.Revision)
+	matchesManifest := func(event FilesystemEvent) bool {
+		if normalizeRemotePath(event.Path) != manifestPath || strings.TrimSpace(event.EventID) == "" {
+			return false
+		}
+		return manifestRevision == "" || strings.TrimSpace(event.Revision) == manifestRevision
+	}
+	// Without an exact revision, a server that silently ignores direction=desc
+	// could make the first path match the oldest sentinel event. Preserve the
+	// legacy full scan in that compatibility case so it selects the latest
+	// matching event instead.
+	if client, ok := s.client.(descendingEventClient); ok && manifestRevision != "" {
+		cursor := ""
+		seenCursors := make(map[string]struct{})
+		for {
+			feed, err := client.ListEventsDescending(ctx, s.workspace, s.eventProvider, cursor, 200)
+			if err != nil {
+				var httpErr *HTTPError
+				if !errors.As(err, &httpErr) || (httpErr.StatusCode != http.StatusBadRequest && httpErr.StatusCode != http.StatusNotFound) {
+					return "", err
+				}
+				// Older servers do not understand direction=desc. Preserve the
+				// legacy oldest-to-newest scan below for compatibility.
+				break
+			}
+			for _, event := range feed.Events {
+				if matchesManifest(event) {
+					return strings.TrimSpace(event.EventID), nil
+				}
+			}
+			nextCursor := ""
+			if feed.NextCursor != nil {
+				nextCursor = strings.TrimSpace(*feed.NextCursor)
+			}
+			if nextCursor == "" {
+				return "", nil
+			}
+			reason := "next cursor did not advance"
+			if nextCursor != cursor {
+				reason = "next cursor repeated a previous page"
+			}
+			if _, seen := seenCursors[nextCursor]; seen || nextCursor == cursor {
+				return "", &MalformedPaginationError{
+					Feed:       "github clone manifest events",
+					Cursor:     cursor,
+					NextCursor: nextCursor,
+					Reason:     reason,
+				}
+			}
+			seenCursors[nextCursor] = struct{}{}
+			cursor = nextCursor
+		}
+	}
 	cursor := ""
 	latest := ""
+	seenCursors := make(map[string]struct{})
 	for {
 		feed, err := s.client.ListEvents(ctx, s.workspace, s.eventProvider, cursor, 200)
 		if err != nil {
 			return "", err
 		}
 		for _, event := range feed.Events {
-			if normalizeRemotePath(event.Path) == manifestPath && strings.TrimSpace(event.EventID) != "" {
+			if matchesManifest(event) {
 				latest = strings.TrimSpace(event.EventID)
 			}
 		}
-		if feed.NextCursor == nil || strings.TrimSpace(*feed.NextCursor) == "" {
+		nextCursor := ""
+		if feed.NextCursor != nil {
+			nextCursor = strings.TrimSpace(*feed.NextCursor)
+		}
+		if nextCursor == "" {
 			break
 		}
-		cursor = strings.TrimSpace(*feed.NextCursor)
+		reason := "next cursor did not advance"
+		if nextCursor != cursor {
+			reason = "next cursor repeated a previous page"
+		}
+		if _, seen := seenCursors[nextCursor]; seen || nextCursor == cursor {
+			return "", &MalformedPaginationError{
+				Feed:       "github clone manifest events",
+				Cursor:     cursor,
+				NextCursor: nextCursor,
+				Reason:     reason,
+			}
+		}
+		seenCursors[nextCursor] = struct{}{}
+		cursor = nextCursor
 	}
 	return latest, nil
 }

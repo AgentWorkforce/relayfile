@@ -428,6 +428,20 @@
       "startedAt": "2026-10-03T06:34:33.099Z",
       "completedAt": "2026-10-03T08:19:07.562Z",
       "path": ".trajectories/completed/2026-10/traj_60dloiqfxbjn.json"
+    },
+    "traj_2e49zhqkzvs6": {
+      "title": "Measure and accelerate Relayfile mount bulk bootstrap",
+      "status": "completed",
+      "startedAt": "2026-10-03T06:25:41.952Z",
+      "completedAt": "2026-10-03T07:25:09.723Z",
+      "path": ".trajectories/completed/2026-10/traj_2e49zhqkzvs6.json"
+    },
+    "traj_ys8v0ia099wi": {
+      "title": "Harden descending clone cursor pagination",
+      "status": "completed",
+      "startedAt": "2026-10-03T07:31:30.162Z",
+      "completedAt": "2026-10-03T07:33:18.387Z",
+      "path": ".trajectories/completed/2026-10/traj_ys8v0ia099wi.json"
     }
   }
 }

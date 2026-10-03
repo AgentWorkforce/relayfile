@@ -2980,6 +2980,9 @@ func TestPullRemoteFullGithubWorkingTreeTarSeedsAndStoresCursor(t *testing.T) {
 		ContentType: "application/json",
 		Content:     `{"headSha":"` + headSHA + `","defaultBranch":"main","sourceProfile":"complete-v1","filesExpected":3}`,
 	}
+	client.events = append(client.events, FilesystemEvent{
+		EventID: "evt_4", Type: "file.updated", Path: sentinelPath, Revision: "rev_4",
+	})
 	mismatchDir := t.TempDir()
 	mismatchSyncer, err := NewSyncer(client, SyncerOptions{
 		WorkspaceID:   "ws_tar_seed_count_mismatch",
@@ -2998,6 +3001,166 @@ func TestPullRemoteFullGithubWorkingTreeTarSeedsAndStoresCursor(t *testing.T) {
 	}
 	if client.tarCalls != 1 {
 		t.Fatalf("count mismatch must fail before tar export; got %d total tar calls", client.tarCalls)
+	}
+}
+
+type descendingManifestEventClient struct {
+	*fakeClient
+	feeds            []EventFeed
+	requestedCursors []string
+}
+
+func (c *descendingManifestEventClient) ListEventsDescending(_ context.Context, _, _ string, cursor string, _ int) (EventFeed, error) {
+	c.requestedCursors = append(c.requestedCursors, cursor)
+	if len(c.feeds) == 0 {
+		return EventFeed{}, errors.New("descending event feed exhausted")
+	}
+	feed := c.feeds[0]
+	c.feeds = c.feeds[1:]
+	return feed, nil
+}
+
+func TestResolveGithubCloneManifestCursorSearchesNewestEventsFirst(t *testing.T) {
+	sentinelPath := "/github/repos/AgentWorkforce/cloud/.relayfile/clone.json"
+	older := "older-page"
+	client := &descendingManifestEventClient{
+		fakeClient: &fakeClient{},
+		feeds: []EventFeed{
+			{
+				Events: []FilesystemEvent{
+					{EventID: "evt_500", Path: "/github/repos/AgentWorkforce/other/.relayfile/clone.json"},
+					{EventID: "evt_499", Path: sentinelPath, Revision: "rev_newer"},
+				},
+				NextCursor: &older,
+			},
+			{
+				Events: []FilesystemEvent{
+					{EventID: "evt_498", Path: sentinelPath, Revision: "rev_manifest"},
+				},
+			},
+		},
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_manifest_cursor",
+		RemoteRoot:  "/github/repos/AgentWorkforce/cloud/contents",
+		LocalRoot:   t.TempDir(),
+		WebSocket:   boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+
+	cursor, err := syncer.resolveGithubCloneManifestCursor(context.Background(), githubCloneManifest{
+		Path:     sentinelPath,
+		Revision: "rev_manifest",
+	})
+	if err != nil {
+		t.Fatalf("resolveGithubCloneManifestCursor failed: %v", err)
+	}
+	if cursor != "evt_498" {
+		t.Fatalf("cursor = %q, want evt_498", cursor)
+	}
+	if len(client.requestedCursors) != 2 || client.requestedCursors[0] != "" || client.requestedCursors[1] != older {
+		t.Fatalf("descending cursors = %#v, want tip then %q", client.requestedCursors, older)
+	}
+	if client.listEventsCalls != 0 {
+		t.Fatalf("legacy oldest-first feed was called %d time(s)", client.listEventsCalls)
+	}
+}
+
+func TestResolveGithubCloneManifestCursorRejectsRepeatedDescendingCursor(t *testing.T) {
+	repeated := "repeat"
+	client := &descendingManifestEventClient{
+		fakeClient: &fakeClient{},
+		feeds: []EventFeed{
+			{NextCursor: &repeated},
+			{NextCursor: &repeated},
+		},
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_manifest_cursor_cycle",
+		RemoteRoot:  "/github/repos/AgentWorkforce/cloud/contents",
+		LocalRoot:   t.TempDir(),
+		WebSocket:   boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+
+	_, err = syncer.resolveGithubCloneManifestCursor(context.Background(), githubCloneManifest{
+		Path:     "/github/repos/AgentWorkforce/cloud/.relayfile/clone.json",
+		Revision: "rev_manifest",
+	})
+	var paginationErr *MalformedPaginationError
+	if !errors.As(err, &paginationErr) {
+		t.Fatalf("error = %v, want MalformedPaginationError", err)
+	}
+	if len(client.requestedCursors) != 2 {
+		t.Fatalf("descending cursors = %#v, want two bounded requests", client.requestedCursors)
+	}
+}
+
+func TestResolveGithubCloneManifestCursorWithoutRevisionUsesLatestLegacyMatch(t *testing.T) {
+	sentinelPath := "/github/repos/AgentWorkforce/cloud/.relayfile/clone.json"
+	client := &descendingManifestEventClient{
+		fakeClient: &fakeClient{events: []FilesystemEvent{
+			{EventID: "evt_1", Path: sentinelPath, Revision: "rev_1"},
+			{EventID: "evt_2", Path: sentinelPath, Revision: "rev_2"},
+		}},
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_manifest_cursor_no_revision",
+		RemoteRoot:  "/github/repos/AgentWorkforce/cloud/contents",
+		LocalRoot:   t.TempDir(),
+		WebSocket:   boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+
+	cursor, err := syncer.resolveGithubCloneManifestCursor(context.Background(), githubCloneManifest{Path: sentinelPath})
+	if err != nil {
+		t.Fatalf("resolveGithubCloneManifestCursor failed: %v", err)
+	}
+	if cursor != "evt_2" {
+		t.Fatalf("cursor = %q, want latest legacy match evt_2", cursor)
+	}
+	if len(client.requestedCursors) != 0 {
+		t.Fatalf("descending feed used without an exact manifest revision: %#v", client.requestedCursors)
+	}
+	if client.listEventsCalls != 1 {
+		t.Fatalf("legacy feed calls = %d, want 1", client.listEventsCalls)
+	}
+}
+
+func TestResolveGithubCloneManifestCursorRejectsRepeatedLegacyCursor(t *testing.T) {
+	repeated := "repeat"
+	client := &scriptedEventFeedClient{
+		fakeClient: &fakeClient{},
+		feeds: []EventFeed{
+			{NextCursor: &repeated},
+			{NextCursor: &repeated},
+		},
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_manifest_cursor_legacy_cycle",
+		RemoteRoot:  "/github/repos/AgentWorkforce/cloud/contents",
+		LocalRoot:   t.TempDir(),
+		WebSocket:   boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+
+	_, err = syncer.resolveGithubCloneManifestCursor(context.Background(), githubCloneManifest{
+		Path: "/github/repos/AgentWorkforce/cloud/.relayfile/clone.json",
+	})
+	var paginationErr *MalformedPaginationError
+	if !errors.As(err, &paginationErr) {
+		t.Fatalf("error = %v, want MalformedPaginationError", err)
+	}
+	if len(client.requestedCursors) != 2 {
+		t.Fatalf("legacy cursors = %#v, want two bounded requests", client.requestedCursors)
 	}
 }
 
