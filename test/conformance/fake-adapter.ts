@@ -124,7 +124,8 @@ export class FakeConformanceAdapter {
   private readonly deadLetters = new Map<string, { deliveryId: string; envelopeId: string; body?: WebhookBody }>();
   private readonly sockets = new Set<WebSocket>();
   private readonly mounts = new Map<string, MountState>();
-  private readonly traceRecords: unknown[] = [];
+  private readonly traceRecords: Array<{ sequence: number; requestId: string }> = [];
+  private traceSequence = 0;
   private config: FakeConfig = {};
   private heldWebhook?: PendingWebhook;
   private pendingCrash?: PendingCrash;
@@ -219,13 +220,17 @@ export class FakeConformanceAdapter {
       const requestId = url.searchParams.get("requestId");
       const records = requestId
         ? this.traceRecords.filter((record) => (record as { requestId?: unknown }).requestId === requestId)
-        : this.traceRecords;
+        : [...this.traceRecords].reverse();
       this.json(response, 200, {
+        epoch: "fake-history-1",
+        cursor: this.traceSequence,
+        capacity: 500,
         dropped: 0,
         evicted: 0,
         persistenceFailed: false,
         records,
         nextCursor: null,
+        resumeCursor: `fake-${this.traceSequence}`,
         reset: false,
       });
       return;
@@ -233,7 +238,7 @@ export class FakeConformanceAdapter {
     if (/\/actors\/[^/]+\/[^/]+\/invoke$/u.test(url.pathname)) {
       const body = await this.body(request);
       if (this.mutant === "RF-AUTH-005" && !request.headers.authorization) {
-        this.traceRecords.push({ requestId: String(body.requestId ?? "mutant-auth-dispatch") });
+        this.recordTrace(String(body.requestId ?? "mutant-auth-dispatch"));
       }
       this.json(response, 401, { code: "unauthorized" });
       return;
@@ -451,7 +456,7 @@ export class FakeConformanceAdapter {
     }
     if (operation === "state.inspect") {
       if (this.mutant === "RF-QUEUE-003") {
-        this.traceRecords.push({ requestId: String(body.probeRequestId ?? "mutant-inspect-wake") });
+        this.recordTrace("mutant-inspect-wake-unrelated-request-id");
       }
       const paths = Array.isArray(body.paths) ? body.paths.map(String) : [];
       const inspectedFiles = Object.fromEntries(paths.map((path) => {
@@ -816,11 +821,16 @@ export class FakeConformanceAdapter {
     this.identities.clear();
     this.deadLetters.clear();
     this.traceRecords.length = 0;
+    this.traceSequence = 0;
     this.config = {};
     this.revision = 0;
     this.eventSequence = 0;
     this.operationSequence = 0;
     this.servingRuntime = "terse-durable-actors";
+  }
+
+  private recordTrace(requestId: string): void {
+    this.traceRecords.push({ sequence: ++this.traceSequence, requestId });
   }
 
   private async body(request: IncomingMessage): Promise<Record<string, unknown>> {

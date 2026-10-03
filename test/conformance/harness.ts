@@ -38,12 +38,21 @@ interface RuntimeResponse<T = unknown> {
 }
 
 interface TracePage {
+  epoch?: string;
+  cursor?: number;
   dropped?: number;
   evicted?: number;
   persistenceFailed?: boolean;
-  records?: unknown[];
+  records?: Array<{ sequence?: number; requestId?: string }>;
   nextCursor?: string | null;
+  resumeCursor?: string;
   reset?: boolean;
+}
+
+interface TraceHighWater {
+  epoch: string;
+  cursor: number;
+  sequence: number;
 }
 
 export class RequestTransportError extends Error {
@@ -61,7 +70,6 @@ export class Harness {
   readonly exchanges: Exchange[] = [];
   readonly startedAt = new Date().toISOString();
   private correlationCounter = 0;
-  private runtimeProbeCounter = 0;
   private activeCorrelations?: string[];
   private activePollSignal?: AbortSignal;
   private activeEvidenceBasis?: CaseResult["evidenceBasis"];
@@ -323,7 +331,7 @@ export class Harness {
     return data as T;
   }
 
-  async verifyStateInspection<T>(read: (probeRequestId?: string) => Promise<T>): Promise<T> {
+  async verifyStateInspection<T>(read: () => Promise<T>): Promise<T> {
     if (this.target.runtime.kind === "cloudflare-do") {
       this.markEvidenceBasis("adapter-attested");
       return read();
@@ -331,16 +339,14 @@ export class Harness {
     if (this.target.runtime.kind !== "terse-durable-actors") return read();
 
     this.markEvidenceBasis("runtime-native");
-    const probeRequestId = this.nextRuntimeProbeRequestId("inspect");
-    const fromMs = Date.now();
-    const value = await read(probeRequestId);
-    const toMs = Date.now();
+    const traceMark = await this.captureRuntimeTraceHighWater();
+    const value = await read();
     const observed = await this.runtimeObserveState();
     assert(
       Object.hasOwn(observed, "snapshot") && Object.hasOwn(observed, "schema"),
       "Terse observe/state omitted snapshot or schema",
     );
-    await this.assertNoRuntimeActorRequests(fromMs, toMs, probeRequestId);
+    await this.assertRuntimeTraceUnchanged(traceMark);
     return value;
   }
 
@@ -362,7 +368,7 @@ export class Harness {
     const toMs = Date.now();
     assert([401, 403].includes(omitted.status), `Terse runtime accepted omitted auth with status ${omitted.status}`);
     assert([401, 403].includes(invalid.status), `Terse runtime accepted invalid auth with status ${invalid.status}`);
-    await this.assertNoRuntimeActorRequests(fromMs, toMs, probeRequestId);
+    await this.assertNoRuntimeActorRequestsForId(fromMs, toMs, probeRequestId);
   }
 
   private async runtimeObserveState(): Promise<Record<string, unknown>> {
@@ -377,40 +383,80 @@ export class Harness {
     return asRecord(response.data);
   }
 
-  private async assertNoRuntimeActorRequests(fromMs: number, toMs: number, requestId: string): Promise<void> {
+  private async captureRuntimeTraceHighWater(): Promise<TraceHighWater> {
+    const trace = await this.runtimeTracePage(new URLSearchParams({ limit: "500" }));
+    this.assertHealthyTracePage(trace, "before state inspection");
+    assert(typeof trace.epoch === "string" && trace.epoch.length > 0, "Terse trace response omitted epoch");
+    assert(Number.isSafeInteger(trace.cursor) && trace.cursor! >= 0, "Terse trace response omitted cursor");
+    return {
+      epoch: trace.epoch,
+      cursor: trace.cursor!,
+      sequence: this.highestTraceSequence(trace),
+    };
+  }
+
+  private async assertRuntimeTraceUnchanged(mark: TraceHighWater): Promise<void> {
+    const trace = await this.runtimeTracePage(new URLSearchParams({ limit: "500" }));
+    this.assertHealthyTracePage(trace, "after state inspection");
+    assert(trace.epoch === mark.epoch, "Terse trace epoch changed while verifying no-wake behavior");
+    assert(trace.cursor === mark.cursor, `Terse trace cursor advanced from ${mark.cursor} to ${String(trace.cursor)}`);
+    const newRecords = trace.records!.filter((record) => {
+      assert(Number.isSafeInteger(record.sequence) && record.sequence! >= 0, "Terse trace record omitted sequence");
+      return record.sequence! > mark.sequence;
+    });
+    assert(newRecords.length === 0, `state inspection reached actor application code (${newRecords.length} records)`);
+  }
+
+  private highestTraceSequence(trace: TracePage): number {
+    let highest = -1;
+    for (const record of trace.records!) {
+      assert(Number.isSafeInteger(record.sequence) && record.sequence! >= 0, "Terse trace record omitted sequence");
+      highest = Math.max(highest, record.sequence!);
+    }
+    return highest;
+  }
+
+  private assertHealthyTracePage(trace: TracePage, context: string): void {
+    assert(trace.dropped === 0, `Terse trace ${context} dropped ${String(trace.dropped)} records`);
+    assert(trace.evicted === 0, `Terse trace ${context} evicted ${String(trace.evicted)} records`);
+    assert(trace.persistenceFailed === false, `Terse trace persistence failed ${context}`);
+    assert(trace.reset === false, `Terse trace reset ${context}`);
+    assert(Array.isArray(trace.records), "Terse trace response omitted records");
+  }
+
+  private async runtimeTracePage(extra: URLSearchParams): Promise<TracePage> {
     const verification = this.requireRuntimeVerification();
+    const query = new URLSearchParams({
+      actorName: verification.actorName,
+      actorId: verification.actorId,
+    });
+    for (const [key, value] of extra) query.set(key, value);
+    const response = await this.runtimeRequest<TracePage>(
+      "GET",
+      `/v1/projects/${encodeURIComponent(verification.projectId)}/observe/requests?${query.toString()}`,
+      { Authorization: `Bearer ${verification.adminKey}` },
+    );
+    assert(response.status === 200, `Terse observe/requests returned ${response.status}`);
+    return asRecord(response.data) as TracePage;
+  }
+
+  private async assertNoRuntimeActorRequestsForId(fromMs: number, toMs: number, requestId: string): Promise<void> {
     let cursor: string | undefined;
     for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
       const query = new URLSearchParams({
-        actorName: verification.actorName,
-        actorId: verification.actorId,
         requestId,
         fromMs: String(Math.max(0, fromMs - TRACE_SKEW_MARGIN_MS)),
         toMs: String(toMs + TRACE_SKEW_MARGIN_MS),
         limit: "500",
       });
       if (cursor) query.set("cursor", cursor);
-      const response = await this.runtimeRequest<TracePage>(
-        "GET",
-        `/v1/projects/${encodeURIComponent(verification.projectId)}/observe/requests?${query.toString()}`,
-        { Authorization: `Bearer ${verification.adminKey}` },
-      );
-      assert(response.status === 200, `Terse observe/requests returned ${response.status}`);
-      const trace = asRecord(response.data) as TracePage;
-      assert(trace.dropped === 0, `Terse trace window dropped ${String(trace.dropped)} records`);
-      assert(trace.evicted === 0, `Terse trace window evicted ${String(trace.evicted)} records`);
-      assert(trace.persistenceFailed === false, "Terse trace persistence failed");
-      assert(trace.reset === false, "Terse trace window reset while verifying no-wake behavior");
-      assert(Array.isArray(trace.records), "Terse trace response omitted records");
+      const trace = await this.runtimeTracePage(query);
+      this.assertHealthyTracePage(trace, "while verifying runtime auth rejection");
       assert(trace.records.length === 0, `runtime-native probe reached actor application code (${trace.records.length} records)`);
       if (!trace.nextCursor) return;
       cursor = trace.nextCursor;
     }
     throw new Error("Terse trace pagination exceeded 100 pages");
-  }
-
-  private nextRuntimeProbeRequestId(kind: string): string {
-    return `${this.seed}-runtime-${kind}-${String(++this.runtimeProbeCounter).padStart(4, "0")}`;
   }
 
   private requireRuntimeVerification(): NonNullable<ResolvedTarget["runtimeVerification"]> {
