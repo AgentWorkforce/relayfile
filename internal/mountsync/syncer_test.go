@@ -4008,7 +4008,7 @@ func TestGithubWorkingTreeTarSeedPreservesEditBeforeWatcherMarksDirty(t *testing
 	contentsRoot := "/github/repos/AgentWorkforce/cloud/contents"
 	headSHA := "head123"
 	staleBody := []byte("stale remote\n")
-	updatedBody := []byte("updated remote\n")
+	updatedBody := bytes.Repeat([]byte("updated remote body\n"), 256)
 	localBody := []byte("edit still inside watcher debounce\n")
 	secondBody := []byte("second remote\n")
 	firstRemote := contentsRoot + "/first.txt@" + headSHA + ".json"
@@ -4080,6 +4080,69 @@ func TestGithubWorkingTreeTarSeedPreservesEditBeforeWatcherMarksDirty(t *testing
 	}
 
 	assertLocalFileContent(t, firstPath, string(localBody))
+	assertLocalFileContent(t, filepath.Join(localDir, "second.txt"), string(secondBody))
+}
+
+func TestGithubWorkingTreeTarSeedSkipsUnreadableChangedPathAndPublishesOthers(t *testing.T) {
+	localDir := t.TempDir()
+	contentsRoot := "/github/repos/AgentWorkforce/cloud/contents"
+	headSHA := "head123"
+	staleBody := []byte("stale local\n")
+	updatedBody := []byte("updated remote\n")
+	secondBody := []byte("second remote\n")
+	firstPath := filepath.Join(localDir, "first.txt")
+	if err := os.WriteFile(firstPath, staleBody, 0o644); err != nil {
+		t.Fatalf("write initial local file: %v", err)
+	}
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_unreadable_publish_fence", RemoteRoot: contentsRoot, LocalRoot: localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+	firstReads := 0
+	syncer.readLocalSnapshotFn = func(localPath string, includeContent bool) (localSnapshot, error) {
+		if localPath == firstPath {
+			firstReads++
+			if firstReads > 1 {
+				return localSnapshot{}, errors.New("transient editor replacement")
+			}
+		}
+		return readLocalSnapshotLimitedUnderRoot(localDir, localPath, includeContent, maxWritebackBytes())
+	}
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, entry := range []struct {
+		name string
+		body []byte
+	}{{"first.txt", updatedBody}, {"second.txt", secondBody}} {
+		if err := tw.WriteHeader(&tar.Header{Name: entry.name, Mode: 0o644, Size: int64(len(entry.body))}); err != nil {
+			t.Fatalf("write %s header: %v", entry.name, err)
+		}
+		if _, err := tw.Write(entry.body); err != nil {
+			t.Fatalf("write %s body: %v", entry.name, err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+	_, err = syncer.applyGithubWorkingTreeTarSeedStrict(GithubWorkingTreeTar{
+		Body: io.NopCloser(bytes.NewReader(buf.Bytes())), ContentType: "application/x-tar",
+	}, map[string]githubTreeFile{
+		"first.txt": {
+			RemotePath: contentsRoot + "/first.txt@" + headSHA + ".json", Revision: "rev_1",
+			ContentHash: hashBytes(updatedBody), Type: remoteTypeFile, Mode: 0o644,
+		},
+		"second.txt": {
+			RemotePath: contentsRoot + "/second.txt@" + headSHA + ".json", Revision: "rev_2",
+			ContentHash: hashBytes(secondBody), Type: remoteTypeFile, Mode: 0o644,
+		},
+	}, nil, bootstrapProgress{}, true)
+	if err != nil {
+		t.Fatalf("unreadable changed path aborted archive publish: %v", err)
+	}
+	assertLocalFileContent(t, firstPath, string(staleBody))
 	assertLocalFileContent(t, filepath.Join(localDir, "second.txt"), string(secondBody))
 }
 

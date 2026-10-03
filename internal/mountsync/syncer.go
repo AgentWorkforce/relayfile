@@ -7216,6 +7216,27 @@ func stripTarPathComponents(name string, count int) (string, error) {
 
 func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTar, tree map[string]githubTreeFile, conflicted map[string]struct{}, prog bootstrapProgress, strictComplete bool) (map[string]struct{}, error) {
 	const maxAbandonedStagingEntries = 100000
+	type localPathObservation struct {
+		snapshot localSnapshot
+		existed  bool
+		readable bool
+	}
+	// Capture the local baseline before consuming any archive bytes. Otherwise
+	// an edit made while a large tar entry streams could become the baseline and
+	// then be overwritten during publication.
+	localBaselines := make(map[string]localPathObservation, len(tree))
+	for rel := range tree {
+		localPath, err := safeLocalPath(s.localRoot, rel)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.assertNotMountRoot(localPath); err != nil {
+			return nil, err
+		}
+		snapshot, readErr := s.readLocalSnapshot(localPath, false)
+		observation := localPathObservation{snapshot: snapshot, existed: readErr == nil, readable: readErr == nil || errors.Is(readErr, os.ErrNotExist)}
+		localBaselines[rel] = observation
+	}
 	// Keep the unverified tree outside the visible mount root. Besides making
 	// publication explicit, this prevents the watcher from observing staging
 	// writes and avoids following a user-controlled infrastructure symlink.
@@ -7393,15 +7414,19 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 			prog.touch()
 			continue
 		}
-		localObserved, localReadErr := s.readLocalSnapshot(localPath, false)
-		localExisted := localReadErr == nil
-		if localReadErr != nil && !errors.Is(localReadErr, os.ErrNotExist) {
-			return nil, localReadErr
+		localBaseline := localBaselines[rel]
+		if !localBaseline.readable {
+			// A transient editor replacement, unsupported local type, or
+			// oversized local file is not evidence that the remote is invalid.
+			// Preserve this path and continue publishing unrelated entries.
+			remotePaths[meta.RemotePath] = struct{}{}
+			prog.touch()
+			continue
 		}
 		shouldWrite := true
-		if isSymlink && localExisted && isSymlinkType(localObserved.Type) && localObserved.Target == header.Linkname {
+		if isSymlink && localBaseline.existed && isSymlinkType(localBaseline.snapshot.Type) && localBaseline.snapshot.Target == header.Linkname {
 			shouldWrite = false
-		} else if !isSymlink && localExisted && localObserved.Type == remoteTypeFile && localObserved.Hash == hash {
+		} else if !isSymlink && localBaseline.existed && localBaseline.snapshot.Type == remoteTypeFile && localBaseline.snapshot.Hash == hash {
 			shouldWrite = false
 		}
 		stagedPath := ""
@@ -7431,8 +7456,8 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 			remotePath:    meta.RemotePath,
 			localPath:     localPath,
 			stagedPath:    stagedPath,
-			localObserved: localObserved,
-			localExisted:  localExisted,
+			localObserved: localBaseline.snapshot,
+			localExisted:  localBaseline.existed,
 			state: trackedFile{
 				Revision:    meta.Revision,
 				ContentType: contentType,
@@ -7490,7 +7515,11 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 		localNow, localReadErr := s.readLocalSnapshot(entry.localPath, false)
 		localExistsNow := localReadErr == nil
 		if localReadErr != nil && !errors.Is(localReadErr, os.ErrNotExist) {
-			return nil, localReadErr
+			// Treat an unreadable final snapshot as a local concurrent change.
+			// Skipping one uncertain path must not discard the verified archive
+			// or prevent unrelated staged entries from being published.
+			prog.touch()
+			continue
 		}
 		if localExistsNow != entry.localExisted ||
 			(localExistsNow && !sameLocalSnapshotIdentity(localNow, entry.localObserved)) {
