@@ -98,8 +98,8 @@ async function authAndTenantScenarios(h: Harness): Promise<void> {
   });
 
   await h.case("RF-AUTH-003", "path-scoped token is bounded to its declared subtree", ["public-api", "tenant-auth"], async () => {
-    const inside = "/conformance/scoped/inside.md";
-    const outside = h.path("auth/outside.md");
+    const inside = `/conformance/scoped/${h.seed}/inside.md`;
+    const outside = `/conformance/unscoped/${h.seed}/outside.md`;
     const allowed = await h.request(
       "PUT",
       h.workspacePath(h.target.workspaces.primary, `/fs/file?path=${encodeURIComponent(inside)}`),
@@ -372,12 +372,14 @@ async function contractScenarios(h: Harness): Promise<void> {
 }
 
 async function advancedAdapterScenarios(h: Harness): Promise<void> {
-  await h.case("RF-AUTH-005", "runtime actor rejects missing and invalid shared secrets", ["runtime-auth-probe"], async () => {
-    const omitted = await h.control<{ rejected: boolean; actorInvoked: boolean }>("auth.probe", { credential: "omitted" });
-    const invalid = await h.control<{ rejected: boolean; actorInvoked: boolean }>("auth.probe", { credential: "invalid" });
-    assert(omitted.rejected && invalid.rejected, "runtime accepted a missing or invalid shared secret");
-    assert(!omitted.actorInvoked && !invalid.actorInvoked, "unauthorized runtime probe reached actor application code");
-  });
+  if (h.target.runtime.kind === "terse-durable-actors") {
+    await h.case("RF-AUTH-005", "runtime actor rejects missing and invalid shared secrets", ["runtime-auth-probe"], async () => {
+      const omitted = await h.control<{ rejected: boolean; actorInvoked: boolean }>("auth.probe", { credential: "omitted" });
+      const invalid = await h.control<{ rejected: boolean; actorInvoked: boolean }>("auth.probe", { credential: "invalid" });
+      assert(omitted.rejected && invalid.rejected, "runtime accepted a missing or invalid shared secret");
+      assert(!omitted.actorInvoked && !invalid.actorInvoked, "unauthorized runtime probe reached actor application code");
+    });
+  }
 
   await h.case("RF-QUEUE-001", "retry progresses after backoff with no inbound traffic", ["provider-faults", "clock-control"], async () => {
     const path = h.path("queue/retry.md");
@@ -463,6 +465,9 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
   await h.case("RF-PROJ-001", "provider mutation emits file and digest artifacts without recursion", ["webhook-ingest", "digest-projection", "clock-control"], async () => {
     const path = h.path("projection/record.md");
     const endpoint = h.workspacePath(h.target.workspaces.primary, "/webhooks/ingest");
+    await h.control("clock.advance", { milliseconds: 20_000 });
+    const digestBefore = await inspectState(h, ["/digests/today.md"]);
+    const digestEventsBefore = digestBefore.eventCounts?.["/digests/today.md"] ?? 0;
     assertStatus(
       await h.request("POST", endpoint, {
         body: webhookBody(path, `${h.seed}-projection`, "state: open", "2026-01-02T03:04:05.000Z", "projection-object"),
@@ -476,12 +481,12 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
     await waitForFile(h, path, "state: open");
     const digest = await waitForFile(h, "/digests/today.md");
     assert(digest.content?.includes("generated_at"), "today digest was not regenerated");
-    const sentinel = `manual-${h.seed}`;
-    await writeRemoteFile(h, "/digests/today.md", sentinel);
     await h.control("clock.advance", { milliseconds: 20_000 });
-    assertInspectedFile(await inspectState(h, ["/digests/today.md"]), "/digests/today.md", sentinel);
-    const after = await readFileResponse(h, "/digests/today.md");
-    assert(after.content === sentinel, "digest write recursively regenerated the digest");
+    const digestAfter = await inspectState(h, ["/digests/today.md"]);
+    assert(
+      (digestAfter.eventCounts?.["/digests/today.md"] ?? 0) - digestEventsBefore === 1,
+      "one provider mutation did not produce exactly one digest event; digest regeneration may be recursive",
+    );
   });
 
   await h.case("RF-PROJ-002", "terminal state persists until an upstream delete", ["webhook-ingest", "digest-projection", "clock-control"], async () => {
@@ -634,8 +639,7 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
 
   await h.case("RF-CRASH-001", "commit survives crash between durable mutation and response", ["runtime-crash", "durable-restart", "provider-faults", "state-inspection"], async () => {
     const beforePath = h.path("crash/before-commit.md");
-    await h.control("provider.configure", { crashBeforeCommitPath: beforePath });
-    try { await writeRemoteFile(h, beforePath, "must roll back"); } catch { /* connection loss is expected */ }
+    await crashWriteAtBarrier(h, beforePath, "must roll back", "before-commit");
     await h.restart();
     const rolledBack = await inspectState(h, [beforePath]);
     assert(inspectedFile(rolledBack, beforePath)?.exists === false, "crash-before-commit left a file behind");
@@ -643,8 +647,7 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
     assert((rolledBack.operations ?? []).length === 0, "crash-before-commit left an outbox operation behind");
 
     const path = h.path("crash/after-commit.md");
-    await h.control("provider.configure", { crashBeforeCommitPath: null, crashAfterCommitPath: path });
-    try { await writeRemoteFile(h, path, "committed before crash"); } catch { /* connection loss is expected */ }
+    await crashWriteAtBarrier(h, path, "committed before crash", "after-commit");
     await h.restart();
     const committed = await inspectState(h, [path]);
     assertInspectedFile(committed, path, "committed before crash");
@@ -662,9 +665,17 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
 
   await h.case("RF-MIG-001", "export/import preserves revisions, cursors, pending work, and DLQ", ["state-migration", "provider-faults", "clock-control"], async () => {
     const path = h.path("migration/state.md");
+    const historyPaths = [h.path("migration/history-a.md"), h.path("migration/history-b.md")];
+    await writeRemoteFile(h, historyPaths[0]!, "history a");
+    await writeRemoteFile(h, historyPaths[1]!, "history b");
     await writeRemoteFile(h, path, "migration state");
     const before = await readFileResponse(h, path);
     const eventsBefore = await readEvents(h);
+    const eventIdsBefore = eventsBefore.flatMap((event) => event.eventId ? [event.eventId] : []);
+    const migrationEventIds = eventsBefore
+      .filter((event) => [...historyPaths, path].includes(event.path ?? ""))
+      .flatMap((event) => event.eventId ? [event.eventId] : []);
+    assert(migrationEventIds.length >= 3, "migration setup did not create enough cursor history");
     await h.control("provider.configure", {
       seedMigrationState: {
         pendingOutboxId: `${h.seed}-pending`,
@@ -699,8 +710,19 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
     );
     const after = await readFileResponse(h, path);
     const eventsAfter = await readEvents(h);
+    const eventIdsAfter = eventsAfter.flatMap((event) => event.eventId ? [event.eventId] : []);
     assert(after.revision === before.revision, "migration changed file revision");
-    assert(lastEventId(eventsAfter) === lastEventId(eventsBefore), "migration changed the event cursor");
+    assert(
+      JSON.stringify(eventIdsAfter) === JSON.stringify(eventIdsBefore),
+      "migration changed event history or ordering",
+    );
+    const replayCursor = migrationEventIds[0]!;
+    const replayExpected = migrationEventIds.slice(1);
+    const replayedIds = await collectWebSocketEventIds(h, replayCursor, replayExpected);
+    assert(
+      JSON.stringify(replayedIds) === JSON.stringify(replayExpected),
+      "migration cursor replay lost, duplicated, or reordered events",
+    );
     const routed = await inspectState(h, [path], { operationIds: [`${h.seed}-pending`] });
     assert(routed.servingRuntime === destinationRuntime, "out-of-band inspection is not reading the imported destination");
     assertInspectedFile(routed, path, "migration state");
@@ -727,8 +749,12 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
     const path = h.path("failover/shared.md");
     await writeRemoteFile(h, path, "base");
     const base = await readFileResponse(h, path);
-    const failover = h.control("runtime.failover", { phase: "switch", pause: true });
-    const writes = Promise.all(
+    const switchReady = await h.control<{ switchId: string; state: string }>("runtime.failover", {
+      phase: "begin",
+      pause: true,
+    });
+    assert(switchReady.switchId && switchReady.state === "fenced", "failover did not establish the fencing barrier");
+    const writes = Promise.allSettled(
       ["left", "right"].map((content) =>
         h.request("PUT", h.workspacePath(h.target.workspaces.primary, `/fs/file?path=${encodeURIComponent(path)}`), {
           headers: { "If-Match": base.revision! },
@@ -736,8 +762,19 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
         }),
       ),
     );
-    await failover;
-    const results = await writes;
+    try {
+      const waiting = await h.control<{ pendingWriters: number }>("runtime.failover", {
+        phase: "await-writers",
+        switchId: switchReady.switchId,
+        count: 2,
+      });
+      assert(waiting.pendingWriters >= 2, "failover did not hold both writers behind the fence");
+    } finally {
+      await h.control("runtime.failover", { phase: "release", switchId: switchReady.switchId });
+    }
+    const settled = await writes;
+    assert(settled.every((result) => result.status === "fulfilled"), "a fenced writer lost its public response");
+    const results = settled.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
     assert(results.filter((response) => [200, 202].includes(response.status)).length === 1, "failover admitted multiple writers");
     assert(results.filter((response) => response.status === 409).length === 1, "failover did not fence the losing writer");
     const winnerIndex = results.findIndex((response) => [200, 202].includes(response.status));
@@ -778,7 +815,13 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
     const mirrorPath = join(mirror.root, remotePath.replace(/^\//u, ""));
     await h.poll("mirror transition backfill", () => readFile(mirrorPath, "utf8").catch(() => ""), (content) => content === "write-mode update", 30_000);
     await h.control("runtime.evict");
-    await h.poll("mirror reconnect", () => readFile(mirrorPath, "utf8").catch(() => ""), (content) => content === "write-mode update", 30_000);
+    await writeRemoteFile(h, remotePath, "post-eviction remote update");
+    await h.poll(
+      "mirror reconnect",
+      () => readFile(mirrorPath, "utf8").catch(() => ""),
+      (content) => content === "post-eviction remote update",
+      30_000,
+    );
 
     await writeFile(mirrorPath, "local conflict");
     await writeRemoteFile(h, remotePath, "remote conflict");
@@ -858,6 +901,30 @@ async function writeRemoteFile(h: Harness, path: string, content: string): Promi
   );
   assertStatus(response, [200, 202]);
   return response;
+}
+
+async function crashWriteAtBarrier(
+  h: Harness,
+  path: string,
+  content: string,
+  phase: "before-commit" | "after-commit",
+): Promise<void> {
+  await h.control("provider.configure", { crashBarrier: { matchPath: path, phase } });
+  const outcome = writeRemoteFile(h, path, content).then(
+    () => "completed" as const,
+    () => "interrupted" as const,
+  );
+  await h.poll(
+    `${phase} crash barrier`,
+    () => h.control<{ crashReady: boolean; crashPhase: string }>("provider.calls", { matchPath: path }),
+    (calls) => calls.crashReady === true && calls.crashPhase === phase,
+  );
+  const crashed = await h.control<{ terminated: boolean }>("runtime.crash", { matchPath: path, phase });
+  assert(crashed.terminated === true, `runtime did not terminate at the ${phase} barrier`);
+  assert(
+    await settleWithin(outcome, 5_000, `${phase} public write did not terminate after crash`) === "interrupted",
+    `${phase} public write returned success despite the crash barrier`,
+  );
 }
 
 async function readFileResponse(h: Harness, path: string): Promise<FileBody> {
@@ -950,6 +1017,22 @@ async function collectWebSocketEvents(h: Harness, cursor: string, expectedPaths:
   }
 }
 
+async function collectWebSocketEventIds(h: Harness, cursor: string, expectedIds: string[]): Promise<string[]> {
+  const capture = await openWebSocket(h, cursor);
+  try {
+    await h.poll(
+      "WebSocket migration cursor replay",
+      async () => capture.received,
+      (events) => expectedIds.every((id) => events.some((event) => event.eventId === id)),
+      10_000,
+    );
+    const expected = new Set(expectedIds);
+    return capture.received.flatMap((event) => event.eventId && expected.has(event.eventId) ? [event.eventId] : []);
+  } finally {
+    await closeWebSocket(capture.socket);
+  }
+}
+
 async function closeWebSocket(socket: WebSocket): Promise<void> {
   if (socket.readyState === WebSocket.CLOSED) return;
   const closed = waitForWebSocketClose(socket);
@@ -1003,6 +1086,16 @@ function revisionNumber(revision: string): number | undefined {
   return match ? Number(match[1]) : undefined;
 }
 
-function lastEventId(events: EventItem[]): string | undefined {
-  return [...events].reverse().find((event) => event.eventId)?.eventId;
+async function settleWithin<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }

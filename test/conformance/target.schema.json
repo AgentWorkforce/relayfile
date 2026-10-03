@@ -43,7 +43,13 @@
         "pathScopedTokenEnv": { "type": "string" },
         "readOnlyTokenEnv": { "type": "string" },
         "runtimeSharedSecretEnv": { "type": "string" }
-      }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "strategy": { "const": "environment" } }, "required": ["strategy"] },
+          "then": { "required": ["primaryTokenEnv"] }
+        }
+      ]
     },
     "capabilities": {
       "type": "array",
@@ -59,7 +65,7 @@
     "control": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["operations"],
+      "required": ["tokenEnv", "operations"],
       "properties": {
         "baseUrl": { "type": "string", "format": "uri" },
         "baseUrlEnv": { "type": "string" },

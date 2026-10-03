@@ -6,10 +6,10 @@ Status legend: **CI** runs in this repository; **configured** has a checked-in t
 
 | Contract area | Invariant IDs | Go durable-local oracle | Hosted Cloudflare DO | TerseAI durable-actors v0.7.9 |
 | --- | --- | --- | --- | --- |
-| Public auth and tenant/path isolation | `RF-AUTH-*`, `RF-MODE-001` | CI | configured, black-box | configured; gateway must derive actor ID from verified claim; shared secret fails closed |
+| Public auth and tenant/path isolation | `RF-AUTH-001`–`RF-AUTH-004`, `RF-MODE-001`; Terse-only `RF-AUTH-005` | public cases CI | public cases configured, black-box | configured; gateway must derive actor ID from verified claim; `RF-AUTH-005` verifies the shared-secret hop fails closed |
 | Webhook idempotency and ordering | `RF-ING-*` | CI | configured, black-box | configured; adapter provider stub for full fault cases |
 | Retry, backpressure, DLQ/replay, poison isolation | `RF-QUEUE-*` | API baseline; time/fault cases skip explicitly | adapter | risk: no actor alarm API; external durable scheduler required |
-| File/digest projection and echo suppression | `RF-PROJ-*`, `RF-TIMER-*` | file projection CI; digest/clock cases skip explicitly | adapter | risk: no alarm API for digest rollover |
+| File/digest projection and echo suppression | `RF-PROJ-*`, `RF-TIMER-*` | `RF-ING-*` cover ingest projection; digest/echo/timer cases skip explicitly | adapter | risk: no alarm API for digest rollover |
 | Optimistic concurrency and replay-safe receipts | `RF-CAS-*`, `RF-SER-*` | CI for 20-way CAS and content identity | configured; held-provider case needs adapter | risk: `@Reentrant` methods can race shared state |
 | Read/write/mirror mount transitions | `RF-MODE-001`, `RF-MOUNT-001` | read-only API CI; lifecycle case skips explicitly | adapter on a mount-capable runner | adapter on a mount-capable runner |
 | Cursor reconnect, restart, and large effect batches | `RF-WS-*`, `RF-DUR-001`, `RF-LIMIT-001` | cursor and process-restart CI | eviction adapter for full profile | risk: sockets do not survive eviction; 512-effect/24 MiB invocation cap |
@@ -18,6 +18,6 @@ Status legend: **CI** runs in this repository; **configured** has a checked-in t
 | OpenAPI and error envelopes | `RF-OAS-*` | CI, every harness response validated | configured, public gateway only | configured, public gateway only; actor-internal errors are not the contract |
 | Evidence and redaction | harness self-tests | CI | generated per run | generated per run |
 
-The plain `cloudflare-hosted` target intentionally declares only observable public capabilities, so it can qualify the current hosted edge without private runtime hooks. `cloudflare-controlled` declares every capability and fails unless all adapter controls are present. The `terse` target is full-profile by default; missing scheduler, lifecycle, migration, failover, or mount behavior is a failure rather than an optimistic pass.
+The plain `cloudflare-hosted` target intentionally declares only observable public capabilities, so it can qualify the current hosted edge without private runtime hooks. `cloudflare-controlled` declares every backend-neutral capability that applies to Cloudflare and fails unless all corresponding adapter controls are present. `RF-AUTH-005` and `runtime-auth-probe` apply only to Terse's shared-secret actor hop. The `npm run test:conformance:terse` command selects the full profile; missing scheduler, lifecycle, migration, failover, or mount behavior is then a failure rather than an optimistic pass.
 
 See [backend-neutral-conformance.md](backend-neutral-conformance.md) for commands, environment variables, exact adapter behavior, and evidence format.

@@ -5,12 +5,14 @@ import {
   CONTROL_OPERATIONS,
   type Capability,
   type ControlOperation,
+  type Profile,
   type ResolvedTarget,
   type TargetFile,
 } from "./types.js";
 
 const capabilitySet = new Set<string>(CAPABILITIES);
 const operationSet = new Set<string>(CONTROL_OPERATIONS);
+const runtimeKinds = new Set(["go-oracle", "cloudflare-do", "terse-durable-actors"]);
 
 export async function loadTarget(
   input: string,
@@ -34,6 +36,7 @@ export async function loadTarget(
     requireResolved("runtime version/SHA", runtimeVersion, sourcePath);
     requireResolved("Relayfile SHA", relayfileSha, sourcePath);
   }
+  if (baseUrl) requireHttpUrl("base URL", baseUrl, sourcePath);
 
   const tokens = local
     ? {}
@@ -70,8 +73,9 @@ export async function loadTarget(
   if (file.control) {
     const controlBaseUrl = resolveValue(file.control.baseUrl, file.control.baseUrlEnv, env);
     requireResolved("control adapter URL", controlBaseUrl, sourcePath);
+    requireHttpUrl("control adapter URL", controlBaseUrl!, sourcePath);
     const controlToken = envValue(file.control.tokenEnv, env);
-    if (!local && !controlToken) {
+    if (!controlToken) {
       throw new Error(`target ${file.id} is unconfigured: ${file.control.tokenEnv ?? "control token env"} is required`);
     }
     control = {
@@ -103,6 +107,22 @@ export async function loadTarget(
   };
 }
 
+export function assertFullRunSafety(
+  target: ResolvedTarget,
+  profile: Profile,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  if (profile !== "full" || target.runtime.kind === "go-oracle") return;
+  if (!target.control?.operations.has("reset")) {
+    throw new Error(`target ${target.id} full profile requires the reset control operation`);
+  }
+  if (env.RELAYFILE_CONFORMANCE_DISPOSABLE !== "1") {
+    throw new Error(
+      `target ${target.id} full profile requires RELAYFILE_CONFORMANCE_DISPOSABLE=1; use dedicated disposable workspaces`,
+    );
+  }
+}
+
 function targetPath(input: string): string {
   if (isAbsolute(input) || input.includes("/") || input.endsWith(".json")) {
     return resolve(input);
@@ -128,6 +148,18 @@ function requireResolved(label: string, value: string | undefined, sourcePath: s
   if (!value) throw new Error(`target ${sourcePath} is unconfigured: ${label} is required`);
 }
 
+function requireHttpUrl(label: string, value: string, sourcePath: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`target ${sourcePath} has invalid ${label}: ${value}`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`target ${sourcePath} ${label} must use http or https`);
+  }
+}
+
 function trimSlash(value: string): string {
   return value.replace(/\/+$/u, "");
 }
@@ -136,6 +168,7 @@ function validateTargetFile(file: TargetFile, sourcePath: string): void {
   if (file.schemaVersion !== 1) throw new Error(`${sourcePath}: unsupported schemaVersion`);
   if (!file.id?.trim()) throw new Error(`${sourcePath}: id is required`);
   if (!file.runtime?.kind) throw new Error(`${sourcePath}: runtime.kind is required`);
+  if (!runtimeKinds.has(file.runtime.kind)) throw new Error(`${sourcePath}: unsupported runtime.kind ${file.runtime.kind}`);
   if (!file.auth?.strategy) throw new Error(`${sourcePath}: auth.strategy is required`);
   if (!Array.isArray(file.capabilities)) throw new Error(`${sourcePath}: capabilities must be an array`);
 

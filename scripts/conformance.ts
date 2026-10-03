@@ -32,8 +32,19 @@ const HELP = flags.has('--help') || argv.includes('-h');
 
 const PORT = Number(process.env.RELAYFILE_PORT || 19090);
 const BASE_URL = process.env.RELAYFILE_BASE_URL || `http://127.0.0.1:${PORT}`;
-const WORKSPACE = process.env.RELAYFILE_CONFORMANCE_WORKSPACE || 'conformance-legacy-v1';
+const WORKSPACE = resolveWorkspace();
 const DISABLE_SHARED_SECRET_JWT_ENV = `RELAYFILE_VERIFIER_ACCEPT_HS${256}`;
+
+function resolveWorkspace(): string {
+  const explicit = process.env.RELAYFILE_CONFORMANCE_WORKSPACE?.trim();
+  if (explicit) return explicit;
+  const seed = process.env.RELAYFILE_CONFORMANCE_SEED?.trim();
+  if (seed) return `conformance-${seed.replace(/[^A-Za-z0-9._-]/g, '-')}`;
+  if (REMOTE) {
+    throw new Error('--remote requires RELAYFILE_CONFORMANCE_WORKSPACE or RELAYFILE_CONFORMANCE_SEED');
+  }
+  return 'conformance-legacy-v1';
+}
 
 // ---------------------------------------------------------------------------
 // Terminal output
@@ -564,8 +575,7 @@ async function runSuite() {
 
   await test('WebSocket upgrade and catch-up events', async () => {
     if (typeof globalThis.WebSocket === 'undefined') {
-      log('⏭️ ', 'Skipping WebSocket test (Node < 22)');
-      return;
+      throw new SkippedTest('WebSocket upgrade and catch-up events: Node < 22 has no global WebSocket');
     }
 
     // NOTE: Passing JWT in query string is a known security concern (tokens may appear

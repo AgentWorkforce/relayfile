@@ -21,6 +21,7 @@ export interface RequestOptions {
   token?: TokenName | false;
   body?: unknown;
   headers?: Record<string, string>;
+  signal?: AbortSignal;
 }
 
 export class Harness {
@@ -29,6 +30,7 @@ export class Harness {
   readonly startedAt = new Date().toISOString();
   private correlationCounter = 0;
   private activeCorrelations?: string[];
+  private activePollSignal?: AbortSignal;
 
   constructor(
     readonly target: ResolvedTarget,
@@ -110,11 +112,27 @@ export class Harness {
 
     const startedAt = new Date().toISOString();
     const started = performance.now();
-    const response = await fetch(`${this.target.baseUrl}${path}`, {
-      method,
-      headers,
-      ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
-    });
+    const signal = options.signal ?? this.activePollSignal;
+    let response: Response;
+    try {
+      response = await fetch(`${this.target.baseUrl}${path}`, {
+        method,
+        headers,
+        ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
+        ...(signal ? { signal } : {}),
+      });
+    } catch (error) {
+      this.exchanges.push({
+        correlationId,
+        method,
+        url: `${this.target.baseUrl}${path}`,
+        startedAt,
+        durationMs: Math.round(performance.now() - started),
+        request: { headers, ...(options.body !== undefined ? { body: options.body } : {}) },
+        response: { status: 0, headers: {}, body: { transportError: error instanceof Error ? error.name : "Error" } },
+      });
+      throw new Error(`request transport failure (correlation ${correlationId})`);
+    }
     const raw = await response.text();
     let data: unknown = raw;
     if (raw) {
@@ -150,13 +168,32 @@ export class Harness {
     const body = { workspaceId: this.target.workspaces.primary, seed: this.seed, ...payload };
     const startedAt = new Date().toISOString();
     const started = performance.now();
-    const response = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-    });
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        ...(this.activePollSignal ? { signal: this.activePollSignal } : {}),
+      });
+    } catch (error) {
+      this.exchanges.push({
+        correlationId,
+        method: "CONTROL",
+        url,
+        startedAt,
+        durationMs: Math.round(performance.now() - started),
+        request: { headers, body },
+        response: { status: 0, headers: {}, body: { transportError: error instanceof Error ? error.name : "Error" } },
+      });
+      throw new Error(`control ${operation} transport failure (correlation ${correlationId})`);
+    }
     const raw = await response.text();
-    const data = raw ? JSON.parse(raw) : {};
+    let data: unknown = {};
+    let jsonError = false;
+    if (raw) {
+      try { data = JSON.parse(raw); } catch { data = raw; jsonError = true; }
+    }
     this.exchanges.push({
       correlationId,
       method: "CONTROL",
@@ -171,6 +208,7 @@ export class Harness {
       },
     });
     if (!response.ok) throw new Error(`control ${operation} failed with status ${response.status}; inspect redacted requests.jsonl`);
+    if (jsonError) throw new Error(`control ${operation} returned non-JSON success; inspect redacted requests.jsonl`);
     return data as T;
   }
 
@@ -187,9 +225,28 @@ export class Harness {
     let delay = 20;
     let latest: T | undefined;
     while (Date.now() < deadline) {
-      latest = await read();
-      if (accept(latest)) return latest;
-      await new Promise((resolve) => setTimeout(resolve, delay));
+      const remaining = deadline - Date.now();
+      const controller = new AbortController();
+      const previousSignal = this.activePollSignal;
+      this.activePollSignal = controller.signal;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        latest = await Promise.race([
+          read(),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => {
+              controller.abort();
+              reject(new Error(`${label} did not converge within ${timeoutMs}ms; latest=${safeDiagnostic(latest)}`));
+            }, remaining);
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+        this.activePollSignal = previousSignal;
+      }
+      if (Date.now() <= deadline && accept(latest)) return latest;
+      const sleepMs = Math.min(delay, Math.max(0, deadline - Date.now()));
+      if (sleepMs > 0) await new Promise((resolve) => setTimeout(resolve, sleepMs));
       delay = Math.min(delay * 2, 250);
     }
     throw new Error(`${label} did not converge within ${timeoutMs}ms; latest=${safeDiagnostic(latest)}`);

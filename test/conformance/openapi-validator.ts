@@ -42,19 +42,25 @@ export async function validateOpenApiResponse(
     throw new Error(`OpenAPI does not declare ${status} for ${method} ${route.template}`);
   }
   const response = resolveResponse(document, rawResponse);
-  const declaredJson = response.content?.["application/json"] ?? response.content?.["application/problem+json"];
-  if (!declaredJson?.schema) return;
-  if (!contentType?.toLowerCase().includes("json")) {
-    throw new Error(`OpenAPI expects JSON for ${method} ${route.template} ${status}, got ${contentType ?? "no Content-Type"}`);
+  const declaredContent = response.content ?? {};
+  const declaredTypes = Object.keys(declaredContent);
+  if (declaredTypes.length === 0) return;
+  const mediaType = contentType?.split(";", 1)[0]?.trim().toLowerCase();
+  const declared = mediaType ? declaredContent[mediaType] : undefined;
+  if (!declared) {
+    throw new Error(
+      `OpenAPI declares ${declaredTypes.join("/")} for ${method} ${route.template} ${status}, got ${contentType ?? "no Content-Type"}`,
+    );
   }
+  if (!declared.schema) return;
 
-  const key = `${method.toUpperCase()} ${route.template} ${status}`;
+  const key = `${method.toUpperCase()} ${route.template} ${status} ${mediaType}`;
   let validate = validators.get(key);
   if (!validate) {
     const ajv = new Ajv2020({ allErrors: true, strict: false, validateFormats: false });
     validate = ajv.compile({
       $ref: "#/$defs/response",
-      $defs: { response: declaredJson.schema },
+      $defs: { response: declared.schema },
       components: document.components ?? {},
     });
     validators.set(key, validate);

@@ -1,6 +1,6 @@
 #!/usr/bin/env npx tsx
 import { resolve } from "node:path";
-import { loadTarget } from "./config.js";
+import { assertFullRunSafety, loadTarget } from "./config.js";
 import { redact, redactEnvironmentText, writeEvidence } from "./evidence.js";
 import { Harness } from "./harness.js";
 import { LocalGoTarget } from "./local-go.js";
@@ -23,6 +23,7 @@ async function main(): Promise<void> {
 
   try {
     if (local) target = await local.start(target);
+    assertFullRunSafety(target, options.profile);
     const harness = new Harness(
       target,
       options.profile,
@@ -30,9 +31,13 @@ async function main(): Promise<void> {
       local ? () => local.restart(target.baseUrl) : undefined,
     );
     if (options.profile === "full" && target.control?.operations.has("reset")) {
-      await harness.control("reset");
+      await harness.case("RF-SETUP-001", "controlled target reset succeeds", [], async () => {
+        await harness.control("reset");
+      });
     }
-    await runScenarios(harness);
+    if (!harness.cases.some((result) => result.id === "RF-SETUP-001" && result.status === "failed")) {
+      await runScenarios(harness);
+    }
     const summary = harness.summary();
     const outDir = resolve(options.outDir ?? `artifacts/conformance/${target.id}/${options.seed}`);
     await writeEvidence(outDir, summary, harness.exchanges, target);
@@ -61,12 +66,32 @@ Options:
     process.exit(0);
   }
 
+  validateArguments(args);
+
   const target = option(args, "--target") ?? "go-local";
   const profile = (option(args, "--profile") ?? "core") as Profile;
   if (profile !== "core" && profile !== "full") throw new Error(`invalid --profile ${profile}`);
   const seed = option(args, "--seed") ?? process.env.RELAYFILE_CONFORMANCE_SEED ?? "rfce-v1";
-  if (!/^[A-Za-z0-9._-]{1,80}$/u.test(seed)) throw new Error("--seed must match [A-Za-z0-9._-]{1,80}");
+  if (!/^[A-Za-z0-9._-]{1,80}$/u.test(seed) || seed === "." || seed === "..") {
+    throw new Error("--seed must match [A-Za-z0-9._-]{1,80} and cannot be . or ..");
+  }
   return { target, profile, seed, ...(option(args, "--out-dir") ? { outDir: option(args, "--out-dir") } : {}) };
+}
+
+function validateArguments(args: string[]): void {
+  const allowed = new Set(["--target", "--profile", "--seed", "--out-dir"]);
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!;
+    if (!arg.startsWith("--")) throw new Error(`unexpected positional argument ${arg}`);
+    const [name, inline] = arg.split("=", 2);
+    if (!allowed.has(name!)) throw new Error(`unknown option ${name}`);
+    if (inline !== undefined) {
+      if (!inline) throw new Error(`${name} requires a value`);
+      continue;
+    }
+    const value = args[++index];
+    if (!value || value.startsWith("--")) throw new Error(`${name} requires a value`);
+  }
 }
 
 function option(args: string[], name: string): string | undefined {

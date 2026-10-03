@@ -42,6 +42,7 @@
     "@agentworkforce/workload-router": "^0.3.0",
     "agent-trajectories": "^0.5.8",
     "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
     "tsx": "^4.21.0",
     "yaml": "2.8.3"
   }

@@ -43,9 +43,10 @@ The Cloudflare and Terse descriptors read secrets only from the environment:
 | `RELAYFILE_SHA` | Relayfile application SHA under test. |
 | `RELAYFILE_CONFORMANCE_CONTROL_URL` | Full-profile control adapter origin. |
 | `RELAYFILE_CONFORMANCE_CONTROL_TOKEN` | Bearer token for that adapter. |
+| `RELAYFILE_CONFORMANCE_DISPOSABLE` | Must be exactly `1` for a remote full-profile run; acknowledges that both workspaces are dedicated and disposable. |
 | `RELAYFILE_TERSE_SHARED_SECRET` | Non-empty Terse runtime shared secret; target loading fails closed when absent. |
 
-Use disposable workspaces. `reset` is invoked before a full run, and every suite path is namespaced under `/conformance/<seed>/`.
+Use dedicated disposable workspaces. A remote full run fails closed unless `RELAYFILE_CONFORMANCE_DISPOSABLE=1`; `reset` is invoked before its scenarios. Source fixtures are namespaced under `/conformance/<seed>/` (or `/conformance/scoped/<seed>/` for the path-token check), but product-defined digest paths (`/digests/today.md` and `/digests/yesterday.md`) are intentionally fixed and may be regenerated or rolled over. The suite never writes arbitrary content directly to those digest paths.
 
 ## Narrow control adapter contract
 
@@ -66,16 +67,16 @@ A successful operation returns JSON and a 2xx status. A non-2xx response fails t
 
 | Operation | Required behavior and response |
 | --- | --- |
-| `reset` | Remove only state owned by `workspaceId` + `seed`; return `{}`. |
-| `provider.configure` | Configure/release deterministic provider faults: finite `ingestFailures`, `permanentIngestFailurePath`, `ingestBackpressure`, `echoWritebackWebhook`, `holdIngestPath`/`releaseIngestPath`, `crashAfterCommitPath`, or `seedMigrationState`. Return the applied configuration. |
-| `provider.calls` | For an optional `matchPath`, return applicable `attempts`, `writebackAttempts`, `echoDeliveries`, and `held` fields. Counts must survive runtime restart. |
+| `reset` | Clear the dedicated qualification workspace, including fixed digest artifacts, plus adapter state for `workspaceId` + `seed`; return `{}`. A failure is recorded as `RF-SETUP-001` with evidence and stops the run. |
+| `provider.configure` | Configure/release deterministic provider faults: finite `ingestFailures`, `permanentIngestFailurePath`, `ingestBackpressure`, `echoWritebackWebhook`, `holdIngestPath`/`releaseIngestPath`, `crashBarrier:{matchPath,phase}` (`before-commit` or `after-commit`), or `seedMigrationState`. `seedMigrationState.deadLetterId` is both the exported manifest ID and the replayable `envelopeId`. Return the applied configuration. |
+| `provider.calls` | For an optional `matchPath`, return applicable `attempts`, retry `state` (`retrying` while a poison item still has budget), `writebackAttempts`, `echoDeliveries`, `held`, `crashReady`, and `crashPhase` fields. Counts and barrier state must survive until the requested crash/restart. |
 | `state.inspect` | Read durable backing state directly without routing to or waking the actor. For requested `paths`, identities, operations, or delivery IDs, return `files`, `eventCounts`, `identityActive`, `backpressureActive`, `operations`, `deadLetters`, and `servingRuntime` as applicable. Returned operations are restricted to requested paths/IDs. This is the proof point immediately after clock advance. |
 | `auth.probe` | Attempt direct runtime access with `credential: omitted|invalid`; return `{rejected,actorInvoked}`. Both probes must reject before actor application code is invoked. |
 | `clock.advance` | Advance the target's injected UTC clock by `milliseconds`, run all due work, and return only after the runtime is quiescent. It must not synthesize public traffic. |
 | `runtime.evict` | Evict the workspace actor/DO without deleting durable state, then return when routing can create a new instance. |
-| `runtime.crash` | Terminate the active instance without a graceful disconnect. Fault placement is selected through `provider.configure`. |
+| `runtime.crash` | After `provider.calls` exposes the configured `crashReady` barrier, accept the matching `{matchPath,phase}`, terminate the active instance without a graceful disconnect, and return `{terminated:true}`. The paused public write must lose its response. `before-commit` leaves no file/event/op; `after-commit` preserves all three exactly once. |
 | `runtime.restart` | Restart the runtime/gateway while retaining durable state; return when `/health` is ready. |
-| `runtime.failover` | With `{phase:"switch",pause:true}`, force replica switching and release the two concurrent writers only after fencing is active. |
+| `runtime.failover` | Three-phase barrier: `{phase:"begin",pause:true}` starts switching and returns `{switchId,state:"fenced"}` only after the old writer is fenced; `{phase:"await-writers",switchId,count:2}` waits until both public writes are held and returns `{pendingWriters}`; `{phase:"release",switchId}` releases them and completes switching. |
 | `state.export` | Return `{artifact, manifest}`. The manifest includes `pendingOutboxIds` and `deadLetterIds`; the artifact also preserves files, revisions, event cursors, idempotency records, and retry metadata. |
 | `state.import` | Import `{artifact,destinationRuntime}`, switch subsequent public requests to the imported state, and return the imported `manifest`. |
 | `mount.start` | Start the real mount client with `mode` and optional `resetAfterClobber`; return `{id,root,maxReconnectDelayMs}`. The root is local to the harness host. |
@@ -113,7 +114,7 @@ The qualification pin used while designing this contract is `TerseAI/durable-act
 
 Do not mark a handler reentrant unless revision compare-and-swap remains atomic. A `202` write acknowledgement must atomically preserve file state, its event, and the pending writeback operation even though Terse commits persisted state only after a method succeeds. Mount recovery must use durable event cursors because sockets and disconnect callbacks do not survive every restart. Time-based behavior needs an external durable scheduler because this Terse release has no alarm API.
 
-The Terse descriptor refuses to load without `RELAYFILE_TERSE_SHARED_SECRET`. The gateway must also fail closed when its actor shared secret is empty; a request path must never select an actor independently of the verified workspace claim.
+The Terse descriptor refuses to load without `RELAYFILE_TERSE_SHARED_SECRET`. The gateway must also fail closed when its actor shared secret is empty; a request path must never select an actor independently of the verified workspace claim. `RF-AUTH-005` is Terse-specific because Cloudflare Durable Objects have no equivalent shared-secret hop; the universally applicable public auth and tenant-isolation cases still run on every target.
 
 ## tester-army/e2e decision
 

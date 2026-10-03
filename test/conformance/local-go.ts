@@ -112,13 +112,32 @@ export class LocalGoTarget {
   private async stopServer(): Promise<void> {
     const child = this.child;
     this.child = undefined;
-    if (!child || child.exitCode !== null) return;
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
     child.kill("SIGTERM");
-    await Promise.race([
-      new Promise<void>((resolve) => child.once("exit", () => resolve())),
-      new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
-    ]);
-    if (child.exitCode === null) child.kill("SIGKILL");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        new Promise<void>((resolve) => child.once("exit", () => resolve())),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, 5_000);
+          timer.unref();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    if (child.exitCode === null && child.signalCode === null) {
+      await new Promise<void>((resolve) => {
+        const onExit = () => resolve();
+        child.once("exit", onExit);
+        if (child.exitCode !== null || child.signalCode !== null) {
+          child.off("exit", onExit);
+          resolve();
+          return;
+        }
+        child.kill("SIGKILL");
+      });
+    }
   }
 }
 
