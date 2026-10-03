@@ -84,7 +84,6 @@ interface MountState {
   mode: "read" | "write" | "mirror";
   root: string;
   known: Map<string, string>;
-  pending: Map<string, string>;
   scanning: boolean;
   timer: ReturnType<typeof setInterval>;
 }
@@ -676,7 +675,7 @@ export class FakeConformanceAdapter {
     content: string,
     origin: FakeEvent["origin"],
     correlationId: string,
-    options: { suppressBroadcast?: boolean } = {},
+    options: { suppressBroadcast?: boolean; sourceMountId?: string } = {},
   ): { opId: string; status: "queued"; targetRevision: string } {
     const existed = this.files.has(path);
     const revision = this.nextRevision();
@@ -684,7 +683,7 @@ export class FakeConformanceAdapter {
     const opId = `op_${++this.operationSequence}`;
     this.operations.set(opId, { opId, state: "succeeded", writebackAttempts: 1, path });
     this.emit(path, existed ? "file.updated" : "file.created", revision, origin, correlationId, options.suppressBroadcast);
-    void this.projectMounts(path, content);
+    void this.projectMounts(path, content, options.sourceMountId);
     return { opId, status: "queued", targetRevision: revision };
   }
 
@@ -728,7 +727,6 @@ export class FakeConformanceAdapter {
       mode,
       root,
       known,
-      pending: new Map<string, string>(),
       scanning: false,
       timer: setInterval(() => void this.scanMount(id), 15),
     } satisfies MountState;
@@ -747,26 +745,18 @@ export class FakeConformanceAdapter {
         const relative = localPath.slice(mount.root.length).replaceAll("\\", "/");
         if (!relative.startsWith("/") || relative.startsWith("/.relay/")) continue;
         const content = await readFile(localPath, "utf8").catch(() => undefined);
-        if (content === undefined || mount.known.get(relative) === content) {
-          mount.pending.delete(relative);
-          continue;
-        }
-        // Ignore the transient truncated value that writeFile can expose between open and flush.
-        if (mount.pending.get(relative) !== content) {
-          mount.pending.set(relative, content);
-          continue;
-        }
-        mount.pending.delete(relative);
+        if (content === undefined || mount.known.get(relative) === content) continue;
         mount.known.set(relative, content);
-        this.write(relative, content, "agent_write", "fake-mount");
+        this.write(relative, content, "agent_write", "fake-mount", { sourceMountId: id });
       }
     } finally {
       mount.scanning = false;
     }
   }
 
-  private async projectMounts(path: string, content: string): Promise<void> {
-    for (const mount of this.mounts.values()) {
+  private async projectMounts(path: string, content: string, sourceMountId?: string): Promise<void> {
+    for (const [mountId, mount] of this.mounts) {
+      if (mountId === sourceMountId) continue;
       const localPath = join(mount.root, path.replace(/^\/+/, ""));
       const existing = await readFile(localPath, "utf8").catch(() => undefined);
       const known = mount.known.get(path);
@@ -778,7 +768,6 @@ export class FakeConformanceAdapter {
         }
       }
       await this.writeMountFile(mount.root, path, content, mount.mode === "read");
-      mount.pending.delete(path);
       mount.known.set(path, content);
     }
   }
