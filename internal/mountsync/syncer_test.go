@@ -3856,6 +3856,89 @@ func TestGithubWorkingTreeTarSeedStagesBeforePublishing(t *testing.T) {
 	}
 }
 
+func TestGithubWorkingTreeTarSeedPreservesEditThatBecomesDirtyAfterStaging(t *testing.T) {
+	localDir := t.TempDir()
+	contentsRoot := "/github/repos/AgentWorkforce/cloud/contents"
+	headSHA := "head123"
+	staleBody := []byte("stale remote\n")
+	localBody := []byte("unsent local edit\n")
+	secondBody := []byte("second remote\n")
+	firstRemote := contentsRoot + "/first.txt@" + headSHA + ".json"
+	secondRemote := contentsRoot + "/second.txt@" + headSHA + ".json"
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_dirty_during_stage", RemoteRoot: contentsRoot, LocalRoot: localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+	firstPath := filepath.Join(localDir, "first.txt")
+	syncer.state.Files[firstRemote] = trackedFile{
+		Revision: "rev_old", Hash: hashBytes(staleBody), Type: remoteTypeFile, Mode: 0o644,
+	}
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, entry := range []struct {
+		name string
+		body []byte
+	}{{"first.txt", staleBody}, {"second.txt", secondBody}} {
+		if err := tw.WriteHeader(&tar.Header{Name: entry.name, Mode: 0o644, Size: int64(len(entry.body))}); err != nil {
+			t.Fatalf("write %s header: %v", entry.name, err)
+		}
+		if _, err := tw.Write(entry.body); err != nil {
+			t.Fatalf("write %s body: %v", entry.name, err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+	secondEntryBlocked := make(chan struct{})
+	releaseSecondEntry := make(chan struct{})
+	body := &blockingOffsetReader{
+		reader: bytes.NewReader(buf.Bytes()), remaining: 1024,
+		blocked: secondEntryBlocked, release: releaseSecondEntry,
+	}
+	tree := map[string]githubTreeFile{
+		"first.txt":  {RemotePath: firstRemote, Revision: "rev_1", ContentHash: hashBytes(staleBody), Type: remoteTypeFile, Mode: 0o644},
+		"second.txt": {RemotePath: secondRemote, Revision: "rev_2", ContentHash: hashBytes(secondBody), Type: remoteTypeFile, Mode: 0o644},
+	}
+	applyDone := make(chan error, 1)
+	go func() {
+		syncer.mu.Lock()
+		syncer.fullPullActive = true
+		_, applyErr := syncer.applyGithubWorkingTreeTarSeedStrict(GithubWorkingTreeTar{
+			Body: io.NopCloser(body), ContentType: "application/x-tar",
+		}, tree, nil, bootstrapProgress{}, true)
+		syncer.fullPullActive = false
+		syncer.mu.Unlock()
+		applyDone <- applyErr
+	}()
+	select {
+	case <-secondEntryBlocked:
+	case <-time.After(time.Second):
+		t.Fatal("archive did not block after staging first entry")
+	}
+	if err := os.WriteFile(firstPath, localBody, 0o644); err != nil {
+		t.Fatalf("write concurrent local edit: %v", err)
+	}
+	syncer.mu.Lock()
+	tracked := syncer.state.Files[firstRemote]
+	tracked.Hash = hashBytes(localBody)
+	tracked.Dirty = true
+	syncer.state.Files[firstRemote] = tracked
+	syncer.mu.Unlock()
+	close(releaseSecondEntry)
+	if err := <-applyDone; err != nil {
+		t.Fatalf("apply staged tar: %v", err)
+	}
+
+	assertLocalFileContent(t, firstPath, string(localBody))
+	if tracked := syncer.state.Files[firstRemote]; !tracked.Dirty || tracked.Hash != hashBytes(localBody) {
+		t.Fatalf("pending local edit state was overwritten: %+v", tracked)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "second.txt"), string(secondBody))
+}
+
 func TestGithubWorkingTreeSourceArchiveMaterializesRealisticTree(t *testing.T) {
 	const fileCount = 5_884
 	localDir := t.TempDir()
@@ -10276,6 +10359,28 @@ type blockingGithubTarClient struct {
 	*fakeExportClient
 	tarStarted chan struct{}
 	tarRelease <-chan struct{}
+}
+
+type blockingOffsetReader struct {
+	reader    *bytes.Reader
+	remaining int
+	blocked   chan<- struct{}
+	release   <-chan struct{}
+	once      sync.Once
+}
+
+func (r *blockingOffsetReader) Read(p []byte) (int, error) {
+	if r.remaining <= 0 {
+		r.once.Do(func() { close(r.blocked) })
+		<-r.release
+		return r.reader.Read(p)
+	}
+	if len(p) > r.remaining {
+		p = p[:r.remaining]
+	}
+	n, err := r.reader.Read(p)
+	r.remaining -= n
+	return n, err
 }
 
 func (c *blockingGithubTarClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID string, seed GithubWorkingTreeSeedRequest) (GithubWorkingTreeTar, error) {
