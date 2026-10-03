@@ -2,7 +2,7 @@ import { readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { Harness, asRecord, assert, assertStatus, type ApiResponse } from "./harness.js";
+import { Harness, RequestTransportError, asRecord, assert, assertStatus, type ApiResponse } from "./harness.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -910,9 +910,16 @@ async function crashWriteAtBarrier(
   phase: "before-commit" | "after-commit",
 ): Promise<void> {
   await h.control("provider.configure", { crashBarrier: { matchPath: path, phase } });
-  const outcome = writeRemoteFile(h, path, content).then(
-    () => "completed" as const,
-    () => "interrupted" as const,
+  const outcome = h.request(
+    "PUT",
+    h.workspacePath(h.target.workspaces.primary, `/fs/file?path=${encodeURIComponent(path)}`),
+    { headers: { "If-Match": "*" }, body: { content } },
+  ).then(
+    (response) => ({ kind: "response", status: response.status } as const),
+    (error: unknown) => {
+      if (error instanceof RequestTransportError) return { kind: "transport" } as const;
+      throw error;
+    },
   );
   await h.poll(
     `${phase} crash barrier`,
@@ -921,9 +928,12 @@ async function crashWriteAtBarrier(
   );
   const crashed = await h.control<{ terminated: boolean }>("runtime.crash", { matchPath: path, phase });
   assert(crashed.terminated === true, `runtime did not terminate at the ${phase} barrier`);
+  const result = await settleWithin(outcome, 5_000, `${phase} public write did not terminate after crash`);
   assert(
-    await settleWithin(outcome, 5_000, `${phase} public write did not terminate after crash`) === "interrupted",
-    `${phase} public write returned success despite the crash barrier`,
+    result.kind === "transport",
+    result.kind === "response"
+      ? `${phase} public write returned HTTP ${result.status} instead of losing its response`
+      : `${phase} public write did not lose its response`,
   );
 }
 

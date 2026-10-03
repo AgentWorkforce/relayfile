@@ -23,7 +23,7 @@ async function main(): Promise<void> {
 
   try {
     if (local) target = await local.start(target);
-    assertFullRunSafety(target, options.profile);
+    assertFullRunSafety(target, options.profile, process.env, local !== undefined);
     const harness = new Harness(
       target,
       options.profile,

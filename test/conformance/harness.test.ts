@@ -8,7 +8,7 @@ import addFormats from "ajv-formats";
 import { parse } from "yaml";
 import { assertFullRunSafety, loadTarget } from "./config.js";
 import { redact, redactEnvironmentText, writeEvidence } from "./evidence.js";
-import { Harness } from "./harness.js";
+import { Harness, RequestTransportError } from "./harness.js";
 import { validateOpenApiResponse } from "./openapi-validator.js";
 import type { EvidenceSummary, ResolvedTarget } from "./types.js";
 
@@ -62,6 +62,12 @@ test("remote full profiles require explicit disposable-workspace confirmation", 
     assertFullRunSafety(loaded.target, "full", { RELAYFILE_CONFORMANCE_DISPOSABLE: "1" }),
   );
   assert.doesNotThrow(() => assertFullRunSafety(loaded.target, "core", {}));
+});
+
+test("only the locally spawned Go oracle bypasses remote full-profile safety", async () => {
+  const loaded = await loadTarget("go-local", {});
+  assert.throws(() => assertFullRunSafety(loaded.target, "full", {}), /reset control operation/u);
+  assert.doesNotThrow(() => assertFullRunSafety(loaded.target, "full", {}, true));
 });
 
 test("Terse target fails closed when its actor shared secret is unset", async () => {
@@ -164,6 +170,29 @@ test("control failures preserve non-JSON response evidence", async () => {
   assert.equal(harness.exchanges.length, 1);
   assert.equal(harness.exchanges[0]?.response.status, 503);
   assert.equal(harness.exchanges[0]?.response.body, "adapter unavailable");
+});
+
+test("response body transport failures preserve status and headers in evidence", async () => {
+  const harness = new Harness(fakeTarget(), "core", "seed");
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(
+    new ReadableStream({
+      start(controller) { controller.error(new Error("body interrupted")); },
+    }),
+    { status: 200, headers: { "Content-Type": "application/json", "X-Test": "present" } },
+  )) as typeof fetch;
+  try {
+    await assert.rejects(
+      () => harness.request("GET", "/v1/workspaces/primary/fs/file?path=%2Ftest.md", { token: false }),
+      (error: unknown) => error instanceof RequestTransportError && error.phase === "response-body",
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  assert.equal(harness.exchanges.length, 1);
+  assert.equal(harness.exchanges[0]?.response.status, 200);
+  assert.equal(harness.exchanges[0]?.response.headers["x-test"], "present");
+  assert.deepEqual(harness.exchanges[0]?.response.body, { transportError: "Error", phase: "response-body" });
 });
 
 test("poll bounds a stalled read", async () => {

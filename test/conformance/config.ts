@@ -111,8 +111,10 @@ export function assertFullRunSafety(
   target: ResolvedTarget,
   profile: Profile,
   env: NodeJS.ProcessEnv = process.env,
+  locallySpawned = false,
 ): void {
-  if (profile !== "full" || target.runtime.kind === "go-oracle") return;
+  if (profile !== "full") return;
+  if (locallySpawned && target.runtime.kind === "go-oracle") return;
   if (!target.control?.operations.has("reset")) {
     throw new Error(`target ${target.id} full profile requires the reset control operation`);
   }

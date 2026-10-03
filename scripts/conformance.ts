@@ -12,6 +12,8 @@
  *
  *   # Against an already-running server:
  *   RELAYFILE_BASE_URL=https://your-cloud.workers.dev npx tsx scripts/conformance.ts --remote
+ *   # Set RELAYFILE_CONFORMANCE_WORKSPACE for a known tenant or
+ *   # RELAYFILE_CONFORMANCE_SEED for a deterministic generated tenant.
  *
  *   # CI mode:
  *   npx tsx scripts/conformance.ts --ci
@@ -39,10 +41,13 @@ function resolveWorkspace(): string {
   const explicit = process.env.RELAYFILE_CONFORMANCE_WORKSPACE?.trim();
   if (explicit) return explicit;
   const seed = process.env.RELAYFILE_CONFORMANCE_SEED?.trim();
-  if (seed) return `conformance-${seed.replace(/[^A-Za-z0-9._-]/g, '-')}`;
-  if (REMOTE) {
-    throw new Error('--remote requires RELAYFILE_CONFORMANCE_WORKSPACE or RELAYFILE_CONFORMANCE_SEED');
+  if (seed) {
+    if (!/^[A-Za-z0-9._-]{1,80}$/u.test(seed) || seed === "." || seed === "..") {
+      throw new Error("RELAYFILE_CONFORMANCE_SEED must match [A-Za-z0-9._-]{1,80} and cannot be . or ..");
+    }
+    return `conformance-${seed}`;
   }
+  if (REMOTE) return `conformance-${Date.now()}`;
   return 'conformance-legacy-v1';
 }
 
@@ -767,6 +772,8 @@ Usage:
 Environment:
   RELAYFILE_BASE_URL  Base URL when using --remote
   RELAYFILE_PORT      Local server port when not using --remote
+  RELAYFILE_CONFORMANCE_WORKSPACE  Explicit workspace (remote otherwise creates a fresh one)
+  RELAYFILE_CONFORMANCE_SEED       Deterministic workspace suffix when no explicit workspace is set
 `);
     return;
   }

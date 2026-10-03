@@ -4,7 +4,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createLocalRs256Auth, type LocalRs256Auth } from "../../scripts/test-utils/rsa-signer.js";
 import type { ResolvedTarget } from "./types.js";
 
@@ -24,7 +24,7 @@ const ALL_SCOPES = [
 ];
 
 export class LocalGoTarget {
-  private child?: ChildProcessWithoutNullStreams;
+  private child?: ChildProcess;
   private auth?: LocalRs256Auth;
   private scratch?: string;
   private binary?: string;
@@ -86,7 +86,7 @@ export class LocalGoTarget {
       throw new Error("local Go target is not prepared");
     }
     this.logs = [];
-    this.child = spawn(this.binary, [], {
+    const child = spawn(this.binary, [], {
       env: {
         ...process.env,
         RELAYFILE_ADDR: `127.0.0.1:${this.port}`,
@@ -100,8 +100,9 @@ export class LocalGoTarget {
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
-    this.child.stdout.on("data", (chunk: Buffer) => this.capture(chunk));
-    this.child.stderr.on("data", (chunk: Buffer) => this.capture(chunk));
+    child.stdout?.on("data", (chunk: Buffer) => this.capture(chunk));
+    child.stderr?.on("data", (chunk: Buffer) => this.capture(chunk));
+    this.child = child;
   }
 
   private capture(chunk: Buffer): void {

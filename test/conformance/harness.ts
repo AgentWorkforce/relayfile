@@ -24,6 +24,16 @@ export interface RequestOptions {
   signal?: AbortSignal;
 }
 
+export class RequestTransportError extends Error {
+  constructor(
+    readonly correlationId: string,
+    readonly phase: "request" | "response-body",
+  ) {
+    super(`request transport failure during ${phase} (correlation ${correlationId})`);
+    this.name = "RequestTransportError";
+  }
+}
+
 export class Harness {
   readonly cases: CaseResult[] = [];
   readonly exchanges: Exchange[] = [];
@@ -131,14 +141,32 @@ export class Harness {
         request: { headers, ...(options.body !== undefined ? { body: options.body } : {}) },
         response: { status: 0, headers: {}, body: { transportError: error instanceof Error ? error.name : "Error" } },
       });
-      throw new Error(`request transport failure (correlation ${correlationId})`);
+      throw new RequestTransportError(correlationId, "request");
     }
-    const raw = await response.text();
+    const responseHeaders = Object.fromEntries(response.headers.entries());
+    let raw: string;
+    try {
+      raw = await response.text();
+    } catch (error) {
+      this.exchanges.push({
+        correlationId,
+        method,
+        url: `${this.target.baseUrl}${path}`,
+        startedAt,
+        durationMs: Math.round(performance.now() - started),
+        request: { headers, ...(options.body !== undefined ? { body: options.body } : {}) },
+        response: {
+          status: response.status,
+          headers: responseHeaders,
+          body: { transportError: error instanceof Error ? error.name : "Error", phase: "response-body" },
+        },
+      });
+      throw new RequestTransportError(correlationId, "response-body");
+    }
     let data: unknown = raw;
     if (raw) {
       try { data = JSON.parse(raw); } catch { /* retain text */ }
     }
-    const responseHeaders = Object.fromEntries(response.headers.entries());
     this.exchanges.push({
       correlationId,
       method,
@@ -188,7 +216,26 @@ export class Harness {
       });
       throw new Error(`control ${operation} transport failure (correlation ${correlationId})`);
     }
-    const raw = await response.text();
+    const responseHeaders = Object.fromEntries(response.headers.entries());
+    let raw: string;
+    try {
+      raw = await response.text();
+    } catch (error) {
+      this.exchanges.push({
+        correlationId,
+        method: "CONTROL",
+        url,
+        startedAt,
+        durationMs: Math.round(performance.now() - started),
+        request: { headers, body },
+        response: {
+          status: response.status,
+          headers: responseHeaders,
+          body: { transportError: error instanceof Error ? error.name : "Error", phase: "response-body" },
+        },
+      });
+      throw new Error(`control ${operation} response body transport failure (correlation ${correlationId})`);
+    }
     let data: unknown = {};
     let jsonError = false;
     if (raw) {
@@ -203,7 +250,7 @@ export class Harness {
       request: { headers, body },
       response: {
         status: response.status,
-        headers: Object.fromEntries(response.headers.entries()),
+        headers: responseHeaders,
         ...(raw ? { body: data } : {}),
       },
     });
