@@ -361,6 +361,9 @@ paths:
         or patch (unified diff format). With `decode=github-working-tree`,
         `pathPrefix` and `headSha` select a complete-v1 GitHub snapshot; the tar
         entry names are repository-relative and preserve symlink and mode metadata.
+        `sourceArchive=1` requests the retained immutable GitHub archive when
+        available; responses set `X-Relayfile-Tar-Strip-Components: 1` because
+        GitHub archives wrap the repository in one top-level directory.
       security:
         - BearerAuth: [fs:read]
       parameters:
@@ -413,9 +416,22 @@ paths:
           schema:
             type: string
             enum: ["0", "1", "false", "no", "off"]
+        - name: sourceArchive
+          in: query
+          required: false
+          description: Set to 1 with decode=github-working-tree to prefer the retained headSha-bound GitHub source archive. The server falls back to a generated verified tar when unavailable.
+          schema:
+            type: string
+            enum: ["1"]
       responses:
         '200':
           description: Export data in requested format
+          headers:
+            X-Relayfile-Tar-Strip-Components:
+              description: Number of leading tar path components the client must remove. Present only for retained GitHub source archives.
+              schema:
+                type: integer
+                enum: [1]
           content:
             application/json:
               schema:

@@ -723,11 +723,13 @@ type GithubWorkingTreeSeedRequest struct {
 	HeadSHA       string
 	SourceProfile string
 	Gzip          bool
+	SourceArchive bool
 }
 
 type GithubWorkingTreeTar struct {
-	Body        io.ReadCloser
-	ContentType string
+	Body            io.ReadCloser
+	ContentType     string
+	StripComponents int
 }
 
 type LazyMaterializeClient interface {
@@ -1273,6 +1275,9 @@ func (c *HTTPClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID
 	if !seed.Gzip {
 		q.Set("gzip", "0")
 	}
+	if seed.SourceArchive {
+		q.Set("sourceArchive", "1")
+	}
 	requestPath := fmt.Sprintf("/v1/workspaces/%s/fs/export?%s", url.PathEscape(workspaceID), q.Encode())
 
 	authRefreshTried := false
@@ -1295,10 +1300,18 @@ func (c *HTTPClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID
 			return GithubWorkingTreeTar{}, err
 		}
 		if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+			stripComponents, stripErr := parseTarStripComponents(
+				resp.Header.Get("X-Relayfile-Tar-Strip-Components"),
+			)
+			if stripErr != nil {
+				_ = resp.Body.Close()
+				return GithubWorkingTreeTar{}, stripErr
+			}
 			c.logHTTPStatus(http.MethodGet, requestPath, resp.StatusCode, resp.Header.Get("Retry-After"), attempt)
 			return GithubWorkingTreeTar{
-				Body:        resp.Body,
-				ContentType: resp.Header.Get("Content-Type"),
+				Body:            resp.Body,
+				ContentType:     resp.Header.Get("Content-Type"),
+				StripComponents: stripComponents,
 			}, nil
 		}
 		payloadBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -1335,6 +1348,18 @@ func (c *HTTPClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID
 			Reason:     errPayload.Details.Reason,
 		}
 	}
+}
+
+func parseTarStripComponents(raw string) (int, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0, nil
+	}
+	value, err := strconv.Atoi(trimmed)
+	if err != nil || value != 1 {
+		return 0, fmt.Errorf("invalid X-Relayfile-Tar-Strip-Components value %q", raw)
+	}
+	return value, nil
 }
 
 func (c *HTTPClient) LazyMaterialize(ctx context.Context, workspaceID, owner, repo string) error {
@@ -6730,7 +6755,8 @@ func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubW
 			PathPrefix:    s.githubWorkingTree.ContentsRoot,
 			HeadSHA:       headSHA,
 			SourceProfile: manifest.SourceProfile,
-			Gzip:          false,
+			Gzip:          true,
+			SourceArchive: true,
 		})
 	})
 	if slotErr != nil {
@@ -7172,7 +7198,43 @@ func (s *Syncer) applyGithubWorkingTreeTarSeed(tarBody GithubWorkingTreeTar, tre
 	return s.applyGithubWorkingTreeTarSeedStrict(tarBody, tree, conflicted, prog, false)
 }
 
+func stripTarPathComponents(name string, count int) (string, error) {
+	normalized := strings.ReplaceAll(name, "\\", "/")
+	cleaned := path.Clean(normalized)
+	if count == 0 {
+		return cleaned, nil
+	}
+	if count != 1 || cleaned == "" || cleaned == "." || path.IsAbs(cleaned) || strings.HasPrefix(cleaned, "../") || strings.Contains(cleaned, "/../") {
+		return "", fmt.Errorf("github source archive contains unsafe path %q", name)
+	}
+	parts := strings.Split(cleaned, "/")
+	if len(parts) <= count || parts[0] == "" || parts[0] == "." || parts[0] == ".." {
+		return "", fmt.Errorf("github source archive path %q has no file after stripping %d component", name, count)
+	}
+	return strings.Join(parts[count:], "/"), nil
+}
+
 func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTar, tree map[string]githubTreeFile, conflicted map[string]struct{}, prog bootstrapProgress, strictComplete bool) (map[string]struct{}, error) {
+	// Keep the unverified tree outside the visible mount root. Besides making
+	// publication explicit, this prevents the watcher from observing staging
+	// writes and avoids following a user-controlled infrastructure symlink.
+	stagingRoot, err := os.MkdirTemp(filepath.Dir(s.localRoot), ".relayfile-github-tar-stage-")
+	if err != nil {
+		return nil, fmt.Errorf("create github tar staging directory: %w", err)
+	}
+	defer os.RemoveAll(stagingRoot)
+	type pendingPublish struct {
+		remotePath    string
+		localPath     string
+		stagedPath    string
+		state         trackedFile
+		observedState trackedFile
+		observed      bool
+		canWrite      bool
+		mode          uint32
+		isSymlink     bool
+	}
+	pending := make([]pendingPublish, 0, len(tree))
 	reader := io.Reader(tarBody.Body)
 	buffered := bufio.NewReader(reader)
 	if strings.Contains(strings.ToLower(tarBody.ContentType), "gzip") {
@@ -7215,7 +7277,11 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 			}
 			continue
 		}
-		rel := path.Clean(strings.ReplaceAll(header.Name, "\\", "/"))
+		rel, err := stripTarPathComponents(header.Name, tarBody.StripComponents)
+		if err != nil {
+			return nil, err
+		}
+		rel = path.Clean(strings.ReplaceAll(rel, "\\", "/"))
 		rel = strings.TrimPrefix(rel, "/")
 		if rel == "" || rel == "." || strings.HasPrefix(rel, "../") || strings.Contains(rel, "/../") {
 			return nil, fmt.Errorf("github tar seed contains unsafe path %q", header.Name)
@@ -7292,19 +7358,23 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 				return nil, fmt.Errorf("github tar seed contains unsafe symlink %s: %w", rel, err)
 			}
 		}
-		tracked := s.state.Files[meta.RemotePath]
+		tracked, trackedExists := s.state.Files[meta.RemotePath]
 		canWrite := s.canWritePath(meta.RemotePath)
 		if tracked.Dirty {
-			if err := s.applyLocalPermissionsForMode(localPath, canWrite, tracked.Mode); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return nil, err
-			}
 			tracked.ReadOnly = !canWrite
-			s.state.Files[meta.RemotePath] = tracked
+			pending = append(pending, pendingPublish{
+				remotePath:    meta.RemotePath,
+				localPath:     localPath,
+				state:         tracked,
+				observedState: tracked,
+				observed:      trackedExists,
+				canWrite:      canWrite,
+				mode:          tracked.Mode,
+				isSymlink:     isSymlink,
+			})
 			remotePaths[meta.RemotePath] = struct{}{}
+			prog.touch()
 			continue
-		}
-		if err := ensureSecureParentDirectory(s.localRoot, localPath); err != nil {
-			return nil, err
 		}
 		shouldWrite := true
 		if isSymlink {
@@ -7314,33 +7384,51 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 		} else if current, readErr := s.readLocalSnapshot(localPath, true); readErr == nil && current.Type == remoteTypeFile && current.Hash == hash {
 			shouldWrite = false
 		}
+		stagedPath := ""
 		if shouldWrite {
+			stagedPath, err = safeLocalPath(stagingRoot, rel)
+			if err != nil {
+				return nil, err
+			}
+			if err := ensureSecureParentDirectory(stagingRoot, stagedPath); err != nil {
+				return nil, err
+			}
 			var writeErr error
 			if isSymlink {
-				writeErr = writeSymlinkAtomicSecure(s.localRoot, localPath, header.Linkname)
+				writeErr = writeSymlinkAtomicSecure(stagingRoot, stagedPath, header.Linkname)
 			} else {
-				writeErr = writeFileAtomicSecure(s.localRoot, localPath, data, os.FileMode(meta.Mode&0o777))
+				// Staging is private and must remain readable by the publisher
+				// even when legacy metadata reports mode 0000. The authoritative
+				// mode is applied only to the final path after publication.
+				writeErr = writeFileAtomicSecure(stagingRoot, stagedPath, data, 0o600)
 			}
 			if writeErr != nil {
 				return nil, writeErr
 			}
 		}
-		if err := s.applyLocalPermissionsForMode(localPath, canWrite, meta.Mode); err != nil {
-			return nil, err
-		}
 		contentType := detectContentType(localPath)
-		s.state.Files[meta.RemotePath] = trackedFile{
-			Revision:    meta.Revision,
-			ContentType: contentType,
-			Encoding:    meta.Encoding,
-			Type:        meta.Type,
-			Target:      meta.Target,
-			Mode:        meta.Mode,
-			Hash:        hash,
-			Dirty:       false,
-			Denied:      false,
-			ReadOnly:    !canWrite,
-		}
+		pending = append(pending, pendingPublish{
+			remotePath: meta.RemotePath,
+			localPath:  localPath,
+			stagedPath: stagedPath,
+			state: trackedFile{
+				Revision:    meta.Revision,
+				ContentType: contentType,
+				Encoding:    meta.Encoding,
+				Type:        meta.Type,
+				Target:      meta.Target,
+				Mode:        meta.Mode,
+				Hash:        hash,
+				Dirty:       false,
+				Denied:      false,
+				ReadOnly:    !canWrite,
+			},
+			observedState: tracked,
+			observed:      trackedExists,
+			canWrite:      canWrite,
+			mode:          meta.Mode,
+			isSymlink:     isSymlink,
+		})
 		remotePaths[meta.RemotePath] = struct{}{}
 		s.yieldFullPullStateLock()
 		prog.touch()
@@ -7349,6 +7437,55 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 		if _, ok := remotePaths[meta.RemotePath]; !ok {
 			return nil, fmt.Errorf("github tar seed missing tree file %s", rel)
 		}
+	}
+	// Nothing under the visible mount root changes until the complete archive
+	// has passed count/path/hash verification. Publish each staged entry with
+	// the existing secure atomic writer; a crash leaves only an ignored staging
+	// directory outside the mount, and the next bootstrap can restart cleanly.
+	for _, entry := range pending {
+		// Give watcher/outbox work a turn between each disk publication, then
+		// fence on both accepted writes and pending/failed local edits. The
+		// archive entry was staged against observedState; any newer tracked
+		// state owns the path even if its cloud write has not succeeded yet.
+		s.yieldFullPullStateLock()
+		current, currentExists := s.state.Files[entry.remotePath]
+		if s.fullPullPathTouchedByUpPath(entry.remotePath) ||
+			current.Dirty ||
+			currentExists != entry.observed ||
+			(currentExists && current != entry.observedState) {
+			// A local writeback may have landed after this entry was staged but
+			// before the full archive finished verification. Preserve that newer
+			// local state just as the streaming path does before staging.
+			prog.touch()
+			continue
+		}
+		if entry.stagedPath != "" {
+			if err := ensureSecureParentDirectory(s.localRoot, entry.localPath); err != nil {
+				return nil, err
+			}
+			if entry.isSymlink {
+				target, err := os.Readlink(entry.stagedPath)
+				if err != nil {
+					return nil, err
+				}
+				if err := writeSymlinkAtomicSecure(s.localRoot, entry.localPath, target); err != nil {
+					return nil, err
+				}
+			} else {
+				data, err := os.ReadFile(entry.stagedPath)
+				if err != nil {
+					return nil, err
+				}
+				if err := writeFileAtomicSecure(s.localRoot, entry.localPath, data, os.FileMode(entry.mode&0o777)); err != nil {
+					return nil, err
+				}
+			}
+		}
+		if err := s.applyLocalPermissionsForMode(entry.localPath, entry.canWrite, entry.mode); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		s.state.Files[entry.remotePath] = entry.state
+		prog.touch()
 	}
 	return remotePaths, nil
 }

@@ -3,6 +3,7 @@ package mountsync
 import (
 	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -725,6 +726,58 @@ func TestHTTPClientExportGithubWorkingTreeTarUsesRawTarContract(t *testing.T) {
 	}
 	if string(data) != "# Cloud\n" {
 		t.Fatalf("unexpected tar content %q", string(data))
+	}
+}
+
+func TestHTTPClientExportGithubWorkingTreeTarRequestsSourceArchive(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("sourceArchive"); got != "1" {
+			t.Fatalf("expected sourceArchive=1, got %q", got)
+		}
+		if _, present := r.URL.Query()["gzip"]; present {
+			t.Fatalf("source archive should retain its native gzip encoding, query=%q", r.URL.RawQuery)
+		}
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		tw := tar.NewWriter(gz)
+		body := []byte("# Cloud\n")
+		if err := tw.WriteHeader(&tar.Header{Name: "cloud-head123/README.md", Mode: 0o644, Size: int64(len(body))}); err != nil {
+			t.Fatalf("write tar header: %v", err)
+		}
+		if _, err := tw.Write(body); err != nil {
+			t.Fatalf("write tar body: %v", err)
+		}
+		if err := tw.Close(); err != nil {
+			t.Fatalf("close tar: %v", err)
+		}
+		if err := gz.Close(); err != nil {
+			t.Fatalf("close gzip: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/gzip")
+		w.Header().Set("X-Relayfile-Tar-Strip-Components", "1")
+		_, _ = w.Write(buf.Bytes())
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL, "token", server.Client())
+	out, err := client.ExportGithubWorkingTreeTar(context.Background(), "ws_tar", GithubWorkingTreeSeedRequest{
+		Owner:         "AgentWorkforce",
+		Repo:          "cloud",
+		PathPrefix:    "/github/repos/AgentWorkforce/cloud/contents",
+		HeadSHA:       "head123",
+		SourceProfile: "complete-v1",
+		Gzip:          true,
+		SourceArchive: true,
+	})
+	if err != nil {
+		t.Fatalf("export source archive: %v", err)
+	}
+	defer out.Body.Close()
+	if out.StripComponents != 1 {
+		t.Fatalf("strip components = %d, want 1", out.StripComponents)
+	}
+	if out.ContentType != "application/gzip" {
+		t.Fatalf("content type = %q, want application/gzip", out.ContentType)
 	}
 }
 
