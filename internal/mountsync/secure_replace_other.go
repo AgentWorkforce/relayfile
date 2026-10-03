@@ -21,3 +21,7 @@ func writeFileAtomicSecure(root, target string, data []byte, mode os.FileMode) e
 func writeSymlinkAtomicSecure(root, targetPath, target string) error {
 	return errAncestorSafetyUnsupported
 }
+
+func movePathAtomicSecure(sourceRoot, sourcePath, targetRoot, targetPath string) error {
+	return errAncestorSafetyUnsupported
+}

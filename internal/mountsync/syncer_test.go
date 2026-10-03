@@ -3860,6 +3860,56 @@ func TestGithubWorkingTreeTarSeedStagesBeforePublishing(t *testing.T) {
 	}
 }
 
+func TestGithubWorkingTreeTarSeedReclaimsAbandonedPerMountStage(t *testing.T) {
+	localDir := t.TempDir()
+	stagingRoot := filepath.Join(
+		filepath.Dir(localDir),
+		".relayfile-github-tar-stage-"+hashString(filepath.Clean(localDir))[:16],
+	)
+	if err := os.Mkdir(stagingRoot, 0o700); err != nil {
+		t.Fatalf("create abandoned stage: %v", err)
+	}
+	marker := filepath.Join(stagingRoot, "abandoned.txt")
+	if err := os.WriteFile(marker, []byte("old partial tree"), 0o600); err != nil {
+		t.Fatalf("write abandoned stage marker: %v", err)
+	}
+	contentsRoot := "/github/repos/AgentWorkforce/cloud/contents"
+	body := []byte("fresh\n")
+	remotePath := contentsRoot + "/fresh.txt@head123.json"
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_reclaim_stage", RemoteRoot: contentsRoot, LocalRoot: localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := tw.WriteHeader(&tar.Header{Name: "fresh.txt", Mode: 0o644, Size: int64(len(body))}); err != nil {
+		t.Fatalf("write tar header: %v", err)
+	}
+	if _, err := tw.Write(body); err != nil {
+		t.Fatalf("write tar body: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+	_, err = syncer.applyGithubWorkingTreeTarSeedStrict(GithubWorkingTreeTar{
+		Body: io.NopCloser(bytes.NewReader(buf.Bytes())), ContentType: "application/x-tar",
+	}, map[string]githubTreeFile{
+		"fresh.txt": {RemotePath: remotePath, Revision: "rev_1", ContentHash: hashBytes(body), Type: remoteTypeFile, Mode: 0o644},
+	}, nil, bootstrapProgress{}, true)
+	if err != nil {
+		t.Fatalf("apply archive after abandoned stage: %v", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("abandoned staging marker survived restart cleanup: %v", err)
+	}
+	if _, err := os.Stat(stagingRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("staging root survived successful publish: %v", err)
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "fresh.txt"), string(body))
+}
+
 func TestGithubWorkingTreeTarSeedPreservesEditThatBecomesDirtyAfterStaging(t *testing.T) {
 	localDir := t.TempDir()
 	contentsRoot := "/github/repos/AgentWorkforce/cloud/contents"
@@ -3871,6 +3921,7 @@ func TestGithubWorkingTreeTarSeedPreservesEditThatBecomesDirtyAfterStaging(t *te
 	secondRemote := contentsRoot + "/second.txt@" + headSHA + ".json"
 	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
 		WorkspaceID: "ws_dirty_during_stage", RemoteRoot: contentsRoot, LocalRoot: localDir,
+		SyncMode: "pull-only",
 	})
 	if err != nil {
 		t.Fatalf("NewSyncer failed: %v", err)
@@ -3937,8 +3988,11 @@ func TestGithubWorkingTreeTarSeedPreservesEditThatBecomesDirtyAfterStaging(t *te
 	}
 
 	assertLocalFileContent(t, firstPath, string(localBody))
-	if tracked := syncer.state.Files[firstRemote]; !tracked.Dirty || tracked.Hash != hashBytes(localBody) {
+	if tracked := syncer.state.Files[firstRemote]; !tracked.Dirty || tracked.Hash != hashBytes(localBody) || !tracked.ReadOnly {
 		t.Fatalf("pending local edit state was overwritten: %+v", tracked)
+	}
+	if info, err := os.Stat(firstPath); err != nil || info.Mode().Perm()&0o222 != 0 {
+		t.Fatalf("dirty skipped path did not receive pull-only permissions: mode=%v err=%v", info, err)
 	}
 	assertLocalFileContent(t, filepath.Join(localDir, "second.txt"), string(secondBody))
 }

@@ -156,3 +156,26 @@ func writeSymlinkAtomicSecure(root, targetPath, target string) error {
 	committed = true
 	return nil
 }
+
+// movePathAtomicSecure publishes an already-verified staged file or symlink
+// without copying its body again. Both parents are opened without following
+// symlinks, and staging is created beside the mount so renameat stays on one
+// filesystem and atomically replaces the destination entry.
+func movePathAtomicSecure(sourceRoot, sourcePath, targetRoot, targetPath string) error {
+	sourceParent, sourceBase, err := secureParentDir(sourceRoot, sourcePath)
+	if err != nil {
+		return err
+	}
+	defer sourceParent.Close()
+	targetParent, targetBase, err := secureParentDir(targetRoot, targetPath)
+	if err != nil {
+		return err
+	}
+	defer targetParent.Close()
+	return unix.Renameat(
+		int(sourceParent.Fd()),
+		sourceBase,
+		int(targetParent.Fd()),
+		targetBase,
+	)
+}

@@ -7218,8 +7218,18 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 	// Keep the unverified tree outside the visible mount root. Besides making
 	// publication explicit, this prevents the watcher from observing staging
 	// writes and avoids following a user-controlled infrastructure symlink.
-	stagingRoot, err := os.MkdirTemp(filepath.Dir(s.localRoot), ".relayfile-github-tar-stage-")
-	if err != nil {
+	stagingRoot := filepath.Join(
+		filepath.Dir(s.localRoot),
+		".relayfile-github-tar-stage-"+hashString(filepath.Clean(s.localRoot))[:16],
+	)
+	// The name is stable per mount root, so a restart after SIGKILL reclaims
+	// the abandoned tree instead of accumulating another full repository copy.
+	// RemoveAll does not follow a staging-root symlink; subsequent secure writes
+	// also open every directory component with O_NOFOLLOW.
+	if err := os.RemoveAll(stagingRoot); err != nil {
+		return nil, fmt.Errorf("remove abandoned github tar staging directory: %w", err)
+	}
+	if err := os.Mkdir(stagingRoot, 0o700); err != nil {
 		return nil, fmt.Errorf("create github tar staging directory: %w", err)
 	}
 	defer os.RemoveAll(stagingRoot)
@@ -7232,7 +7242,6 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 		observed      bool
 		canWrite      bool
 		mode          uint32
-		isSymlink     bool
 	}
 	pending := make([]pendingPublish, 0, len(tree))
 	reader := io.Reader(tarBody.Body)
@@ -7370,7 +7379,6 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 				observed:      trackedExists,
 				canWrite:      canWrite,
 				mode:          tracked.Mode,
-				isSymlink:     isSymlink,
 			})
 			remotePaths[meta.RemotePath] = struct{}{}
 			prog.touch()
@@ -7427,7 +7435,6 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 			observed:      trackedExists,
 			canWrite:      canWrite,
 			mode:          meta.Mode,
-			isSymlink:     isSymlink,
 		})
 		remotePaths[meta.RemotePath] = struct{}{}
 		s.yieldFullPullStateLock()
@@ -7456,29 +7463,19 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 			// A local writeback may have landed after this entry was staged but
 			// before the full archive finished verification. Preserve that newer
 			// local state just as the streaming path does before staging.
+			if currentExists {
+				current.ReadOnly = !entry.canWrite
+				s.state.Files[entry.remotePath] = current
+				if err := s.applyLocalPermissionsForMode(entry.localPath, entry.canWrite, current.Mode); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return nil, err
+				}
+			}
 			prog.touch()
 			continue
 		}
 		if entry.stagedPath != "" {
-			if err := ensureSecureParentDirectory(s.localRoot, entry.localPath); err != nil {
+			if err := movePathAtomicSecure(stagingRoot, entry.stagedPath, s.localRoot, entry.localPath); err != nil {
 				return nil, err
-			}
-			if entry.isSymlink {
-				target, err := os.Readlink(entry.stagedPath)
-				if err != nil {
-					return nil, err
-				}
-				if err := writeSymlinkAtomicSecure(s.localRoot, entry.localPath, target); err != nil {
-					return nil, err
-				}
-			} else {
-				data, err := os.ReadFile(entry.stagedPath)
-				if err != nil {
-					return nil, err
-				}
-				if err := writeFileAtomicSecure(s.localRoot, entry.localPath, data, os.FileMode(entry.mode&0o777)); err != nil {
-					return nil, err
-				}
 			}
 		}
 		if err := s.applyLocalPermissionsForMode(entry.localPath, entry.canWrite, entry.mode); err != nil && !errors.Is(err, os.ErrNotExist) {
