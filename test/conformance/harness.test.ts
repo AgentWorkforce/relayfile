@@ -146,6 +146,36 @@ test("unknown runtimes, malformed URLs, and unauthenticated controls are rejecte
   }
 });
 
+test("credential-bearing target URLs require HTTPS unless they use loopback", async () => {
+  const remote = remoteEnvironment();
+  await assert.rejects(
+    () => loadTarget("cloudflare-hosted", { ...remote, RELAYFILE_BASE_URL: "http://api.example.test" }),
+    /base URL must use https unless the host is loopback/u,
+  );
+  await assert.rejects(
+    () => loadTarget("cloudflare-controlled", {
+      ...remote,
+      RELAYFILE_CONFORMANCE_CONTROL_URL: "http://control.example.test",
+    }),
+    /control adapter URL must use https unless the host is loopback/u,
+  );
+  await assert.rejects(
+    () => loadTarget("terse", {
+      ...remoteEnvironment({ terse: true }),
+      RELAYFILE_TERSE_RUNTIME_URL: "http://terse.example.test",
+    }),
+    /runtime verification URL must use https unless the host is loopback/u,
+  );
+
+  const loopback = await loadTarget("cloudflare-controlled", {
+    ...remote,
+    RELAYFILE_BASE_URL: "http://localhost:19090",
+    RELAYFILE_CONFORMANCE_CONTROL_URL: "http://127.0.0.1:19091",
+  });
+  assert.equal(loopback.target.baseUrl, "http://localhost:19090");
+  assert.equal(loopback.target.control?.baseUrl, "http://127.0.0.1:19091");
+});
+
 test("redaction removes credentials from nested request evidence", () => {
   const target = fakeTarget();
   target.tokens.primary = "token-primary-secret";
@@ -328,6 +358,55 @@ test("Terse state inspection uses a trace high-water fence while auth keeps its 
   assert.equal(traceUrls[1]?.searchParams.get("fromMs"), null);
   assert.equal(Number(traceUrls[2]?.searchParams.get("fromMs")), fixedNow - 5_000);
   assert.equal(Number(traceUrls[2]?.searchParams.get("toMs")), fixedNow + 5_000);
+});
+
+test("Terse state inspection rejects an unrelated request above the trace high-water mark", async () => {
+  const target = fakeTarget();
+  target.runtime = { kind: "terse-durable-actors", version: "test" };
+  target.runtimeVerification = {
+    baseUrl: "https://terse.example.test",
+    adminKey: "admin-key",
+    projectId: "project",
+    actorName: "RelayfileWorkspace",
+    actorId: "primary",
+  };
+  const harness = new Harness(target, "full", "seed");
+  const previousFetch = globalThis.fetch;
+  let traceReads = 0;
+  globalThis.fetch = (async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/observe/state")) {
+      return Response.json({ snapshot: {}, schema: {} });
+    }
+    if (url.pathname.endsWith("/observe/requests")) {
+      traceReads++;
+      const advanced = traceReads === 2;
+      return Response.json({
+        epoch: "history-1",
+        cursor: advanced ? 8 : 7,
+        capacity: 500,
+        dropped: 0,
+        evicted: 0,
+        persistenceFailed: false,
+        reset: false,
+        records: advanced
+          ? [{ sequence: 8, requestId: "runtime-generated-unrelated-id" }, { sequence: 7, requestId: "earlier" }]
+          : [{ sequence: 7, requestId: "earlier" }],
+        nextCursor: null,
+        resumeCursor: advanced ? "resume-8" : "resume-7",
+      });
+    }
+    throw new Error(`unexpected URL ${url.toString()}`);
+  }) as typeof fetch;
+  try {
+    await assert.rejects(
+      () => harness.verifyStateInspection(() => Promise.resolve({})),
+      /trace cursor advanced from 7 to 8/u,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  assert.equal(traceReads, 2);
 });
 
 test("evidence emits JSON, JSONL, and JUnit without secrets", async () => {
