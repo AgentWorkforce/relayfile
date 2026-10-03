@@ -14,6 +14,16 @@ export function redact<T>(value: T, target?: ResolvedTarget): T {
   return redactValue(value, secrets) as T;
 }
 
+export function redactEnvironmentText(value: string, env: NodeJS.ProcessEnv = process.env): string {
+  let result = value;
+  for (const [key, secret] of Object.entries(env)) {
+    if (secret && secret.length >= 8 && SECRET_KEYS.test(key)) {
+      result = result.split(secret).join("[REDACTED]");
+    }
+  }
+  return result;
+}
+
 function redactValue(value: unknown, secrets: Set<string>, key = ""): unknown {
   if (SECRET_KEYS.test(key)) return "[REDACTED]";
   if (typeof value === "string") {

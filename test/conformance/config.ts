@@ -174,8 +174,10 @@ function requiredOperations(capability: Capability): ControlOperation[] {
   switch (capability) {
     case "durable-restart": return ["runtime.restart"];
     case "provider-faults": return ["provider.configure", "provider.calls"];
-    case "clock-control": return ["clock.advance"];
+    case "state-inspection": return ["state.inspect"];
+    case "clock-control": return ["clock.advance", "state.inspect"];
     case "runtime-eviction": return ["runtime.evict"];
+    case "runtime-auth-probe": return ["auth.probe"];
     case "runtime-crash": return ["runtime.crash"];
     case "runtime-failover": return ["runtime.failover"];
     case "state-migration": return ["state.export", "state.import"];

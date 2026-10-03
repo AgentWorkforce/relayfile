@@ -69,6 +69,8 @@ A successful operation returns JSON and a 2xx status. A non-2xx response fails t
 | `reset` | Remove only state owned by `workspaceId` + `seed`; return `{}`. |
 | `provider.configure` | Configure/release deterministic provider faults: finite `ingestFailures`, `permanentIngestFailurePath`, `ingestBackpressure`, `echoWritebackWebhook`, `holdIngestPath`/`releaseIngestPath`, `crashAfterCommitPath`, or `seedMigrationState`. Return the applied configuration. |
 | `provider.calls` | For an optional `matchPath`, return applicable `attempts`, `writebackAttempts`, `echoDeliveries`, and `held` fields. Counts must survive runtime restart. |
+| `state.inspect` | Read durable backing state directly without routing to or waking the actor. For requested `paths`, identities, operations, or delivery IDs, return `files`, `eventCounts`, `identityActive`, `backpressureActive`, `operations`, `deadLetters`, and `servingRuntime` as applicable. Returned operations are restricted to requested paths/IDs. This is the proof point immediately after clock advance. |
+| `auth.probe` | Attempt direct runtime access with `credential: omitted|invalid`; return `{rejected,actorInvoked}`. Both probes must reject before actor application code is invoked. |
 | `clock.advance` | Advance the target's injected UTC clock by `milliseconds`, run all due work, and return only after the runtime is quiescent. It must not synthesize public traffic. |
 | `runtime.evict` | Evict the workspace actor/DO without deleting durable state, then return when routing can create a new instance. |
 | `runtime.crash` | Terminate the active instance without a graceful disconnect. Fault placement is selected through `provider.configure`. |

@@ -25,6 +25,22 @@ interface EventsBody {
   nextCursor?: string | null;
 }
 
+interface InspectedFile {
+  exists: boolean;
+  content?: string;
+  revision?: string;
+}
+
+interface StateInspection {
+  files?: Record<string, InspectedFile>;
+  eventCounts?: Record<string, number>;
+  deadLetters?: Array<{ deliveryId: string; envelopeId: string }>;
+  backpressureActive?: boolean;
+  identityActive?: boolean;
+  servingRuntime?: string;
+  operations?: Array<{ opId: string; writebackAttempts: number; state: string }>;
+}
+
 export async function runScenarios(h: Harness): Promise<void> {
   await authAndTenantScenarios(h);
   await ingestionScenarios(h);
@@ -273,33 +289,20 @@ async function reconnectAndRestartScenarios(h: Harness): Promise<void> {
     const cursor = anchorEvents.find((event) => event.path === anchorPath)?.eventId;
     assert(cursor, "anchor event cursor missing");
 
-    const token = h.target.tokens.primary;
-    assert(token, "primary token missing");
-    const wsUrl = `${h.target.baseUrl.replace(/^http/u, "ws")}${h.workspacePath(
-      h.target.workspaces.primary,
-      `/fs/ws?token=${encodeURIComponent(token)}&cursor=${encodeURIComponent(cursor)}`,
-    )}`;
-    const socket = new WebSocket(wsUrl);
-    const received: EventItem[] = [];
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("WebSocket did not open")), 5_000);
-      socket.addEventListener("open", () => {
-        clearTimeout(timer);
-        resolve();
-      }, { once: true });
-      socket.addEventListener("error", () => reject(new Error("WebSocket open failed")), { once: true });
-    });
-    socket.addEventListener("message", (message) => {
-      const parsed = JSON.parse(String(message.data)) as EventItem;
-      if (parsed.eventId) received.push(parsed);
-    });
+    const firstConnection = await openWebSocket(h, cursor);
+    await closeWebSocket(firstConnection.socket);
     const paths = [0, 1, 2].map((index) => h.path(`events/resume-${index}.md`));
     for (const [index, path] of paths.entries()) await writeRemoteFile(h, path, `event-${index}`);
-    await h.poll("WebSocket resumed events", async () => received, (events) => paths.every((path) => events.some((event) => event.path === path)));
-    socket.close();
-    const ids = received.filter((event) => paths.includes(event.path ?? "")).map((event) => event.eventId);
+    const received = await collectWebSocketEvents(h, cursor, paths);
+    const resumed = received.filter((event) => paths.includes(event.path ?? ""));
+    assert(resumed.map((event) => event.path).join("|") === paths.join("|"), "reconnected events were not delivered in order");
+    const ids = resumed.map((event) => event.eventId);
     assert(ids.length === new Set(ids).size, "WebSocket reconnect delivered duplicate event IDs");
     assert(!received.some((event) => event.eventId === cursor), "exclusive cursor replayed the anchor event");
+  });
+
+  await h.case("RF-WS-003", "WebSocket authorization cannot cross tenant boundaries", ["tenant-auth", "websocket-resume"], async () => {
+    await expectWebSocketRejected(h, h.target.tokens.secondary, h.target.workspaces.primary);
   });
 
   await h.case("RF-DUR-001", "acknowledged file and event survive runtime restart", ["public-api", "durable-restart"], async () => {
@@ -333,7 +336,10 @@ async function reconnectAndRestartScenarios(h: Harness): Promise<void> {
     );
     const cursor = anchorEvents.find((event) => event.path === anchorPath)?.eventId;
     assert(cursor, "eviction anchor cursor missing");
+    const live = await openWebSocket(h, cursor);
+    const closed = waitForWebSocketClose(live.socket);
     await h.control("runtime.evict");
+    await closed;
 
     const paths = [0, 1, 2].map((index) => h.path(`events/after-eviction-${index}.md`));
     for (const [index, path] of paths.entries()) await writeRemoteFile(h, path, `after-eviction-${index}`);
@@ -366,6 +372,13 @@ async function contractScenarios(h: Harness): Promise<void> {
 }
 
 async function advancedAdapterScenarios(h: Harness): Promise<void> {
+  await h.case("RF-AUTH-005", "runtime actor rejects missing and invalid shared secrets", ["runtime-auth-probe"], async () => {
+    const omitted = await h.control<{ rejected: boolean; actorInvoked: boolean }>("auth.probe", { credential: "omitted" });
+    const invalid = await h.control<{ rejected: boolean; actorInvoked: boolean }>("auth.probe", { credential: "invalid" });
+    assert(omitted.rejected && invalid.rejected, "runtime accepted a missing or invalid shared secret");
+    assert(!omitted.actorInvoked && !invalid.actorInvoked, "unauthorized runtime probe reached actor application code");
+  });
+
   await h.case("RF-QUEUE-001", "retry progresses after backoff with no inbound traffic", ["provider-faults", "clock-control"], async () => {
     const path = h.path("queue/retry.md");
     await h.control("provider.configure", { ingestFailures: 2, matchPath: path });
@@ -374,9 +387,10 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
     });
     assertStatus(response, 202);
     await h.control("clock.advance", { milliseconds: 60_000 });
-    await waitForFile(h, path, "retry succeeds");
     const calls = await h.control<{ attempts: number }>("provider.calls", { matchPath: path });
     assert(calls.attempts === 3, `expected 3 attempts, got ${calls.attempts}`);
+    assertInspectedFile(await inspectState(h, [path]), path, "retry succeeds");
+    await waitForFile(h, path, "retry succeeds");
   });
 
   await h.case("RF-QUEUE-002", "poison record reaches DLQ without wedging later work and replays once", ["provider-faults", "clock-control"], async () => {
@@ -384,24 +398,32 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
     const goodPath = h.path("queue/good.md");
     await h.control("provider.configure", { permanentIngestFailurePath: poisonPath });
     const endpoint = h.workspacePath(h.target.workspaces.primary, "/webhooks/ingest");
-    const [poison, good] = await Promise.all([
-      h.request("POST", endpoint, {
-        body: webhookBody(poisonPath, `${h.seed}-poison`, "poison", "2026-01-02T03:04:05.000Z", "poison-object"),
-      }),
-      h.request("POST", endpoint, {
-        body: webhookBody(goodPath, `${h.seed}-good`, "good", "2026-01-02T03:04:06.000Z", "good-object"),
-      }),
-    ]);
+    const poison = await h.request("POST", endpoint, {
+      body: webhookBody(poisonPath, `${h.seed}-poison`, "poison", "2026-01-02T03:04:05.000Z", "poison-object"),
+    });
     assertStatus(poison, 202);
-    assertStatus(good, 202);
-    await h.control("clock.advance", { milliseconds: 300_000 });
-    await waitForFile(h, goodPath, "good");
-    const deadLetters = await h.poll(
-      "poison DLQ record",
-      () => h.request<Record<string, unknown>>("GET", h.workspacePath(h.target.workspaces.primary, "/sync/dead-letter")),
-      (response) => Array.isArray(asRecord(response.data).items) && (asRecord(response.data).items as unknown[]).length > 0,
+    await h.poll(
+      "poison enters retry without exhaustion",
+      () => h.control<{ attempts: number; state: string }>("provider.calls", { matchPath: poisonPath }),
+      (calls) => calls.attempts >= 1 && calls.state === "retrying",
     );
-    const item = (asRecord(deadLetters.data).items as Array<Record<string, unknown>>).find(
+    const good = await h.request("POST", endpoint, {
+      body: webhookBody(goodPath, `${h.seed}-good`, "good", "2026-01-02T03:04:06.000Z", "good-object"),
+    });
+    assertStatus(good, 202);
+    await h.poll(
+      "good record bypasses poison before its retry budget expires",
+      () => inspectState(h, [goodPath]),
+      (state) => inspectedFile(state, goodPath)?.content === "good",
+    );
+    await waitForFile(h, goodPath, "good");
+    await h.control("clock.advance", { milliseconds: 300_000 });
+    const inspectedDlq = await h.poll(
+      "poison DLQ record without actor wakeup",
+      () => inspectState(h, [], { deliveryIds: [`${h.seed}-poison`] }),
+      (state) => state.deadLetters?.some((item) => item.deliveryId === `${h.seed}-poison`) === true,
+    );
+    const item = inspectedDlq.deadLetters?.find(
       (candidate) => candidate.deliveryId === `${h.seed}-poison`,
     );
     assert(item && typeof item.envelopeId === "string", "poison record missing from DLQ");
@@ -415,6 +437,9 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
       202,
     );
     await h.control("clock.advance", { milliseconds: 60_000 });
+    const replayed = await inspectState(h, [poisonPath]);
+    assertInspectedFile(replayed, poisonPath, "poison");
+    assert(replayed.eventCounts?.[poisonPath] === 1, `DLQ replay produced ${replayed.eventCounts?.[poisonPath]} events`);
     await waitForFile(h, poisonPath, "poison");
     const events = (await readEvents(h)).filter((event) => event.path === poisonPath && /^file\./u.test(event.type ?? ""));
     assert(events.length === 1, `DLQ replay applied poison record ${events.length} times`);
@@ -429,6 +454,8 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
     assertStatus(throttled, 429);
     assert(Number(throttled.headers.get("retry-after")) >= 1, "429 response omitted a positive Retry-After");
     await h.control("clock.advance", { milliseconds: 2_000 });
+    const pressure = await inspectState(h, [], { backpressurePath: path });
+    assert(pressure.backpressureActive === false, "backpressure did not clear without inbound traffic");
     assertStatus(await h.request("POST", endpoint, { body }), 202);
     await waitForFile(h, path, "accepted after pressure");
   });
@@ -443,12 +470,16 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
       202,
     );
     await h.control("clock.advance", { milliseconds: 20_000 });
+    const projected = await inspectState(h, [path, "/digests/today.md"]);
+    assertInspectedFile(projected, path, "state: open");
+    assert(inspectedFile(projected, "/digests/today.md")?.content?.includes("generated_at"), "today digest was not regenerated out-of-band");
     await waitForFile(h, path, "state: open");
     const digest = await waitForFile(h, "/digests/today.md");
     assert(digest.content?.includes("generated_at"), "today digest was not regenerated");
     const sentinel = `manual-${h.seed}`;
     await writeRemoteFile(h, "/digests/today.md", sentinel);
     await h.control("clock.advance", { milliseconds: 20_000 });
+    assertInspectedFile(await inspectState(h, ["/digests/today.md"]), "/digests/today.md", sentinel);
     const after = await readFileResponse(h, "/digests/today.md");
     assert(after.content === sentinel, "digest write recursively regenerated the digest");
   });
@@ -465,6 +496,9 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
       202,
     );
     await h.control("clock.advance", { milliseconds: 20_000 });
+    const terminal = await inspectState(h, [path, "/digests/today.md"]);
+    assertInspectedFile(terminal, path, "state: closed");
+    assert(inspectedFile(terminal, "/digests/today.md")?.exists === true, "terminal mutation did not update digest");
     await waitForFile(h, path, "state: closed");
     await waitForFile(h, "/digests/today.md");
     assertStatus(
@@ -472,6 +506,11 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
         body: webhookBody(path, `${h.seed}-terminal-delete`, "", "2026-01-02T03:05:05.000Z", "terminal-object", {}, "file.deleted"),
       }),
       202,
+    );
+    await h.poll(
+      "upstream delete durable projection",
+      () => inspectState(h, [path]),
+      (state) => inspectedFile(state, path)?.exists === false,
     );
     await h.poll(
       "upstream delete projection",
@@ -491,11 +530,26 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
   });
 
   await h.case("RF-TIMER-001", "day rollover advances today to yesterday without traffic", ["digest-projection", "clock-control"], async () => {
-    const before = await readFileResponse(h, "/digests/today.md");
+    const sourcePath = h.path("timers/rollover-source.md");
+    assertStatus(
+      await h.request("POST", h.workspacePath(h.target.workspaces.primary, "/webhooks/ingest"), {
+        body: webhookBody(sourcePath, `${h.seed}-rollover`, "rollover", "2026-01-02T03:04:05.000Z", "rollover-object"),
+      }),
+      202,
+    );
+    await h.control("clock.advance", { milliseconds: 20_000 });
+    const initialized = await inspectState(h, ["/digests/today.md", "/digests/yesterday.md"]);
+    const before = inspectedFile(initialized, "/digests/today.md");
+    assert(before?.exists && before.content, "self-contained rollover setup did not create today.md");
+    const oldYesterdayRevision = inspectedFile(initialized, "/digests/yesterday.md")?.revision;
     await h.control("clock.advance", { milliseconds: 86_400_000 });
+    const rolled = await inspectState(h, ["/digests/today.md", "/digests/yesterday.md"]);
+    const yesterdayState = inspectedFile(rolled, "/digests/yesterday.md");
+    assert(yesterdayState?.exists, "yesterday digest missing after out-of-band clock advance");
+    assert(yesterdayState.content === before.content, "yesterday digest does not equal the prior today digest");
+    assert(yesterdayState.revision !== oldYesterdayRevision, "rollover did not create a new yesterday revision");
     const yesterday = await waitForFile(h, "/digests/yesterday.md");
-    assert(yesterday.content && yesterday.content.length > 0, "yesterday digest missing after rollover");
-    assert(yesterday.content !== before.content || yesterday.content?.includes("covers"), "rollover did not close the previous day");
+    assert(yesterday.content === before.content, "public yesterday digest differs from inspected rollover state");
   });
 
   await h.case("RF-TIMER-002", "idempotency identity expires only after clock advance", ["clock-control"], async () => {
@@ -514,20 +568,40 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
     assertStatus(await h.request("POST", endpoint, { body }), [200, 202]);
     assert((await readFileResponse(h, path)).revision === first.revision, "identity expired before its TTL");
     await h.control("clock.advance", { milliseconds: 31_000 });
+    const identity = await inspectState(h, [], { contentIdentity: { kind: "conformance", key: `${h.seed}-ttl` } });
+    assert(identity.identityActive === false, "idempotency identity did not expire without inbound traffic");
     assertStatus(await h.request("POST", endpoint, { body }), [200, 202]);
     assert((await readFileResponse(h, path)).revision !== first.revision, "identity did not expire after clock advance");
   });
 
   await h.case("RF-LIMIT-001", "bulk projection above the Terse 512-effect boundary commits", ["public-api", "large-effect-batch"], async () => {
+    const anchorPath = h.path("effects/anchor.txt");
+    await writeRemoteFile(h, anchorPath, "anchor");
+    const anchorEvents = await readEvents(h);
+    const cursor = anchorEvents.find((event) => event.path === anchorPath)?.eventId;
+    assert(cursor, "large-effect anchor cursor missing");
+    const subscriber = await openWebSocket(h, cursor);
     const files = Array.from({ length: 513 }, (_, index) => ({
       path: h.path(`effects/${String(index).padStart(3, "0")}.txt`),
       contentType: "text/plain",
       content: String(index),
       ifMatch: "*",
     }));
-    const response = await h.request("POST", h.workspacePath(h.target.workspaces.primary, "/fs/bulk"), { body: { files } });
-    assertStatus(response, [200, 202]);
-    assert(asRecord(response.data).written === files.length, `bulk wrote ${asRecord(response.data).written}, expected 513`);
+    try {
+      const response = await h.request("POST", h.workspacePath(h.target.workspaces.primary, "/fs/bulk"), { body: { files } });
+      assertStatus(response, [200, 202]);
+      assert(asRecord(response.data).written === files.length, `bulk wrote ${asRecord(response.data).written}, expected 513`);
+      await h.poll(
+        "513 socket broadcast effects",
+        async () => subscriber.received,
+        (events) => new Set(events.filter((event) => files.some((file) => file.path === event.path)).map((event) => event.path)).size === files.length,
+        30_000,
+      );
+      const delivered = subscriber.received.filter((event) => files.some((file) => file.path === event.path));
+      assert(delivered.length === files.length, `socket delivered ${delivered.length}, expected exactly 513`);
+    } finally {
+      await closeWebSocket(subscriber.socket);
+    }
   });
 
   await h.case("RF-SER-001", "a held mutation on object X does not block object Y", ["provider-faults"], async () => {
@@ -558,18 +632,35 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
     await waitForFile(h, heldPath, "held");
   });
 
-  await h.case("RF-CRASH-001", "commit survives crash between durable mutation and response", ["runtime-crash", "durable-restart", "provider-faults"], async () => {
+  await h.case("RF-CRASH-001", "commit survives crash between durable mutation and response", ["runtime-crash", "durable-restart", "provider-faults", "state-inspection"], async () => {
+    const beforePath = h.path("crash/before-commit.md");
+    await h.control("provider.configure", { crashBeforeCommitPath: beforePath });
+    try { await writeRemoteFile(h, beforePath, "must roll back"); } catch { /* connection loss is expected */ }
+    await h.restart();
+    const rolledBack = await inspectState(h, [beforePath]);
+    assert(inspectedFile(rolledBack, beforePath)?.exists === false, "crash-before-commit left a file behind");
+    assert((rolledBack.eventCounts?.[beforePath] ?? 0) === 0, "crash-before-commit left an event behind");
+    assert((rolledBack.operations ?? []).length === 0, "crash-before-commit left an outbox operation behind");
+
     const path = h.path("crash/after-commit.md");
-    await h.control("provider.configure", { crashAfterCommitPath: path });
+    await h.control("provider.configure", { crashBeforeCommitPath: null, crashAfterCommitPath: path });
     try { await writeRemoteFile(h, path, "committed before crash"); } catch { /* connection loss is expected */ }
     await h.restart();
+    const committed = await inspectState(h, [path]);
+    assertInspectedFile(committed, path, "committed before crash");
+    assert(committed.eventCounts?.[path] === 1, `crash recovery left ${committed.eventCounts?.[path]} file events`);
+    const operation = committed.operations?.find((candidate) => candidate.state === "pending" || candidate.state === "succeeded");
+    assert(operation, "crash-after-commit lost the outbox operation");
+    assert(operation.writebackAttempts === 1, `recovered outbox executed ${operation.writebackAttempts} times`);
     const file = await waitForFile(h, path, "committed before crash");
     assert(file.revision, "crash-recovered file has no revision");
     const events = (await readEvents(h)).filter((event) => event.path === path && /^file\./u.test(event.type ?? ""));
     assert(events.length === 1, `crash recovery left ${events.length} file events`);
+    const publicOperation = await h.request("GET", h.workspacePath(h.target.workspaces.primary, `/ops/${encodeURIComponent(operation.opId)}`));
+    assertStatus(publicOperation, 200);
   });
 
-  await h.case("RF-MIG-001", "export/import preserves revisions, cursors, pending work, and DLQ", ["state-migration", "provider-faults"], async () => {
+  await h.case("RF-MIG-001", "export/import preserves revisions, cursors, pending work, and DLQ", ["state-migration", "provider-faults", "clock-control"], async () => {
     const path = h.path("migration/state.md");
     await writeRemoteFile(h, path, "migration state");
     const before = await readFileResponse(h, path);
@@ -591,10 +682,12 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
       Array.isArray(exportedManifest.deadLetterIds) && exportedManifest.deadLetterIds.includes(`${h.seed}-dead-letter`),
       "state export omitted the DLQ record",
     );
+    const destinationRuntime = h.target.runtime.kind === "cloudflare-do" ? "terse-durable-actors" : "cloudflare-do";
     const imported = await h.control<Record<string, unknown>>("state.import", {
       artifact: exported.artifact,
-      destinationRuntime: "terse-durable-actors",
+      destinationRuntime,
     });
+    assert(imported.servingRuntime === destinationRuntime, "import did not route the public edge to the destination runtime");
     const importedManifest = asRecord(imported.manifest);
     assert(
       JSON.stringify(importedManifest.pendingOutboxIds) === JSON.stringify(exportedManifest.pendingOutboxIds),
@@ -608,6 +701,26 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
     const eventsAfter = await readEvents(h);
     assert(after.revision === before.revision, "migration changed file revision");
     assert(lastEventId(eventsAfter) === lastEventId(eventsBefore), "migration changed the event cursor");
+    const routed = await inspectState(h, [path], { operationIds: [`${h.seed}-pending`] });
+    assert(routed.servingRuntime === destinationRuntime, "out-of-band inspection is not reading the imported destination");
+    assertInspectedFile(routed, path, "migration state");
+    assertStatus(
+      await h.request(
+        "POST",
+        h.workspacePath(h.target.workspaces.primary, `/sync/dead-letter/${encodeURIComponent(`${h.seed}-dead-letter`)}/replay`),
+        { body: {} },
+      ),
+      202,
+    );
+    await h.control("clock.advance", { milliseconds: 60_000 });
+    const progressed = await inspectState(h, [path], {
+      operationIds: [`${h.seed}-pending`],
+      deliveryIds: [`${h.seed}-dead-letter`],
+    });
+    const pending = progressed.operations?.find((operation) => operation.opId === `${h.seed}-pending`);
+    assert(pending?.state === "succeeded", "imported pending outbox operation did not execute on the destination");
+    assert(pending.writebackAttempts === 1, `imported pending outbox executed ${pending.writebackAttempts} times`);
+    assert(!progressed.deadLetters?.some((item) => item.envelopeId === `${h.seed}-dead-letter`), "destination DLQ replay did not clear the record");
   });
 
   await h.case("RF-FAILOVER-001", "replica switching retains a single monotonic writer", ["runtime-failover"], async () => {
@@ -627,6 +740,21 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
     const results = await writes;
     assert(results.filter((response) => [200, 202].includes(response.status)).length === 1, "failover admitted multiple writers");
     assert(results.filter((response) => response.status === 409).length === 1, "failover did not fence the losing writer");
+    const winnerIndex = results.findIndex((response) => [200, 202].includes(response.status));
+    const winner = ["left", "right"][winnerIndex];
+    const after = await readFileResponse(h, path);
+    assert(after.content === winner, `failover readback ${after.content} did not match winner ${winner}`);
+    const beforeRevision = revisionNumber(base.revision!);
+    const afterRevision = revisionNumber(after.revision!);
+    if (beforeRevision !== undefined && afterRevision !== undefined) {
+      assert(afterRevision === beforeRevision + 1, "failover winning revision was not monotonic by exactly one");
+    }
+    const third = await h.request("PUT", h.workspacePath(h.target.workspaces.primary, `/fs/file?path=${encodeURIComponent(path)}`), {
+      headers: { "If-Match": after.revision! },
+      body: { content: "post-failover" },
+    });
+    assertStatus(third, [200, 202]);
+    assert((await readFileResponse(h, path)).content === "post-failover", "new writer did not accept a post-failover write");
   });
 
   await h.case("RF-MOUNT-001", "read, write, and mirror transitions preserve durable mount state", ["mount-control", "runtime-eviction"], async () => {
@@ -704,6 +832,24 @@ async function webhookFixture(
   };
 }
 
+async function inspectState(
+  h: Harness,
+  paths: string[],
+  extra: Record<string, unknown> = {},
+): Promise<StateInspection> {
+  return h.control<StateInspection>("state.inspect", { paths, ...extra });
+}
+
+function inspectedFile(state: StateInspection, path: string): InspectedFile | undefined {
+  return state.files?.[path];
+}
+
+function assertInspectedFile(state: StateInspection, path: string, content: string): void {
+  const file = inspectedFile(state, path);
+  assert(file?.exists === true, `out-of-band inspection says ${path} does not exist`);
+  assert(file.content === content, `out-of-band inspection returned unexpected content for ${path}`);
+}
+
 async function writeRemoteFile(h: Harness, path: string, content: string): Promise<ApiResponse<FileBody>> {
   const response = await h.request<FileBody>(
     "PUT",
@@ -734,20 +880,42 @@ async function waitForFile(h: Harness, path: string, content?: string): Promise<
 }
 
 async function readEvents(h: Harness): Promise<EventItem[]> {
-  const response = await h.request<EventsBody>(
-    "GET",
-    h.workspacePath(h.target.workspaces.primary, "/fs/events?limit=1000&direction=asc"),
-  );
-  assertStatus(response, 200);
-  assert(Array.isArray(response.data.events), "events response omitted events array");
-  return response.data.events;
+  const events: EventItem[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  for (let page = 0; page < 100; page++) {
+    const query = new URLSearchParams({ limit: "1000", direction: "asc" });
+    if (cursor) query.set("cursor", cursor);
+    const response = await h.request<EventsBody>(
+      "GET",
+      h.workspacePath(h.target.workspaces.primary, `/fs/events?${query.toString()}`),
+    );
+    assertStatus(response, 200);
+    assert(Array.isArray(response.data.events), "events response omitted events array");
+    events.push(...response.data.events);
+    const next = response.data.nextCursor ?? undefined;
+    if (!next) return events;
+    assert(!seenCursors.has(next), `events pagination repeated cursor ${next}`);
+    seenCursors.add(next);
+    cursor = next;
+  }
+  throw new Error("events pagination exceeded 100 pages");
 }
 
-async function collectWebSocketEvents(h: Harness, cursor: string, expectedPaths: string[]): Promise<EventItem[]> {
-  const token = h.target.tokens.primary;
+interface SocketCapture {
+  socket: WebSocket;
+  received: EventItem[];
+}
+
+async function openWebSocket(
+  h: Harness,
+  cursor: string,
+  token = h.target.tokens.primary,
+  workspace = h.target.workspaces.primary,
+): Promise<SocketCapture> {
   assert(token, "primary token missing");
   const wsUrl = `${h.target.baseUrl.replace(/^http/u, "ws")}${h.workspacePath(
-    h.target.workspaces.primary,
+    workspace,
     `/fs/ws?token=${encodeURIComponent(token)}&cursor=${encodeURIComponent(cursor)}`,
   )}`;
   const socket = new WebSocket(wsUrl);
@@ -764,17 +932,63 @@ async function collectWebSocketEvents(h: Harness, cursor: string, expectedPaths:
     }, { once: true });
     socket.addEventListener("error", () => reject(new Error("WebSocket open failed")), { once: true });
   });
+  return { socket, received };
+}
+
+async function collectWebSocketEvents(h: Harness, cursor: string, expectedPaths: string[]): Promise<EventItem[]> {
+  const capture = await openWebSocket(h, cursor);
   try {
     await h.poll(
       "WebSocket cursor recovery",
-      async () => received,
+      async () => capture.received,
       (events) => expectedPaths.every((path) => events.some((event) => event.path === path)),
       10_000,
     );
-    return received;
+    return capture.received;
   } finally {
-    socket.close();
+    await closeWebSocket(capture.socket);
   }
+}
+
+async function closeWebSocket(socket: WebSocket): Promise<void> {
+  if (socket.readyState === WebSocket.CLOSED) return;
+  const closed = waitForWebSocketClose(socket);
+  socket.close();
+  await closed;
+}
+
+async function waitForWebSocketClose(socket: WebSocket): Promise<void> {
+  if (socket.readyState === WebSocket.CLOSED) return;
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("WebSocket did not close within 5s")), 5_000);
+    socket.addEventListener("close", () => {
+      clearTimeout(timer);
+      resolve();
+    }, { once: true });
+  });
+}
+
+async function expectWebSocketRejected(h: Harness, token: string | undefined, workspace: string): Promise<void> {
+  assert(token, "secondary token missing");
+  const wsUrl = `${h.target.baseUrl.replace(/^http/u, "ws")}${h.workspacePath(
+    workspace,
+    `/fs/ws?token=${encodeURIComponent(token)}&cursor=now`,
+  )}`;
+  const socket = new WebSocket(wsUrl);
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("cross-tenant WebSocket did not reject within 5s")), 5_000);
+    socket.addEventListener("open", () => {
+      clearTimeout(timer);
+      socket.close();
+      reject(new Error("cross-tenant WebSocket unexpectedly opened"));
+    }, { once: true });
+    const rejected = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    socket.addEventListener("error", rejected, { once: true });
+    socket.addEventListener("close", rejected, { once: true });
+  });
 }
 
 function assertErrorEnvelope(response: ApiResponse): void {

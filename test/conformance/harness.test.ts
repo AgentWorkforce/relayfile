@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import Ajv2020 from "ajv/dist/2020.js";
+import { parse } from "yaml";
 import { loadTarget } from "./config.js";
-import { redact, writeEvidence } from "./evidence.js";
+import { redact, redactEnvironmentText, writeEvidence } from "./evidence.js";
 import { Harness } from "./harness.js";
 import { validateOpenApiResponse } from "./openapi-validator.js";
 import type { EvidenceSummary, ResolvedTarget } from "./types.js";
@@ -77,6 +78,14 @@ test("redaction removes credentials from nested request evidence", () => {
   assert(!serialized.includes("rk_live_secret"));
   assert(!serialized.includes("session=secret"));
   assert(serialized.includes("[REDACTED]"));
+});
+
+test("console error redaction removes configured environment secrets", () => {
+  const safe = redactEnvironmentText("adapter failed with top-secret-token", {
+    RELAYFILE_CONFORMANCE_CONTROL_TOKEN: "top-secret-token",
+  });
+  assert(!safe.includes("top-secret-token"));
+  assert(safe.includes("[REDACTED]"));
 });
 
 test("missing capability skips in core and fails in full", async () => {
@@ -158,6 +167,18 @@ test("OpenAPI validator accepts the concrete conflict envelope", async () => {
     },
     "application/json",
   );
+});
+
+test("conflict schemas retain every required ErrorResponse field", async () => {
+  const document = parse(await readFile("openapi/relayfile-v1.openapi.yaml", "utf8")) as {
+    components: { schemas: Record<string, { required?: string[] }> };
+  };
+  const schemas = document.components.schemas;
+  const baseRequired = schemas.ErrorResponse?.required ?? [];
+  for (const name of ["ConflictErrorResponse", "ForkCommitConflictResponse"]) {
+    const required = new Set(schemas[name]?.required ?? []);
+    for (const field of baseRequired) assert(required.has(field), `${name} stopped requiring ${field}`);
+  }
 });
 
 function fakeTarget(): ResolvedTarget {

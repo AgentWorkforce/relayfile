@@ -111,6 +111,48 @@
             "focal:reviewer checklist",
             "confidence:0.82"
           ]
+        },
+        {
+          "ts": 1791013211387,
+          "type": "decision",
+          "content": "Use an out-of-band state.inspect control operation as the post-clock proof point: Use an out-of-band state.inspect control operation as the post-clock proof point",
+          "raw": {
+            "question": "Use an out-of-band state.inspect control operation as the post-clock proof point",
+            "chosen": "Use an out-of-band state.inspect control operation as the post-clock proof point",
+            "alternatives": [
+              {
+                "option": "Poll public GETs",
+                "reason": ""
+              },
+              {
+                "option": "Use provider.calls for every state type",
+                "reason": ""
+              }
+            ],
+            "reasoning": "Polling the public API can wake an actor and mask a missing alarm/scheduler. state.inspect is required to read durable backing state without gateway or actor invocation before any public verification."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1791013212527,
+          "type": "reflection",
+          "content": "Exact-head review found false-pass topology in pagination, poison HOL, timer wakeups, reconnect, and socket-effect limit cases. The remediation now pages the full feed, proves HOL before retry exhaustion, inspects state out-of-band after clock advance, disconnects before reconnect backlog, holds a live socket through eviction, and subscribes during the 513-event bulk.",
+          "raw": {
+            "focalPoints": [
+              "review blockers",
+              "false-pass resistance",
+              "adapter contract"
+            ],
+            "adjustments": "Run consolidated local gate; wait for the replacement head CI to finish before requesting the next exact-head verdict.",
+            "confidence": 0.88
+          },
+          "significance": "high",
+          "tags": [
+            "focal:review blockers",
+            "focal:false-pass resistance",
+            "focal:adapter contract",
+            "confidence:0.88"
+          ]
         }
       ]
     }

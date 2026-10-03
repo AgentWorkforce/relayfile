@@ -51,7 +51,7 @@
       "items": {
         "enum": [
           "public-api", "tenant-auth", "webhook-ingest", "event-cursor", "websocket-resume",
-          "durable-restart", "provider-faults", "clock-control", "runtime-eviction", "large-effect-batch", "runtime-crash",
+          "durable-restart", "provider-faults", "state-inspection", "clock-control", "runtime-eviction", "large-effect-batch", "runtime-auth-probe", "runtime-crash",
           "runtime-failover", "state-migration", "mount-control", "digest-projection"
         ]
       }
@@ -69,7 +69,7 @@
           "uniqueItems": true,
           "items": {
             "enum": [
-              "reset", "provider.configure", "provider.calls", "clock.advance", "runtime.evict",
+              "reset", "provider.configure", "provider.calls", "state.inspect", "auth.probe", "clock.advance", "runtime.evict",
               "runtime.crash", "runtime.restart", "runtime.failover", "state.export", "state.import",
               "mount.start", "mount.stop"
             ]

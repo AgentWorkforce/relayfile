@@ -170,7 +170,7 @@ export class Harness {
         ...(raw ? { body: data } : {}),
       },
     });
-    if (!response.ok) throw new Error(`control ${operation} failed (${response.status}): ${raw}`);
+    if (!response.ok) throw new Error(`control ${operation} failed with status ${response.status}; inspect redacted requests.jsonl`);
     return data as T;
   }
 
@@ -192,7 +192,7 @@ export class Harness {
       await new Promise((resolve) => setTimeout(resolve, delay));
       delay = Math.min(delay * 2, 250);
     }
-    throw new Error(`${label} did not converge within ${timeoutMs}ms; latest=${safeString(latest)}`);
+    throw new Error(`${label} did not converge within ${timeoutMs}ms; latest=${safeDiagnostic(latest)}`);
   }
 
   summary(): EvidenceSummary {
@@ -225,15 +225,23 @@ export function assertStatus(response: ApiResponse, expected: number | number[])
   const statuses = Array.isArray(expected) ? expected : [expected];
   assert(
     statuses.includes(response.status),
-    `expected status ${statuses.join("/")}, got ${response.status}: ${safeString(response.data)}`,
+    `expected status ${statuses.join("/")}, got ${response.status} (correlation ${response.correlationId})`,
   );
 }
 
 export function asRecord(value: unknown): Record<string, unknown> {
-  assert(value !== null && typeof value === "object" && !Array.isArray(value), `expected object, got ${safeString(value)}`);
+  assert(value !== null && typeof value === "object" && !Array.isArray(value), `expected object, got ${typeof value}`);
   return value as Record<string, unknown>;
 }
 
-function safeString(value: unknown): string {
-  try { return JSON.stringify(value); } catch { return String(value); }
+function safeDiagnostic(value: unknown): string {
+  if (Array.isArray(value)) return `array(length=${value.length})`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (typeof record.status === "number") {
+      return `response(status=${record.status},correlation=${String(record.correlationId ?? "unknown")})`;
+    }
+    return `object(keys=${Object.keys(record).sort().join(",")})`;
+  }
+  return typeof value;
 }

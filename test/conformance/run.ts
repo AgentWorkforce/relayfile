@@ -1,7 +1,7 @@
 #!/usr/bin/env npx tsx
 import { resolve } from "node:path";
 import { loadTarget } from "./config.js";
-import { writeEvidence } from "./evidence.js";
+import { redact, redactEnvironmentText, writeEvidence } from "./evidence.js";
 import { Harness } from "./harness.js";
 import { LocalGoTarget } from "./local-go.js";
 import { runScenarios } from "./scenarios.js";
@@ -36,7 +36,7 @@ async function main(): Promise<void> {
     const summary = harness.summary();
     const outDir = resolve(options.outDir ?? `artifacts/conformance/${target.id}/${options.seed}`);
     await writeEvidence(outDir, summary, harness.exchanges, target);
-    printSummary(summary, outDir);
+    printSummary(redact(summary, target), outDir);
     if (summary.counts.failed > 0) process.exitCode = 1;
   } finally {
     await local?.close();
@@ -92,6 +92,6 @@ function printSummary(summary: ReturnType<Harness["summary"]>, outDir: string): 
 }
 
 main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
+  console.error(redactEnvironmentText(error instanceof Error ? error.message : String(error)));
   process.exitCode = 2;
 });
