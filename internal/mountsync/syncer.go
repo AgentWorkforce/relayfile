@@ -7239,6 +7239,8 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 		remotePath    string
 		localPath     string
 		stagedPath    string
+		localObserved localSnapshot
+		localExisted  bool
 		state         trackedFile
 		observedState trackedFile
 		observed      bool
@@ -7278,6 +7280,11 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 			return nil, err
 		}
 		if header == nil || header.FileInfo().IsDir() {
+			continue
+		}
+		if header.Typeflag == tar.TypeXGlobalHeader {
+			// GitHub/git-archive source tarballs carry repository-wide PAX
+			// metadata (notably the commit id). It is not a working-tree entry.
 			continue
 		}
 		isRegular := header.Typeflag == tar.TypeReg || header.Typeflag == tar.TypeRegA
@@ -7386,12 +7393,15 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 			prog.touch()
 			continue
 		}
+		localObserved, localReadErr := s.readLocalSnapshot(localPath, false)
+		localExisted := localReadErr == nil
+		if localReadErr != nil && !errors.Is(localReadErr, os.ErrNotExist) {
+			return nil, localReadErr
+		}
 		shouldWrite := true
-		if isSymlink {
-			if current, readErr := readLocalSymlinkNoFollow(s.localRoot, localPath, maxWritebackBytes()); readErr == nil && current == header.Linkname {
-				shouldWrite = false
-			}
-		} else if current, readErr := s.readLocalSnapshot(localPath, true); readErr == nil && current.Type == remoteTypeFile && current.Hash == hash {
+		if isSymlink && localExisted && isSymlinkType(localObserved.Type) && localObserved.Target == header.Linkname {
+			shouldWrite = false
+		} else if !isSymlink && localExisted && localObserved.Type == remoteTypeFile && localObserved.Hash == hash {
 			shouldWrite = false
 		}
 		stagedPath := ""
@@ -7418,9 +7428,11 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 		}
 		contentType := detectContentType(localPath)
 		pending = append(pending, pendingPublish{
-			remotePath: meta.RemotePath,
-			localPath:  localPath,
-			stagedPath: stagedPath,
+			remotePath:    meta.RemotePath,
+			localPath:     localPath,
+			stagedPath:    stagedPath,
+			localObserved: localObserved,
+			localExisted:  localExisted,
 			state: trackedFile{
 				Revision:    meta.Revision,
 				ContentType: contentType,
@@ -7475,6 +7487,19 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 			prog.touch()
 			continue
 		}
+		localNow, localReadErr := s.readLocalSnapshot(entry.localPath, false)
+		localExistsNow := localReadErr == nil
+		if localReadErr != nil && !errors.Is(localReadErr, os.ErrNotExist) {
+			return nil, localReadErr
+		}
+		if localExistsNow != entry.localExisted ||
+			(localExistsNow && !sameLocalSnapshotIdentity(localNow, entry.localObserved)) {
+			// The watcher may still be inside its debounce window, so tracked
+			// state can look clean even though the destination changed after
+			// staging. Preserve the newer disk state and let the watcher own it.
+			prog.touch()
+			continue
+		}
 		if entry.stagedPath != "" {
 			if err := movePathAtomicSecure(stagingRoot, entry.stagedPath, s.localRoot, entry.localPath, localPermissionsForMode(entry.canWrite, entry.mode)); err != nil {
 				return nil, err
@@ -7488,6 +7513,13 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 		prog.touch()
 	}
 	return remotePaths, nil
+}
+
+func sameLocalSnapshotIdentity(left, right localSnapshot) bool {
+	return normalizeRemoteType(left.Type) == normalizeRemoteType(right.Type) &&
+		left.Target == right.Target &&
+		left.Mode == right.Mode &&
+		left.Hash == right.Hash
 }
 
 func exportSnapshotUnsupported(err error) bool {

@@ -3771,6 +3771,12 @@ func TestGithubWorkingTreeSourceArchiveStripsTopLevelDirectory(t *testing.T) {
 
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
+	if err := tw.WriteHeader(&tar.Header{
+		Name: "pax_global_header", Typeflag: tar.TypeXGlobalHeader,
+		PAXRecords: map[string]string{"comment": headSHA},
+	}); err != nil {
+		t.Fatalf("write pax global header: %v", err)
+	}
 	if err := tw.WriteHeader(&tar.Header{Name: "cloud-head123/README.md", Mode: 0, Size: int64(len(body))}); err != nil {
 		t.Fatalf("write tar header: %v", err)
 	}
@@ -3994,6 +4000,86 @@ func TestGithubWorkingTreeTarSeedPreservesEditThatBecomesDirtyAfterStaging(t *te
 	if info, err := os.Stat(firstPath); err != nil || info.Mode().Perm()&0o222 != 0 {
 		t.Fatalf("dirty skipped path did not receive pull-only permissions: mode=%v err=%v", info, err)
 	}
+	assertLocalFileContent(t, filepath.Join(localDir, "second.txt"), string(secondBody))
+}
+
+func TestGithubWorkingTreeTarSeedPreservesEditBeforeWatcherMarksDirty(t *testing.T) {
+	localDir := t.TempDir()
+	contentsRoot := "/github/repos/AgentWorkforce/cloud/contents"
+	headSHA := "head123"
+	staleBody := []byte("stale remote\n")
+	updatedBody := []byte("updated remote\n")
+	localBody := []byte("edit still inside watcher debounce\n")
+	secondBody := []byte("second remote\n")
+	firstRemote := contentsRoot + "/first.txt@" + headSHA + ".json"
+	secondRemote := contentsRoot + "/second.txt@" + headSHA + ".json"
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_edit_before_dirty", RemoteRoot: contentsRoot, LocalRoot: localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+	firstPath := filepath.Join(localDir, "first.txt")
+	if err := os.WriteFile(firstPath, staleBody, 0o644); err != nil {
+		t.Fatalf("write initial local file: %v", err)
+	}
+	syncer.state.Files[firstRemote] = trackedFile{
+		Revision: "rev_old", Hash: hashBytes(staleBody), Type: remoteTypeFile, Mode: 0o644,
+	}
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, entry := range []struct {
+		name string
+		body []byte
+	}{{"first.txt", updatedBody}, {"second.txt", secondBody}} {
+		if err := tw.WriteHeader(&tar.Header{Name: entry.name, Mode: 0o644, Size: int64(len(entry.body))}); err != nil {
+			t.Fatalf("write %s header: %v", entry.name, err)
+		}
+		if _, err := tw.Write(entry.body); err != nil {
+			t.Fatalf("write %s body: %v", entry.name, err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+	secondEntryBlocked := make(chan struct{})
+	releaseSecondEntry := make(chan struct{})
+	body := &blockingOffsetReader{
+		reader: bytes.NewReader(buf.Bytes()), remaining: 1024,
+		blocked: secondEntryBlocked, release: releaseSecondEntry,
+	}
+	tree := map[string]githubTreeFile{
+		"first.txt":  {RemotePath: firstRemote, Revision: "rev_1", ContentHash: hashBytes(updatedBody), Type: remoteTypeFile, Mode: 0o644},
+		"second.txt": {RemotePath: secondRemote, Revision: "rev_2", ContentHash: hashBytes(secondBody), Type: remoteTypeFile, Mode: 0o644},
+	}
+	applyDone := make(chan error, 1)
+	go func() {
+		syncer.mu.Lock()
+		syncer.fullPullActive = true
+		_, applyErr := syncer.applyGithubWorkingTreeTarSeedStrict(GithubWorkingTreeTar{
+			Body: io.NopCloser(body), ContentType: "application/x-tar",
+		}, tree, nil, bootstrapProgress{}, true)
+		syncer.fullPullActive = false
+		syncer.mu.Unlock()
+		applyDone <- applyErr
+	}()
+	select {
+	case <-secondEntryBlocked:
+	case <-time.After(time.Second):
+		t.Fatal("archive did not block after staging first entry")
+	}
+	if err := os.WriteFile(firstPath, localBody, 0o644); err != nil {
+		t.Fatalf("write concurrent local edit: %v", err)
+	}
+	// Deliberately do not update syncer.state: this is the watcher debounce
+	// window where the disk has changed but the tracked entry is still clean.
+	close(releaseSecondEntry)
+	if err := <-applyDone; err != nil {
+		t.Fatalf("apply staged tar: %v", err)
+	}
+
+	assertLocalFileContent(t, firstPath, string(localBody))
 	assertLocalFileContent(t, filepath.Join(localDir, "second.txt"), string(secondBody))
 }
 
