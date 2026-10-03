@@ -7224,13 +7224,15 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 	}
 	defer os.RemoveAll(stagingRoot)
 	type pendingPublish struct {
-		remotePath string
-		localPath  string
-		stagedPath string
-		state      trackedFile
-		canWrite   bool
-		mode       uint32
-		isSymlink  bool
+		remotePath    string
+		localPath     string
+		stagedPath    string
+		state         trackedFile
+		observedState trackedFile
+		observed      bool
+		canWrite      bool
+		mode          uint32
+		isSymlink     bool
 	}
 	pending := make([]pendingPublish, 0, len(tree))
 	reader := io.Reader(tarBody.Body)
@@ -7356,17 +7358,19 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 				return nil, fmt.Errorf("github tar seed contains unsafe symlink %s: %w", rel, err)
 			}
 		}
-		tracked := s.state.Files[meta.RemotePath]
+		tracked, trackedExists := s.state.Files[meta.RemotePath]
 		canWrite := s.canWritePath(meta.RemotePath)
 		if tracked.Dirty {
 			tracked.ReadOnly = !canWrite
 			pending = append(pending, pendingPublish{
-				remotePath: meta.RemotePath,
-				localPath:  localPath,
-				state:      tracked,
-				canWrite:   canWrite,
-				mode:       tracked.Mode,
-				isSymlink:  isSymlink,
+				remotePath:    meta.RemotePath,
+				localPath:     localPath,
+				state:         tracked,
+				observedState: tracked,
+				observed:      trackedExists,
+				canWrite:      canWrite,
+				mode:          tracked.Mode,
+				isSymlink:     isSymlink,
 			})
 			remotePaths[meta.RemotePath] = struct{}{}
 			prog.touch()
@@ -7416,9 +7420,11 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 				Denied:      false,
 				ReadOnly:    !canWrite,
 			},
-			canWrite:  canWrite,
-			mode:      meta.Mode,
-			isSymlink: isSymlink,
+			observedState: tracked,
+			observed:      trackedExists,
+			canWrite:      canWrite,
+			mode:          meta.Mode,
+			isSymlink:     isSymlink,
 		})
 		remotePaths[meta.RemotePath] = struct{}{}
 		s.yieldFullPullStateLock()
@@ -7434,7 +7440,16 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 	// the existing secure atomic writer; a crash leaves only an ignored staging
 	// directory outside the mount, and the next bootstrap can restart cleanly.
 	for _, entry := range pending {
-		if s.fullPullPathTouchedByUpPath(entry.remotePath) {
+		// Give watcher/outbox work a turn between each disk publication, then
+		// fence on both accepted writes and pending/failed local edits. The
+		// archive entry was staged against observedState; any newer tracked
+		// state owns the path even if its cloud write has not succeeded yet.
+		s.yieldFullPullStateLock()
+		current, currentExists := s.state.Files[entry.remotePath]
+		if s.fullPullPathTouchedByUpPath(entry.remotePath) ||
+			current.Dirty ||
+			currentExists != entry.observed ||
+			(currentExists && current != entry.observedState) {
 			// A local writeback may have landed after this entry was staged but
 			// before the full archive finished verification. Preserve that newer
 			// local state just as the streaming path does before staging.
