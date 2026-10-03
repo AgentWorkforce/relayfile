@@ -66,6 +66,19 @@ interface PendingFailoverWrite {
   correlationId: string;
 }
 
+interface FailoverWaiter {
+  count: number;
+  resolve: (pendingWriters: number) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+interface FailoverState {
+  id: string;
+  writes: PendingFailoverWrite[];
+  waiters: FailoverWaiter[];
+}
+
 interface MountState {
   id: string;
   mode: "read" | "write" | "mirror";
@@ -114,7 +127,7 @@ export class FakeConformanceAdapter {
   private config: FakeConfig = {};
   private heldWebhook?: PendingWebhook;
   private pendingCrash?: PendingCrash;
-  private failover?: { id: string; writes: PendingFailoverWrite[] };
+  private failover?: FailoverState;
   private pendingMigrationId?: string;
   private exportedArtifact?: string;
 
@@ -257,7 +270,9 @@ export class FakeConformanceAdapter {
         return;
       }
       if (this.failover) {
-        this.failover.writes.push({ path, content, ifMatch: String(request.headers["if-match"] ?? ""), response, correlationId });
+        const failover = this.failover;
+        failover.writes.push({ path, content, ifMatch: String(request.headers["if-match"] ?? ""), response, correlationId });
+        this.resolveFailoverWaiters(failover);
         return;
       }
       const current = this.files.get(path);
@@ -485,16 +500,27 @@ export class FakeConformanceAdapter {
     if (operation === "runtime.failover") {
       const phase = String(body.phase ?? "");
       if (phase === "begin") {
-        this.failover = { id: "fake-switch", writes: [] };
+        this.failover = { id: "fake-switch", writes: [], waiters: [] };
         this.json(response, 200, { switchId: "fake-switch", state: "fenced" });
         return;
       }
       if (phase === "await-writers") {
-        this.json(response, 200, { pendingWriters: this.failover?.writes.length ?? 0 });
+        const failover = this.failover;
+        if (!failover || body.switchId !== failover.id) {
+          this.json(response, 409, { error: "unknown failover barrier" });
+          return;
+        }
+        const pendingWriters = await this.waitForFailoverWriters(failover, Number(body.count ?? 0));
+        this.json(response, 200, { pendingWriters });
         return;
       }
       if (phase === "release") {
-        const pending = this.failover?.writes ?? [];
+        const failover = this.failover;
+        const pending = failover?.writes ?? [];
+        for (const waiter of failover?.waiters ?? []) {
+          clearTimeout(waiter.timer);
+          waiter.reject(new Error("failover released before the writer barrier was satisfied"));
+        }
         this.failover = undefined;
         for (const [index, write] of pending.entries()) {
           if (index === 0 || this.mutant === "RF-FAILOVER-001") {
@@ -545,6 +571,32 @@ export class FakeConformanceAdapter {
       return;
     }
     this.json(response, 400, this.error(request, "unsupported_control", operation));
+  }
+
+  private waitForFailoverWriters(failover: FailoverState, count: number): Promise<number> {
+    if (failover.writes.length >= count) return Promise.resolve(failover.writes.length);
+    return new Promise<number>((resolve, reject) => {
+      const waiter = {
+        count,
+        resolve: (pendingWriters: number) => {
+          clearTimeout(waiter.timer);
+          resolve(pendingWriters);
+        },
+        reject,
+        timer: setTimeout(() => {
+          failover.waiters = failover.waiters.filter((candidate) => candidate !== waiter);
+          reject(new Error(`timed out waiting for ${count} fenced writers; saw ${failover.writes.length}`));
+        }, 5_000),
+      } satisfies FailoverWaiter;
+      failover.waiters.push(waiter);
+    });
+  }
+
+  private resolveFailoverWaiters(failover: FailoverState): void {
+    const pendingWriters = failover.writes.length;
+    const ready = failover.waiters.filter((waiter) => pendingWriters >= waiter.count);
+    failover.waiters = failover.waiters.filter((waiter) => pendingWriters < waiter.count);
+    for (const waiter of ready) waiter.resolve(pendingWriters);
   }
 
   private async advanceClock(milliseconds: number): Promise<void> {
