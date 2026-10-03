@@ -1372,6 +1372,11 @@
         "flags": "--json",
         "description": "print the raw JSON response",
         "defaultValue": false
+      },
+      {
+        "flags": "--no-retry",
+        "description": "do not retry transient read failures",
+        "defaultValue": false
       }
     ]
   },
@@ -1410,6 +1415,11 @@
       {
         "flags": "--json",
         "description": "print the raw JSON response",
+        "defaultValue": false
+      },
+      {
+        "flags": "--no-retry",
+        "description": "do not retry transient read failures",
         "defaultValue": false
       }
     ]
@@ -1468,6 +1478,11 @@
         "flags": "--output <file>",
         "description": "output file path or - for stdout",
         "defaultValue": "-"
+      },
+      {
+        "flags": "--no-retry",
+        "description": "do not retry transient read failures",
+        "defaultValue": false
       }
     ]
   },
@@ -1493,6 +1508,11 @@
       {
         "flags": "--json",
         "description": "emit JSON",
+        "defaultValue": false
+      },
+      {
+        "flags": "--no-retry",
+        "description": "do not retry transient read failures",
         "defaultValue": false
       }
     ]
