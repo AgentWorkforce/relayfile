@@ -6,6 +6,7 @@ import { test } from "node:test";
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 import { parse } from "yaml";
+import { renderCaseCheckAnnotation } from "./ci-summary.js";
 import { assertFullRunSafety, loadTarget } from "./config.js";
 import { redact, redactEnvironmentText, writeEvidence } from "./evidence.js";
 import { Harness, RequestTransportError } from "./harness.js";
@@ -169,6 +170,33 @@ test("console error redaction removes configured environment secrets", () => {
   });
   assert(!safe.includes("top-secret-token"));
   assert(safe.includes("[REDACTED]"));
+});
+
+test("CI annotations expose escaped per-case results through the check-run API", () => {
+  const annotation = renderCaseCheckAnnotation("Fake 100% matrix", [
+    {
+      id: "RF-TEST-001",
+      name: "passes",
+      status: "passed",
+      durationMs: 1,
+      requiredCapabilities: [],
+      correlationIds: [],
+      evidenceBasis: "adapter-attested",
+    },
+    {
+      id: "RF-TEST-002",
+      name: "skips",
+      status: "skipped",
+      durationMs: 1,
+      requiredCapabilities: [],
+      correlationIds: [],
+      skipReason: "not applicable\r\nto fake",
+    },
+  ]);
+  assert(annotation.startsWith("::notice title=Fake 100%25 matrix::"));
+  assert(annotation.includes("RF-TEST-001 PASSED [adapter-attested]"));
+  assert(annotation.includes("%0ARF-TEST-002 SKIPPED"));
+  assert(annotation.includes("not applicable%0D%0Ato fake"));
 });
 
 test("control failures preserve non-JSON response evidence", async () => {
