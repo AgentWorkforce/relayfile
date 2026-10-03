@@ -51,11 +51,11 @@ Implemented the deterministic backend-neutral Relayfile conformance harness, Go 
 - A local, self-reported and non-gating Go-oracle run exposed one receipt assertion with intentional correlation/written-count differences; the invariant was narrowed to stable opId and revision. Advanced runtime cases are adapter-gated and full profiles convert every missing applicable capability into a failure. Authoritative command output remains in CI rather than this reflection record.
 - Use an out-of-band state.inspect control operation as the post-clock proof point: Use an out-of-band state.inspect control operation as the post-clock proof point
 - Exact-head review found false-pass topology in pagination, poison HOL, timer wakeups, reconnect, and socket-effect limit cases. The remediation now pages the full feed, proves HOL before retry exhaustion, inspects state out-of-band after clock advance, disconnects before reconnect backlog, holds a live socket through eviction, and subscribes during the 513-event bulk.
-- Automated ready-for-review checks found safety and false-pass gaps beyond the independent review: destructive fixed digest writes, missing crash/failover barriers, incomplete migration replay proof, reset evidence loss, permissive target/CLI validation, and artifact robustness. Each valid finding was incorporated locally. A self-reported, non-gating local run passed the expanded 19-case harness tests, Go oracle, typecheck, and contract checks; the authoritative result is the replacement-head CI recorded outside this trajectory.
+- Automated ready-for-review checks found safety and false-pass gaps beyond the independent review: destructive fixed digest writes, missing crash/failover barriers, incomplete migration replay proof, reset evidence loss, permissive target/CLI validation, and artifact robustness. Each valid finding was incorporated locally. A self-reported, non-gating local run passed the expanded 21-case harness tests, Go oracle, typecheck, and contract checks; the authoritative result is the replacement-head CI recorded outside this trajectory.
 
 ---
 
 ## Artifacts
 
-**Commits:** 439d7961, 12c54e1d, b5172760
-**Files changed:** 25
+**Commits:** 87a721c0, 95c1b0cf, 439d7961, 12c54e1d, b5172760
+**Files changed:** 27

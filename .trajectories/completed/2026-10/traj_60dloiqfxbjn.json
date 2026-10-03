@@ -159,7 +159,7 @@
         {
           "ts": 1791015545773,
           "type": "reflection",
-          "content": "Automated ready-for-review checks found safety and false-pass gaps beyond the independent review: destructive fixed digest writes, missing crash/failover barriers, incomplete migration replay proof, reset evidence loss, permissive target/CLI validation, and artifact robustness. Each valid finding was incorporated locally. A self-reported, non-gating local run passed the expanded 19-case harness tests, Go oracle, typecheck, and contract checks; the authoritative result is the replacement-head CI recorded outside this trajectory.",
+          "content": "Automated ready-for-review checks found safety and false-pass gaps beyond the independent review: destructive fixed digest writes, missing crash/failover barriers, incomplete migration replay proof, reset evidence loss, permissive target/CLI validation, and artifact robustness. Each valid finding was incorporated locally. A self-reported, non-gating local run passed the expanded 21-case harness tests, Go oracle, typecheck, and contract checks; the authoritative result is the replacement-head CI recorded outside this trajectory.",
           "raw": {
             "focalPoints": [
               "automated review",
@@ -186,6 +186,8 @@
     "confidence": 0.92
   },
   "commits": [
+    "87a721c0",
+    "95c1b0cf",
     "439d7961",
     "12c54e1d",
     "b5172760"
@@ -193,7 +195,9 @@
   "filesChanged": [
     ".github/workflows/ci.yml",
     ".gitignore",
-    ".trajectories/active/traj_60dloiqfxbjn.json",
+    ".trajectories/completed/2026-10/traj_60dloiqfxbjn.json",
+    ".trajectories/completed/2026-10/traj_60dloiqfxbjn.md",
+    ".trajectories/completed/2026-10/traj_60dloiqfxbjn.trace.json",
     ".trajectories/index.json",
     "docs/backend-neutral-conformance.md",
     "docs/vendor-compatibility-matrix.md",
@@ -221,7 +225,7 @@
   "tags": [],
   "_trace": {
     "startRef": "aa95991113ec78a6c2ee04460ba401d0c0853640",
-    "endRef": "439d7961dc7b256172a80454ad5c83f90a39af15",
+    "endRef": "87a721c087c21c5b3b4f486fa27dce31c8318c80",
     "traceId": "f2caee52-5def-463b-8c2e-1856ef6e51ba"
   }
 }
