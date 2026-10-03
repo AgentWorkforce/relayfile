@@ -241,6 +241,7 @@ export class Harness {
   }
 
   async control<T = unknown>(operation: ControlOperation, payload: Record<string, unknown> = {}): Promise<T> {
+    this.markEvidenceBasis("adapter-attested");
     const control = this.target.control;
     if (!control || !control.operations.has(operation)) {
       throw new Error(`target ${this.target.id} does not provide control operation ${operation}`);

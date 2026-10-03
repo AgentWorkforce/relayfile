@@ -27,7 +27,6 @@ export const CONTROL_OPERATIONS = [
   "provider.configure",
   "provider.calls",
   "state.inspect",
-  "auth.probe",
   "clock.advance",
   "runtime.evict",
   "runtime.crash",

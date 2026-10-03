@@ -261,7 +261,7 @@ function requiredOperations(capability: Capability): ControlOperation[] {
     case "state-inspection": return ["state.inspect"];
     case "clock-control": return ["clock.advance", "state.inspect"];
     case "runtime-eviction": return ["runtime.evict"];
-    case "runtime-auth-probe": return ["auth.probe"];
+    case "runtime-auth-probe": return [];
     case "runtime-crash": return ["runtime.crash"];
     case "runtime-failover": return ["runtime.failover"];
     case "state-migration": return ["state.export", "state.import"];

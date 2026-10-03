@@ -45,6 +45,11 @@ The Cloudflare and Terse descriptors read secrets only from the environment:
 | `RELAYFILE_CONFORMANCE_CONTROL_TOKEN` | Bearer token for that adapter. |
 | `RELAYFILE_CONFORMANCE_DISPOSABLE` | Must be exactly `1` for a remote full-profile run; acknowledges that both workspaces are dedicated and disposable. |
 | `RELAYFILE_TERSE_SHARED_SECRET` | Non-empty Terse runtime shared secret; target loading fails closed when absent. |
+| `RELAYFILE_TERSE_RUNTIME_URL` | Terse control-plane/runtime origin used for runtime-native verification. |
+| `RELAYFILE_TERSE_ADMIN_KEY` | Terse administrative bearer key; redacted from every evidence artifact. |
+| `RELAYFILE_TERSE_PROJECT_ID` | Terse project containing the Relayfile workspace actor. |
+| `RELAYFILE_TERSE_ACTOR_NAME` | Published Terse actor class name for the Relayfile workspace runtime. |
+| `RELAYFILE_TERSE_ACTOR_ID` | Actor ID derived from the verified workspace claim; defaults to the primary workspace ID. |
 
 Use dedicated disposable workspaces. A remote full run fails closed unless `RELAYFILE_CONFORMANCE_DISPOSABLE=1`; `reset` is invoked before its scenarios. Source fixtures are namespaced under `/conformance/<seed>/` (or `/conformance/scoped/<seed>/` for the path-token check), but product-defined digest paths (`/digests/today.md` and `/digests/yesterday.md`) are intentionally fixed and may be regenerated or rolled over. `RF-PROJ-001` also writes a sentinel directly to `/digests/today.md` and proves a later clock tick leaves it unchanged while emitting exactly the sentinel write's one event. This destructive fixed-path check is why full runs require a disposable workspace.
 
@@ -71,7 +76,6 @@ A successful operation returns JSON and a 2xx status. A non-2xx response fails t
 | `provider.configure` | Configure/release deterministic provider faults: finite `ingestFailures`, `permanentIngestFailurePath`, `ingestBackpressure`, `echoWritebackWebhook`, `holdIngestPath`/`releaseIngestPath`, `crashBarrier:{matchPath,phase}` (`before-commit` or `after-commit`), or `seedMigrationState`. The adapter must use `seedMigrationState.deadLetterId` verbatim as the exported manifest ID and the envelope ID accepted by `/sync/dead-letter/{envelopeId}/replay`; remapping it is a contract failure. Return the applied configuration. |
 | `provider.calls` | For an optional `matchPath`, return applicable `attempts`, retry `state` (`retrying` while a poison item still has budget), `writebackAttempts`, `echoDeliveries`, `held`, `crashReady`, and `crashPhase` fields. Counts and barrier state must survive until the requested crash/restart. |
 | `state.inspect` | Read durable backing state directly without routing to or waking the actor. For requested `paths`, identities, operations, or delivery IDs, return `files`, `eventCounts`, `identityActive`, `backpressureActive`, `operations`, `deadLetters`, and `servingRuntime` as applicable. Returned operations are restricted to requested paths/IDs. This is the proof point immediately after clock advance. |
-| `auth.probe` | Attempt direct runtime access first with an omitted credential and then with an invalid credential; return `{rejected,actorInvoked}`. Both probes must reject before actor application code is invoked. |
 | `clock.advance` | Advance the target's injected UTC clock by `milliseconds`, run all due work, and return only after the runtime is quiescent. It must not synthesize public traffic. |
 | `runtime.evict` | Evict the workspace actor/DO without deleting durable state, then return when routing can create a new instance. |
 | `runtime.crash` | After `provider.calls` exposes the configured `crashReady` barrier, accept the matching `{matchPath,phase}`, terminate the active instance without a graceful disconnect, and return `{terminated:true}`. The paused public write must lose its response. `before-commit` leaves no file/event/op; `after-commit` preserves all three exactly once. |
@@ -83,6 +87,12 @@ A successful operation returns JSON and a 2xx status. A non-2xx response fails t
 | `mount.stop` | Stop the mount identified by `id` and wait for teardown. |
 
 Clock control is mandatory for retries, DLQ exhaustion/replay, idempotency expiry, and digest day rollover. This catches actor ports that appear healthy but only make progress when another request arrives. Runtime eviction/crash controls distinguish durable cursor/state recovery from socket continuity.
+
+## Runtime-native Terse verification
+
+Terse checks do not trust the control adapter to report whether it woke or invoked the actor. Against the API pinned at [`19af4b48`](https://github.com/TerseAI/durable-actors/blob/19af4b48e6f148b6edd11ee243c79c30c17dc30e/docs/reference/openapi.yaml), the harness reads `GET /v1/projects/{project}/observe/state` after every adapter `state.inspect`, then pages `GET /v1/projects/{project}/observe/requests` over the inspection window. The trace must contain zero records and report `dropped: 0`, `evicted: 0`, `persistenceFailed: false`, and `reset: false`; otherwise the inspection cannot prove no-wake behavior.
+
+`RF-AUTH-005` posts directly to `/v1/projects/{project}/actors/{actorName}/{actorId}/invoke` once without a bearer and once with an invalid bearer. Both requests must return 401 or 403, and the same runtime-native trace query must show that neither reached actor application code. The old adapter `auth.probe` self-report is not part of the contract. Cloudflare has no reachable equivalent runtime-native observer, so cases backed by its control adapter are labeled `adapter-attested` in JSON, JUnit-adjacent summary data, and the GitHub step summary; Terse-native proofs are labeled `runtime-native`.
 
 ## Invariants and evidence
 

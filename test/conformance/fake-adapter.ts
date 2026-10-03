@@ -215,10 +215,8 @@ export class FakeConformanceAdapter {
     if (/\/actors\/[^/]+\/[^/]+\/invoke$/u.test(url.pathname)) {
       if (this.mutant === "RF-AUTH-005" && !request.headers.authorization) {
         this.traceRecords.push({ requestId: "mutant-auth-dispatch" });
-        this.json(response, 200, { ok: true });
-      } else {
-        this.json(response, 401, { code: "unauthorized" });
       }
+      this.json(response, 401, { code: "unauthorized" });
       return;
     }
 
@@ -431,6 +429,7 @@ export class FakeConformanceAdapter {
       return;
     }
     if (operation === "state.inspect") {
+      if (this.mutant === "RF-QUEUE-003") this.traceRecords.push({ requestId: "mutant-inspect-wake" });
       const paths = Array.isArray(body.paths) ? body.paths.map(String) : [];
       const inspectedFiles = Object.fromEntries(paths.map((path) => {
         const file = this.files.get(path);
@@ -446,7 +445,7 @@ export class FakeConformanceAdapter {
         files: inspectedFiles,
         eventCounts,
         deadLetters: [...this.deadLetters.values()].map(({ deliveryId, envelopeId }) => ({ deliveryId, envelopeId })),
-        backpressureActive: this.mutant === "RF-QUEUE-003" || (this.config.backpressureUntil ?? 0) > this.virtualNow,
+        backpressureActive: (this.config.backpressureUntil ?? 0) > this.virtualNow,
         identityActive: identityKey ? (this.mutant === "RF-TIMER-002" || (this.identities.get(identityKey)?.expiresAt ?? 0) > this.virtualNow) : undefined,
         servingRuntime: this.servingRuntime,
         operations,
@@ -549,7 +548,7 @@ export class FakeConformanceAdapter {
   }
 
   private async advanceClock(milliseconds: number): Promise<void> {
-    if (this.config.backpressureUntil && this.virtualNow >= this.config.backpressureUntil && this.mutant !== "RF-QUEUE-003") {
+    if (this.config.backpressureUntil && this.virtualNow >= this.config.backpressureUntil) {
       this.config.backpressureUntil = undefined;
     }
     const retry = this.config.matchPath ? this.deadLetters.get(`retry:${this.config.matchPath}`) : undefined;
