@@ -10,7 +10,7 @@ import type { Profile } from "./types.js";
 interface Options {
   target: string;
   profile: Profile;
-  seed: string;
+  seed?: string;
   outDir?: string;
 }
 
@@ -18,6 +18,7 @@ async function main(): Promise<void> {
   process.env.E2E_TELEMETRY_DISABLED = "1";
   const options = parseOptions(process.argv.slice(2));
   const loaded = await loadTarget(options.target);
+  const seed = options.seed ?? defaultSeed(loaded.file.auth.strategy === "local-rs256");
   let target = loaded.target;
   const local = loaded.file.auth.strategy === "local-rs256" ? new LocalGoTarget() : undefined;
 
@@ -27,7 +28,7 @@ async function main(): Promise<void> {
     const harness = new Harness(
       target,
       options.profile,
-      options.seed,
+      seed,
       local ? () => local.restart(target.baseUrl) : undefined,
     );
     if (options.profile === "full" && target.control?.operations.has("reset")) {
@@ -39,7 +40,7 @@ async function main(): Promise<void> {
       await runScenarios(harness);
     }
     const summary = harness.summary();
-    const outDir = resolve(options.outDir ?? `artifacts/conformance/${target.id}/${options.seed}`);
+    const outDir = resolve(options.outDir ?? `artifacts/conformance/${target.id}/${seed}`);
     await writeEvidence(outDir, summary, harness.exchanges, target);
     printSummary(redact(summary, target), outDir);
     if (summary.counts.failed > 0) process.exitCode = 1;
@@ -60,7 +61,7 @@ Usage:
 Options:
   --target <name|path>   Target descriptor under test/conformance/targets or a JSON path
   --profile core|full   core permits explicit capability skips; full turns every skip into failure
-  --seed <value>        Deterministic namespace seed (letters, digits, dot, dash, underscore)
+  --seed <value>        Deterministic namespace seed; defaults to rfce-v1 locally and a run-unique remote seed
   --out-dir <path>      Evidence directory (default artifacts/conformance/<target>/<seed>)
 `);
     process.exit(0);
@@ -71,11 +72,24 @@ Options:
   const target = option(args, "--target") ?? "go-local";
   const profile = (option(args, "--profile") ?? "core") as Profile;
   if (profile !== "core" && profile !== "full") throw new Error(`invalid --profile ${profile}`);
-  const seed = option(args, "--seed") ?? process.env.RELAYFILE_CONFORMANCE_SEED ?? "rfce-v1";
+  const seed = option(args, "--seed") ?? process.env.RELAYFILE_CONFORMANCE_SEED;
+  if (seed) validateSeed(seed);
+  return { target, profile, ...(seed ? { seed } : {}), ...(option(args, "--out-dir") ? { outDir: option(args, "--out-dir") } : {}) };
+}
+
+function defaultSeed(local: boolean): string {
+  if (local) return "rfce-v1";
+  const runId = process.env.GITHUB_RUN_ID?.trim();
+  const attempt = process.env.GITHUB_RUN_ATTEMPT?.trim() || "1";
+  const seed = runId ? `rfce-${runId}-${attempt}` : `rfce-${Date.now()}-${process.pid}`;
+  validateSeed(seed);
+  return seed;
+}
+
+function validateSeed(seed: string): void {
   if (!/^[A-Za-z0-9._-]{1,80}$/u.test(seed) || seed === "." || seed === "..") {
     throw new Error("--seed must match [A-Za-z0-9._-]{1,80} and cannot be . or ..");
   }
-  return { target, profile, seed, ...(option(args, "--out-dir") ? { outDir: option(args, "--out-dir") } : {}) };
 }
 
 function validateArguments(args: string[]): void {
