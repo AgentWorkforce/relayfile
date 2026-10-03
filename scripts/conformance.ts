@@ -791,6 +791,7 @@ ${B}${CYAN}╔══════════════════════
   log('🌐', `Server: ${B}${BASE_URL}${R}`);
   log('🔑', `JWKS:   ${B}${rs256Auth.jwksUrl}${R}`);
   log('⚙️ ', `Mode:   ${B}${REMOTE ? 'Remote' : 'Local'} ${CI ? '(CI)' : ''}${R}`);
+  log('🗂️ ', `Workspace: ${B}${WORKSPACE}${R}`);
 
   try {
     await startServer();

@@ -918,7 +918,7 @@ async function crashWriteAtBarrier(
     (response) => ({ kind: "response", status: response.status } as const),
     (error: unknown) => {
       if (error instanceof RequestTransportError) return { kind: "transport" } as const;
-      throw error;
+      return { kind: "error", error } as const;
     },
   );
   await h.poll(
@@ -929,12 +929,11 @@ async function crashWriteAtBarrier(
   const crashed = await h.control<{ terminated: boolean }>("runtime.crash", { matchPath: path, phase });
   assert(crashed.terminated === true, `runtime did not terminate at the ${phase} barrier`);
   const result = await settleWithin(outcome, 5_000, `${phase} public write did not terminate after crash`);
-  assert(
-    result.kind === "transport",
-    result.kind === "response"
-      ? `${phase} public write returned HTTP ${result.status} instead of losing its response`
-      : `${phase} public write did not lose its response`,
-  );
+  if (result.kind === "error") throw result.error;
+  if (result.kind === "response") {
+    throw new Error(`${phase} public write returned HTTP ${result.status} instead of losing its response`);
+  }
+  assert(result.kind === "transport", `${phase} public write did not lose its response`);
 }
 
 async function readFileResponse(h: Harness, path: string): Promise<FileBody> {
