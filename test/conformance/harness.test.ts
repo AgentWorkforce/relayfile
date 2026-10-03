@@ -173,7 +173,7 @@ test("console error redaction removes configured environment secrets", () => {
 });
 
 test("CI annotations expose escaped per-case results through the check-run API", () => {
-  const annotation = renderCaseCheckAnnotation("Fake 100% matrix", [
+  const annotation = renderCaseCheckAnnotation("Fake: 100%, matrix", [
     {
       id: "RF-TEST-001",
       name: "passes",
@@ -193,7 +193,7 @@ test("CI annotations expose escaped per-case results through the check-run API",
       skipReason: "not applicable\r\nto fake",
     },
   ]);
-  assert(annotation.startsWith("::notice title=Fake 100%25 matrix::"));
+  assert(annotation.startsWith("::notice title=Fake%3A 100%25%2C matrix::"));
   assert(annotation.includes("RF-TEST-001 PASSED [adapter-attested]"));
   assert(annotation.includes("%0ARF-TEST-002 SKIPPED"));
   assert(annotation.includes("not applicable%0D%0Ato fake"));

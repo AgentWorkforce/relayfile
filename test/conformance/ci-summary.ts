@@ -33,7 +33,7 @@ export function renderCaseCheckAnnotation(title: string, cases: CaseResult[]): s
     const evidence = result.evidenceBasis ? ` [${result.evidenceBasis}]` : "";
     return `${result.id} ${result.status.toUpperCase()}${evidence}${detail ? ` — ${detail}` : ""}`;
   });
-  return `::notice title=${workflowCommandValue(title)}::${workflowCommandValue(results.join("\n"))}`;
+  return `::notice title=${workflowCommandProperty(title)}::${workflowCommandValue(results.join("\n"))}`;
 }
 
 function cell(value: string): string {
@@ -42,4 +42,8 @@ function cell(value: string): string {
 
 function workflowCommandValue(value: string): string {
   return value.replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
+}
+
+function workflowCommandProperty(value: string): string {
+  return workflowCommandValue(value).replaceAll(":", "%3A").replaceAll(",", "%2C");
 }
