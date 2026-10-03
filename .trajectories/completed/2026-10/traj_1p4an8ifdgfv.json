@@ -1,0 +1,62 @@
+{
+  "id": "traj_1p4an8ifdgfv",
+  "version": 1,
+  "task": {
+    "title": "Use retained GitHub source archive for verified mount bootstrap"
+  },
+  "status": "completed",
+  "startedAt": "2026-10-03T15:42:22.196Z",
+  "completedAt": "2026-10-03T16:08:45.325Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-10-03T16:01:24.534Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_8u0eduntp86k",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-10-03T16:01:24.534Z",
+      "endedAt": "2026-10-03T16:08:45.325Z",
+      "events": [
+        {
+          "ts": 1791043284535,
+          "type": "decision",
+          "content": "Request the retained GitHub source archive and fully verify it in staging before publication: Request the retained GitHub source archive and fully verify it in staging before publication",
+          "raw": {
+            "question": "Request the retained GitHub source archive and fully verify it in staging before publication",
+            "chosen": "Request the retained GitHub source archive and fully verify it in staging before publication",
+            "alternatives": [
+              {
+                "option": "Continue bounded-prefetch generated tar",
+                "reason": ""
+              },
+              {
+                "option": "trust the GitHub archive without tree verification",
+                "reason": ""
+              }
+            ],
+            "reasoning": "The immutable headSha-bound archive reduces the bootstrap body from thousands of R2 reads and 175 MB of regenerated tar to one roughly 20 MB stream, while the authoritative Relayfile tree still supplies exact paths, types, modes, and SHA-256 hashes. Staging prevents a corrupt or incomplete archive from becoming visible."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Added retained-source-archive bootstrap support: request the new export variant, honor its explicit one-component strip contract, verify all paths/types/modes/content hashes against the authoritative tree in bounded-memory staging, preserve concurrent local writebacks, and publish only after complete verification. Added HTTP, corruption atomicity, and 5,884-file gzip coverage plus OpenAPI contract updates.",
+    "approach": "Kept the existing manifest/tree snapshot as the authority and used the retained GitHub tar only as a faster body transport. Maintained compatibility with older or unavailable exports through the existing generated-tar and resumable per-file fallbacks.",
+    "confidence": 0.92
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "71f90f8b0eb9a91d2d58d6c9a2cfb065c5a78fab",
+    "endRef": "71f90f8b0eb9a91d2d58d6c9a2cfb065c5a78fab"
+  }
+}
