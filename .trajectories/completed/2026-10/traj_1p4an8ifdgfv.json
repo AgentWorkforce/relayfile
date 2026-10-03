@@ -54,13 +54,16 @@
   "commits": [
     "60b0c8b9",
     "76871fd6",
-    "39212ff5"
+    "39212ff5",
+    "01706681"
   ],
   "filesChanged": [
     ".trajectories/completed/2026-10/traj_1p4an8ifdgfv.json",
     ".trajectories/completed/2026-10/traj_1p4an8ifdgfv.md",
     ".trajectories/index.json",
     "internal/mountsync/http_client_test.go",
+    "internal/mountsync/secure_replace_other.go",
+    "internal/mountsync/secure_replace_posix.go",
     "internal/mountsync/syncer.go",
     "internal/mountsync/syncer_test.go",
     "openapi/relayfile-v1.openapi.yaml"
@@ -73,6 +76,6 @@
   ],
   "_trace": {
     "startRef": "71f90f8b0eb9a91d2d58d6c9a2cfb065c5a78fab",
-    "endRef": "39212ff5d6760f7ba99c1f6f7a899a1ffe09554e"
+    "endRef": "01706681ddb9566d0fc8f8f913b9f56c379d370a"
   }
 }
