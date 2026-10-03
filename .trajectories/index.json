@@ -441,7 +441,7 @@
       "status": "completed",
       "startedAt": "2026-10-03T15:42:22.196Z",
       "completedAt": "2026-10-03T16:08:45.325Z",
-      "path": "/home/khaliqgant/Projects/AgentWorkforce/.worktrees/clone-perf-archive-client/.trajectories/completed/2026-10/traj_1p4an8ifdgfv.json"
+      "path": ".trajectories/completed/2026-10/traj_1p4an8ifdgfv.json"
     }
   }
 }
