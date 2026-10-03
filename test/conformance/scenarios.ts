@@ -924,7 +924,8 @@ async function inspectState(
   paths: string[],
   extra: Record<string, unknown> = {},
 ): Promise<StateInspection> {
-  return h.verifyStateInspection(() => h.control<StateInspection>("state.inspect", { paths, ...extra }));
+  return h.verifyStateInspection((probeRequestId) =>
+    h.control<StateInspection>("state.inspect", { paths, ...extra, ...(probeRequestId ? { probeRequestId } : {}) }));
 }
 
 function inspectedFile(state: StateInspection, path: string): InspectedFile | undefined {

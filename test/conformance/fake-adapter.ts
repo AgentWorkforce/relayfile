@@ -215,19 +215,24 @@ export class FakeConformanceAdapter {
         this.json(response, 401, { code: "unauthorized" });
         return;
       }
+      const requestId = url.searchParams.get("requestId");
+      const records = requestId
+        ? this.traceRecords.filter((record) => (record as { requestId?: unknown }).requestId === requestId)
+        : this.traceRecords;
       this.json(response, 200, {
         dropped: 0,
         evicted: 0,
         persistenceFailed: false,
-        records: this.traceRecords,
+        records,
         nextCursor: null,
         reset: false,
       });
       return;
     }
     if (/\/actors\/[^/]+\/[^/]+\/invoke$/u.test(url.pathname)) {
+      const body = await this.body(request);
       if (this.mutant === "RF-AUTH-005" && !request.headers.authorization) {
-        this.traceRecords.push({ requestId: "mutant-auth-dispatch" });
+        this.traceRecords.push({ requestId: String(body.requestId ?? "mutant-auth-dispatch") });
       }
       this.json(response, 401, { code: "unauthorized" });
       return;
@@ -444,7 +449,9 @@ export class FakeConformanceAdapter {
       return;
     }
     if (operation === "state.inspect") {
-      if (this.mutant === "RF-QUEUE-003") this.traceRecords.push({ requestId: "mutant-inspect-wake" });
+      if (this.mutant === "RF-QUEUE-003") {
+        this.traceRecords.push({ requestId: String(body.probeRequestId ?? "mutant-inspect-wake") });
+      }
       const paths = Array.isArray(body.paths) ? body.paths.map(String) : [];
       const inspectedFiles = Object.fromEntries(paths.map((path) => {
         const file = this.files.get(path);

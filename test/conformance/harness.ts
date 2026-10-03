@@ -61,6 +61,7 @@ export class Harness {
   readonly exchanges: Exchange[] = [];
   readonly startedAt = new Date().toISOString();
   private correlationCounter = 0;
+  private runtimeProbeCounter = 0;
   private activeCorrelations?: string[];
   private activePollSignal?: AbortSignal;
   private activeEvidenceBasis?: CaseResult["evidenceBasis"];
@@ -322,7 +323,7 @@ export class Harness {
     return data as T;
   }
 
-  async verifyStateInspection<T>(read: () => Promise<T>): Promise<T> {
+  async verifyStateInspection<T>(read: (probeRequestId?: string) => Promise<T>): Promise<T> {
     if (this.target.runtime.kind === "cloudflare-do") {
       this.markEvidenceBasis("adapter-attested");
       return read();
@@ -330,15 +331,16 @@ export class Harness {
     if (this.target.runtime.kind !== "terse-durable-actors") return read();
 
     this.markEvidenceBasis("runtime-native");
+    const probeRequestId = this.nextRuntimeProbeRequestId("inspect");
     const fromMs = Date.now();
-    const value = await read();
+    const value = await read(probeRequestId);
     const toMs = Date.now();
     const observed = await this.runtimeObserveState();
     assert(
       Object.hasOwn(observed, "snapshot") && Object.hasOwn(observed, "schema"),
       "Terse observe/state omitted snapshot or schema",
     );
-    await this.assertNoRuntimeActorRequests(fromMs, toMs);
+    await this.assertNoRuntimeActorRequests(fromMs, toMs, probeRequestId);
     return value;
   }
 
@@ -348,8 +350,9 @@ export class Harness {
     const path = `/v1/projects/${encodeURIComponent(verification.projectId)}/actors/${encodeURIComponent(
       verification.actorName,
     )}/${encodeURIComponent(verification.actorId)}/invoke`;
+    const probeRequestId = `${this.seed}-runtime-auth-probe`;
     const body = {
-      requestId: `${this.seed}-runtime-auth-probe`,
+      requestId: probeRequestId,
       method: "__relayfile_conformance_auth_probe__",
       args: [],
     };
@@ -359,7 +362,7 @@ export class Harness {
     const toMs = Date.now();
     assert([401, 403].includes(omitted.status), `Terse runtime accepted omitted auth with status ${omitted.status}`);
     assert([401, 403].includes(invalid.status), `Terse runtime accepted invalid auth with status ${invalid.status}`);
-    await this.assertNoRuntimeActorRequests(fromMs, toMs);
+    await this.assertNoRuntimeActorRequests(fromMs, toMs, probeRequestId);
   }
 
   private async runtimeObserveState(): Promise<Record<string, unknown>> {
@@ -374,13 +377,14 @@ export class Harness {
     return asRecord(response.data);
   }
 
-  private async assertNoRuntimeActorRequests(fromMs: number, toMs: number): Promise<void> {
+  private async assertNoRuntimeActorRequests(fromMs: number, toMs: number, requestId: string): Promise<void> {
     const verification = this.requireRuntimeVerification();
     let cursor: string | undefined;
     for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
       const query = new URLSearchParams({
         actorName: verification.actorName,
         actorId: verification.actorId,
+        requestId,
         fromMs: String(Math.max(0, fromMs - TRACE_SKEW_MARGIN_MS)),
         toMs: String(toMs + TRACE_SKEW_MARGIN_MS),
         limit: "500",
@@ -403,6 +407,10 @@ export class Harness {
       cursor = trace.nextCursor;
     }
     throw new Error("Terse trace pagination exceeded 100 pages");
+  }
+
+  private nextRuntimeProbeRequestId(kind: string): string {
+    return `${this.seed}-runtime-${kind}-${String(++this.runtimeProbeCounter).padStart(4, "0")}`;
   }
 
   private requireRuntimeVerification(): NonNullable<ResolvedTarget["runtimeVerification"]> {

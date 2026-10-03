@@ -270,7 +270,7 @@ test("adapter attestation remains the evidence basis when a case mixes proof sou
   assert.equal(harness.cases[0]?.evidenceBasis, "adapter-attested");
 });
 
-test("Terse runtime trace queries allow five seconds of cross-host clock skew", async () => {
+test("Terse runtime trace queries combine probe IDs with a five-second clock-skew margin", async () => {
   const target = fakeTarget();
   target.runtime = { kind: "terse-durable-actors", version: "test" };
   target.runtimeVerification = {
@@ -284,27 +284,43 @@ test("Terse runtime trace queries allow five seconds of cross-host clock skew", 
   const previousFetch = globalThis.fetch;
   const previousNow = Date.now;
   const fixedNow = previousNow();
-  let traceUrl: URL | undefined;
+  let inspectProbeRequestId: string | undefined;
+  const traceUrls: URL[] = [];
   Date.now = () => fixedNow;
   globalThis.fetch = (async (input) => {
     const url = new URL(String(input));
+    if (url.pathname.endsWith("/observe/state")) {
+      return Response.json({ snapshot: {}, schema: {} });
+    }
     if (url.pathname.endsWith("/observe/requests")) {
-      traceUrl = url;
+      traceUrls.push(url);
       return Response.json({ dropped: 0, evicted: 0, persistenceFailed: false, reset: false, records: [] });
     }
     return Response.json({}, { status: 401 });
   }) as typeof fetch;
   try {
+    await harness.case("RF-TEST-INSPECT", "runtime inspection", [], () =>
+      harness.verifyStateInspection((probeRequestId) => {
+        assert(probeRequestId);
+        inspectProbeRequestId = probeRequestId;
+        return Promise.resolve({});
+      }));
     await harness.case("RF-AUTH-005", "runtime auth", [], () => harness.verifyRuntimeAuthRejects());
   } finally {
     globalThis.fetch = previousFetch;
     Date.now = previousNow;
   }
-  assert.equal(harness.cases[0]?.status, "passed");
-  assert.equal(harness.cases[0]?.evidenceBasis, "runtime-native");
-  assert(traceUrl);
-  assert.equal(Number(traceUrl.searchParams.get("fromMs")), fixedNow - 5_000);
-  assert.equal(Number(traceUrl.searchParams.get("toMs")), fixedNow + 5_000);
+  assert.deepEqual(harness.cases.map((result) => result.status), ["passed", "passed"]);
+  assert.deepEqual(harness.cases.map((result) => result.evidenceBasis), ["runtime-native", "runtime-native"]);
+  assert.equal(traceUrls.length, 2);
+  assert.deepEqual(
+    traceUrls.map((url) => url.searchParams.get("requestId")),
+    [inspectProbeRequestId, "seed-runtime-auth-probe"],
+  );
+  for (const traceUrl of traceUrls) {
+    assert.equal(Number(traceUrl.searchParams.get("fromMs")), fixedNow - 5_000);
+    assert.equal(Number(traceUrl.searchParams.get("toMs")), fixedNow + 5_000);
+  }
 });
 
 test("evidence emits JSON, JSONL, and JUnit without secrets", async () => {
