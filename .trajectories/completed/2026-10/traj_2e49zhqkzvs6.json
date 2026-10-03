@@ -29,10 +29,10 @@
         {
           "ts": 1791012309433,
           "type": "decision",
-          "content": "Resolve the GitHub clone sentinel cursor newest-first and require its exact file revision: Resolve the GitHub clone sentinel cursor newest-first and require its exact file revision",
+          "content": "Resolve the GitHub clone sentinel cursor newest-first and match its exact file revision when available: Resolve the GitHub clone sentinel cursor newest-first and match its exact file revision when available",
           "raw": {
-            "question": "Resolve the GitHub clone sentinel cursor newest-first and require its exact file revision",
-            "chosen": "Resolve the GitHub clone sentinel cursor newest-first and require its exact file revision",
+            "question": "Resolve the GitHub clone sentinel cursor newest-first and match its exact file revision when available",
+            "chosen": "Resolve the GitHub clone sentinel cursor newest-first and match its exact file revision when available",
             "alternatives": [
               {
                 "option": "Increase the watchdog",
@@ -76,16 +76,27 @@
     }
   ],
   "retrospective": {
-    "summary": "Made GitHub clone bootstrap cursor resolution newest-first and revision-safe, reducing the DEV manifest cursor lookup from 328 event requests to one; added regression coverage and verified the full mountsync package.",
-    "approach": "Measured released 0.10.70 on DEV, isolated the event-feed scan, implemented an optional descending-event extension with legacy fallback, matched the sentinel revision, then measured a cold and warm run with the built client.",
+    "summary": "Made GitHub clone bootstrap cursor resolution newest-first and revision-safe. Self-reported, non-gating DEV measurements observed a reduction from 328 event requests to one; regression coverage and repository CI are the gating evidence.",
+    "approach": "Measured released 0.10.70 on DEV, isolated the event-feed scan, implemented an optional descending-event extension with legacy fallback, matched the sentinel revision when available, then measured a cold and warm run with the built client.",
     "confidence": 0.96
   },
-  "commits": [],
-  "filesChanged": [],
+  "commits": [
+    "781b6aca"
+  ],
+  "filesChanged": [
+    ".trajectories/completed/2026-10/traj_2e49zhqkzvs6.json",
+    ".trajectories/completed/2026-10/traj_2e49zhqkzvs6.md",
+    ".trajectories/index.json",
+    "internal/mountsync/syncer.go",
+    "internal/mountsync/syncer_test.go"
+  ],
   "projectId": "AgentWorkforce/relayfile",
-  "tags": [],
+  "tags": [
+    "self-reported",
+    "non-gating"
+  ],
   "_trace": {
     "startRef": "aa95991113ec78a6c2ee04460ba401d0c0853640",
-    "endRef": "aa95991113ec78a6c2ee04460ba401d0c0853640"
+    "endRef": "781b6acad368fd7b817e490765d9d1d93c36fba4"
   }
 }
