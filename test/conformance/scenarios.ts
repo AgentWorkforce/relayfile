@@ -41,6 +41,36 @@ interface StateInspection {
   operations?: Array<{ opId: string; writebackAttempts: number; state: string }>;
 }
 
+export const CONFORMANCE_CASE_IDS = [
+  "RF-AUTH-001", "RF-AUTH-002", "RF-AUTH-003", "RF-AUTH-004", "RF-AUTH-005", "RF-MODE-001",
+  "RF-ING-001", "RF-ING-002", "RF-ING-003", "RF-CAS-001", "RF-CAS-002", "RF-WS-001",
+  "RF-WS-002", "RF-WS-003", "RF-DUR-001", "RF-OAS-001", "RF-OAS-002", "RF-QUEUE-001",
+  "RF-QUEUE-002", "RF-QUEUE-003", "RF-PROJ-001", "RF-PROJ-002", "RF-PROJ-003", "RF-TIMER-001",
+  "RF-TIMER-002", "RF-LIMIT-001", "RF-SER-001", "RF-CRASH-001", "RF-MIG-001", "RF-FAILOVER-001",
+  "RF-MOUNT-001",
+] as const;
+
+export const ADVANCED_CASE_IDS = [
+  "RF-AUTH-005",
+  "RF-WS-002",
+  "RF-QUEUE-001",
+  "RF-QUEUE-002",
+  "RF-QUEUE-003",
+  "RF-PROJ-001",
+  "RF-PROJ-002",
+  "RF-PROJ-003",
+  "RF-TIMER-001",
+  "RF-TIMER-002",
+  "RF-LIMIT-001",
+  "RF-SER-001",
+  "RF-CRASH-001",
+  "RF-MIG-001",
+  "RF-FAILOVER-001",
+  "RF-MOUNT-001",
+] as const;
+
+export type AdvancedCaseId = (typeof ADVANCED_CASE_IDS)[number];
+
 export async function runScenarios(h: Harness): Promise<void> {
   await authAndTenantScenarios(h);
   await ingestionScenarios(h);
@@ -374,11 +404,14 @@ async function contractScenarios(h: Harness): Promise<void> {
 async function advancedAdapterScenarios(h: Harness): Promise<void> {
   if (h.target.runtime.kind === "terse-durable-actors") {
     await h.case("RF-AUTH-005", "runtime actor rejects missing and invalid shared secrets", ["runtime-auth-probe"], async () => {
-      const omitted = await h.control<{ rejected: boolean; actorInvoked: boolean }>("auth.probe", { credential: "omitted" });
-      const invalid = await h.control<{ rejected: boolean; actorInvoked: boolean }>("auth.probe", { credential: "invalid" });
-      assert(omitted.rejected && invalid.rejected, "runtime accepted a missing or invalid shared secret");
-      assert(!omitted.actorInvoked && !invalid.actorInvoked, "unauthorized runtime probe reached actor application code");
+      await h.verifyRuntimeAuthRejects();
     });
+  } else {
+    h.notApplicable(
+      "RF-AUTH-005",
+      "runtime actor rejects missing and invalid shared secrets",
+      `not applicable to ${h.target.runtime.kind}`,
+    );
   }
 
   await h.case("RF-QUEUE-001", "retry progresses after backoff with no inbound traffic", ["provider-faults", "clock-control"], async () => {
@@ -486,6 +519,16 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
     assert(
       (digestAfter.eventCounts?.["/digests/today.md"] ?? 0) - digestEventsBefore === 1,
       "one provider mutation did not produce exactly one digest event; digest regeneration may be recursive",
+    );
+    const sentinel = `manual-${h.seed}`;
+    const manualEventsBefore = digestAfter.eventCounts?.["/digests/today.md"] ?? 0;
+    await writeRemoteFile(h, "/digests/today.md", sentinel);
+    await h.control("clock.advance", { milliseconds: 20_000 });
+    const manualDigest = await inspectState(h, ["/digests/today.md"]);
+    assertInspectedFile(manualDigest, "/digests/today.md", sentinel);
+    assert(
+      (manualDigest.eventCounts?.["/digests/today.md"] ?? 0) - manualEventsBefore === 1,
+      "a direct digest write regenerated recursively instead of emitting exactly its own event",
     );
   });
 
@@ -665,6 +708,7 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
 
   await h.case("RF-MIG-001", "export/import preserves revisions, cursors, pending work, and DLQ", ["state-migration", "provider-faults", "clock-control"], async () => {
     const path = h.path("migration/state.md");
+    const deadLetterId = `${h.seed}-dead-letter`;
     const historyPaths = [h.path("migration/history-a.md"), h.path("migration/history-b.md")];
     await writeRemoteFile(h, historyPaths[0]!, "history a");
     await writeRemoteFile(h, historyPaths[1]!, "history b");
@@ -679,7 +723,7 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
     await h.control("provider.configure", {
       seedMigrationState: {
         pendingOutboxId: `${h.seed}-pending`,
-        deadLetterId: `${h.seed}-dead-letter`,
+        deadLetterId,
       },
     });
     const exported = await h.control<Record<string, unknown>>("state.export");
@@ -690,7 +734,7 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
       "state export omitted the pending outbox operation",
     );
     assert(
-      Array.isArray(exportedManifest.deadLetterIds) && exportedManifest.deadLetterIds.includes(`${h.seed}-dead-letter`),
+      Array.isArray(exportedManifest.deadLetterIds) && exportedManifest.deadLetterIds.includes(deadLetterId),
       "state export omitted the DLQ record",
     );
     const destinationRuntime = h.target.runtime.kind === "cloudflare-do" ? "terse-durable-actors" : "cloudflare-do";
@@ -729,7 +773,7 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
     assertStatus(
       await h.request(
         "POST",
-        h.workspacePath(h.target.workspaces.primary, `/sync/dead-letter/${encodeURIComponent(`${h.seed}-dead-letter`)}/replay`),
+        h.workspacePath(h.target.workspaces.primary, `/sync/dead-letter/${encodeURIComponent(deadLetterId)}/replay`),
         { body: {} },
       ),
       202,
@@ -737,12 +781,12 @@ async function advancedAdapterScenarios(h: Harness): Promise<void> {
     await h.control("clock.advance", { milliseconds: 60_000 });
     const progressed = await inspectState(h, [path], {
       operationIds: [`${h.seed}-pending`],
-      deliveryIds: [`${h.seed}-dead-letter`],
+      deliveryIds: [deadLetterId],
     });
     const pending = progressed.operations?.find((operation) => operation.opId === `${h.seed}-pending`);
     assert(pending?.state === "succeeded", "imported pending outbox operation did not execute on the destination");
     assert(pending.writebackAttempts === 1, `imported pending outbox executed ${pending.writebackAttempts} times`);
-    assert(!progressed.deadLetters?.some((item) => item.envelopeId === `${h.seed}-dead-letter`), "destination DLQ replay did not clear the record");
+    assert(!progressed.deadLetters?.some((item) => item.envelopeId === deadLetterId), "destination DLQ replay did not clear the record");
   });
 
   await h.case("RF-FAILOVER-001", "replica switching retains a single monotonic writer", ["runtime-failover"], async () => {
@@ -880,7 +924,7 @@ async function inspectState(
   paths: string[],
   extra: Record<string, unknown> = {},
 ): Promise<StateInspection> {
-  return h.control<StateInspection>("state.inspect", { paths, ...extra });
+  return h.verifyStateInspection(() => h.control<StateInspection>("state.inspect", { paths, ...extra }));
 }
 
 function inspectedFile(state: StateInspection, path: string): InspectedFile | undefined {

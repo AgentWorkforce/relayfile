@@ -20,6 +20,7 @@
     "webhook-ingest",
     "event-cursor",
     "websocket-resume",
-    "durable-restart"
+    "durable-restart",
+    "large-effect-batch"
   ]
 }

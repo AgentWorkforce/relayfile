@@ -22,7 +22,8 @@
     "test:release": "node --test scripts/release/*.test.mjs",
     "conformance": "tsx test/conformance/run.ts",
     "test:conformance": "node --import tsx --test test/conformance/*.test.ts",
-    "test:conformance:local": "npm run test:conformance && tsx scripts/conformance.ts --ci && tsx test/conformance/run.ts --target go-local --profile core",
+    "test:conformance:local": "npm run test:conformance && npm run test:conformance:fake && tsx scripts/conformance.ts --ci && tsx test/conformance/run.ts --target go-local --profile core",
+    "test:conformance:fake": "tsx test/conformance/fake-adapter-matrix.ts",
     "test:conformance:cloudflare": "tsx test/conformance/run.ts --target cloudflare-hosted --profile core",
     "test:conformance:cloudflare:full": "tsx test/conformance/run.ts --target cloudflare-controlled --profile full",
     "test:conformance:terse": "tsx test/conformance/run.ts --target terse --profile full",
@@ -43,7 +44,9 @@
     "agent-trajectories": "^0.5.8",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
+    "@types/ws": "8.18.1",
     "tsx": "^4.21.0",
+    "ws": "8.20.0",
     "yaml": "2.8.3"
   }
 }

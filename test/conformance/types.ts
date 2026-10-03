@@ -74,6 +74,17 @@ export interface TargetFile {
     tokenEnv?: string;
     operations: ControlOperation[];
   };
+  runtimeVerification?: {
+    baseUrl?: string;
+    baseUrlEnv?: string;
+    adminKeyEnv: string;
+    projectId?: string;
+    projectIdEnv?: string;
+    actorName?: string;
+    actorNameEnv?: string;
+    actorId?: string;
+    actorIdEnv?: string;
+  };
 }
 
 export interface ResolvedTarget {
@@ -88,6 +99,13 @@ export interface ResolvedTarget {
     baseUrl: string;
     token?: string;
     operations: Set<ControlOperation>;
+  };
+  runtimeVerification?: {
+    baseUrl: string;
+    adminKey: string;
+    projectId: string;
+    actorName: string;
+    actorId: string;
   };
   sourcePath: string;
 }
@@ -113,6 +131,8 @@ export interface CaseResult {
   correlationIds: string[];
   error?: string;
   skipReason?: string;
+  skipKind?: "missing-capability" | "not-applicable";
+  evidenceBasis?: "runtime-native" | "adapter-attested";
 }
 
 export interface EvidenceSummary {

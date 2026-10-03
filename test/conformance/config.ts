@@ -85,6 +85,51 @@ export async function loadTarget(
     };
   }
 
+  let runtimeVerification: ResolvedTarget["runtimeVerification"];
+  if (file.runtimeVerification) {
+    const verificationBaseUrl = resolveValue(
+      file.runtimeVerification.baseUrl,
+      file.runtimeVerification.baseUrlEnv,
+      env,
+    );
+    requireResolved("runtime verification URL", verificationBaseUrl, sourcePath);
+    requireHttpUrl("runtime verification URL", verificationBaseUrl!, sourcePath);
+    const adminKey = envValue(file.runtimeVerification.adminKeyEnv, env);
+    if (!adminKey) {
+      throw new Error(
+        `target ${file.id} is unconfigured: ${file.runtimeVerification.adminKeyEnv} is required for runtime-native verification`,
+      );
+    }
+    const projectId = resolveValue(
+      file.runtimeVerification.projectId,
+      file.runtimeVerification.projectIdEnv,
+      env,
+    );
+    const actorName = resolveValue(
+      file.runtimeVerification.actorName,
+      file.runtimeVerification.actorNameEnv,
+      env,
+    );
+    const actorId = resolveValue(
+      file.runtimeVerification.actorId,
+      file.runtimeVerification.actorIdEnv,
+      env,
+    ) ?? primary;
+    requireResolved("runtime verification project ID", projectId, sourcePath);
+    requireResolved("runtime verification actor name", actorName, sourcePath);
+    requireResolved("runtime verification actor ID", actorId, sourcePath);
+    runtimeVerification = {
+      baseUrl: trimSlash(verificationBaseUrl!),
+      adminKey,
+      projectId: projectId!,
+      actorName: actorName!,
+      actorId: actorId!,
+    };
+  }
+  if (file.runtime.kind === "terse-durable-actors" && !runtimeVerification) {
+    throw new Error(`${sourcePath}: Terse targets require runtimeVerification`);
+  }
+
   return {
     file,
     target: {
@@ -102,6 +147,7 @@ export async function loadTarget(
       tokens,
       capabilities: new Set(file.capabilities),
       ...(control ? { control } : {}),
+      ...(runtimeVerification ? { runtimeVerification } : {}),
       sourcePath,
     },
   };
@@ -198,6 +244,9 @@ function validateTargetFile(file: TargetFile, sourcePath: string): void {
     if (controlled.length > 0) {
       throw new Error(`${sourcePath}: capabilities require a control adapter: ${controlled.join(", ")}`);
     }
+  }
+  if (file.runtime.kind === "terse-durable-actors" && !file.runtimeVerification) {
+    throw new Error(`${sourcePath}: terse-durable-actors requires runtimeVerification`);
   }
 }
 

@@ -57,5 +57,12 @@
       "mount.start",
       "mount.stop"
     ]
+  },
+  "runtimeVerification": {
+    "baseUrlEnv": "RELAYFILE_TERSE_RUNTIME_URL",
+    "adminKeyEnv": "RELAYFILE_TERSE_ADMIN_KEY",
+    "projectIdEnv": "RELAYFILE_TERSE_PROJECT_ID",
+    "actorNameEnv": "RELAYFILE_TERSE_ACTOR_NAME",
+    "actorIdEnv": "RELAYFILE_TERSE_ACTOR_ID"
   }
 }

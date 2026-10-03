@@ -10,6 +10,7 @@ export function redact<T>(value: T, target?: ResolvedTarget): T {
   if (target) {
     for (const token of Object.values(target.tokens)) if (token) secrets.add(token);
     if (target.control?.token) secrets.add(target.control.token);
+    if (target.runtimeVerification?.adminKey) secrets.add(target.runtimeVerification.adminKey);
   }
   return redactValue(value, secrets) as T;
 }

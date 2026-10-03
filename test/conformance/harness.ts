@@ -24,6 +24,25 @@ export interface RequestOptions {
   signal?: AbortSignal;
 }
 
+export interface HarnessOptions {
+  includeCaseIds?: ReadonlySet<string>;
+  maxPollTimeoutMs?: number;
+}
+
+interface RuntimeResponse<T = unknown> {
+  status: number;
+  data: T;
+}
+
+interface TracePage {
+  dropped?: number;
+  evicted?: number;
+  persistenceFailed?: boolean;
+  records?: unknown[];
+  nextCursor?: string | null;
+  reset?: boolean;
+}
+
 export class RequestTransportError extends Error {
   constructor(
     readonly correlationId: string,
@@ -41,12 +60,14 @@ export class Harness {
   private correlationCounter = 0;
   private activeCorrelations?: string[];
   private activePollSignal?: AbortSignal;
+  private activeEvidenceBasis?: CaseResult["evidenceBasis"];
 
   constructor(
     readonly target: ResolvedTarget,
     readonly profile: Profile,
     readonly seed: string,
     private readonly localRestart?: () => Promise<void>,
+    private readonly options: HarnessOptions = {},
   ) {}
 
   path(suffix: string): string {
@@ -63,6 +84,7 @@ export class Harness {
     requiredCapabilities: Capability[],
     run: () => Promise<void>,
   ): Promise<void> {
+    if (this.options.includeCaseIds && !this.options.includeCaseIds.has(id)) return;
     const missing = requiredCapabilities.filter((capability) => !this.target.capabilities.has(capability));
     if (missing.length > 0) {
       const reason = `target ${this.target.id} lacks ${missing.join(", ")}`;
@@ -73,13 +95,16 @@ export class Harness {
         durationMs: 0,
         requiredCapabilities,
         correlationIds: [],
-        ...(this.profile === "full" ? { error: reason } : { skipReason: reason }),
+        ...(this.profile === "full"
+          ? { error: reason }
+          : { skipReason: reason, skipKind: "missing-capability" as const }),
       });
       return;
     }
 
     const started = performance.now();
     this.activeCorrelations = [];
+    this.activeEvidenceBasis = undefined;
     try {
       await run();
       this.cases.push({
@@ -89,6 +114,7 @@ export class Harness {
         durationMs: Math.round(performance.now() - started),
         requiredCapabilities,
         correlationIds: this.activeCorrelations,
+        ...(this.activeEvidenceBasis ? { evidenceBasis: this.activeEvidenceBasis } : {}),
       });
     } catch (error) {
       this.cases.push({
@@ -99,10 +125,30 @@ export class Harness {
         requiredCapabilities,
         correlationIds: this.activeCorrelations,
         error: error instanceof Error ? error.message : String(error),
+        ...(this.activeEvidenceBasis ? { evidenceBasis: this.activeEvidenceBasis } : {}),
       });
     } finally {
       this.activeCorrelations = undefined;
+      this.activeEvidenceBasis = undefined;
     }
+  }
+
+  notApplicable(id: string, name: string, reason: string): void {
+    if (this.options.includeCaseIds && !this.options.includeCaseIds.has(id)) return;
+    this.cases.push({
+      id,
+      name,
+      status: "skipped",
+      durationMs: 0,
+      requiredCapabilities: [],
+      correlationIds: [],
+      skipReason: reason,
+      skipKind: "not-applicable",
+    });
+  }
+
+  markEvidenceBasis(basis: NonNullable<CaseResult["evidenceBasis"]>): void {
+    if (basis === "runtime-native" || !this.activeEvidenceBasis) this.activeEvidenceBasis = basis;
   }
 
   async request<T = unknown>(method: string, path: string, options: RequestOptions = {}): Promise<ApiResponse<T>> {
@@ -259,6 +305,150 @@ export class Harness {
     return data as T;
   }
 
+  async verifyStateInspection<T>(read: () => Promise<T>): Promise<T> {
+    if (this.target.runtime.kind === "cloudflare-do") {
+      this.markEvidenceBasis("adapter-attested");
+      return read();
+    }
+    if (this.target.runtime.kind !== "terse-durable-actors") return read();
+
+    this.markEvidenceBasis("runtime-native");
+    const fromMs = Date.now();
+    const value = await read();
+    const toMs = Date.now();
+    const observed = await this.runtimeObserveState();
+    assert(
+      Object.hasOwn(observed, "snapshot") && Object.hasOwn(observed, "schema"),
+      "Terse observe/state omitted snapshot or schema",
+    );
+    await this.assertNoRuntimeActorRequests(fromMs, toMs);
+    return value;
+  }
+
+  async verifyRuntimeAuthRejects(): Promise<void> {
+    const verification = this.requireRuntimeVerification();
+    this.markEvidenceBasis("runtime-native");
+    const path = `/v1/projects/${encodeURIComponent(verification.projectId)}/actors/${encodeURIComponent(
+      verification.actorName,
+    )}/${encodeURIComponent(verification.actorId)}/invoke`;
+    const body = {
+      requestId: `${this.seed}-runtime-auth-probe`,
+      method: "__relayfile_conformance_auth_probe__",
+      args: [],
+    };
+    const fromMs = Date.now();
+    const omitted = await this.runtimeRequest("POST", path, {}, body);
+    const invalid = await this.runtimeRequest("POST", path, { Authorization: "Bearer invalid-conformance-key" }, body);
+    const toMs = Date.now();
+    assert([401, 403].includes(omitted.status), `Terse runtime accepted omitted auth with status ${omitted.status}`);
+    assert([401, 403].includes(invalid.status), `Terse runtime accepted invalid auth with status ${invalid.status}`);
+    await this.assertNoRuntimeActorRequests(fromMs, toMs);
+  }
+
+  private async runtimeObserveState(): Promise<Record<string, unknown>> {
+    const verification = this.requireRuntimeVerification();
+    const query = new URLSearchParams({ actorName: verification.actorName, actorId: verification.actorId });
+    const response = await this.runtimeRequest(
+      "GET",
+      `/v1/projects/${encodeURIComponent(verification.projectId)}/observe/state?${query.toString()}`,
+      { Authorization: `Bearer ${verification.adminKey}` },
+    );
+    assert(response.status === 200, `Terse observe/state returned ${response.status}`);
+    return asRecord(response.data);
+  }
+
+  private async assertNoRuntimeActorRequests(fromMs: number, toMs: number): Promise<void> {
+    const verification = this.requireRuntimeVerification();
+    let cursor: string | undefined;
+    for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
+      const query = new URLSearchParams({
+        actorName: verification.actorName,
+        actorId: verification.actorId,
+        fromMs: String(Math.max(0, fromMs - 1)),
+        toMs: String(toMs + 1),
+        limit: "500",
+      });
+      if (cursor) query.set("cursor", cursor);
+      const response = await this.runtimeRequest<TracePage>(
+        "GET",
+        `/v1/projects/${encodeURIComponent(verification.projectId)}/observe/requests?${query.toString()}`,
+        { Authorization: `Bearer ${verification.adminKey}` },
+      );
+      assert(response.status === 200, `Terse observe/requests returned ${response.status}`);
+      const trace = asRecord(response.data) as TracePage;
+      assert(trace.dropped === 0, `Terse trace window dropped ${String(trace.dropped)} records`);
+      assert(trace.evicted === 0, `Terse trace window evicted ${String(trace.evicted)} records`);
+      assert(trace.persistenceFailed === false, "Terse trace persistence failed");
+      assert(trace.reset === false, "Terse trace window reset while verifying no-wake behavior");
+      assert(Array.isArray(trace.records), "Terse trace response omitted records");
+      assert(trace.records.length === 0, `runtime-native probe reached actor application code (${trace.records.length} records)`);
+      if (!trace.nextCursor) return;
+      cursor = trace.nextCursor;
+    }
+    throw new Error("Terse trace pagination exceeded 100 pages");
+  }
+
+  private requireRuntimeVerification(): NonNullable<ResolvedTarget["runtimeVerification"]> {
+    const verification = this.target.runtimeVerification;
+    assert(verification, `target ${this.target.id} lacks runtime-native verification configuration`);
+    return verification;
+  }
+
+  private async runtimeRequest<T = unknown>(
+    method: string,
+    path: string,
+    extraHeaders: Record<string, string>,
+    body?: unknown,
+  ): Promise<RuntimeResponse<T>> {
+    const verification = this.requireRuntimeVerification();
+    const correlationId = `${this.seed}-runtime-${String(++this.correlationCounter).padStart(4, "0")}`;
+    this.activeCorrelations?.push(correlationId);
+    const headers: Record<string, string> = {
+      "X-Correlation-Id": correlationId,
+      ...extraHeaders,
+      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+    };
+    const url = `${verification.baseUrl}${path}`;
+    const startedAt = new Date().toISOString();
+    const started = performance.now();
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method,
+        headers,
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        ...(this.activePollSignal ? { signal: this.activePollSignal } : {}),
+      });
+    } catch (error) {
+      this.exchanges.push({
+        correlationId,
+        method: "RUNTIME",
+        url,
+        startedAt,
+        durationMs: Math.round(performance.now() - started),
+        request: { headers, ...(body === undefined ? {} : { body }) },
+        response: { status: 0, headers: {}, body: { transportError: error instanceof Error ? error.name : "Error" } },
+      });
+      throw new Error(`runtime-native request transport failure (correlation ${correlationId})`);
+    }
+    const raw = await response.text();
+    let data: unknown = raw;
+    if (raw) {
+      try { data = JSON.parse(raw); } catch { /* retain text */ }
+    }
+    const responseHeaders = Object.fromEntries(response.headers.entries());
+    this.exchanges.push({
+      correlationId,
+      method: "RUNTIME",
+      url,
+      startedAt,
+      durationMs: Math.round(performance.now() - started),
+      request: { headers, ...(body === undefined ? {} : { body }) },
+      response: { status: response.status, headers: responseHeaders, ...(raw ? { body: data } : {}) },
+    });
+    return { status: response.status, data: data as T };
+  }
+
   async restart(): Promise<void> {
     if (this.localRestart) {
       await this.localRestart();
@@ -268,7 +458,8 @@ export class Harness {
   }
 
   async poll<T>(label: string, read: () => Promise<T>, accept: (value: T) => boolean, timeoutMs = 5_000): Promise<T> {
-    const deadline = Date.now() + timeoutMs;
+    const effectiveTimeoutMs = Math.min(timeoutMs, this.options.maxPollTimeoutMs ?? timeoutMs);
+    const deadline = Date.now() + effectiveTimeoutMs;
     let delay = 20;
     let latest: T | undefined;
     while (Date.now() < deadline) {
@@ -283,7 +474,7 @@ export class Harness {
           new Promise<never>((_, reject) => {
             timer = setTimeout(() => {
               controller.abort();
-              reject(new Error(`${label} did not converge within ${timeoutMs}ms; latest=${safeDiagnostic(latest)}`));
+              reject(new Error(`${label} did not converge within ${effectiveTimeoutMs}ms; latest=${safeDiagnostic(latest)}`));
             }, remaining);
           }),
         ]);
@@ -296,7 +487,7 @@ export class Harness {
       if (sleepMs > 0) await new Promise((resolve) => setTimeout(resolve, sleepMs));
       delay = Math.min(delay * 2, 250);
     }
-    throw new Error(`${label} did not converge within ${timeoutMs}ms; latest=${safeDiagnostic(latest)}`);
+    throw new Error(`${label} did not converge within ${effectiveTimeoutMs}ms; latest=${safeDiagnostic(latest)}`);
   }
 
   summary(): EvidenceSummary {

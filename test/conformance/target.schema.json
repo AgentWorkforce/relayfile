@@ -82,6 +82,22 @@
           }
         }
       }
+    },
+    "runtimeVerification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adminKeyEnv"],
+      "properties": {
+        "baseUrl": { "type": "string", "format": "uri" },
+        "baseUrlEnv": { "type": "string" },
+        "adminKeyEnv": { "type": "string" },
+        "projectId": { "type": "string" },
+        "projectIdEnv": { "type": "string" },
+        "actorName": { "type": "string" },
+        "actorNameEnv": { "type": "string" },
+        "actorId": { "type": "string" },
+        "actorIdEnv": { "type": "string" }
+      }
     }
   }
 }

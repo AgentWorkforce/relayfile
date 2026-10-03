@@ -1,6 +1,7 @@
 #!/usr/bin/env npx tsx
 import { resolve } from "node:path";
 import { assertFullRunSafety, loadTarget } from "./config.js";
+import { appendEvidenceStepSummary } from "./ci-summary.js";
 import { redact, redactEnvironmentText, writeEvidence } from "./evidence.js";
 import { Harness } from "./harness.js";
 import { LocalGoTarget } from "./local-go.js";
@@ -42,6 +43,7 @@ async function main(): Promise<void> {
     const summary = harness.summary();
     const outDir = resolve(options.outDir ?? `artifacts/conformance/${target.id}/${seed}`);
     await writeEvidence(outDir, summary, harness.exchanges, target);
+    await appendEvidenceStepSummary(redact(summary, target));
     printSummary(redact(summary, target), outDir);
     if (summary.counts.failed > 0) process.exitCode = 1;
   } finally {
