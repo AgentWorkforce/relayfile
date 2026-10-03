@@ -427,14 +427,14 @@
       "status": "completed",
       "startedAt": "2026-10-03T06:25:41.952Z",
       "completedAt": "2026-10-03T07:25:09.723Z",
-      "path": "/home/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-10/traj_2e49zhqkzvs6.json"
+      "path": ".trajectories/completed/2026-10/traj_2e49zhqkzvs6.json"
     },
     "traj_ys8v0ia099wi": {
       "title": "Harden descending clone cursor pagination",
       "status": "completed",
       "startedAt": "2026-10-03T07:31:30.162Z",
       "completedAt": "2026-10-03T07:33:18.387Z",
-      "path": "/home/khaliqgant/Projects/AgentWorkforce/relayfile/.trajectories/completed/2026-10/traj_ys8v0ia099wi.json"
+      "path": ".trajectories/completed/2026-10/traj_ys8v0ia099wi.json"
     }
   }
 }
