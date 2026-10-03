@@ -7397,7 +7397,10 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 			if isSymlink {
 				writeErr = writeSymlinkAtomicSecure(stagingRoot, stagedPath, header.Linkname)
 			} else {
-				writeErr = writeFileAtomicSecure(stagingRoot, stagedPath, data, os.FileMode(meta.Mode&0o777))
+				// Staging is private and must remain readable by the publisher
+				// even when legacy metadata reports mode 0000. The authoritative
+				// mode is applied only to the final path after publication.
+				writeErr = writeFileAtomicSecure(stagingRoot, stagedPath, data, 0o600)
 			}
 			if writeErr != nil {
 				return nil, writeErr
@@ -7453,6 +7456,7 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 			// A local writeback may have landed after this entry was staged but
 			// before the full archive finished verification. Preserve that newer
 			// local state just as the streaming path does before staging.
+			prog.touch()
 			continue
 		}
 		if entry.stagedPath != "" {
@@ -7481,6 +7485,7 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 			return nil, err
 		}
 		s.state.Files[entry.remotePath] = entry.state
+		prog.touch()
 	}
 	return remotePaths, nil
 }
