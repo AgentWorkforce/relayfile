@@ -10,7 +10,7 @@
 
 ## Summary
 
-Added fail-fast repeated-cursor detection to descending and legacy clone-manifest event pagination, kept blank-revision manifests on the latest-match compatibility path, and exercised multi-page success and cursor-cycle failure.
+Added fail-fast repeated-cursor detection to descending and legacy clone-manifest event pagination, kept blank-revision manifests on the latest-match compatibility path, and recorded self-reported, non-gating test coverage for multi-page success and cursor-cycle failure.
 
 **Approach:** Applied the existing MalformedPaginationError pattern used by other Relayfile pagination loops and covered descending, legacy, and blank-revision compatibility paths with focused regression tests.
 

@@ -47,7 +47,7 @@
     }
   ],
   "retrospective": {
-    "summary": "Added fail-fast repeated-cursor detection to descending and legacy clone-manifest event pagination, kept blank-revision manifests on the latest-match compatibility path, and exercised multi-page success and cursor-cycle failure.",
+    "summary": "Added fail-fast repeated-cursor detection to descending and legacy clone-manifest event pagination, kept blank-revision manifests on the latest-match compatibility path, and recorded self-reported, non-gating test coverage for multi-page success and cursor-cycle failure.",
     "approach": "Applied the existing MalformedPaginationError pattern used by other Relayfile pagination loops and covered descending, legacy, and blank-revision compatibility paths with focused regression tests.",
     "confidence": 0.99
   },
@@ -64,7 +64,9 @@
   ],
   "projectId": "AgentWorkforce/relayfile",
   "tags": [
-    "review-follow-up"
+    "review-follow-up",
+    "self-reported",
+    "non-gating"
   ],
   "_trace": {
     "startRef": "781b6acad368fd7b817e490765d9d1d93c36fba4",

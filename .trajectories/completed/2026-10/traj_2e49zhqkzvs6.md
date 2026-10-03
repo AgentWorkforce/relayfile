@@ -10,7 +10,7 @@
 
 ## Summary
 
-Made GitHub clone bootstrap cursor resolution newest-first and revision-safe. Self-reported, non-gating DEV measurements observed a reduction from 328 event requests to one; regression coverage and repository CI are the gating evidence.
+Made GitHub clone bootstrap cursor resolution newest-first and revision-matched when the manifest revision is available. Self-reported, non-gating DEV measurements observed a reduction from 328 event requests to one; regression coverage and repository CI are the gating evidence.
 
 **Approach:** Measured released 0.10.70 on DEV, isolated the event-feed scan, implemented an optional descending-event extension with legacy fallback, matched the sentinel revision when available, then measured a cold and warm run with the built client.
 
