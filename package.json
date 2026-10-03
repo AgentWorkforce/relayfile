@@ -20,6 +20,12 @@
     "test": "npm run test --workspace=packages/core && npm run test --workspace=packages/sdk/typescript && npm run test --workspace=@relayfile/client && npm run test --workspace=packages/local-mount && npm run test --workspace=@relayfile/file-observer && npm run test --workspace=packages/cli && npm run test:go",
     "test:go": "go test ./...",
     "test:release": "node --test scripts/release/*.test.mjs",
+    "conformance": "tsx test/conformance/run.ts",
+    "test:conformance": "node --import tsx --test test/conformance/*.test.ts",
+    "test:conformance:local": "npm run test:conformance && tsx scripts/conformance.ts --ci && tsx test/conformance/run.ts --target go-local --profile core",
+    "test:conformance:cloudflare": "tsx test/conformance/run.ts --target cloudflare-hosted --profile core",
+    "test:conformance:cloudflare:full": "tsx test/conformance/run.ts --target cloudflare-controlled --profile full",
+    "test:conformance:terse": "tsx test/conformance/run.ts --target terse --profile full",
     "typecheck": "npm run typecheck --workspace=packages/sdk/typescript && npm run typecheck --workspace=@relayfile/client && npm run typecheck --workspace=packages/agents && npm run typecheck --workspace=packages/local-mount && npm run typecheck:go",
     "typecheck:go": "go vet ./...",
     "evals:compile": "node scripts/evals/compile-cases.mjs",
@@ -35,6 +41,8 @@
     "@agent-relay/sdk": "^4.0.28",
     "@agentworkforce/workload-router": "^0.3.0",
     "agent-trajectories": "^0.5.8",
-    "tsx": "^4.21.0"
+    "ajv": "8.20.0",
+    "tsx": "^4.21.0",
+    "yaml": "2.8.3"
   }
 }

@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://relayfile.dev/schemas/conformance-target-v1.json",
+  "title": "Relayfile backend conformance target",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "runtime", "workspaces", "auth", "capabilities"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": { "type": "string", "minLength": 1 },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "enum": ["go-oracle", "cloudflare-do", "terse-durable-actors"] },
+        "version": { "type": "string" },
+        "versionEnv": { "type": "string" }
+      }
+    },
+    "relayfileSha": { "type": "string" },
+    "relayfileShaEnv": { "type": "string" },
+    "baseUrl": { "type": "string", "format": "uri" },
+    "baseUrlEnv": { "type": "string" },
+    "workspaces": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "primary": { "type": "string" },
+        "primaryEnv": { "type": "string" },
+        "secondary": { "type": "string" },
+        "secondaryEnv": { "type": "string" }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["strategy"],
+      "properties": {
+        "strategy": { "enum": ["local-rs256", "environment"] },
+        "primaryTokenEnv": { "type": "string" },
+        "secondaryTokenEnv": { "type": "string" },
+        "pathScopedTokenEnv": { "type": "string" },
+        "readOnlyTokenEnv": { "type": "string" },
+        "runtimeSharedSecretEnv": { "type": "string" }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "public-api", "tenant-auth", "webhook-ingest", "event-cursor", "websocket-resume",
+          "durable-restart", "provider-faults", "clock-control", "runtime-eviction", "large-effect-batch", "runtime-crash",
+          "runtime-failover", "state-migration", "mount-control", "digest-projection"
+        ]
+      }
+    },
+    "control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operations"],
+      "properties": {
+        "baseUrl": { "type": "string", "format": "uri" },
+        "baseUrlEnv": { "type": "string" },
+        "tokenEnv": { "type": "string" },
+        "operations": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "reset", "provider.configure", "provider.calls", "clock.advance", "runtime.evict",
+              "runtime.crash", "runtime.restart", "runtime.failover", "state.export", "state.import",
+              "mount.start", "mount.stop"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

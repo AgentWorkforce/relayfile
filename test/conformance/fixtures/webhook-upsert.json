@@ -1,0 +1,12 @@
+{
+  "provider": "conformance",
+  "event_type": "file.updated",
+  "path": "/provider/items/deterministic.json",
+  "data": {
+    "content": "{\"state\":\"open\",\"version\":1}\n",
+    "contentType": "application/json",
+    "providerObjectId": "deterministic-item"
+  },
+  "delivery_id": "delivery-deterministic-1",
+  "timestamp": "2026-01-02T03:04:05.000Z"
+}
