@@ -580,9 +580,10 @@ func relayfileCommands() []cliCommandSpec {
 				{Flags: "--reason <text>", Description: "free-form reason recorded server-side", DefaultValue: "manual"},
 				serverFlagOption,
 				tokenFlagOption,
+				{Flags: "--no-retry", Description: "do not retry transient provider-status read failures", DefaultValue: false},
 			},
 			dispatch: func(inv cliInvocation) error {
-				return runPull(inv.args, inv.stdout)
+				return runPull(inv.args, inv.stdout, inv.stderr)
 			},
 		},
 		{

@@ -6311,7 +6311,7 @@ func runOpsReplay(args []string, stdin io.Reader, stdout io.Writer) error {
 	return nil
 }
 
-func runPull(args []string, stdout io.Writer) error {
+func runPull(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("pull", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	workspaceName := fs.String("workspace", "", "workspace name or id")
@@ -6319,12 +6319,14 @@ func runPull(args []string, stdout io.Writer) error {
 	reason := fs.String("reason", "manual", "free-form reason recorded server-side")
 	server := fs.String("server", "", "relayfile server URL override")
 	tokenOverride := fs.String("token", "", "relayfile token override")
+	noRetry := fs.Bool("no-retry", false, "do not retry transient provider-status read failures")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
 		"workspace": true,
 		"provider":  true,
 		"reason":    true,
 		"server":    true,
 		"token":     true,
+		"no-retry":  false,
 	})); err != nil {
 		return err
 	}
@@ -6337,7 +6339,7 @@ func runPull(args []string, stdout io.Writer) error {
 		return err
 	}
 
-	providers, err := resolvePullProviders(commandClient, strings.TrimSpace(*provider))
+	providers, err := resolvePullProviders(commandClient, strings.TrimSpace(*provider), defaultOneShotGETRetryPolicy(!*noRetry, stderr))
 	if err != nil {
 		return err
 	}
@@ -6370,12 +6372,12 @@ func runPull(args []string, stdout io.Writer) error {
 	return nil
 }
 
-func resolvePullProviders(commandClient *workspaceCommandClient, requested string) ([]string, error) {
+func resolvePullProviders(commandClient *workspaceCommandClient, requested string, retryPolicy oneShotGETRetryPolicy) ([]string, error) {
 	if requested != "" {
 		return []string{normalizeProviderID(requested)}, nil
 	}
 	var status syncStatusResponse
-	err := commandClient.getWorkspaceJSON(context.Background(), func(workspaceID string) string {
+	err := retryPolicy.getWorkspaceJSON(context.Background(), commandClient, func(workspaceID string) string {
 		return fmt.Sprintf("/v1/workspaces/%s/sync/status", url.PathEscape(workspaceID))
 	}, &status)
 	if err != nil {

@@ -997,6 +997,11 @@
       {
         "flags": "--token <token>",
         "description": "relayfile token override"
+      },
+      {
+        "flags": "--no-retry",
+        "description": "do not retry transient provider-status read failures",
+        "defaultValue": false
       }
     ]
   },

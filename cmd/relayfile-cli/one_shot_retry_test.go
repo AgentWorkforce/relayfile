@@ -52,6 +52,46 @@ func TestOneShotGETRetryPolicyRetriesWorkspaceBusyThenSucceeds(t *testing.T) {
 	}
 }
 
+func TestOneShotGETRetryPolicyHonorsRetryAfterFor503(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(0, 0)}
+	policy := testOneShotPolicy(clock, &bytes.Buffer{})
+	policy.opts.jitterFraction = 0.2
+	policy.jitter = func(delay time.Duration, _ float64) time.Duration { return delay - time.Second }
+	var attempts int
+	err := policy.run(context.Background(), func(context.Context) error {
+		attempts++
+		if attempts == 1 {
+			return &apiError{StatusCode: http.StatusServiceUnavailable, RetryAfter: 30 * time.Second}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("retry returned error: %v", err)
+	}
+	if len(clock.sleeps) != 1 || clock.sleeps[0] != 30*time.Second {
+		t.Fatalf("sleeps = %v, want [30s]", clock.sleeps)
+	}
+}
+
+func TestOneShotGETRetryPolicyLabelsGeneric429(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(0, 0)}
+	var stderr bytes.Buffer
+	var attempts int
+	err := testOneShotPolicy(clock, &stderr).run(context.Background(), func(context.Context) error {
+		attempts++
+		if attempts == 1 {
+			return &apiError{StatusCode: http.StatusTooManyRequests, Code: "rate_limited"}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("retry returned error: %v", err)
+	}
+	if got := stderr.String(); got != "rate limited, retrying in 1s\n" {
+		t.Fatalf("stderr = %q", got)
+	}
+}
+
 func TestOneShotGETRetryPolicyClassificationAndExhaustion(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -157,5 +197,37 @@ func TestReadNoRetryMakesSingleRequest(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestResolvePullProvidersRetriesStatusRead(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			w.Header().Set("Retry-After", "2")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"code":"service_unavailable","message":"busy"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"providers":[{"provider":"slack"}]}`))
+	}))
+	defer server.Close()
+
+	client, err := newAPIClient(server.URL, testJWTWithWorkspace("ws_demo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	commandClient := &workspaceCommandClient{workspaceID: "ws_demo", client: client, directToken: true}
+	clock := &fakeClock{now: time.Unix(0, 0)}
+	providers, err := resolvePullProviders(commandClient, "", testOneShotPolicy(clock, &bytes.Buffer{}))
+	if err != nil {
+		t.Fatalf("resolve providers: %v", err)
+	}
+	if len(providers) != 1 || providers[0] != "slack" {
+		t.Fatalf("providers = %v, want [slack]", providers)
+	}
+	if len(clock.sleeps) != 1 || clock.sleeps[0] != 2*time.Second {
+		t.Fatalf("sleeps = %v, want [2s]", clock.sleeps)
 	}
 }

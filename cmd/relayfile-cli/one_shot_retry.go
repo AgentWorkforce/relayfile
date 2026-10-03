@@ -20,6 +20,7 @@ type oneShotGETRetryPolicy struct {
 	enabled bool
 	stderr  io.Writer
 	opts    politeOpts
+	jitter  func(time.Duration, float64) time.Duration
 }
 
 func defaultOneShotGETRetryPolicy(enabled bool, stderr io.Writer) oneShotGETRetryPolicy {
@@ -40,37 +41,40 @@ func (p oneShotGETRetryPolicy) run(ctx context.Context, get func(context.Context
 		return get(ctx)
 	}
 
-	var lastErr error
-	attempts := 0
-	opts := p.opts
-	baseSleep := opts.sleep
-	if baseSleep == nil {
-		baseSleep = sleepCtx
+	opts := p.opts.withDefaults()
+	jitter := p.jitter
+	if jitter == nil {
+		jitter = applyJitter
 	}
-	opts.sleep = func(ctx context.Context, delay time.Duration) error {
-		// politePoll applies jitter after its upper clamp. Keep this command's
-		// advertised 60-second ceiling absolute.
-		delay = clampDuration(delay, time.Millisecond, oneShotGETMaxDelay)
-		if p.stderr != nil {
-			fmt.Fprintf(p.stderr, "%s, retrying in %s\n", oneShotRetryLabel(lastErr), delay.Round(time.Millisecond))
+	for attempt := 1; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		return baseSleep(ctx, delay)
-	}
+		err := get(ctx)
+		if err == nil || attempt >= oneShotGETMaxAttempts || !isRetryableOneShotGETError(err) {
+			return err
+		}
 
-	err := politePoll(ctx, func(ctx context.Context) pollResult {
-		attempts++
-		lastErr = get(ctx)
-		if lastErr == nil || attempts >= oneShotGETMaxAttempts || !isRetryableOneShotGETError(lastErr) {
-			return pollResult{done: true}
-		}
 		var apiErr *apiError
-		_ = errors.As(lastErr, &apiErr)
-		return pollResult{err: lastErr, httpStatus: apiErr.StatusCode, retryAfter: apiErr.RetryAfter}
-	}, opts)
-	if err != nil {
-		return err
+		_ = errors.As(err, &apiErr)
+		baseDelay := backoffFor(attempt, opts.minInterval, opts.maxInterval)
+		if apiErr.RetryAfter > 0 {
+			baseDelay = clampDuration(apiErr.RetryAfter, opts.minInterval, opts.maxInterval)
+		}
+		delay := jitter(baseDelay, opts.jitterFraction)
+		// Retry-After is a lower bound. Symmetric jitter must never make us
+		// retry before the server's advertised delay has elapsed.
+		if apiErr.RetryAfter > 0 && delay < baseDelay {
+			delay = baseDelay
+		}
+		delay = clampDuration(delay, time.Millisecond, opts.maxInterval)
+		if p.stderr != nil {
+			fmt.Fprintf(p.stderr, "%s, retrying in %s\n", oneShotRetryLabel(err), delay.Round(time.Millisecond))
+		}
+		if err := opts.sleep(ctx, delay); err != nil {
+			return err
+		}
 	}
-	return lastErr
 }
 
 func isRetryableOneShotGETError(err error) bool {
@@ -82,6 +86,9 @@ func oneShotRetryLabel(err error) string {
 	var apiErr *apiError
 	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusTooManyRequests && apiErr.Code == "workspace_busy" {
 		return "workspace busy"
+	}
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusTooManyRequests {
+		return "rate limited"
 	}
 	return "service unavailable"
 }
