@@ -10,6 +10,8 @@ import type {
 } from "./types.js";
 import { validateOpenApiResponse } from "./openapi-validator.js";
 
+const TRACE_SKEW_MARGIN_MS = 5_000;
+
 export interface ApiResponse<T = unknown> {
   status: number;
   data: T;
@@ -162,7 +164,7 @@ export class Harness {
   }
 
   markEvidenceBasis(basis: NonNullable<CaseResult["evidenceBasis"]>): void {
-    if (basis === "runtime-native" || !this.activeEvidenceBasis) this.activeEvidenceBasis = basis;
+    if (basis === "adapter-attested" || !this.activeEvidenceBasis) this.activeEvidenceBasis = basis;
   }
 
   async request<T = unknown>(method: string, path: string, options: RequestOptions = {}): Promise<ApiResponse<T>> {
@@ -379,8 +381,8 @@ export class Harness {
       const query = new URLSearchParams({
         actorName: verification.actorName,
         actorId: verification.actorId,
-        fromMs: String(Math.max(0, fromMs - 1)),
-        toMs: String(toMs + 1),
+        fromMs: String(Math.max(0, fromMs - TRACE_SKEW_MARGIN_MS)),
+        toMs: String(toMs + TRACE_SKEW_MARGIN_MS),
         limit: "500",
       });
       if (cursor) query.set("cursor", cursor);

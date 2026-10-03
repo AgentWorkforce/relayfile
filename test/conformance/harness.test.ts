@@ -260,6 +260,53 @@ test("missing capability skips in core and fails in full", async () => {
   assert.equal(full.cases[0]?.status, "failed");
 });
 
+test("adapter attestation remains the evidence basis when a case mixes proof sources", async () => {
+  const harness = new Harness(fakeTarget(), "core", "seed");
+  await harness.case("RF-TEST-MIXED", "mixed evidence", [], async () => {
+    harness.markEvidenceBasis("runtime-native");
+    harness.markEvidenceBasis("adapter-attested");
+    harness.markEvidenceBasis("runtime-native");
+  });
+  assert.equal(harness.cases[0]?.evidenceBasis, "adapter-attested");
+});
+
+test("Terse runtime trace queries allow five seconds of cross-host clock skew", async () => {
+  const target = fakeTarget();
+  target.runtime = { kind: "terse-durable-actors", version: "test" };
+  target.runtimeVerification = {
+    baseUrl: "https://terse.example.test",
+    adminKey: "admin-key",
+    projectId: "project",
+    actorName: "RelayfileWorkspace",
+    actorId: "primary",
+  };
+  const harness = new Harness(target, "full", "seed");
+  const previousFetch = globalThis.fetch;
+  const previousNow = Date.now;
+  const fixedNow = previousNow();
+  let traceUrl: URL | undefined;
+  Date.now = () => fixedNow;
+  globalThis.fetch = (async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/observe/requests")) {
+      traceUrl = url;
+      return Response.json({ dropped: 0, evicted: 0, persistenceFailed: false, reset: false, records: [] });
+    }
+    return Response.json({}, { status: 401 });
+  }) as typeof fetch;
+  try {
+    await harness.case("RF-AUTH-005", "runtime auth", [], () => harness.verifyRuntimeAuthRejects());
+  } finally {
+    globalThis.fetch = previousFetch;
+    Date.now = previousNow;
+  }
+  assert.equal(harness.cases[0]?.status, "passed");
+  assert.equal(harness.cases[0]?.evidenceBasis, "runtime-native");
+  assert(traceUrl);
+  assert.equal(Number(traceUrl.searchParams.get("fromMs")), fixedNow - 5_000);
+  assert.equal(Number(traceUrl.searchParams.get("toMs")), fixedNow + 5_000);
+});
+
 test("evidence emits JSON, JSONL, and JUnit without secrets", async () => {
   const dir = await mkdtemp(join(tmpdir(), "relayfile-evidence-test-"));
   const target = fakeTarget();

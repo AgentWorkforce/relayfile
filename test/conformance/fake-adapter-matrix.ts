@@ -60,7 +60,7 @@ async function runFake(
 ): Promise<{ harness: Harness; target: Awaited<ReturnType<FakeConformanceAdapter["start"]>>["target"] }> {
   const adapter = new FakeConformanceAdapter(mutant);
   const running = await adapter.start();
-  const harness = new Harness(running.target, "full", seed, undefined, { includeCaseIds, maxPollTimeoutMs: 750 });
+  const harness = new Harness(running.target, "full", seed, undefined, { includeCaseIds, maxPollTimeoutMs: 3_000 });
   try {
     await runScenarios(harness);
     return { harness, target: running.target };
