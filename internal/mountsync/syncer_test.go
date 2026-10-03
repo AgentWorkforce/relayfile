@@ -3771,7 +3771,7 @@ func TestGithubWorkingTreeSourceArchiveStripsTopLevelDirectory(t *testing.T) {
 
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
-	if err := tw.WriteHeader(&tar.Header{Name: "cloud-head123/README.md", Mode: 0o644, Size: int64(len(body))}); err != nil {
+	if err := tw.WriteHeader(&tar.Header{Name: "cloud-head123/README.md", Mode: 0, Size: int64(len(body))}); err != nil {
 		t.Fatalf("write tar header: %v", err)
 	}
 	if _, err := tw.Write(body); err != nil {
@@ -3784,7 +3784,7 @@ func TestGithubWorkingTreeSourceArchiveStripsTopLevelDirectory(t *testing.T) {
 	remotePaths, err := syncer.applyGithubWorkingTreeTarSeedStrict(GithubWorkingTreeTar{
 		Body: io.NopCloser(bytes.NewReader(buf.Bytes())), ContentType: "application/x-tar", StripComponents: 1,
 	}, map[string]githubTreeFile{
-		"README.md": {RemotePath: remotePath, Revision: "rev_1", ContentHash: hashBytes(body), Type: remoteTypeFile, Mode: 0o644},
+		"README.md": {RemotePath: remotePath, Revision: "rev_1", ContentHash: hashBytes(body), Type: remoteTypeFile, Mode: 0},
 	}, nil, bootstrapProgress{}, true)
 	if err != nil {
 		t.Fatalf("apply source archive: %v", err)
@@ -3793,6 +3793,10 @@ func TestGithubWorkingTreeSourceArchiveStripsTopLevelDirectory(t *testing.T) {
 		t.Fatalf("source archive did not materialize %s", remotePath)
 	}
 	assertLocalFileContent(t, filepath.Join(localDir, "README.md"), string(body))
+	info, err := os.Stat(filepath.Join(localDir, "README.md"))
+	if err != nil || info.Mode().Perm() != 0o644 {
+		t.Fatalf("zero remote mode should publish with default 0644, info=%v err=%v", info, err)
+	}
 	if _, err := os.Stat(filepath.Join(localDir, "cloud-head123")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("top-level archive directory leaked into mount: %v", err)
 	}
