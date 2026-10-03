@@ -26,6 +26,12 @@ Set `RELAYFILE_CONFORMANCE_SEED` to a stable CI run identifier, or pass `--seed`
 
 The local command starts the Go server with a durable-local backend, strong internal HMAC secret, ephemeral RS256 issuer, two isolated workspaces, and scoped tokens. Its data directory survives the suite's server restart and is removed afterward.
 
+### PostgresSync applicability
+
+`PostgresSync` is not a separate runtime contract or an implicitly qualified fourth target. Whether the name refers to the Postgres provider integration or to a Go deployment using `PostgresStateBackend` plus the Postgres envelope/writeback queues, Relayfile still exposes the same public HTTP/WebSocket contract, so every backend-neutral case ID applies unchanged.
+
+The checked-in `go-local` target deliberately uses `durable-local`; this PR therefore does not claim that the conformance suite has qualified Postgres-backed sync. Existing Go integration tests exercise the Postgres state and queue implementations when `RELAYFILE_TEST_POSTGRES_DSN` is configured, while the provider catalog documents `postgres` as path-mapping/writeback-only with no shipped sync definition or automatic backfill. Those checks do not replace this public-boundary suite. End-to-end PostgresSync qualification is deferred until CI provisions a disposable Postgres instance and runs the same core profile through a dedicated target; controlled retry, crash, migration, failover, and mount claims additionally require the full-profile adapter controls documented below.
+
 ## Hosted target environment
 
 The Cloudflare and Terse descriptors read secrets only from the environment:

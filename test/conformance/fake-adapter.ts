@@ -84,6 +84,8 @@ interface MountState {
   mode: "read" | "write" | "mirror";
   root: string;
   known: Map<string, string>;
+  pending: Map<string, string>;
+  scanning: boolean;
   timer: ReturnType<typeof setInterval>;
 }
 
@@ -721,7 +723,15 @@ export class FakeConformanceAdapter {
       await this.writeMountFile(root, path, file.content, mode === "read");
       known.set(path, file.content);
     }
-    const mount = { id, mode, root, known, timer: setInterval(() => void this.scanMount(id), 15) } satisfies MountState;
+    const mount = {
+      id,
+      mode,
+      root,
+      known,
+      pending: new Map<string, string>(),
+      scanning: false,
+      timer: setInterval(() => void this.scanMount(id), 15),
+    } satisfies MountState;
     mount.timer.unref();
     this.mounts.set(id, mount);
     return mount;
@@ -729,15 +739,29 @@ export class FakeConformanceAdapter {
 
   private async scanMount(id: string): Promise<void> {
     const mount = this.mounts.get(id);
-    if (!mount || mount.mode === "read") return;
-    const paths = await this.walk(mount.root);
-    for (const localPath of paths) {
-      const relative = localPath.slice(mount.root.length).replaceAll("\\", "/");
-      if (!relative.startsWith("/") || relative.startsWith("/.relay/")) continue;
-      const content = await readFile(localPath, "utf8").catch(() => undefined);
-      if (content === undefined || mount.known.get(relative) === content) continue;
-      mount.known.set(relative, content);
-      this.write(relative, content, "agent_write", "fake-mount");
+    if (!mount || mount.mode === "read" || mount.scanning) return;
+    mount.scanning = true;
+    try {
+      const paths = await this.walk(mount.root);
+      for (const localPath of paths) {
+        const relative = localPath.slice(mount.root.length).replaceAll("\\", "/");
+        if (!relative.startsWith("/") || relative.startsWith("/.relay/")) continue;
+        const content = await readFile(localPath, "utf8").catch(() => undefined);
+        if (content === undefined || mount.known.get(relative) === content) {
+          mount.pending.delete(relative);
+          continue;
+        }
+        // Ignore the transient truncated value that writeFile can expose between open and flush.
+        if (mount.pending.get(relative) !== content) {
+          mount.pending.set(relative, content);
+          continue;
+        }
+        mount.pending.delete(relative);
+        mount.known.set(relative, content);
+        this.write(relative, content, "agent_write", "fake-mount");
+      }
+    } finally {
+      mount.scanning = false;
     }
   }
 
@@ -754,6 +778,7 @@ export class FakeConformanceAdapter {
         }
       }
       await this.writeMountFile(mount.root, path, content, mount.mode === "read");
+      mount.pending.delete(path);
       mount.known.set(path, content);
     }
   }
