@@ -1,0 +1,235 @@
+{
+  "id": "traj_60dloiqfxbjn",
+  "version": 1,
+  "task": {
+    "title": "Implement backend-neutral Relayfile conformance and E2E suite",
+    "source": {
+      "system": "plain",
+      "id": "relayfile-durable-actors-e2e"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-10-03T06:34:33.099Z",
+  "completedAt": "2026-10-03T08:19:07.562Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-10-03T07:10:51.774Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_tpcqpmz9uirl",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-10-03T07:10:51.774Z",
+      "endedAt": "2026-10-03T08:19:07.562Z",
+      "events": [
+        {
+          "ts": 1791011451777,
+          "type": "decision",
+          "content": "Use the OSS Go durable-local server as the executable reference oracle and keep Cloudflare/Terse as public-edge black-box targets behind one control adapter contract: Use the OSS Go durable-local server as the executable reference oracle and keep Cloudflare/Terse as public-edge black-box targets behind one control adapter contract",
+          "raw": {
+            "question": "Use the OSS Go durable-local server as the executable reference oracle and keep Cloudflare/Terse as public-edge black-box targets behind one control adapter contract",
+            "chosen": "Use the OSS Go durable-local server as the executable reference oracle and keep Cloudflare/Terse as public-edge black-box targets behind one control adapter contract",
+            "alternatives": [
+              {
+                "option": "Assume private Cloudflare internals",
+                "reason": ""
+              },
+              {
+                "option": "Test only hosted Cloudflare",
+                "reason": ""
+              },
+              {
+                "option": "Create backend-specific suites",
+                "reason": ""
+              }
+            ],
+            "reasoning": "The public repository contains no Cloudflare Durable Object implementation; backend internals are neither available nor a portable contract. Public HTTP/WebSocket behavior plus explicit fault, clock, lifecycle, migration, and mount hooks keeps the gate backend-neutral."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1791011452907,
+          "type": "decision",
+          "content": "Exclude tester-army/e2e from deterministic conformance gates: Exclude tester-army/e2e from deterministic conformance gates",
+          "raw": {
+            "question": "Exclude tester-army/e2e from deterministic conformance gates",
+            "chosen": "Exclude tester-army/e2e from deterministic conformance gates",
+            "alternatives": [
+              {
+                "option": "Make tester-army a required gate",
+                "reason": ""
+              },
+              {
+                "option": "Add an optional dashboard smoke now",
+                "reason": ""
+              }
+            ],
+            "reasoning": "Pinned tester-army/e2e is model-driven browser/mobile record-replay, has no API contract focus, enables telemetry by default, and is pre-1.0. It does not improve the required HTTP/WebSocket/runtime invariants; an optional dashboard smoke can be reconsidered later with telemetry disabled."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1791011454032,
+          "type": "decision",
+          "content": "Validate every public harness response against the repository OpenAPI document and emit redacted JSON/JSONL/JUnit evidence: Validate every public harness response against the repository OpenAPI document and emit redacted JSON/JSONL/JUnit evidence",
+          "raw": {
+            "question": "Validate every public harness response against the repository OpenAPI document and emit redacted JSON/JSONL/JUnit evidence",
+            "chosen": "Validate every public harness response against the repository OpenAPI document and emit redacted JSON/JSONL/JUnit evidence",
+            "alternatives": [
+              {
+                "option": "Rely only on check-contract-surface.sh",
+                "reason": ""
+              },
+              {
+                "option": "Validate a small error subset",
+                "reason": ""
+              }
+            ],
+            "reasoning": "Status-only assertions miss shape drift. Runtime validation found an invalid allOf/additionalProperties composition in conflict schemas, which is now represented as explicit response schemas."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1791011455181,
+          "type": "reflection",
+          "content": "A local, self-reported and non-gating Go-oracle run exposed one receipt assertion with intentional correlation/written-count differences; the invariant was narrowed to stable opId and revision. Advanced runtime cases are adapter-gated and full profiles convert every missing applicable capability into a failure. Authoritative command output remains in CI rather than this reflection record.",
+          "raw": {
+            "focalPoints": [
+              "Go oracle run",
+              "OpenAPI validation",
+              "reviewer checklist"
+            ],
+            "adjustments": "Document precise control request/response shapes; finish target schema and CI evidence upload; rerun all required gates before reviewer handoff.",
+            "confidence": 0.82
+          },
+          "significance": "high",
+          "tags": [
+            "focal:Go oracle run",
+            "focal:OpenAPI validation",
+            "focal:reviewer checklist",
+            "confidence:0.82"
+          ]
+        },
+        {
+          "ts": 1791013211387,
+          "type": "decision",
+          "content": "Use an out-of-band state.inspect control operation as the post-clock proof point: Use an out-of-band state.inspect control operation as the post-clock proof point",
+          "raw": {
+            "question": "Use an out-of-band state.inspect control operation as the post-clock proof point",
+            "chosen": "Use an out-of-band state.inspect control operation as the post-clock proof point",
+            "alternatives": [
+              {
+                "option": "Poll public GETs",
+                "reason": ""
+              },
+              {
+                "option": "Use provider.calls for every state type",
+                "reason": ""
+              }
+            ],
+            "reasoning": "Polling the public API can wake an actor and mask a missing alarm/scheduler. state.inspect is required to read durable backing state without gateway or actor invocation before any public verification."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1791013212527,
+          "type": "reflection",
+          "content": "Exact-head review found false-pass topology in pagination, poison HOL, timer wakeups, reconnect, and socket-effect limit cases. The remediation now pages the full feed, proves HOL before retry exhaustion, inspects state out-of-band after clock advance, disconnects before reconnect backlog, holds a live socket through eviction, and subscribes during the 513-event bulk.",
+          "raw": {
+            "focalPoints": [
+              "review blockers",
+              "false-pass resistance",
+              "adapter contract"
+            ],
+            "adjustments": "Run consolidated local gate; wait for the replacement head CI to finish before requesting the next exact-head verdict.",
+            "confidence": 0.88
+          },
+          "significance": "high",
+          "tags": [
+            "focal:review blockers",
+            "focal:false-pass resistance",
+            "focal:adapter contract",
+            "confidence:0.88"
+          ]
+        },
+        {
+          "ts": 1791015545773,
+          "type": "reflection",
+          "content": "Automated ready-for-review checks found safety and false-pass gaps beyond the independent review: destructive fixed digest writes, missing crash/failover barriers, incomplete migration replay proof, reset evidence loss, permissive target/CLI validation, and artifact robustness. Each valid finding was incorporated locally. A self-reported, non-gating local run passed the expanded 21-case harness tests, Go oracle, typecheck, and contract checks; the authoritative result is the replacement-head CI recorded outside this trajectory.",
+          "raw": {
+            "focalPoints": [
+              "automated review",
+              "fail-closed configuration",
+              "evidence integrity"
+            ],
+            "adjustments": "Push one replacement head, require fresh CI and exact-head reviewer confirmation, and retain hosted/Terse qualification as an explicit follow-up rather than a compatibility claim.",
+            "confidence": 0.92
+          },
+          "significance": "high",
+          "tags": [
+            "focal:automated review",
+            "focal:fail-closed configuration",
+            "focal:evidence integrity",
+            "confidence:0.92"
+          ]
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Implemented the deterministic backend-neutral Relayfile conformance harness, Go reference-oracle CI gate, hosted Cloudflare and controlled Terse target contracts, redacted evidence, compatibility matrix, and review hardening.",
+    "approach": "Built public HTTP/WebSocket black-box scenarios around capability-gated target descriptors and narrow clock, provider, state, lifecycle, migration, failover, auth, and mount controls; consolidated legacy coverage; iterated through independent and automated exact-head review.",
+    "confidence": 0.92
+  },
+  "commits": [
+    "5b59f64e",
+    "61442970",
+    "d3aafdc2",
+    "83be9940",
+    "87a721c0",
+    "95c1b0cf",
+    "439d7961",
+    "12c54e1d",
+    "b5172760"
+  ],
+  "filesChanged": [
+    ".github/workflows/ci.yml",
+    ".gitignore",
+    ".trajectories/completed/2026-10/traj_60dloiqfxbjn.json",
+    ".trajectories/completed/2026-10/traj_60dloiqfxbjn.md",
+    ".trajectories/completed/2026-10/traj_60dloiqfxbjn.trace.json",
+    ".trajectories/index.json",
+    "docs/backend-neutral-conformance.md",
+    "docs/vendor-compatibility-matrix.md",
+    "openapi/relayfile-v1.openapi.yaml",
+    "package-lock.json",
+    "package.json",
+    "scripts/conformance.ts",
+    "test/conformance/config.ts",
+    "test/conformance/evidence.ts",
+    "test/conformance/fixtures/webhook-upsert.json",
+    "test/conformance/harness.test.ts",
+    "test/conformance/harness.ts",
+    "test/conformance/local-go.ts",
+    "test/conformance/openapi-validator.ts",
+    "test/conformance/run.ts",
+    "test/conformance/scenarios.ts",
+    "test/conformance/target.schema.json",
+    "test/conformance/targets/cloudflare-controlled.json",
+    "test/conformance/targets/cloudflare-hosted.json",
+    "test/conformance/targets/go-local.json",
+    "test/conformance/targets/terse.json",
+    "test/conformance/types.ts"
+  ],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "aa95991113ec78a6c2ee04460ba401d0c0853640",
+    "endRef": "5b59f64e762c8be12248b21aeccea4243471b35b",
+    "traceId": "f2caee52-5def-463b-8c2e-1856ef6e51ba"
+  }
+}

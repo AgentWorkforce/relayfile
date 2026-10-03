@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "go-local",
+  "runtime": {
+    "kind": "go-oracle",
+    "version": "repository-head"
+  },
+  "relayfileSha": "repository-head",
+  "baseUrl": "http://127.0.0.1:19090",
+  "workspaces": {
+    "primary": "conformance-primary",
+    "secondary": "conformance-secondary"
+  },
+  "auth": {
+    "strategy": "local-rs256"
+  },
+  "capabilities": [
+    "public-api",
+    "tenant-auth",
+    "webhook-ingest",
+    "event-cursor",
+    "websocket-resume",
+    "durable-restart",
+    "large-effect-batch"
+  ]
+}

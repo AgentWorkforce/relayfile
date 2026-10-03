@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "id": "cloudflare-hosted",
+  "runtime": {
+    "kind": "cloudflare-do",
+    "versionEnv": "RELAYFILE_RUNTIME_VERSION"
+  },
+  "relayfileShaEnv": "RELAYFILE_SHA",
+  "baseUrlEnv": "RELAYFILE_BASE_URL",
+  "workspaces": {
+    "primaryEnv": "RELAYFILE_WORKSPACE_PRIMARY",
+    "secondaryEnv": "RELAYFILE_WORKSPACE_SECONDARY"
+  },
+  "auth": {
+    "strategy": "environment",
+    "primaryTokenEnv": "RELAYFILE_TOKEN_PRIMARY",
+    "secondaryTokenEnv": "RELAYFILE_TOKEN_SECONDARY",
+    "pathScopedTokenEnv": "RELAYFILE_TOKEN_PATH_SCOPED",
+    "readOnlyTokenEnv": "RELAYFILE_TOKEN_READ_ONLY"
+  },
+  "capabilities": [
+    "public-api",
+    "tenant-auth",
+    "webhook-ingest",
+    "event-cursor",
+    "websocket-resume"
+  ]
+}
