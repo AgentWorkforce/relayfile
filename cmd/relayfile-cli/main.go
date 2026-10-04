@@ -1441,7 +1441,10 @@ func runAgentRelayLogin(stdin io.Reader, stdout io.Writer, noOpen bool) error {
 	}
 	args := []string{"cloud", "login"}
 	if noOpen {
-		args = append(args, "--no-open")
+		// `agent-relay cloud login` has no --no-open; its --device flow prints
+		// a URL and code instead of opening a browser, matching what setup's
+		// cloud preflight does for --no-open.
+		args = append(args, "--device")
 	}
 	bin, _ := agentRelayBinary()
 	// No deadline: this is the interactive browser login, and the user may
