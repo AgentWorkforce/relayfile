@@ -39,7 +39,7 @@ var (
 	checkpointLifecycleIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$`)
 	checkpointDigestPattern      = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	checkpointRevisionPattern    = regexp.MustCompile(`^(?:0|rev_[0-9]+)$`)
-	checkpointCursorPattern      = regexp.MustCompile(`^(?:0|evt_[0-9]+)$`)
+	checkpointCursorPattern      = regexp.MustCompile(`^(?:0|evt_[0-9]+|upstream:v1:[A-Za-z0-9._:\-]{1,400})$`)
 )
 
 type checkpointCLIError struct {

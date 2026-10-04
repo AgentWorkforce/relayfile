@@ -12,6 +12,21 @@ import (
 
 const checkpointTestConsumerPrincipal = "cloud-dashboard-observer"
 
+func TestCheckpointEventCursorPattern(t *testing.T) {
+	valid := []string{"0", "evt_42", "upstream:v1:github:pull_123", "upstream:v1:github:pull_123:2", "upstream:v1:" + strings.Repeat("a", 400)}
+	invalid := []string{"", "   ", "evt_", "upstream:v1:", "upstream:v1:github pull_123", "upstream:v1:github\tpull_123", "upstream:v1:" + strings.Repeat("a", 401)}
+	for _, cursor := range valid {
+		if !checkpointEventCursorPattern.MatchString(cursor) {
+			t.Errorf("valid cursor rejected: %q", cursor)
+		}
+	}
+	for _, cursor := range invalid {
+		if checkpointEventCursorPattern.MatchString(cursor) {
+			t.Errorf("invalid cursor accepted: %q", cursor)
+		}
+	}
+}
+
 func TestCheckpointIssuanceResponseLossRotatesBearerAcrossRestart(t *testing.T) {
 	stateFile := filepath.Join(t.TempDir(), "relayfile-state.json")
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)

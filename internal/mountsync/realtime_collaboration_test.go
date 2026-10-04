@@ -1150,6 +1150,13 @@ func TestAdvanceEventCursorNeverRegressesRelayfileOrdinal(t *testing.T) {
 	if got := advanceEventCursor("evt_42", "evt_43"); got != "evt_43" {
 		t.Fatalf("cursor did not advance: %q", got)
 	}
+	upstream := "upstream:v1:linear:issue_123:2"
+	if got := advanceEventCursor("evt_43", upstream); got != upstream {
+		t.Fatalf("mixed feed cursor = %q, want %q", got, upstream)
+	}
+	if !checkpointEventCursorPattern.MatchString(upstream) {
+		t.Fatalf("latest mixed feed cursor is not checkpoint-safe: %q", upstream)
+	}
 }
 
 // TestWebSocketURLScopesToMountRoot guards the path-scoped dial. A mount whose

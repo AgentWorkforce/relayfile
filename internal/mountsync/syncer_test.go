@@ -10731,6 +10731,25 @@ func TestCheckpointOwnershipEndToEndHandbackPreservesDestinationTurn(t *testing.
 }
 
 func TestVerifyCheckpointRequiresLocalExactnessAndServerReattestation(t *testing.T) {
+	t.Run("upstream cursor is opaque and server-attested", func(t *testing.T) {
+		client := &fakeClient{}
+		syncer, _ := newManagedCheckpointSyncer(t, client)
+		receipt := consumedCheckpointReceiptForTest(t, syncer)
+		receipt.EventCursor = "upstream:v1:linear:issue_123:2"
+		client.checkpointVerifySeal = receipt
+		syncer.state.EventsCursor = receipt.EventCursor
+		if err := syncer.saveStateWithoutLocalScan(); err != nil {
+			t.Fatal(err)
+		}
+		verification, err := syncer.VerifyCheckpoint(context.Background(), receipt)
+		if err != nil {
+			t.Fatalf("verify upstream cursor: %v", err)
+		}
+		if verification.Observed.EventCursor != receipt.EventCursor || client.checkpointVerifyCalls != 1 {
+			t.Fatalf("verification=%+v calls=%d", verification, client.checkpointVerifyCalls)
+		}
+	})
+
 	t.Run("empty local cursor normalizes to canonical zero", func(t *testing.T) {
 		client := &fakeClient{}
 		syncer, _ := newManagedCheckpointSyncer(t, client)
@@ -10883,6 +10902,37 @@ func TestVerifyCheckpointRequiresLocalExactnessAndServerReattestation(t *testing
 			})
 		}
 	})
+}
+
+func TestCheckpointEventCursorPattern(t *testing.T) {
+	valid := []string{
+		"0",
+		"evt_42",
+		"upstream:v1:linear:issue_123",
+		"upstream:v1:linear:issue_123:2",
+		"upstream:v1:" + strings.Repeat("a", 400),
+	}
+	invalid := []string{
+		"",
+		"   ",
+		"evt_",
+		"12",
+		"upstream:v1:",
+		"upstream:v1:linear issue_123",
+		"upstream:v1:linear/issue_123",
+		"upstream:v1:linear\nissue_123",
+		"upstream:v1:" + strings.Repeat("a", 401),
+	}
+	for _, cursor := range valid {
+		if !checkpointEventCursorPattern.MatchString(cursor) {
+			t.Errorf("valid cursor rejected: %q", cursor)
+		}
+	}
+	for _, cursor := range invalid {
+		if checkpointEventCursorPattern.MatchString(cursor) {
+			t.Errorf("invalid cursor accepted: %q", cursor)
+		}
+	}
 }
 
 func consumedCheckpointReceiptForTest(t *testing.T, syncer *Syncer) CheckpointSeal {
