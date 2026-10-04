@@ -178,6 +178,46 @@ jobs:
           # The E2E harness builds and starts relayfile and relayfile-mount as part of the test flow.
           npx tsx scripts/e2e.ts --ci
 
+  backend-conformance:
+    name: Backend Conformance (Go oracle)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Run deterministic conformance gates
+        env:
+          CI: "true"
+          E2E_TELEMETRY_DISABLED: "1"
+          RELAYFILE_CONFORMANCE_SEED: ci-${{ github.run_id }}-${{ github.run_attempt }}
+        run: npm run test:conformance:local
+
+      - name: Upload conformance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-conformance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/conformance/
+          if-no-files-found: warn
+          retention-days: 14
+
   release-tooling:
     name: Release Tooling
     runs-on: ubuntu-latest

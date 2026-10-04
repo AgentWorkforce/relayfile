@@ -1,0 +1,117 @@
+{
+  "id": "traj_teattd4y6wmc",
+  "version": 1,
+  "task": {
+    "title": "Close PR #523 raised conformance evidence gates F1-F7",
+    "source": {
+      "system": "plain",
+      "id": "PR-523"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-10-03T15:30:50.703Z",
+  "completedAt": "2026-10-03T16:08:06.028Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-10-03T16:07:54.286Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_c41j6tw8spts",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-10-03T16:07:54.286Z",
+      "endedAt": "2026-10-03T16:08:06.028Z",
+      "events": [
+        {
+          "ts": 1791043674288,
+          "type": "decision",
+          "content": "Use a conforming in-process adapter plus one detectable mutant per advanced invariant: Use a conforming in-process adapter plus one detectable mutant per advanced invariant",
+          "raw": {
+            "question": "Use a conforming in-process adapter plus one detectable mutant per advanced invariant",
+            "chosen": "Use a conforming in-process adapter plus one detectable mutant per advanced invariant",
+            "alternatives": [],
+            "reasoning": "This makes all 16 adapter-dependent cases executable in CI and demonstrates that each assertion rejects the corresponding broken behavior."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1791043675431,
+          "type": "decision",
+          "content": "Verify Terse no-wake and auth properties through runtime-native observe APIs: Verify Terse no-wake and auth properties through runtime-native observe APIs",
+          "raw": {
+            "question": "Verify Terse no-wake and auth properties through runtime-native observe APIs",
+            "chosen": "Verify Terse no-wake and auth properties through runtime-native observe APIs",
+            "alternatives": [],
+            "reasoning": "Adapter self-reports cannot independently prove that inspection or rejected authentication did not invoke actor code."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1791043676585,
+          "type": "decision",
+          "content": "Track the Terse runtime port and durable scheduler outside PR 523: Track the Terse runtime port and durable scheduler outside PR 523",
+          "raw": {
+            "question": "Track the Terse runtime port and durable scheduler outside PR 523",
+            "chosen": "Track the Terse runtime port and durable scheduler outside PR 523",
+            "alternatives": [],
+            "reasoning": "The pinned runtime lacks alarms and the existing Relayfile Durable Object implementation lives in the private cloud repository; qualification requirements remain explicit in this PR."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Implemented PR #523's F1-F7 evidence gates with a 16-case conforming/mutant adapter matrix, Go large-effect coverage, stable N/A auth reporting, restored digest non-regeneration proof, runtime-native Terse verification, dead-letter identity contract, CI summaries, and documented porting prerequisites. This trajectory contains no captured command or output evidence; local validation results are self-reported and non-gating, while CI/check-run artifacts are authoritative.",
+    "approach": "Delivered and pushed each review slice independently, merged current main to restore mergeability, and fixed the final failover-barrier race found by review. The deterministic matrix and full Go-oracle runs were performed outside this trajectory's capture; because their commands and output are absent here, those local results are self-reported and non-gating.",
+    "confidence": 0.96
+  },
+  "commits": [
+    "1bef41f9",
+    "f79ad4e2",
+    "d79eb1bf",
+    "8d4e6b94",
+    "ce7d626b",
+    "ff0cade1",
+    "1c5c053a",
+    "42bf8f45",
+    "756368d1",
+    "5537f242",
+    "90977f3e",
+    "91b9781e"
+  ],
+  "filesChanged": [
+    ".trajectories/completed/2026-10/traj_teattd4y6wmc.json",
+    ".trajectories/completed/2026-10/traj_teattd4y6wmc.md",
+    ".trajectories/completed/2026-10/traj_teattd4y6wmc.trace.json",
+    ".trajectories/index.json",
+    "docs/backend-neutral-conformance.md",
+    "docs/vendor-compatibility-matrix.md",
+    "package-lock.json",
+    "package.json",
+    "test/conformance/ci-summary.ts",
+    "test/conformance/config.ts",
+    "test/conformance/evidence.ts",
+    "test/conformance/fake-adapter-matrix.ts",
+    "test/conformance/fake-adapter.ts",
+    "test/conformance/harness.test.ts",
+    "test/conformance/harness.ts",
+    "test/conformance/run.ts",
+    "test/conformance/scenarios.ts",
+    "test/conformance/target.schema.json",
+    "test/conformance/targets/go-local.json",
+    "test/conformance/targets/terse.json",
+    "test/conformance/types.ts"
+  ],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "7063b59a74756888d4a260b9161d307e6038fc5c",
+    "endRef": "91b9781eb3252dd9bd754b9f2100147297b3b223",
+    "traceId": "c634b462-e894-4c55-bc90-5516ba8110ae"
+  }
+}

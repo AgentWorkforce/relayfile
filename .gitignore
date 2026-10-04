@@ -81,3 +81,6 @@ packages/agents/dist
 .scratch/
 .agentworkforce/
 packages/**/.claude/
+
+# Backend-neutral conformance evidence is uploaded by CI, never committed.
+artifacts/conformance/

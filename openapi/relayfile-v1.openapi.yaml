@@ -5017,27 +5017,41 @@ components:
           maxLength: 4000
 
     ForkCommitConflictResponse:
-      allOf:
-        - $ref: '#/components/schemas/ErrorResponse'
-        - type: object
-          additionalProperties: false
-          required: [currentRevision]
-          properties:
-            currentRevision:
-              type: string
-              description: Current revision of the moved parent directory.
+      type: object
+      additionalProperties: false
+      required: [code, message, correlationId, currentRevision]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        correlationId:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+        currentRevision:
+          type: string
+          description: Current revision of the moved parent directory.
 
     ConflictErrorResponse:
-      allOf:
-        - $ref: '#/components/schemas/ErrorResponse'
-        - type: object
-          additionalProperties: false
-          required: [expectedRevision, currentRevision]
-          properties:
-            expectedRevision:
-              type: string
-            currentRevision:
-              type: string
-            currentContentPreview:
-              type: string
-              maxLength: 4000
+      type: object
+      additionalProperties: false
+      required: [code, message, correlationId, expectedRevision, currentRevision]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        correlationId:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+        expectedRevision:
+          type: string
+        currentRevision:
+          type: string
+        currentContentPreview:
+          type: string
+          maxLength: 4000

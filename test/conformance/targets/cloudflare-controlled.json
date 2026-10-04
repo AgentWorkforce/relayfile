@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "id": "cloudflare-controlled",
+  "runtime": {
+    "kind": "cloudflare-do",
+    "versionEnv": "RELAYFILE_RUNTIME_VERSION"
+  },
+  "relayfileShaEnv": "RELAYFILE_SHA",
+  "baseUrlEnv": "RELAYFILE_BASE_URL",
+  "workspaces": {
+    "primaryEnv": "RELAYFILE_WORKSPACE_PRIMARY",
+    "secondaryEnv": "RELAYFILE_WORKSPACE_SECONDARY"
+  },
+  "auth": {
+    "strategy": "environment",
+    "primaryTokenEnv": "RELAYFILE_TOKEN_PRIMARY",
+    "secondaryTokenEnv": "RELAYFILE_TOKEN_SECONDARY",
+    "pathScopedTokenEnv": "RELAYFILE_TOKEN_PATH_SCOPED",
+    "readOnlyTokenEnv": "RELAYFILE_TOKEN_READ_ONLY"
+  },
+  "capabilities": [
+    "public-api",
+    "tenant-auth",
+    "webhook-ingest",
+    "event-cursor",
+    "websocket-resume",
+    "durable-restart",
+    "provider-faults",
+    "state-inspection",
+    "clock-control",
+    "runtime-eviction",
+    "large-effect-batch",
+    "runtime-crash",
+    "runtime-failover",
+    "state-migration",
+    "mount-control",
+    "digest-projection"
+  ],
+  "control": {
+    "baseUrlEnv": "RELAYFILE_CONFORMANCE_CONTROL_URL",
+    "tokenEnv": "RELAYFILE_CONFORMANCE_CONTROL_TOKEN",
+    "operations": [
+      "reset",
+      "provider.configure",
+      "provider.calls",
+      "state.inspect",
+      "clock.advance",
+      "runtime.evict",
+      "runtime.crash",
+      "runtime.restart",
+      "runtime.failover",
+      "state.export",
+      "state.import",
+      "mount.start",
+      "mount.stop"
+    ]
+  }
+}

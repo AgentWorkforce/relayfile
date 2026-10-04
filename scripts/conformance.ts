@@ -12,12 +12,15 @@
  *
  *   # Against an already-running server:
  *   RELAYFILE_BASE_URL=https://your-cloud.workers.dev npx tsx scripts/conformance.ts --remote
+ *   # Set RELAYFILE_CONFORMANCE_WORKSPACE for a known tenant or
+ *   # RELAYFILE_CONFORMANCE_SEED for a deterministic generated tenant.
  *
  *   # CI mode:
  *   npx tsx scripts/conformance.ts --ci
  */
 
 import { execSync, spawn, ChildProcess } from 'node:child_process';
+import { rmSync } from 'node:fs';
 import { createLocalRs256Auth, type LocalRs256Auth } from './test-utils/rsa-signer';
 
 // ---------------------------------------------------------------------------
@@ -31,8 +34,22 @@ const HELP = flags.has('--help') || argv.includes('-h');
 
 const PORT = Number(process.env.RELAYFILE_PORT || 19090);
 const BASE_URL = process.env.RELAYFILE_BASE_URL || `http://127.0.0.1:${PORT}`;
-const WORKSPACE = `conformance-${Date.now()}`;
+const WORKSPACE = resolveWorkspace();
 const DISABLE_SHARED_SECRET_JWT_ENV = `RELAYFILE_VERIFIER_ACCEPT_HS${256}`;
+
+function resolveWorkspace(): string {
+  const explicit = process.env.RELAYFILE_CONFORMANCE_WORKSPACE?.trim();
+  if (explicit) return explicit;
+  const seed = process.env.RELAYFILE_CONFORMANCE_SEED?.trim();
+  if (seed) {
+    if (!/^[A-Za-z0-9._-]{1,80}$/u.test(seed) || seed === "." || seed === "..") {
+      throw new Error("RELAYFILE_CONFORMANCE_SEED must match [A-Za-z0-9._-]{1,80} and cannot be . or ..");
+    }
+    return `conformance-${seed}`;
+  }
+  if (REMOTE) return `conformance-${Date.now()}`;
+  return 'conformance-legacy-v1';
+}
 
 // ---------------------------------------------------------------------------
 // Terminal output
@@ -175,9 +192,10 @@ function errorCode(data: any): string | undefined {
 
 function skipCloudOnlyWebhookRoute(testName: string, response: { status: number }): boolean {
   if (response.status !== 404) return false;
-  log('⏭️ ', `${testName} skipped: webhook subscription routes are not implemented by this server`);
-  return true;
+  throw new SkippedTest(`${testName}: webhook subscription routes are not implemented by this server`);
 }
+
+class SkippedTest extends Error {}
 
 // ---------------------------------------------------------------------------
 // Process management
@@ -195,7 +213,9 @@ async function startServer(): Promise<void> {
       RELAYFILE_BACKEND_PROFILE: 'memory',
       RELAYAUTH_JWKS_URL: rs256Auth?.jwksUrl ?? '',
       [DISABLE_SHARED_SECRET_JWT_ENV]: 'false',
+      RELAYFILE_INTERNAL_HMAC_SECRET: 'conformance-local-internal-secret-not-production',
       RELAYFILE_EXTERNAL_WRITEBACK: 'true',
+      E2E_TELEMETRY_DISABLED: '1',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -227,7 +247,7 @@ async function stopServer() {
     await rs256Auth.close();
     rs256Auth = null;
   }
-  try { execSync('rm -f relayfile-conformance', { stdio: 'ignore' }); } catch {}
+  rmSync('relayfile-conformance', { force: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +255,7 @@ async function stopServer() {
 // ---------------------------------------------------------------------------
 const passed: string[] = [];
 const failed: string[] = [];
+const skipped: string[] = [];
 
 async function test(name: string, fn: () => Promise<void>) {
   try {
@@ -242,6 +263,11 @@ async function test(name: string, fn: () => Promise<void>) {
     ok(name);
     passed.push(name);
   } catch (err) {
+    if (err instanceof SkippedTest) {
+      log('⏭️ ', `${YELLOW}${err.message}${R}`);
+      skipped.push(name);
+      return;
+    }
     const msg = err instanceof Error ? err.message : String(err);
     fail(`${name}: ${msg}`);
     failed.push(name);
@@ -554,8 +580,7 @@ async function runSuite() {
 
   await test('WebSocket upgrade and catch-up events', async () => {
     if (typeof globalThis.WebSocket === 'undefined') {
-      log('⏭️ ', 'Skipping WebSocket test (Node < 22)');
-      return;
+      throw new SkippedTest('WebSocket upgrade and catch-up events: Node < 22 has no global WebSocket');
     }
 
     // NOTE: Passing JWT in query string is a known security concern (tokens may appear
@@ -747,6 +772,8 @@ Usage:
 Environment:
   RELAYFILE_BASE_URL  Base URL when using --remote
   RELAYFILE_PORT      Local server port when not using --remote
+  RELAYFILE_CONFORMANCE_WORKSPACE  Explicit workspace (remote otherwise creates a fresh one)
+  RELAYFILE_CONFORMANCE_SEED       Deterministic workspace suffix when no explicit workspace is set
 `);
     return;
   }
@@ -764,6 +791,7 @@ ${B}${CYAN}╔══════════════════════
   log('🌐', `Server: ${B}${BASE_URL}${R}`);
   log('🔑', `JWKS:   ${B}${rs256Auth.jwksUrl}${R}`);
   log('⚙️ ', `Mode:   ${B}${REMOTE ? 'Remote' : 'Local'} ${CI ? '(CI)' : ''}${R}`);
+  log('🗂️ ', `Workspace: ${B}${WORKSPACE}${R}`);
 
   try {
     await startServer();
@@ -784,6 +812,11 @@ ${B}${CYAN}╔══════════════════════
       console.log();
       log('❌', `${RED}${B}${failed.length} failed${R}`);
       for (const t of failed) log('  ', `${RED}• ${t}${R}`);
+    }
+    if (skipped.length > 0) {
+      console.log();
+      log('⏭️ ', `${YELLOW}${B}${skipped.length} skipped${R}`);
+      for (const t of skipped) log('  ', `${YELLOW}• ${t}${R}`);
     }
     console.log();
 
