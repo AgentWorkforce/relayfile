@@ -319,7 +319,7 @@ func ValidateSingleRemotePath(normalized []string) error {
 		return nil
 	}
 	return fmt.Errorf(
-		"multiple remote paths (%s) are temporarily unavailable: --local-layout=%s mounts a single remote root and --local-layout=%s is disabled until scoped operator surfaces are ready; pass one --remote-path that covers the subtrees you need",
+		"multiple remote paths (%s) are temporarily unavailable: --local-layout=%s mounts a single remote root and --local-layout=%s is disabled until scoped operator surfaces are ready; pass one --remote-path (or a --paths-file with one root) that covers the subtrees you need",
 		strings.Join(normalized, ", "),
 		LayoutExact,
 		LayoutScoped,

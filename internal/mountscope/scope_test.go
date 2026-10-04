@@ -25,7 +25,7 @@ func TestValidateSingleRemotePath(t *testing.T) {
 	err := ValidateSingleRemotePath(NormalizePaths([]string{"/github", "/slack", "/github/repos"}, "/"))
 	if err == nil ||
 		!strings.Contains(err.Error(), "multiple remote paths (/github, /slack) are temporarily unavailable") ||
-		!strings.Contains(err.Error(), "pass one --remote-path") {
+		!strings.Contains(err.Error(), "pass one --remote-path (or a --paths-file with one root)") {
 		t.Fatalf("expected single-path remedy, got %v", err)
 	}
 }

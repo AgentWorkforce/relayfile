@@ -3183,7 +3183,15 @@ func TestMountRejectsRepeatedRemotePathsWithOneMessageForEveryLayout(t *testing.
 	} {
 		t.Setenv("HOME", t.TempDir())
 		clearRelayfileEnv(t)
+		t.Setenv("RELAYFILE_REMOTE_PATH", "")
+		t.Setenv("RELAYFILE_MOUNT_PATHS_FILE", "")
 		localRoot := filepath.Join(t.TempDir(), "mirror")
+		// An active mount holds the start lock for its lifetime; the
+		// multi-path refusal must not be masked by the lock error.
+		releaseLock, lockErr := acquireMountStartLock(localRoot)
+		if lockErr != nil {
+			t.Fatalf("hold mount-start lock: %v", lockErr)
+		}
 
 		args := append([]string{
 			"mount", "ws_demo", localRoot,
@@ -3193,9 +3201,10 @@ func TestMountRejectsRepeatedRemotePathsWithOneMessageForEveryLayout(t *testing.
 			"--once",
 		}, layoutArgs...)
 		err := run(args, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+		releaseLock()
 		if err == nil ||
 			!strings.Contains(err.Error(), "multiple remote paths (/github, /slack) are temporarily unavailable") ||
-			!strings.Contains(err.Error(), "pass one --remote-path") ||
+			!strings.Contains(err.Error(), "pass one --remote-path (or a --paths-file with one root)") ||
 			strings.Contains(err.Error(), "require --local-layout") {
 			t.Fatalf("%v: expected one multi-path refusal with a single-path remedy, got %v", layoutArgs, err)
 		}

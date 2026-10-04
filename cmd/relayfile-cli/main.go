@@ -7569,6 +7569,16 @@ func runMount(args []string) error {
 			applyRecoveredRecord(record)
 		}
 	}
+	// Refuse multi-root allowlists before taking the mount-start lock so a
+	// running mount on the same root cannot mask this refusal.
+	effectiveRemotePaths := resolveCLIMountRemotePaths(
+		allRemotePaths,
+		recordedRemotePaths,
+		os.Getenv("RELAYFILE_REMOTE_PATH"),
+	)
+	if err := mountscope.ValidateSingleRemotePath(effectiveRemotePaths); err != nil {
+		return err
+	}
 	if localDir == "" {
 		localDir = recordedLocalDir
 	}
@@ -7600,14 +7610,6 @@ func runMount(args []string) error {
 		if err != nil {
 			return fmt.Errorf("compare recorded mount root: %w", err)
 		}
-	}
-	effectiveRemotePaths := resolveCLIMountRemotePaths(
-		allRemotePaths,
-		recordedRemotePaths,
-		os.Getenv("RELAYFILE_REMOTE_PATH"),
-	)
-	if err := mountscope.ValidateSingleRemotePath(effectiveRemotePaths); err != nil {
-		return err
 	}
 	if !stateFileProvided &&
 		!stateDirProvided &&
