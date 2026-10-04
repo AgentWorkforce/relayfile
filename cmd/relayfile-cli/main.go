@@ -34,6 +34,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/agentworkforce/relayfile/internal/delegatedauth"
@@ -752,15 +753,15 @@ func printHelpForArgs(args []string, stdout io.Writer) {
 	case "restart":
 		fmt.Fprintf(stdout, "Usage: %s restart [WORKSPACE] [--foreground]\n", programName())
 	case "tree", "ls":
-		fmt.Fprintf(stdout, "Usage: %s tree [WORKSPACE] [PATH] [--depth N] [--json]\n", programName())
+		fmt.Fprintf(stdout, "Usage: %s tree [WORKSPACE] [PATH] [--depth N] [--json] [--no-retry]\n", programName())
 	case "read", "cat":
-		fmt.Fprintf(stdout, "Usage: %s read [WORKSPACE] PATH [--output FILE] [--json]\n", programName())
+		fmt.Fprintf(stdout, "Usage: %s read [WORKSPACE] PATH [--output FILE] [--json] [--no-retry]\n", programName())
 	case "seed":
 		fmt.Fprintf(stdout, "Usage: %s seed [WORKSPACE] [DIR]\n", programName())
 	case "export":
 		fmt.Fprintf(stdout, "Usage: %s export [WORKSPACE] --format FORMAT [--output FILE]\n", programName())
 	case "status":
-		fmt.Fprintf(stdout, "Usage: %s status [WORKSPACE] [--json]\n", programName())
+		fmt.Fprintf(stdout, "Usage: %s status [WORKSPACE] [--json] [--no-retry]\n", programName())
 	case "stop", "off":
 		fmt.Fprintf(stdout, "Usage: %s stop [WORKSPACE]\n", programName())
 	case "supervisor":
@@ -8162,6 +8163,86 @@ type workspaceCommandClient struct {
 	scopes      []string
 	directToken bool
 	credsFile   string
+	// retryBusy opts one-shot GETs (read, tree, status) into a bounded retry
+	// on 429/503. Polling commands leave it off because politePoll already
+	// owns their backoff.
+	retryBusy bool
+	// retryNotices receives the one-line notice printed before each retry.
+	retryNotices io.Writer
+}
+
+const (
+	oneShotBusyRetryMaxAttempts = 4
+	oneShotBusyRetryBaseDelay   = 500 * time.Millisecond
+	// oneShotBusyRetryMaxDelay clamps a server-advertised Retry-After so a
+	// one-shot command never sleeps longer than this between attempts.
+	oneShotBusyRetryMaxDelay = 30 * time.Second
+)
+
+var (
+	oneShotBusyRetrySleep = func(ctx context.Context, d time.Duration) error {
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return nil
+		}
+	}
+)
+
+func isBusyAPIError(err error) bool {
+	var apiErr *apiError
+	return errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusTooManyRequests || apiErr.StatusCode == http.StatusServiceUnavailable)
+}
+
+// oneShotBusyRetryDelay honors Retry-After when present (exponential backoff
+// otherwise), adds up to 25% jitter so concurrent callers do not re-collide,
+// and clamps the result to oneShotBusyRetryMaxDelay.
+func oneShotBusyRetryDelay(attempt int, retryAfter time.Duration) time.Duration {
+	delay := retryAfter
+	if delay <= 0 {
+		delay = oneShotBusyRetryBaseDelay << (attempt - 1)
+	}
+	if delay > oneShotBusyRetryMaxDelay {
+		delay = oneShotBusyRetryMaxDelay
+	}
+	delay += time.Duration(mathrand.Int64N(int64(delay)/4 + 1))
+	if delay > oneShotBusyRetryMaxDelay {
+		delay = oneShotBusyRetryMaxDelay
+	}
+	return delay
+}
+
+// withBusyRetry runs an idempotent request, retrying 429/503 responses a
+// bounded number of times. Only GET helpers call it; writes are never retried.
+func (c *workspaceCommandClient) withBusyRetry(ctx context.Context, request func() error) error {
+	for attempt := 1; ; attempt++ {
+		err := request()
+		if err == nil || !c.retryBusy || attempt >= oneShotBusyRetryMaxAttempts || !isBusyAPIError(err) {
+			return err
+		}
+		delay := oneShotBusyRetryDelay(attempt, retryAfterFromErr(err))
+		if c.retryNotices != nil {
+			fmt.Fprintf(c.retryNotices, "%s; retrying in %s (attempt %d/%d)\n", oneLineNotice(err.Error()), delay.Round(100*time.Millisecond), attempt+1, oneShotBusyRetryMaxAttempts)
+		}
+		if sleepErr := oneShotBusyRetrySleep(ctx, delay); sleepErr != nil {
+			return err
+		}
+	}
+}
+
+// oneLineNotice keeps server-supplied error text to a single line and drops
+// control and format characters (newlines, ANSI escapes, bidi overrides)
+// before it reaches a terminal.
+func oneLineNotice(text string) string {
+	return strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return ' '
+		}
+		return r
+	}, text)), " ")
 }
 
 func prepareWorkspaceCommandClient(workspaceValue, serverFlag, tokenFlag string, requestedScopes []string) (*workspaceCommandClient, error) {
@@ -8351,6 +8432,17 @@ func (c *workspaceCommandClient) refreshFromDelegated() error {
 }
 
 func (c *workspaceCommandClient) getWorkspaceBytes(ctx context.Context, pathForWorkspace func(string) string) ([]byte, string, error) {
+	var body []byte
+	var contentType string
+	err := c.withBusyRetry(ctx, func() error {
+		var err error
+		body, contentType, err = c.getWorkspaceBytesOnce(ctx, pathForWorkspace)
+		return err
+	})
+	return body, contentType, err
+}
+
+func (c *workspaceCommandClient) getWorkspaceBytesOnce(ctx context.Context, pathForWorkspace func(string) string) ([]byte, string, error) {
 	body, contentType, err := c.client.getBytes(ctx, pathForWorkspace(c.workspaceID))
 	if err == nil || c.directToken || !isAPIAuthError(err) {
 		return body, contentType, err
@@ -8362,6 +8454,12 @@ func (c *workspaceCommandClient) getWorkspaceBytes(ctx context.Context, pathForW
 }
 
 func (c *workspaceCommandClient) getWorkspaceJSON(ctx context.Context, pathForWorkspace func(string) string, out any) error {
+	return c.withBusyRetry(ctx, func() error {
+		return c.getWorkspaceJSONOnce(ctx, pathForWorkspace, out)
+	})
+}
+
+func (c *workspaceCommandClient) getWorkspaceJSONOnce(ctx context.Context, pathForWorkspace func(string) string, out any) error {
 	err := c.client.getJSON(ctx, pathForWorkspace(c.workspaceID), out)
 	if err == nil || c.directToken || !isAPIAuthError(err) {
 		return err
@@ -9411,7 +9509,7 @@ func plistEscapeXML(s string) string {
 	return s
 }
 
-func runTree(args []string, stdout io.Writer) error {
+func runTree(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("tree", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	server := fs.String("server", "", "relayfile server URL override")
@@ -9419,17 +9517,19 @@ func runTree(args []string, stdout io.Writer) error {
 	pathFlag := fs.String("path", "/", "remote path to list")
 	depth := fs.Int("depth", 1, "tree depth")
 	jsonOutput := fs.Bool("json", false, "print the raw JSON response")
+	noRetry := fs.Bool("no-retry", false, "fail immediately on 429/503 instead of retrying")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
-		"server": true,
-		"token":  true,
-		"path":   true,
-		"depth":  true,
-		"json":   false,
+		"server":   true,
+		"token":    true,
+		"path":     true,
+		"depth":    true,
+		"json":     false,
+		"no-retry": false,
 	})); err != nil {
 		return err
 	}
 	if fs.NArg() > 2 {
-		return fmt.Errorf("usage: %s tree [WORKSPACE] [PATH] [--depth N]", programName())
+		return fmt.Errorf("usage: %s tree [WORKSPACE] [PATH] [--depth N] [--json] [--no-retry]", programName())
 	}
 
 	remotePath := strings.TrimSpace(*pathFlag)
@@ -9451,6 +9551,8 @@ func runTree(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	commandClient.retryBusy = !*noRetry
+	commandClient.retryNotices = stderr
 	if remotePath == "" {
 		remotePath = "/"
 	}
@@ -9561,23 +9663,25 @@ func knownRemoteRootSegment(segment string) bool {
 	}
 }
 
-func runRead(args []string, stdout io.Writer) error {
+func runRead(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("read", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	server := fs.String("server", "", "relayfile server URL override")
 	token := fs.String("token", "", "relayfile token override")
 	output := fs.String("output", "-", "output file path or - for stdout")
 	jsonOutput := fs.Bool("json", false, "print the raw JSON response")
+	noRetry := fs.Bool("no-retry", false, "fail immediately on 429/503 instead of retrying")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
-		"server": true,
-		"token":  true,
-		"output": true,
-		"json":   false,
+		"server":   true,
+		"token":    true,
+		"output":   true,
+		"json":     false,
+		"no-retry": false,
 	})); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 || fs.NArg() > 2 {
-		return fmt.Errorf("usage: %s read [WORKSPACE] PATH", programName())
+		return fmt.Errorf("usage: %s read [WORKSPACE] PATH [--output FILE] [--json] [--no-retry]", programName())
 	}
 
 	var workspaceValue string
@@ -9592,6 +9696,8 @@ func runRead(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	commandClient.retryBusy = !*noRetry
+	commandClient.retryNotices = stderr
 	if remotePath == "" {
 		return errors.New("path is required")
 	}
@@ -9752,21 +9858,23 @@ func runExport(args []string, stdout io.Writer) error {
 	return os.WriteFile(*output, body, 0o644)
 }
 
-func runStatus(args []string, stdout io.Writer) error {
+func runStatus(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	server := fs.String("server", "", "relayfile server URL override")
 	token := fs.String("token", "", "relayfile token override")
 	jsonOutput := fs.Bool("json", false, "emit JSON")
+	noRetry := fs.Bool("no-retry", false, "fail immediately on 429/503 instead of retrying")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
-		"server": true,
-		"token":  true,
-		"json":   false,
+		"server":   true,
+		"token":    true,
+		"json":     false,
+		"no-retry": false,
 	})); err != nil {
 		return err
 	}
 	if fs.NArg() > 1 {
-		return fmt.Errorf("usage: %s status [WORKSPACE] [--json]", programName())
+		return fmt.Errorf("usage: %s status [WORKSPACE] [--json] [--no-retry]", programName())
 	}
 
 	workspaceValue := ""
@@ -9777,6 +9885,8 @@ func runStatus(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	commandClient.retryBusy = !*noRetry
+	commandClient.retryNotices = stderr
 	var status syncStatusResponse
 	err = commandClient.getWorkspaceJSON(context.Background(), func(workspaceID string) string {
 		return fmt.Sprintf("/v1/workspaces/%s/sync/status", url.PathEscape(workspaceID))
@@ -9790,7 +9900,8 @@ func runStatus(args []string, stdout io.Writer) error {
 	var ingress *syncIngressStatusResponse
 	if statusNeedsIngressDiagnostics(status) {
 		var ingressStatus syncIngressStatusResponse
-		if err := commandClient.getWorkspaceJSON(context.Background(), func(workspaceID string) string {
+		// Best-effort diagnostics: a busy workspace should not delay status.
+		if err := commandClient.getWorkspaceJSONOnce(context.Background(), func(workspaceID string) string {
 			return fmt.Sprintf("/v1/workspaces/%s/sync/ingress", url.PathEscape(workspaceID))
 		}, &ingressStatus); err == nil {
 			ingress = &ingressStatus
