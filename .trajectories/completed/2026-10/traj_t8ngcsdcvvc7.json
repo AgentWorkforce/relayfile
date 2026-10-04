@@ -1,0 +1,64 @@
+{
+  "id": "traj_t8ngcsdcvvc7",
+  "version": 1,
+  "task": {
+    "title": "Prove bootstrap-complete full re-pull preserves snapshot files after agent edit",
+    "source": {
+      "system": "plain",
+      "id": "Agent37 GA mount no-deletion proof"
+    }
+  },
+  "status": "completed",
+  "startedAt": "2026-10-04T15:50:26.132Z",
+  "completedAt": "2026-10-04T16:07:54.908Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-10-04T16:03:18.492Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_pyckl5knsrzt",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-10-04T16:03:18.492Z",
+      "endedAt": "2026-10-04T16:07:54.908Z",
+      "events": [
+        {
+          "ts": 1791129798492,
+          "type": "decision",
+          "content": "Use an ExportFiles-only fake for the snapshot-backed mount so the regression reaches the post-bootstrap format=json branch instead of the GitHub tar-seed interface; pair the complete export assertion with two advancing incomplete snapshots to prove the tombstone delete consequence.: Use an ExportFiles-only fake for the snapshot-backed mount so the regression reaches the post-bootstrap format=json branch instead of the GitHub tar-seed interface; pair the complete export assertion with two advancing incomplete snapshots to prove the tombstone delete consequence.",
+          "raw": {
+            "question": "Use an ExportFiles-only fake for the snapshot-backed mount so the regression reaches the post-bootstrap format=json branch instead of the GitHub tar-seed interface; pair the complete export assertion with two advancing incomplete snapshots to prove the tombstone delete consequence.",
+            "chosen": "Use an ExportFiles-only fake for the snapshot-backed mount so the regression reaches the post-bootstrap format=json branch instead of the GitHub tar-seed interface; pair the complete export assertion with two advancing incomplete snapshots to prove the tombstone delete consequence.",
+            "alternatives": [],
+            "reasoning": ""
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Added the exact Agent37 post-bootstrap snapshot regression: an agent edit followed by one ExportFiles JSON full re-pull preserves all untouched files and creates no delete tombstones; a two-observation incomplete-export control proves the deletion consequence.",
+    "approach": "Standard approach",
+    "confidence": 0.95
+  },
+  "commits": [
+    "630a0dc6"
+  ],
+  "filesChanged": [
+    ".trajectories/completed/2026-10/traj_t8ngcsdcvvc7.json",
+    ".trajectories/completed/2026-10/traj_t8ngcsdcvvc7.md",
+    ".trajectories/index.json",
+    "internal/mountsync/syncer_test.go"
+  ],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "8d34a161c3e306a68b91958adb8b7ca3959aac4c",
+    "endRef": "630a0dc664b9bfea871ed13bb19409b589503315"
+  }
+}
