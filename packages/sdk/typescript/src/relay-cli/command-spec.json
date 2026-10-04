@@ -1372,6 +1372,11 @@
         "flags": "--json",
         "description": "print the raw JSON response",
         "defaultValue": false
+      },
+      {
+        "flags": "--no-retry",
+        "description": "fail immediately on 429/503 instead of retrying",
+        "defaultValue": false
       }
     ]
   },
@@ -1410,6 +1415,11 @@
       {
         "flags": "--json",
         "description": "print the raw JSON response",
+        "defaultValue": false
+      },
+      {
+        "flags": "--no-retry",
+        "description": "fail immediately on 429/503 instead of retrying",
         "defaultValue": false
       }
     ]
@@ -1493,6 +1503,11 @@
       {
         "flags": "--json",
         "description": "emit JSON",
+        "defaultValue": false
+      },
+      {
+        "flags": "--no-retry",
+        "description": "fail immediately on 429/503 instead of retrying",
         "defaultValue": false
       }
     ]

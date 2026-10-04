@@ -680,6 +680,7 @@ func relayfileCommands() []cliCommandSpec {
 				{Flags: "--path <path>", Description: "remote path to list", DefaultValue: "/"},
 				{Flags: "--depth <n>", Description: "tree depth", DefaultValue: 1},
 				{Flags: "--json", Description: "print the raw JSON response", DefaultValue: false},
+				{Flags: "--no-retry", Description: "fail immediately on 429/503 instead of retrying", DefaultValue: false},
 			},
 			dispatch: func(inv cliInvocation) error {
 				return runTree(inv.args, inv.stdout)
@@ -703,6 +704,7 @@ func relayfileCommands() []cliCommandSpec {
 				tokenFlagOption,
 				{Flags: "--output <file>", Description: "output file path or - for stdout", DefaultValue: "-"},
 				{Flags: "--json", Description: "print the raw JSON response", DefaultValue: false},
+				{Flags: "--no-retry", Description: "fail immediately on 429/503 instead of retrying", DefaultValue: false},
 			},
 			dispatch: func(inv cliInvocation) error {
 				return runRead(inv.args, inv.stdout)
@@ -741,7 +743,12 @@ func relayfileCommands() []cliCommandSpec {
 			Description: "Show sync status and local mirror state for a workspace",
 			flagSource:  "runStatus",
 			Args:        []cliArgSpec{workspaceArg},
-			Options:     []cliOptionSpec{serverFlagOption, tokenFlagOption, jsonFlagOption},
+			Options: []cliOptionSpec{
+				serverFlagOption,
+				tokenFlagOption,
+				jsonFlagOption,
+				{Flags: "--no-retry", Description: "fail immediately on 429/503 instead of retrying", DefaultValue: false},
+			},
 			dispatch: func(inv cliInvocation) error {
 				return runStatus(inv.args, inv.stdout)
 			},
