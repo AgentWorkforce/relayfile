@@ -182,7 +182,7 @@ relayfile login [--no-open] [--provision-messaging-only]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--no-open` | `false` | Forwarded to `agent-relay cloud login --no-open` |
+| `--no-open` | `false` | Forwarded as `agent-relay cloud login --device` (prints a sign-in URL and code instead of opening a browser) |
 | `--api-key` | `false` | Preserve the self-hosted/API-key credential path |
 | `--server` | `https://api.relayfile.dev` | Server base URL for `--api-key` |
 | `--provision-messaging-only` | `false` | When the active Agent Relay workspace exists only in Relaycast, create a separate Relayfile-backed workspace with a ` (Relayfile)` display-name suffix. |

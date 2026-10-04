@@ -4777,7 +4777,7 @@ func agentRelayCloudLoginStub(t *testing.T, apiURL, accessToken string) string {
 		t.Fatalf("stage login stub payload: %v", err)
 	}
 	return fmt.Sprintf(`
-if [ "$*" = "cloud login --no-open" ] || [ "$*" = "cloud login" ]; then
+if [ "$*" = "cloud login --device" ] || [ "$*" = "cloud login" ]; then
   mkdir -p '%s'
   cp '%s' '%s'
   chmod 600 '%s'
@@ -5214,7 +5214,7 @@ func TestLoginCanProvisionSeparateWorkspaceForMessagingOnlyRelaycastWorkspace(t 
 	resolverFailure := agentRelayResolver404Error(workspaceKey, relayfileCLITestFixture(t, "cloud-workspace-not-found.json"))
 	writeAgentRelayCloudAuthForTest(t, cloud.URL, "cld_access")
 	installFakeAgentRelay(t, fmt.Sprintf(`
-if [ "$*" = "cloud login --no-open" ]; then
+if [ "$*" = "cloud login --device" ]; then
   echo "agent-relay login ok"
   exit 0
 fi
@@ -7695,10 +7695,14 @@ exit 2
 		t.Fatalf("read fake agent-relay log failed: %v", err)
 	}
 	gotLog := strings.TrimSpace(string(logBytes))
-	for _, want := range []string{"cloud login --no-open", "workspace active --json"} {
+	for _, want := range []string{"cloud login --device", "workspace active --json"} {
 		if !strings.Contains(gotLog, want) {
 			t.Fatalf("expected agent-relay %s call, got %q", want, string(logBytes))
 		}
+	}
+	// `agent-relay cloud login` rejects --no-open; it must be mapped to --device.
+	if strings.Contains(gotLog, "--no-open") {
+		t.Fatalf("relayfile must not forward --no-open to agent-relay, got %q", string(logBytes))
 	}
 	// The cloud session is read from the canonical credential file, so the CLI
 	// must never be asked for it.
