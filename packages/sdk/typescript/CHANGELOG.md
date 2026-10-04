@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [0.10.72] - 2026-10-04
+
 ### Added
 
 - File reads now use a configurable, byte-capped content-addressed cache (`readCache.maxBytes`, 32 MiB by default; `readCache: false` disables it), revalidate by echoing the server's opaque `ETag` verbatim in `If-None-Match`, and serve `304` responses from cached content. Only responses carrying both an `ETag` and a `contentHash` are cached (others always go to the server), and per-path metadata such as `revision` is kept separate from the deduplicated content bytes.
@@ -651,7 +655,8 @@ _No user-visible changes in this release._
 ### Fixed
 - Bind `fetch` to `globalThis` so the SDK runs on Cloudflare Workers without `TypeError: Illegal invocation`. ([#41])
 
-[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.10.56...HEAD
+[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.10.72...HEAD
+[0.10.72]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.72
 [0.10.56]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.56
 [0.10.55]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.55
 [0.10.54]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.54
