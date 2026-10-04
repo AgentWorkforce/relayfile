@@ -2232,6 +2232,161 @@ func TestReconcileUsesBoundedTreeForFreshScopedInitialPull(t *testing.T) {
 	}
 }
 
+func TestBootstrapCompleteFullRepullPreservesUntouchedSnapshotFilesAfterAgentEdit(t *testing.T) {
+	const (
+		workspaceID  = "ws_complete_snapshot_export"
+		contentsRoot = "/github/repos/AgentWorkforce/cloud/contents"
+		headSHA      = "head123"
+		editedRel    = "src/app.ts"
+	)
+	remotePath := func(rel string) string {
+		return contentsRoot + "/" + rel + "@" + headSHA + ".json"
+	}
+	initial := map[string]string{
+		"README.md":     "# Cloud\n",
+		"docs/guide.md": "# Guide\n",
+		editedRel:       "export const answer = 41;\n",
+		"src/config.ts": "export const enabled = true;\n",
+	}
+	const agentEdit = "export const answer = 42;\n"
+
+	newMountedSnapshot := func(t *testing.T) (*Syncer, *fakeJSONExportClient, string) {
+		t.Helper()
+		base := &fakeClient{
+			files:           make(map[string]RemoteFile, len(initial)),
+			revisionCounter: len(initial),
+		}
+		client := &fakeJSONExportClient{fakeClient: base}
+		localDir := t.TempDir()
+		syncer, err := NewSyncer(client, SyncerOptions{
+			WorkspaceID:   workspaceID,
+			RemoteRoot:    contentsRoot,
+			LocalRoot:     localDir,
+			WebSocket:     boolPtr(false),
+			FullPullEvery: -1,
+		})
+		if err != nil {
+			t.Fatalf("NewSyncer: %v", err)
+		}
+		syncer.githubWorkingTree.HeadSHA = headSHA
+		syncer.state.GithubWorkingTreeHeadSHA = headSHA
+		syncer.state.BootstrapComplete = true
+		syncer.state.LastAppliedRevision = "rev_4"
+
+		rels := make([]string, 0, len(initial))
+		for rel := range initial {
+			rels = append(rels, rel)
+		}
+		sort.Strings(rels)
+		for index, rel := range rels {
+			content := initial[rel]
+			path := remotePath(rel)
+			revision := fmt.Sprintf("rev_%d", index+1)
+			base.files[path] = RemoteFile{
+				Path:        path,
+				Revision:    revision,
+				ContentType: detectContentType(rel),
+				Content:     content,
+				ContentHash: hashString(content),
+			}
+			localPath := filepath.Join(localDir, filepath.FromSlash(rel))
+			if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+				t.Fatalf("mkdir %s: %v", rel, err)
+			}
+			if err := os.WriteFile(localPath, []byte(content), 0o644); err != nil {
+				t.Fatalf("seed %s: %v", rel, err)
+			}
+			syncer.state.Files[path] = trackedFile{
+				Revision:    revision,
+				ContentType: detectContentType(rel),
+				Hash:        hashString(content),
+			}
+		}
+		if err := syncer.saveState(); err != nil {
+			t.Fatalf("persist bootstrap-complete snapshot state: %v", err)
+		}
+
+		editedPath := filepath.Join(localDir, filepath.FromSlash(editedRel))
+		if err := os.WriteFile(editedPath, []byte(agentEdit), 0o644); err != nil {
+			t.Fatalf("write agent edit: %v", err)
+		}
+		if err := syncer.HandleLocalChange(context.Background(), editedRel, fsnotify.Write); err != nil {
+			t.Fatalf("push agent edit: %v", err)
+		}
+		if got := base.files[remotePath(editedRel)].Content; got != agentEdit {
+			t.Fatalf("agent edit was not written through before re-pull: got %q", got)
+		}
+		return syncer, client, localDir
+	}
+
+	t.Run("complete format=json export preserves every untouched file", func(t *testing.T) {
+		syncer, client, localDir := newMountedSnapshot(t)
+
+		if err := syncer.pullRemoteFull(context.Background(), nil, bootstrapProgress{}); err != nil {
+			t.Fatalf("full re-pull: %v", err)
+		}
+
+		if client.exportCalls != 1 || len(client.exportPaths) != 1 || client.exportPaths[0] != contentsRoot {
+			t.Fatalf("full re-pull did not use one ExportFiles format=json snapshot for %s: calls=%d paths=%v", contentsRoot, client.exportCalls, client.exportPaths)
+		}
+		if client.listTreeCalls != 0 {
+			t.Fatalf("full re-pull unexpectedly used tree fallback: calls=%d", client.listTreeCalls)
+		}
+		if got := len(syncer.state.Files); got != len(initial) {
+			t.Fatalf("tracked files after complete export = %d, want %d", got, len(initial))
+		}
+		for rel, content := range initial {
+			want := content
+			if rel == editedRel {
+				want = agentEdit
+			}
+			localPath := filepath.Join(localDir, filepath.FromSlash(rel))
+			assertLocalFileContent(t, localPath, want)
+			if _, err := os.Stat(syncer.tombstoneFile(remotePath(rel))); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("complete export created a delete tombstone for %s: %v", rel, err)
+			}
+		}
+	})
+
+	t.Run("incomplete format=json export would delete an omitted untouched file", func(t *testing.T) {
+		syncer, client, localDir := newMountedSnapshot(t)
+		omittedRel := "docs/guide.md"
+		omittedRemote := remotePath(omittedRel)
+		client.omitPaths = map[string]struct{}{omittedRemote: {}}
+
+		advanceExportRevision := func(revision string) {
+			readmeRemote := remotePath("README.md")
+			readme := client.files[readmeRemote]
+			readme.Revision = revision
+			client.files[readmeRemote] = readme
+		}
+		advanceExportRevision("rev_6")
+		if err := syncer.pullRemoteFull(context.Background(), nil, bootstrapProgress{}); err != nil {
+			t.Fatalf("first incomplete full re-pull: %v", err)
+		}
+		omittedLocal := filepath.Join(localDir, filepath.FromSlash(omittedRel))
+		if _, err := os.Stat(omittedLocal); err != nil {
+			t.Fatalf("first incomplete observation must retain %s pending confirmation: %v", omittedRel, err)
+		}
+		pending, err := syncer.loadTombstone(omittedRemote)
+		if err != nil || pending == nil || pending.Attempts != 1 {
+			t.Fatalf("first incomplete export did not record one pending delete observation: tombstone=%+v err=%v", pending, err)
+		}
+
+		advanceExportRevision("rev_7")
+		if err := syncer.pullRemoteFull(context.Background(), nil, bootstrapProgress{}); err != nil {
+			t.Fatalf("second incomplete full re-pull: %v", err)
+		}
+		if _, tracked := syncer.state.Files[omittedRemote]; tracked {
+			t.Fatalf("omitted snapshot file remained tracked after confirmed incomplete exports")
+		}
+		if _, err := os.Stat(omittedLocal); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("two advancing incomplete exports should demonstrate deletion of omitted %s; stat err=%v", omittedRel, err)
+		}
+		assertLocalFileContent(t, filepath.Join(localDir, filepath.FromSlash(editedRel)), agentEdit)
+	})
+}
+
 func TestReconcileSkipsAtomicExportForWorkspaceRoot(t *testing.T) {
 	base := &fakeClient{
 		files: map[string]RemoteFile{
@@ -10652,6 +10807,35 @@ type fakeExportClient struct {
 	// arrives.
 	exportStarted chan struct{}
 	exportRelease <-chan struct{}
+}
+
+// fakeJSONExportClient implements the atomic ExportFiles path without also
+// implementing the GitHub tar-seed interface. That lets post-bootstrap tests
+// exercise the same /fs/export?format=json dispatch used by published mounts.
+type fakeJSONExportClient struct {
+	*fakeClient
+	exportCalls int
+	exportPaths []string
+	omitPaths   map[string]struct{}
+}
+
+func (c *fakeJSONExportClient) ExportFiles(_ context.Context, _ string, path string) ([]RemoteFile, error) {
+	c.exportCalls++
+	base := normalizeRemotePath(path)
+	c.exportPaths = append(c.exportPaths, base)
+	files := make([]RemoteFile, 0, len(c.files))
+	for remotePath, file := range c.files {
+		remotePath = normalizeRemotePath(remotePath)
+		if !isUnderRemoteRoot(base, remotePath) {
+			continue
+		}
+		if _, omitted := c.omitPaths[remotePath]; omitted {
+			continue
+		}
+		files = append(files, file)
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	return files, nil
 }
 
 type blockingGithubTarClient struct {
