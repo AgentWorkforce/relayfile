@@ -311,9 +311,9 @@ func LocalDir(localRoot, remotePath string) string {
 
 // ValidateSingleRemotePath refuses a normalized allowlist with more than one
 // root while the scoped layout is unavailable to operators. Exact layout can
-// only mount one root, so both mount binaries call this before resolving the
-// layout to give one consistent remedy instead of pointing at a layout that
-// is itself refused. Remove the callers when scoped layout is re-enabled.
+// only mount one root, so both mount binaries call this before refusing the
+// scoped layout to give one consistent remedy instead of pointing at a layout
+// that is itself refused. Remove the callers when scoped layout is re-enabled.
 func ValidateSingleRemotePath(normalized []string) error {
 	if len(normalized) <= 1 {
 		return nil
