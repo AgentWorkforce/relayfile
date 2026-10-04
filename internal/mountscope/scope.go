@@ -309,6 +309,23 @@ func LocalDir(localRoot, remotePath string) string {
 	return filepath.Join(localRoot, filepath.FromSlash(strings.TrimPrefix(remotePath, "/")))
 }
 
+// ValidateSingleRemotePath refuses a normalized allowlist with more than one
+// root while the scoped layout is unavailable to operators. Exact layout can
+// only mount one root, so both mount binaries call this before resolving the
+// layout to give one consistent remedy instead of pointing at a layout that
+// is itself refused. Remove the callers when scoped layout is re-enabled.
+func ValidateSingleRemotePath(normalized []string) error {
+	if len(normalized) <= 1 {
+		return nil
+	}
+	return fmt.Errorf(
+		"multiple remote paths (%s) are temporarily unavailable: --local-layout=%s mounts a single remote root and --local-layout=%s is disabled until scoped operator surfaces are ready; pass one --remote-path that covers the subtrees you need",
+		strings.Join(normalized, ", "),
+		LayoutExact,
+		LayoutScoped,
+	)
+}
+
 // Scope binds one normalized remote root to its isolated local root.
 type Scope struct {
 	RemotePath string

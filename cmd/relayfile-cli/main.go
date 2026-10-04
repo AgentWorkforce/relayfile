@@ -7606,6 +7606,9 @@ func runMount(args []string) error {
 		recordedRemotePaths,
 		os.Getenv("RELAYFILE_REMOTE_PATH"),
 	)
+	if err := mountscope.ValidateSingleRemotePath(effectiveRemotePaths); err != nil {
+		return err
+	}
 	if !stateFileProvided &&
 		!stateDirProvided &&
 		sameRecordedRoot &&
@@ -8114,12 +8117,13 @@ Synced-mirror limitations (§3.6 of the productized cloud-mount contract):
 Common flags:
   --workspace NAME     workspace name or id (defaults to the active workspace)
   --local-dir DIR      local mirror directory (defaults to the recorded mirror)
-  --remote-path PATH   remote subtree to mount (repeat for an allowlist)
-  --paths-file FILE    remote subtrees as a JSON array or newline-separated list
+  --remote-path PATH   remote subtree to mount (one path; multiple paths need
+                       the scoped layout, which is temporarily unavailable)
+  --paths-file FILE    remote subtree as a JSON array or newline-separated list
   --local-layout exact
-                       scoped layout is temporarily unavailable until operator
-                       surfaces can enumerate every child runtime directory;
-                       required with multiple remote paths
+                       the only supported layout; scoped layout is temporarily
+                       unavailable until operator surfaces can enumerate every
+                       child runtime directory
   --mode poll|fuse     poll (synced mirror, default) or fuse
   --interval 30s       sync interval (default 30s)
   --background         detach and keep syncing in the background

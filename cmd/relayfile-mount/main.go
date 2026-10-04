@@ -113,7 +113,7 @@ func main() {
 	credsFile := flag.String("creds-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_CREDS_FILE")), "JSON credentials file containing a relayfile bearer token; takes precedence over --token")
 	workspaceID := flag.String("workspace", strings.TrimSpace(os.Getenv("RELAYFILE_WORKSPACE")), "workspace ID")
 	var remotePaths mountscope.StringListFlag
-	flag.Var(&remotePaths, "remote-path", "remote root path (may be repeated)")
+	flag.Var(&remotePaths, "remote-path", "remote root path (one root while scoped layout is temporarily unavailable)")
 	pathsFile := flag.String("paths-file", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PATHS_FILE")), "file containing remote root paths, as JSON array or newline-separated list")
 	eventProvider := flag.String("provider", strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_PROVIDER")), "event provider filter")
 	localDir := flag.String("local-dir", strings.TrimSpace(os.Getenv("RELAYFILE_LOCAL_DIR")), "local mirror directory")
@@ -204,6 +204,9 @@ func main() {
 	resolvedLocalLayout, err := resolveLocalLayout(*localLayout)
 	if err != nil {
 		log.Fatalf("invalid local layout: %v", err)
+	}
+	if err := mountscope.ValidateSingleRemotePath(mountscope.NormalizePaths(allRemotePaths, envOrDefault("RELAYFILE_REMOTE_PATH", "/"))); err != nil {
+		log.Fatalf("unsupported remote paths: %v", err)
 	}
 	if err := validateCLIRequestedLocalLayout(resolvedLocalLayout); err != nil {
 		log.Fatalf("unsupported local layout: %v", err)
