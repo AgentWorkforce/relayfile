@@ -462,7 +462,7 @@
       "status": "completed",
       "startedAt": "2026-10-04T15:50:26.132Z",
       "completedAt": "2026-10-04T16:07:54.908Z",
-      "path": "/Users/khaliqgant/Projects/AgentWorkforce/.worktrees/agent37-ga-mount-proof/.trajectories/completed/2026-10/traj_t8ngcsdcvvc7.json"
+      "path": ".trajectories/completed/2026-10/traj_t8ngcsdcvvc7.json"
     }
   }
 }
