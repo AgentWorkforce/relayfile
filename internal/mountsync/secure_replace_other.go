@@ -21,3 +21,11 @@ func writeFileAtomicSecure(root, target string, data []byte, mode os.FileMode) e
 func writeSymlinkAtomicSecure(root, targetPath, target string) error {
 	return errAncestorSafetyUnsupported
 }
+
+func movePathAtomicSecure(sourceRoot, sourcePath, targetRoot, targetPath string, targetMode os.FileMode) error {
+	return errAncestorSafetyUnsupported
+}
+
+func removeOwnedStagingTreeBounded(root string, maxEntries int) error {
+	return os.RemoveAll(root)
+}

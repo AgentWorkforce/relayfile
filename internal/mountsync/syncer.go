@@ -723,11 +723,13 @@ type GithubWorkingTreeSeedRequest struct {
 	HeadSHA       string
 	SourceProfile string
 	Gzip          bool
+	SourceArchive bool
 }
 
 type GithubWorkingTreeTar struct {
-	Body        io.ReadCloser
-	ContentType string
+	Body            io.ReadCloser
+	ContentType     string
+	StripComponents int
 }
 
 type LazyMaterializeClient interface {
@@ -1273,6 +1275,9 @@ func (c *HTTPClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID
 	if !seed.Gzip {
 		q.Set("gzip", "0")
 	}
+	if seed.SourceArchive {
+		q.Set("sourceArchive", "1")
+	}
 	requestPath := fmt.Sprintf("/v1/workspaces/%s/fs/export?%s", url.PathEscape(workspaceID), q.Encode())
 
 	authRefreshTried := false
@@ -1295,10 +1300,18 @@ func (c *HTTPClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID
 			return GithubWorkingTreeTar{}, err
 		}
 		if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+			stripComponents, stripErr := parseTarStripComponents(
+				resp.Header.Get("X-Relayfile-Tar-Strip-Components"),
+			)
+			if stripErr != nil {
+				_ = resp.Body.Close()
+				return GithubWorkingTreeTar{}, stripErr
+			}
 			c.logHTTPStatus(http.MethodGet, requestPath, resp.StatusCode, resp.Header.Get("Retry-After"), attempt)
 			return GithubWorkingTreeTar{
-				Body:        resp.Body,
-				ContentType: resp.Header.Get("Content-Type"),
+				Body:            resp.Body,
+				ContentType:     resp.Header.Get("Content-Type"),
+				StripComponents: stripComponents,
 			}, nil
 		}
 		payloadBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -1335,6 +1348,18 @@ func (c *HTTPClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID
 			Reason:     errPayload.Details.Reason,
 		}
 	}
+}
+
+func parseTarStripComponents(raw string) (int, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0, nil
+	}
+	value, err := strconv.Atoi(trimmed)
+	if err != nil || value != 1 {
+		return 0, fmt.Errorf("invalid X-Relayfile-Tar-Strip-Components value %q", raw)
+	}
+	return value, nil
 }
 
 func (c *HTTPClient) LazyMaterialize(ctx context.Context, workspaceID, owner, repo string) error {
@@ -6730,7 +6755,8 @@ func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubW
 			PathPrefix:    s.githubWorkingTree.ContentsRoot,
 			HeadSHA:       headSHA,
 			SourceProfile: manifest.SourceProfile,
-			Gzip:          false,
+			Gzip:          true,
+			SourceArchive: true,
 		})
 	})
 	if slotErr != nil {
@@ -7172,7 +7198,88 @@ func (s *Syncer) applyGithubWorkingTreeTarSeed(tarBody GithubWorkingTreeTar, tre
 	return s.applyGithubWorkingTreeTarSeedStrict(tarBody, tree, conflicted, prog, false)
 }
 
+func stripTarPathComponents(name string, count int) (string, error) {
+	normalized := strings.ReplaceAll(name, "\\", "/")
+	cleaned := path.Clean(normalized)
+	if count == 0 {
+		return cleaned, nil
+	}
+	if count != 1 || cleaned == "" || cleaned == "." || path.IsAbs(cleaned) || strings.HasPrefix(cleaned, "../") || strings.Contains(cleaned, "/../") {
+		return "", fmt.Errorf("github source archive contains unsafe path %q", name)
+	}
+	parts := strings.Split(cleaned, "/")
+	if len(parts) <= count || parts[0] == "" || parts[0] == "." || parts[0] == ".." {
+		return "", fmt.Errorf("github source archive path %q has no file after stripping %d component", name, count)
+	}
+	return strings.Join(parts[count:], "/"), nil
+}
+
 func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTar, tree map[string]githubTreeFile, conflicted map[string]struct{}, prog bootstrapProgress, strictComplete bool) (map[string]struct{}, error) {
+	const maxAbandonedStagingEntries = 100000
+	type localPathObservation struct {
+		snapshot localSnapshot
+		existed  bool
+		readable bool
+		readErr  error
+	}
+	// Capture the local baseline before consuming any archive bytes. Otherwise
+	// an edit made while a large tar entry streams could become the baseline and
+	// then be overwritten during publication.
+	localBaselines := make(map[string]localPathObservation, len(tree))
+	baselinePaths := make([]string, 0, len(tree))
+	for rel := range tree {
+		baselinePaths = append(baselinePaths, rel)
+	}
+	sort.Strings(baselinePaths)
+	for _, rel := range baselinePaths {
+		localPath, err := safeLocalPath(s.localRoot, rel)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.assertNotMountRoot(localPath); err != nil {
+			return nil, err
+		}
+		snapshot, readErr := s.readLocalSnapshot(localPath, false)
+		observation := localPathObservation{snapshot: snapshot, existed: readErr == nil, readable: readErr == nil || errors.Is(readErr, os.ErrNotExist), readErr: readErr}
+		localBaselines[rel] = observation
+		// A warm mount can hash thousands of local files here. Yield between
+		// paths so watcher/outbox work remains responsive, and expose liveness
+		// to both the internal and state-file watchdogs.
+		s.yieldFullPullStateLock()
+		prog.touch()
+	}
+	// Keep the unverified tree outside the visible mount root. Besides making
+	// publication explicit, this prevents the watcher from observing staging
+	// writes and avoids following a user-controlled infrastructure symlink.
+	stagingRoot := filepath.Join(
+		filepath.Dir(s.localRoot),
+		".relayfile-github-tar-stage-"+hashString(filepath.Clean(s.localRoot))[:16],
+	)
+	// The name is stable per mount root, so a restart after SIGKILL reclaims
+	// the abandoned tree instead of accumulating another full repository copy.
+	// Cleanup first verifies ownership and a fixed entry budget without following
+	// symlinks; subsequent secure writes also open every directory component
+	// with O_NOFOLLOW.
+	if err := removeOwnedStagingTreeBounded(stagingRoot, maxAbandonedStagingEntries); err != nil {
+		return nil, fmt.Errorf("remove abandoned github tar staging directory: %w", err)
+	}
+	if err := os.Mkdir(stagingRoot, 0o700); err != nil {
+		return nil, fmt.Errorf("create github tar staging directory: %w", err)
+	}
+	defer os.RemoveAll(stagingRoot)
+	type pendingPublish struct {
+		remotePath    string
+		localPath     string
+		stagedPath    string
+		localObserved localSnapshot
+		localExisted  bool
+		state         trackedFile
+		observedState trackedFile
+		observed      bool
+		canWrite      bool
+		mode          uint32
+	}
+	pending := make([]pendingPublish, 0, len(tree))
 	reader := io.Reader(tarBody.Body)
 	buffered := bufio.NewReader(reader)
 	if strings.Contains(strings.ToLower(tarBody.ContentType), "gzip") {
@@ -7207,6 +7314,11 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 		if header == nil || header.FileInfo().IsDir() {
 			continue
 		}
+		if header.Typeflag == tar.TypeXGlobalHeader {
+			// GitHub/git-archive source tarballs carry repository-wide PAX
+			// metadata (notably the commit id). It is not a working-tree entry.
+			continue
+		}
 		isRegular := header.Typeflag == tar.TypeReg || header.Typeflag == tar.TypeRegA
 		isSymlink := header.Typeflag == tar.TypeSymlink
 		if !isRegular && !isSymlink {
@@ -7215,7 +7327,11 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 			}
 			continue
 		}
-		rel := path.Clean(strings.ReplaceAll(header.Name, "\\", "/"))
+		rel, err := stripTarPathComponents(header.Name, tarBody.StripComponents)
+		if err != nil {
+			return nil, err
+		}
+		rel = path.Clean(strings.ReplaceAll(rel, "\\", "/"))
 		rel = strings.TrimPrefix(rel, "/")
 		if rel == "" || rel == "." || strings.HasPrefix(rel, "../") || strings.Contains(rel, "/../") {
 			return nil, fmt.Errorf("github tar seed contains unsafe path %q", header.Name)
@@ -7292,55 +7408,85 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 				return nil, fmt.Errorf("github tar seed contains unsafe symlink %s: %w", rel, err)
 			}
 		}
-		tracked := s.state.Files[meta.RemotePath]
+		tracked, trackedExists := s.state.Files[meta.RemotePath]
 		canWrite := s.canWritePath(meta.RemotePath)
 		if tracked.Dirty {
-			if err := s.applyLocalPermissionsForMode(localPath, canWrite, tracked.Mode); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return nil, err
-			}
 			tracked.ReadOnly = !canWrite
-			s.state.Files[meta.RemotePath] = tracked
+			pending = append(pending, pendingPublish{
+				remotePath:    meta.RemotePath,
+				localPath:     localPath,
+				state:         tracked,
+				observedState: tracked,
+				observed:      trackedExists,
+				canWrite:      canWrite,
+				mode:          tracked.Mode,
+			})
 			remotePaths[meta.RemotePath] = struct{}{}
+			prog.touch()
 			continue
 		}
-		if err := ensureSecureParentDirectory(s.localRoot, localPath); err != nil {
-			return nil, err
+		localBaseline := localBaselines[rel]
+		if !localBaseline.readable {
+			// A transient editor replacement, unsupported local type, or
+			// oversized local file is not evidence that the remote is invalid.
+			// Preserve this path and continue publishing unrelated entries.
+			s.recordGithubSourceArchiveSkipped(meta.RemotePath, "github source archive baseline snapshot", localBaseline.readErr)
+			remotePaths[meta.RemotePath] = struct{}{}
+			prog.touch()
+			continue
 		}
 		shouldWrite := true
-		if isSymlink {
-			if current, readErr := readLocalSymlinkNoFollow(s.localRoot, localPath, maxWritebackBytes()); readErr == nil && current == header.Linkname {
-				shouldWrite = false
-			}
-		} else if current, readErr := s.readLocalSnapshot(localPath, true); readErr == nil && current.Type == remoteTypeFile && current.Hash == hash {
+		if isSymlink && localBaseline.existed && isSymlinkType(localBaseline.snapshot.Type) && localBaseline.snapshot.Target == header.Linkname {
+			shouldWrite = false
+		} else if !isSymlink && localBaseline.existed && localBaseline.snapshot.Type == remoteTypeFile && localBaseline.snapshot.Hash == hash {
 			shouldWrite = false
 		}
+		stagedPath := ""
 		if shouldWrite {
+			stagedPath, err = safeLocalPath(stagingRoot, rel)
+			if err != nil {
+				return nil, err
+			}
+			if err := ensureSecureParentDirectory(stagingRoot, stagedPath); err != nil {
+				return nil, err
+			}
 			var writeErr error
 			if isSymlink {
-				writeErr = writeSymlinkAtomicSecure(s.localRoot, localPath, header.Linkname)
+				writeErr = writeSymlinkAtomicSecure(stagingRoot, stagedPath, header.Linkname)
 			} else {
-				writeErr = writeFileAtomicSecure(s.localRoot, localPath, data, os.FileMode(meta.Mode&0o777))
+				// Staging is private and must remain readable by the publisher
+				// even when legacy metadata reports mode 0000. The authoritative
+				// mode is applied only to the final path after publication.
+				writeErr = writeFileAtomicSecure(stagingRoot, stagedPath, data, 0o600)
 			}
 			if writeErr != nil {
 				return nil, writeErr
 			}
 		}
-		if err := s.applyLocalPermissionsForMode(localPath, canWrite, meta.Mode); err != nil {
-			return nil, err
-		}
 		contentType := detectContentType(localPath)
-		s.state.Files[meta.RemotePath] = trackedFile{
-			Revision:    meta.Revision,
-			ContentType: contentType,
-			Encoding:    meta.Encoding,
-			Type:        meta.Type,
-			Target:      meta.Target,
-			Mode:        meta.Mode,
-			Hash:        hash,
-			Dirty:       false,
-			Denied:      false,
-			ReadOnly:    !canWrite,
-		}
+		pending = append(pending, pendingPublish{
+			remotePath:    meta.RemotePath,
+			localPath:     localPath,
+			stagedPath:    stagedPath,
+			localObserved: localBaseline.snapshot,
+			localExisted:  localBaseline.existed,
+			state: trackedFile{
+				Revision:    meta.Revision,
+				ContentType: contentType,
+				Encoding:    meta.Encoding,
+				Type:        meta.Type,
+				Target:      meta.Target,
+				Mode:        meta.Mode,
+				Hash:        hash,
+				Dirty:       false,
+				Denied:      false,
+				ReadOnly:    !canWrite,
+			},
+			observedState: tracked,
+			observed:      trackedExists,
+			canWrite:      canWrite,
+			mode:          meta.Mode,
+		})
 		remotePaths[meta.RemotePath] = struct{}{}
 		s.yieldFullPullStateLock()
 		prog.touch()
@@ -7350,7 +7496,79 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 			return nil, fmt.Errorf("github tar seed missing tree file %s", rel)
 		}
 	}
+	// Nothing under the visible mount root changes until the complete archive
+	// has passed count/path/hash verification. Publish each staged entry with
+	// the existing secure atomic writer; a crash leaves only an ignored staging
+	// directory outside the mount, and the next bootstrap can restart cleanly.
+	for _, entry := range pending {
+		// Give watcher/outbox work a turn between each disk publication, then
+		// fence on both accepted writes and pending/failed local edits. The
+		// archive entry was staged against observedState; any newer tracked
+		// state owns the path even if its cloud write has not succeeded yet.
+		s.yieldFullPullStateLock()
+		current, currentExists := s.state.Files[entry.remotePath]
+		if s.fullPullPathTouchedByUpPath(entry.remotePath) ||
+			current.Dirty ||
+			currentExists != entry.observed ||
+			(currentExists && current != entry.observedState) {
+			// A local writeback may have landed after this entry was staged but
+			// before the full archive finished verification. Preserve that newer
+			// local state just as the streaming path does before staging.
+			if currentExists {
+				current.ReadOnly = !entry.canWrite
+				s.state.Files[entry.remotePath] = current
+				if err := s.applyLocalPermissionsForMode(entry.localPath, entry.canWrite, current.Mode); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return nil, err
+				}
+			}
+			prog.touch()
+			continue
+		}
+		localNow, localReadErr := s.readLocalSnapshot(entry.localPath, false)
+		localExistsNow := localReadErr == nil
+		if localReadErr != nil && !errors.Is(localReadErr, os.ErrNotExist) {
+			// Treat an unreadable final snapshot as a local concurrent change.
+			// Skipping one uncertain path must not discard the verified archive
+			// or prevent unrelated staged entries from being published.
+			s.recordGithubSourceArchiveSkipped(entry.remotePath, "github source archive final snapshot", localReadErr)
+			prog.touch()
+			continue
+		}
+		if localExistsNow != entry.localExisted ||
+			(localExistsNow && !sameLocalSnapshotIdentity(localNow, entry.localObserved)) {
+			// The watcher may still be inside its debounce window, so tracked
+			// state can look clean even though the destination changed after
+			// staging. Preserve the newer disk state and let the watcher own it.
+			prog.touch()
+			continue
+		}
+		if entry.stagedPath != "" {
+			if err := movePathAtomicSecure(stagingRoot, entry.stagedPath, s.localRoot, entry.localPath, localPermissionsForMode(entry.canWrite, entry.mode)); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := s.applyLocalPermissionsForMode(entry.localPath, entry.canWrite, entry.mode); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+		}
+		s.state.Files[entry.remotePath] = entry.state
+		s.clearSkippedMaterialization(entry.remotePath)
+		prog.touch()
+	}
 	return remotePaths, nil
+}
+
+func (s *Syncer) recordGithubSourceArchiveSkipped(remotePath, operation string, err error) {
+	s.recordSkippedMaterialization(remotePath, operation, err)
+	s.state.Counters.PathMaterializationSkipped++
+	s.logf("warning: preserving local file %s because %s failed: %v; queued for retry", normalizeRemotePath(remotePath), operation, err)
+}
+
+func sameLocalSnapshotIdentity(left, right localSnapshot) bool {
+	return normalizeRemoteType(left.Type) == normalizeRemoteType(right.Type) &&
+		left.Target == right.Target &&
+		left.Mode == right.Mode &&
+		left.Hash == right.Hash
 }
 
 func exportSnapshotUnsupported(err error) bool {
@@ -10055,6 +10273,10 @@ func (s *Syncer) applyLocalPermissionsForMode(localPath string, canWrite bool, r
 		// symlink, even when a remote event races a local type replacement.
 		return nil
 	}
+	return os.Chmod(localPath, localPermissionsForMode(canWrite, remoteMode))
+}
+
+func localPermissionsForMode(canWrite bool, remoteMode uint32) os.FileMode {
 	mode := os.FileMode(remoteMode & 0o7777)
 	if mode.Perm() == 0 {
 		mode = 0o644
@@ -10062,7 +10284,7 @@ func (s *Syncer) applyLocalPermissionsForMode(localPath string, canWrite bool, r
 	if !canWrite {
 		mode &^= 0o222
 	}
-	return os.Chmod(localPath, mode.Perm())
+	return mode.Perm()
 }
 
 // enforceSyncModePermissionsOnTransition applies the current scope-derived
