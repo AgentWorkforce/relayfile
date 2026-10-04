@@ -683,7 +683,7 @@ func relayfileCommands() []cliCommandSpec {
 				{Flags: "--no-retry", Description: "fail immediately on 429/503 instead of retrying", DefaultValue: false},
 			},
 			dispatch: func(inv cliInvocation) error {
-				return runTree(inv.args, inv.stdout)
+				return runTree(inv.args, inv.stdout, inv.stderr)
 			},
 		},
 		{
@@ -707,7 +707,7 @@ func relayfileCommands() []cliCommandSpec {
 				{Flags: "--no-retry", Description: "fail immediately on 429/503 instead of retrying", DefaultValue: false},
 			},
 			dispatch: func(inv cliInvocation) error {
-				return runRead(inv.args, inv.stdout)
+				return runRead(inv.args, inv.stdout, inv.stderr)
 			},
 		},
 		{
@@ -750,7 +750,7 @@ func relayfileCommands() []cliCommandSpec {
 				{Flags: "--no-retry", Description: "fail immediately on 429/503 instead of retrying", DefaultValue: false},
 			},
 			dispatch: func(inv cliInvocation) error {
-				return runStatus(inv.args, inv.stdout)
+				return runStatus(inv.args, inv.stdout, inv.stderr)
 			},
 		},
 		{

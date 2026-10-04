@@ -8157,6 +8157,8 @@ type workspaceCommandClient struct {
 	// on 429/503. Polling commands leave it off because politePoll already
 	// owns their backoff.
 	retryBusy bool
+	// retryNotices receives the one-line notice printed before each retry.
+	retryNotices io.Writer
 }
 
 const (
@@ -8168,8 +8170,7 @@ const (
 )
 
 var (
-	oneShotBusyRetryStderr io.Writer = os.Stderr
-	oneShotBusyRetrySleep            = func(ctx context.Context, d time.Duration) error {
+	oneShotBusyRetrySleep = func(ctx context.Context, d time.Duration) error {
 		timer := time.NewTimer(d)
 		defer timer.Stop()
 		select {
@@ -8213,7 +8214,9 @@ func (c *workspaceCommandClient) withBusyRetry(ctx context.Context, request func
 			return err
 		}
 		delay := oneShotBusyRetryDelay(attempt, retryAfterFromErr(err))
-		fmt.Fprintf(oneShotBusyRetryStderr, "workspace busy (%v), retrying in %s (attempt %d/%d)\n", err, delay.Round(100*time.Millisecond), attempt+1, oneShotBusyRetryMaxAttempts)
+		if c.retryNotices != nil {
+			fmt.Fprintf(c.retryNotices, "%v; retrying in %s (attempt %d/%d)\n", err, delay.Round(100*time.Millisecond), attempt+1, oneShotBusyRetryMaxAttempts)
+		}
 		if sleepErr := oneShotBusyRetrySleep(ctx, delay); sleepErr != nil {
 			return err
 		}
@@ -9484,7 +9487,7 @@ func plistEscapeXML(s string) string {
 	return s
 }
 
-func runTree(args []string, stdout io.Writer) error {
+func runTree(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("tree", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	server := fs.String("server", "", "relayfile server URL override")
@@ -9504,7 +9507,7 @@ func runTree(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() > 2 {
-		return fmt.Errorf("usage: %s tree [WORKSPACE] [PATH] [--depth N]", programName())
+		return fmt.Errorf("usage: %s tree [WORKSPACE] [PATH] [--depth N] [--json] [--no-retry]", programName())
 	}
 
 	remotePath := strings.TrimSpace(*pathFlag)
@@ -9527,6 +9530,7 @@ func runTree(args []string, stdout io.Writer) error {
 		return err
 	}
 	commandClient.retryBusy = !*noRetry
+	commandClient.retryNotices = stderr
 	if remotePath == "" {
 		remotePath = "/"
 	}
@@ -9637,7 +9641,7 @@ func knownRemoteRootSegment(segment string) bool {
 	}
 }
 
-func runRead(args []string, stdout io.Writer) error {
+func runRead(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("read", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	server := fs.String("server", "", "relayfile server URL override")
@@ -9655,7 +9659,7 @@ func runRead(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() < 1 || fs.NArg() > 2 {
-		return fmt.Errorf("usage: %s read [WORKSPACE] PATH", programName())
+		return fmt.Errorf("usage: %s read [WORKSPACE] PATH [--output FILE] [--json] [--no-retry]", programName())
 	}
 
 	var workspaceValue string
@@ -9671,6 +9675,7 @@ func runRead(args []string, stdout io.Writer) error {
 		return err
 	}
 	commandClient.retryBusy = !*noRetry
+	commandClient.retryNotices = stderr
 	if remotePath == "" {
 		return errors.New("path is required")
 	}
@@ -9831,7 +9836,7 @@ func runExport(args []string, stdout io.Writer) error {
 	return os.WriteFile(*output, body, 0o644)
 }
 
-func runStatus(args []string, stdout io.Writer) error {
+func runStatus(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	server := fs.String("server", "", "relayfile server URL override")
@@ -9847,7 +9852,7 @@ func runStatus(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() > 1 {
-		return fmt.Errorf("usage: %s status [WORKSPACE] [--json]", programName())
+		return fmt.Errorf("usage: %s status [WORKSPACE] [--json] [--no-retry]", programName())
 	}
 
 	workspaceValue := ""
@@ -9859,6 +9864,7 @@ func runStatus(args []string, stdout io.Writer) error {
 		return err
 	}
 	commandClient.retryBusy = !*noRetry
+	commandClient.retryNotices = stderr
 	var status syncStatusResponse
 	err = commandClient.getWorkspaceJSON(context.Background(), func(workspaceID string) string {
 		return fmt.Sprintf("/v1/workspaces/%s/sync/status", url.PathEscape(workspaceID))
@@ -9872,7 +9878,8 @@ func runStatus(args []string, stdout io.Writer) error {
 	var ingress *syncIngressStatusResponse
 	if statusNeedsIngressDiagnostics(status) {
 		var ingressStatus syncIngressStatusResponse
-		if err := commandClient.getWorkspaceJSON(context.Background(), func(workspaceID string) string {
+		// Best-effort diagnostics: a busy workspace should not delay status.
+		if err := commandClient.getWorkspaceJSONOnce(context.Background(), func(workspaceID string) string {
 			return fmt.Sprintf("/v1/workspaces/%s/sync/ingress", url.PathEscape(workspaceID))
 		}, &ingressStatus); err == nil {
 			ingress = &ingressStatus

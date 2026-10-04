@@ -13,22 +13,18 @@ import (
 	"github.com/agentworkforce/relayfile/internal/delegatedauth"
 )
 
-// stubOneShotBusyRetry replaces the sleep and stderr hooks so tests run
-// instantly and can assert on the recorded delays and notices.
-func stubOneShotBusyRetry(t *testing.T) (*[]time.Duration, *bytes.Buffer) {
+// stubOneShotBusyRetry replaces the sleep hook so tests run instantly and can
+// assert on the recorded delays.
+func stubOneShotBusyRetry(t *testing.T) *[]time.Duration {
 	t.Helper()
 	var delays []time.Duration
-	var stderr bytes.Buffer
-	prevSleep, prevStderr := oneShotBusyRetrySleep, oneShotBusyRetryStderr
+	prevSleep := oneShotBusyRetrySleep
 	oneShotBusyRetrySleep = func(_ context.Context, d time.Duration) error {
 		delays = append(delays, d)
 		return nil
 	}
-	oneShotBusyRetryStderr = &stderr
-	t.Cleanup(func() {
-		oneShotBusyRetrySleep, oneShotBusyRetryStderr = prevSleep, prevStderr
-	})
-	return &delays, &stderr
+	t.Cleanup(func() { oneShotBusyRetrySleep = prevSleep })
+	return &delays
 }
 
 // busyFileServer answers the first busyResponses requests with 429
@@ -59,11 +55,11 @@ func busyFileServer(t *testing.T, busyResponses int32) (*httptest.Server, *atomi
 func TestReadRetriesWorkspaceBusyHonoringRetryAfter(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
-	delays, stderr := stubOneShotBusyRetry(t)
+	delays := stubOneShotBusyRetry(t)
 	_, requests := busyFileServer(t, 2)
 
-	var stdout bytes.Buffer
-	if err := run([]string{"read", "ws_cloud", "/github/README.md"}, strings.NewReader(""), &stdout, &stdout); err != nil {
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"read", "ws_cloud", "/github/README.md"}, strings.NewReader(""), &stdout, &stderr); err != nil {
 		t.Fatalf("run read failed: %v", err)
 	}
 	if got := stdout.String(); got != "# readme\n" {
@@ -80,7 +76,9 @@ func TestReadRetriesWorkspaceBusyHonoringRetryAfter(t *testing.T) {
 			t.Fatalf("expected delay to honor Retry-After 2s plus <=25%% jitter, got %s", d)
 		}
 	}
-	notices := strings.Count(stderr.String(), "workspace busy")
+	// Notices go to the stderr writer passed to run, not the process stderr,
+	// and quote the server's error code rather than guessing a cause.
+	notices := strings.Count(stderr.String(), "http 429 workspace_busy: workspace durable object is busy; retry after the advertised delay; retrying in ")
 	if notices != 2 || !strings.Contains(stderr.String(), "attempt 2/4") {
 		t.Fatalf("expected one stderr notice per retry, got %q", stderr.String())
 	}
@@ -89,11 +87,11 @@ func TestReadRetriesWorkspaceBusyHonoringRetryAfter(t *testing.T) {
 func TestReadNoRetryFailsImmediatelyOnWorkspaceBusy(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
-	delays, stderr := stubOneShotBusyRetry(t)
+	delays := stubOneShotBusyRetry(t)
 	_, requests := busyFileServer(t, 1)
 
-	var stdout bytes.Buffer
-	err := run([]string{"read", "ws_cloud", "/github/README.md", "--no-retry"}, strings.NewReader(""), &stdout, &stdout)
+	var stdout, stderr bytes.Buffer
+	err := run([]string{"read", "ws_cloud", "/github/README.md", "--no-retry"}, strings.NewReader(""), &stdout, &stderr)
 	if err == nil || !strings.Contains(err.Error(), "workspace_busy") {
 		t.Fatalf("expected workspace_busy error, got %v", err)
 	}
@@ -108,7 +106,7 @@ func TestReadNoRetryFailsImmediatelyOnWorkspaceBusy(t *testing.T) {
 func TestReadGivesUpAfterBoundedBusyRetries(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
-	delays, _ := stubOneShotBusyRetry(t)
+	delays := stubOneShotBusyRetry(t)
 	_, requests := busyFileServer(t, 100)
 
 	var stdout bytes.Buffer
@@ -139,7 +137,7 @@ func TestOneShotBusyRetryDelayClampsAndBacksOff(t *testing.T) {
 }
 
 func TestWorkspaceCommandClientDoesNotRetryWritesOnBusy(t *testing.T) {
-	_, _ = stubOneShotBusyRetry(t)
+	_ = stubOneShotBusyRetry(t)
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
