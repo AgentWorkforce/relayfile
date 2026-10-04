@@ -16,6 +16,20 @@ func TestPlanRequiresScopedLayoutForMultiplePaths(t *testing.T) {
 	}
 }
 
+func TestValidateSingleRemotePath(t *testing.T) {
+	for _, paths := range [][]string{nil, {"/"}, {"/github"}} {
+		if err := ValidateSingleRemotePath(paths); err != nil {
+			t.Fatalf("ValidateSingleRemotePath(%v) = %v, want nil", paths, err)
+		}
+	}
+	err := ValidateSingleRemotePath(NormalizePaths([]string{"/github", "/slack", "/github/repos"}, "/"))
+	if err == nil ||
+		!strings.Contains(err.Error(), "multiple remote paths (/github, /slack) are temporarily unavailable") ||
+		!strings.Contains(err.Error(), "pass one --remote-path (or a --paths-file with one root)") {
+		t.Fatalf("expected single-path remedy, got %v", err)
+	}
+}
+
 func TestPlanRejectsWorkspaceRootWithScopedLayout(t *testing.T) {
 	_, err := Plan(t.TempDir(), LayoutScoped, []string{"/"}, "/", "")
 	if err == nil || !strings.Contains(err.Error(), "has no isolated child root") || !strings.Contains(err.Error(), "--local-layout=exact") {

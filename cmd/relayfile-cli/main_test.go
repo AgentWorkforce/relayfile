@@ -3174,19 +3174,61 @@ func TestMountMirrorsRepeatedRemotePathsUnderScopedLayout(t *testing.T) {
 	}
 }
 
-func TestMountRejectsRepeatedRemotePathsWithoutScopedLayout(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	clearRelayfileEnv(t)
+func TestMountRejectsRepeatedRemotePathsWithOneMessageForEveryLayout(t *testing.T) {
+	var messages []string
+	for _, layoutArgs := range [][]string{
+		nil,
+		{"--local-layout", mountscope.LayoutExact},
+		{"--local-layout", mountscope.LayoutScoped},
+	} {
+		t.Setenv("HOME", t.TempDir())
+		clearRelayfileEnv(t)
+		t.Setenv("RELAYFILE_REMOTE_PATH", "")
+		t.Setenv("RELAYFILE_MOUNT_PATHS_FILE", "")
+		localRoot := filepath.Join(t.TempDir(), "mirror")
+		// An active mount holds the start lock for its lifetime; the
+		// multi-path refusal must not be masked by the lock error.
+		releaseLock, lockErr := acquireMountStartLock(localRoot)
+		if lockErr != nil {
+			t.Fatalf("hold mount-start lock: %v", lockErr)
+		}
 
-	err := run([]string{
-		"mount", "ws_demo", t.TempDir(),
-		"--token", testJWTWithWorkspace("ws_demo"),
-		"--remote-path", "/github",
-		"--remote-path", "/slack",
-		"--once",
-	}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "--local-layout=scoped") {
-		t.Fatalf("expected scoped-layout guidance, got %v", err)
+		args := append([]string{
+			"mount", "ws_demo", localRoot,
+			"--token", testJWTWithWorkspace("ws_demo"),
+			"--remote-path", "/github",
+			"--remote-path", "/slack",
+			"--once",
+		}, layoutArgs...)
+		err := run(args, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+		releaseLock()
+		if err == nil ||
+			!strings.Contains(err.Error(), "multiple remote paths (/github, /slack) are temporarily unavailable") ||
+			!strings.Contains(err.Error(), "pass one --remote-path (or a --paths-file with one root)") ||
+			strings.Contains(err.Error(), "require --local-layout") {
+			t.Fatalf("%v: expected one multi-path refusal with a single-path remedy, got %v", layoutArgs, err)
+		}
+		if _, statErr := os.Stat(localRoot); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("%v: multi-path refusal initialized mirror: %v", layoutArgs, statErr)
+		}
+		messages = append(messages, err.Error())
+	}
+	for _, message := range messages[1:] {
+		if message != messages[0] {
+			t.Fatalf("multi-path refusal differs by layout:\n%s\n%s", messages[0], message)
+		}
+	}
+}
+
+func TestMountHelpDoesNotOfferExactLayoutForMultiplePaths(t *testing.T) {
+	var buf bytes.Buffer
+	printMountHelp(&buf)
+	got := buf.String()
+	if strings.Contains(got, "required with multiple remote paths") {
+		t.Fatalf("mount --help still claims exact layout supports multiple remote paths:\n%s", got)
+	}
+	if !strings.Contains(got, "one path; multiple paths need") {
+		t.Fatalf("mount --help does not explain the single-path limit:\n%s", got)
 	}
 }
 
