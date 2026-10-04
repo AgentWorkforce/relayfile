@@ -286,7 +286,7 @@ func TestCompleteTarSeedRejectsUnsupportedEntryType(t *testing.T) {
 	if err := tw.Close(); err != nil {
 		t.Fatalf("close tar: %v", err)
 	}
-	_, err = syncer.applyGithubWorkingTreeTarSeedStrict(GithubWorkingTreeTar{Body: io.NopCloser(bytes.NewReader(buf.Bytes()))}, nil, nil, bootstrapProgress{}, true)
+	_, err = syncer.applyGithubWorkingTreeTarSeedStrict(context.Background(), GithubWorkingTreeTar{Body: io.NopCloser(bytes.NewReader(buf.Bytes()))}, nil, nil, bootstrapProgress{}, true)
 	if err == nil || !strings.Contains(err.Error(), "unsupported entry type") {
 		t.Fatalf("unsupported complete-v1 tar error = %v", err)
 	}

@@ -180,6 +180,14 @@ const (
 	// #1499/#1516 non-convergence loop). Must stay strictly under
 	// defaultBootstrapIdleTimeout.
 	defaultExportTimeout = 45 * time.Second
+	// defaultGithubTarSeedTimeout bounds the retained GitHub archive seed with
+	// its own deadline. The seed performs several reads and then one atomic tar
+	// download without reporting applied-file progress; if it consumes the
+	// outer bootstrap idle window, the resumable tree fallback never gets a
+	// live parent context in the same cycle. Agent37 raises the outer idle
+	// window to 240s, leaving two minutes for the fallback to establish and
+	// persist its first checkpoint when this 120s seed deadline fires.
+	defaultGithubTarSeedTimeout = 120 * time.Second
 	// defaultOutboxFlushTimeout bounds a durable writeback/outbox flush with
 	// its OWN deadline derived from rootCtx (see outboxContext), independent of
 	// the tiny per-cycle RELAYFILE_MOUNT_TIMEOUT. A small outbound write (e.g. a
@@ -1671,6 +1679,12 @@ type SyncerOptions struct {
 	// RELAYFILE_EXPORT_TIMEOUT, default 45s; values >= bootstrapIdleTimeout are
 	// clamped below it so the fall-through always fires before the watchdog.
 	ExportTimeout time.Duration
+	// GithubTarSeedTimeout bounds the retained GitHub archive seed with its OWN
+	// deadline derived from the bootstrap ctx. When it expires while the parent
+	// remains live, the syncer falls through to pullRemoteFullTree in the same
+	// cycle. 0 uses RELAYFILE_GITHUB_TAR_SEED_TIMEOUT, default 120s; it is
+	// clamped below the active bootstrap idle/hard-cap window.
+	GithubTarSeedTimeout time.Duration
 	// OutboxFlushTimeout bounds a durable writeback/outbox flush with its OWN
 	// deadline derived from RootCtx (see outboxContext), so the tiny per-cycle
 	// RELAYFILE_MOUNT_TIMEOUT that bounds a mirror cycle cannot starve an
@@ -1876,6 +1890,7 @@ type Syncer struct {
 	bootstrapMaxFilesPerCycle int
 	cursorTimeout             time.Duration
 	exportTimeout             time.Duration
+	githubTarSeedTimeout      time.Duration
 	outboxFlushTimeout        time.Duration
 	bootstrapTimeout          time.Duration
 	bootstrapIdleTimeout      time.Duration
@@ -2581,6 +2596,10 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	if exportTimeout <= 0 {
 		exportTimeout = defaultExportTimeout
 	}
+	githubTarSeedTimeout := resolveDurationEnv(opts.GithubTarSeedTimeout, "RELAYFILE_GITHUB_TAR_SEED_TIMEOUT", defaultGithubTarSeedTimeout, opts.Logger)
+	if githubTarSeedTimeout <= 0 {
+		githubTarSeedTimeout = defaultGithubTarSeedTimeout
+	}
 	outboxFlushTimeout := resolveDurationEnv(opts.OutboxFlushTimeout, "RELAYFILE_OUTBOX_TIMEOUT", defaultOutboxFlushTimeout, opts.Logger)
 	if outboxFlushTimeout <= 0 {
 		outboxFlushTimeout = defaultOutboxFlushTimeout
@@ -2593,18 +2612,24 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 	// RELAYFILE_BOOTSTRAP_TIMEOUT would otherwise cancel the parent ctx before
 	// the export sub-deadline, defeating the same-cycle tree fall-through and
 	// re-creating the #1499/#1516 stall loop).
-	maxExportTimeout := bootstrapIdleTimeout * 3 / 4
+	maxBootstrapSubdeadline := bootstrapIdleTimeout * 3 / 4
 	if bootstrapTimeout > 0 {
 		hardCapMax := bootstrapTimeout * 3 / 4
-		if maxExportTimeout <= 0 || hardCapMax < maxExportTimeout {
-			maxExportTimeout = hardCapMax
+		if maxBootstrapSubdeadline <= 0 || hardCapMax < maxBootstrapSubdeadline {
+			maxBootstrapSubdeadline = hardCapMax
 		}
 	}
-	if maxExportTimeout > 0 && exportTimeout > maxExportTimeout {
+	if maxBootstrapSubdeadline > 0 && exportTimeout > maxBootstrapSubdeadline {
 		if opts.Logger != nil {
-			opts.Logger.Printf("clamping exportTimeout from %s to %s (must stay strictly under the active bootstrap window — no-progress watchdog %s, hard cap %s — so the export yields to the resumable tree pull before the bootstrap ctx is canceled)", exportTimeout, maxExportTimeout, bootstrapIdleTimeout, bootstrapTimeout)
+			opts.Logger.Printf("clamping exportTimeout from %s to %s (must stay strictly under the active bootstrap window — no-progress watchdog %s, hard cap %s — so the export yields to the resumable tree pull before the bootstrap ctx is canceled)", exportTimeout, maxBootstrapSubdeadline, bootstrapIdleTimeout, bootstrapTimeout)
 		}
-		exportTimeout = maxExportTimeout
+		exportTimeout = maxBootstrapSubdeadline
+	}
+	if maxBootstrapSubdeadline > 0 && githubTarSeedTimeout > maxBootstrapSubdeadline {
+		if opts.Logger != nil {
+			opts.Logger.Printf("clamping githubTarSeedTimeout from %s to %s (must stay strictly under the active bootstrap window — no-progress watchdog %s, hard cap %s — so the seed yields to the resumable tree pull before the bootstrap ctx is canceled)", githubTarSeedTimeout, maxBootstrapSubdeadline, bootstrapIdleTimeout, bootstrapTimeout)
+		}
+		githubTarSeedTimeout = maxBootstrapSubdeadline
 	}
 	readNotReadyTTL := resolveDurationEnv(opts.IncrementalReadNotReadyTTL, "RELAYFILE_INCREMENTAL_READ_NOT_READY_TTL", defaultIncrementalReadNotReadyTTL, opts.Logger)
 	if readNotReadyTTL <= 0 {
@@ -2718,6 +2743,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		bootstrapMaxFilesPerCycle: bootstrapMaxFilesPerCycle,
 		cursorTimeout:             cursorTimeout,
 		exportTimeout:             exportTimeout,
+		githubTarSeedTimeout:      githubTarSeedTimeout,
 		outboxFlushTimeout:        outboxFlushTimeout,
 		bootstrapTimeout:          bootstrapTimeout,
 		bootstrapIdleTimeout:      bootstrapIdleTimeout,
@@ -6629,8 +6655,21 @@ func (s *Syncer) pullRemoteFull(ctx context.Context, conflicted map[string]struc
 		}()
 	}
 	var seedErr error
+	seedTimedOut := false
 	if client, ok := s.client.(githubWorkingTreeTarClient); ok {
-		used, err := s.pullRemoteFullGithubTarSeed(ctx, client, conflicted, prog)
+		seedCtx := ctx
+		var cancelSeed context.CancelFunc
+		if s.githubTarSeedTimeout > 0 {
+			seedCtx, cancelSeed = context.WithTimeout(ctx, s.githubTarSeedTimeout)
+		}
+		used, err := s.pullRemoteFullGithubTarSeed(seedCtx, client, conflicted, prog)
+		seedTimedOut = err != nil && ctx.Err() == nil && seedCtx.Err() != nil
+		if cancelSeed != nil {
+			cancelSeed()
+		}
+		if seedTimedOut {
+			s.logf("github tar seed did not complete within %s; falling back to resumable tree pull", s.githubTarSeedTimeout)
+		}
 		if used {
 			if err == nil {
 				return nil
@@ -6641,7 +6680,9 @@ func (s *Syncer) pullRemoteFull(ctx context.Context, conflicted map[string]struc
 			seedErr = err
 		}
 	}
-	if !s.state.BootstrapComplete {
+	if seedTimedOut {
+		s.logf("skipping atomic export after github tar seed deadline; using bounded resumable tree pull")
+	} else if !s.state.BootstrapComplete {
 		s.logf("skipping atomic export for initial bootstrap; using bounded resumable tree pull")
 	} else if client, ok := s.client.(exportSnapshotClient); ok {
 		used, err := s.pullRemoteFullExport(ctx, client, conflicted, prog)
@@ -6775,8 +6816,11 @@ func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubW
 	}()
 	s.recordCloudSuccess()
 
-	remotePaths, err := s.applyGithubWorkingTreeTarSeedStrict(tarBody, tree, conflicted, prog, strings.EqualFold(strings.TrimSpace(manifest.SourceProfile), "complete-v1"))
+	remotePaths, err := s.applyGithubWorkingTreeTarSeedStrict(ctx, tarBody, tree, conflicted, prog, strings.EqualFold(strings.TrimSpace(manifest.SourceProfile), "complete-v1"))
 	if err != nil {
+		return true, err
+	}
+	if err := ctx.Err(); err != nil {
 		return true, err
 	}
 	if len(remotePaths) != len(tree) {
@@ -7195,7 +7239,7 @@ func (s *Syncer) githubWorkingTreeSnapshot(ctx context.Context, prog bootstrapPr
 }
 
 func (s *Syncer) applyGithubWorkingTreeTarSeed(tarBody GithubWorkingTreeTar, tree map[string]githubTreeFile, conflicted map[string]struct{}, prog bootstrapProgress) (map[string]struct{}, error) {
-	return s.applyGithubWorkingTreeTarSeedStrict(tarBody, tree, conflicted, prog, false)
+	return s.applyGithubWorkingTreeTarSeedStrict(context.Background(), tarBody, tree, conflicted, prog, false)
 }
 
 func stripTarPathComponents(name string, count int) (string, error) {
@@ -7214,7 +7258,7 @@ func stripTarPathComponents(name string, count int) (string, error) {
 	return strings.Join(parts[count:], "/"), nil
 }
 
-func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTar, tree map[string]githubTreeFile, conflicted map[string]struct{}, prog bootstrapProgress, strictComplete bool) (map[string]struct{}, error) {
+func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(ctx context.Context, tarBody GithubWorkingTreeTar, tree map[string]githubTreeFile, conflicted map[string]struct{}, prog bootstrapProgress, strictComplete bool) (map[string]struct{}, error) {
 	const maxAbandonedStagingEntries = 100000
 	type localPathObservation struct {
 		snapshot localSnapshot
@@ -7232,6 +7276,9 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 	}
 	sort.Strings(baselinePaths)
 	for _, rel := range baselinePaths {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		localPath, err := safeLocalPath(s.localRoot, rel)
 		if err != nil {
 			return nil, err
@@ -7240,6 +7287,9 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 			return nil, err
 		}
 		snapshot, readErr := s.readLocalSnapshot(localPath, false)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		observation := localPathObservation{snapshot: snapshot, existed: readErr == nil, readable: readErr == nil || errors.Is(readErr, os.ErrNotExist), readErr: readErr}
 		localBaselines[rel] = observation
 		// A warm mount can hash thousands of local files here. Yield between
@@ -7260,6 +7310,9 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 	// Cleanup first verifies ownership and a fixed entry budget without following
 	// symlinks; subsequent secure writes also open every directory component
 	// with O_NOFOLLOW.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := removeOwnedStagingTreeBounded(stagingRoot, maxAbandonedStagingEntries); err != nil {
 		return nil, fmt.Errorf("remove abandoned github tar staging directory: %w", err)
 	}
@@ -7300,11 +7353,17 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 	remotePaths := map[string]struct{}{}
 	seen := map[string]struct{}{}
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		var header *tar.Header
 		var err error
 		s.runFullPullIO(func() {
 			header, err = tr.Next()
 		})
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		if errors.Is(err, io.EOF) {
 			break
 		}
@@ -7366,6 +7425,9 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 			s.runFullPullIO(func() {
 				data, err = io.ReadAll(io.LimitReader(tr, header.Size+1))
 			})
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -7443,6 +7505,9 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 		}
 		stagedPath := ""
 		if shouldWrite {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			stagedPath, err = safeLocalPath(stagingRoot, rel)
 			if err != nil {
 				return nil, err
@@ -7461,6 +7526,9 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 			}
 			if writeErr != nil {
 				return nil, writeErr
+			}
+			if err := ctx.Err(); err != nil {
+				return nil, err
 			}
 		}
 		contentType := detectContentType(localPath)
@@ -7492,6 +7560,9 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 		prog.touch()
 	}
 	for rel, meta := range tree {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if _, ok := remotePaths[meta.RemotePath]; !ok {
 			return nil, fmt.Errorf("github tar seed missing tree file %s", rel)
 		}
@@ -7501,6 +7572,9 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 	// the existing secure atomic writer; a crash leaves only an ignored staging
 	// directory outside the mount, and the next bootstrap can restart cleanly.
 	for _, entry := range pending {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		// Give watcher/outbox work a turn between each disk publication, then
 		// fence on both accepted writes and pending/failed local edits. The
 		// archive entry was staged against observedState; any newer tracked
@@ -7525,6 +7599,9 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 			continue
 		}
 		localNow, localReadErr := s.readLocalSnapshot(entry.localPath, false)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		localExistsNow := localReadErr == nil
 		if localReadErr != nil && !errors.Is(localReadErr, os.ErrNotExist) {
 			// Treat an unreadable final snapshot as a local concurrent change.
@@ -7554,6 +7631,9 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 		s.state.Files[entry.remotePath] = entry.state
 		s.clearSkippedMaterialization(entry.remotePath)
 		prog.touch()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return remotePaths, nil
 }

@@ -3398,6 +3398,150 @@ func TestPullRemoteFullGithubWorkingTreeTarSeedFallsBackToTree(t *testing.T) {
 	}
 }
 
+func TestGithubWorkingTreeTarSeedDeadlineLeavesBootstrapFallbackBudget(t *testing.T) {
+	t.Run("agent37 idle window keeps the 120 second seed deadline", func(t *testing.T) {
+		t.Setenv("RELAYFILE_BOOTSTRAP_IDLE_TIMEOUT", "240s")
+		t.Setenv("RELAYFILE_BOOTSTRAP_TIMEOUT", "")
+		t.Setenv("RELAYFILE_GITHUB_TAR_SEED_TIMEOUT", "")
+		syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+			WorkspaceID: "ws_tar_seed_agent37_budget",
+			RemoteRoot:  "/github/repos/AgentWorkforce/cloud/contents",
+			LocalRoot:   t.TempDir(),
+		})
+		if err != nil {
+			t.Fatalf("NewSyncer failed: %v", err)
+		}
+		if got, want := syncer.githubTarSeedTimeout, 120*time.Second; got != want {
+			t.Fatalf("unexpected github tar seed timeout: got %s, want %s", got, want)
+		}
+	})
+
+	t.Run("shorter outer window clamps the seed below its parent", func(t *testing.T) {
+		t.Setenv("RELAYFILE_BOOTSTRAP_IDLE_TIMEOUT", "80s")
+		t.Setenv("RELAYFILE_BOOTSTRAP_TIMEOUT", "")
+		t.Setenv("RELAYFILE_GITHUB_TAR_SEED_TIMEOUT", "")
+		syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+			WorkspaceID:          "ws_tar_seed_clamped_budget",
+			RemoteRoot:           "/github/repos/AgentWorkforce/cloud/contents",
+			LocalRoot:            t.TempDir(),
+			GithubTarSeedTimeout: 2 * time.Minute,
+		})
+		if err != nil {
+			t.Fatalf("NewSyncer failed: %v", err)
+		}
+		if got, want := syncer.githubTarSeedTimeout, 60*time.Second; got != want {
+			t.Fatalf("unexpected clamped github tar seed timeout: got %s, want %s", got, want)
+		}
+	})
+}
+
+func TestPullRemoteFullGithubWorkingTreeTarSeedDeadlineFallsBackToTreeInSameCycle(t *testing.T) {
+	localDir := t.TempDir()
+	contentsRoot := "/github/repos/AgentWorkforce/cloud/contents"
+	headSHA := "head123"
+	readme := []byte("# Cloud\n")
+	readmeRemote := contentsRoot + "/README.md@" + headSHA + ".json"
+	sentinelPath := "/github/repos/AgentWorkforce/cloud/.relayfile/clone.json"
+	client := &fakeExportClient{
+		fakeClient: &fakeClient{
+			files: map[string]RemoteFile{
+				sentinelPath: {
+					Path:        sentinelPath,
+					Revision:    "rev_1",
+					ContentType: "application/json",
+					Content:     `{"headSha":"` + headSHA + `","defaultBranch":"main","sourceProfile":"complete-v1","filesExpected":1}`,
+				},
+				readmeRemote: {
+					Path:        readmeRemote,
+					Revision:    "rev_2",
+					ContentType: "application/json",
+					Content:     string(readme),
+					ContentHash: hashBytes(readme),
+				},
+			},
+			events: []FilesystemEvent{
+				{EventID: "evt_1", Type: "file.created", Path: readmeRemote, Revision: "rev_2", ContentHash: hashBytes(readme)},
+				{EventID: "evt_2", Type: "file.updated", Path: sentinelPath, Revision: "rev_1"},
+			},
+		},
+		tarBlockUntilCancel:    true,
+		exportBlockUntilCancel: true,
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:          "ws_tar_seed_deadline_fallback",
+		RemoteRoot:           contentsRoot,
+		LocalRoot:            localDir,
+		StateFile:            filepath.Join(localDir, ".relayfile-mount-state.json"),
+		WebSocket:            boolPtr(false),
+		FullPullEvery:        -1,
+		GithubTarSeedTimeout: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+	// A completed mount would normally try the atomic JSON export after a tar
+	// seed failure. A tar deadline must skip that second atomic request so the
+	// resumable tree receives the remaining parent bootstrap window.
+	syncer.state.BootstrapComplete = true
+
+	started := time.Now()
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile should fall back to tree after tar seed deadline: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("tar seed deadline did not yield promptly to tree fallback: %s", elapsed)
+	}
+	if client.tarCalls != 1 {
+		t.Fatalf("expected github tar export once, got %d", client.tarCalls)
+	}
+	if client.exportCalls != 0 {
+		t.Fatalf("atomic export ran after tar seed deadline: %d calls", client.exportCalls)
+	}
+	if client.listTreeCalls < 2 {
+		t.Fatalf("expected verification snapshot plus same-cycle tree fallback, got %d list calls", client.listTreeCalls)
+	}
+	if client.readFileCalls == 0 {
+		t.Fatal("expected same-cycle tree fallback to read the remote file")
+	}
+	assertLocalFileContent(t, filepath.Join(localDir, "README.md"), string(readme))
+	if !syncer.state.BootstrapComplete {
+		t.Fatal("same-cycle tree fallback did not complete bootstrap")
+	}
+}
+
+func TestApplyGithubWorkingTreeTarSeedHonorsCanceledContext(t *testing.T) {
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_tar_seed_canceled_apply",
+		RemoteRoot:  "/github/repos/AgentWorkforce/cloud/contents",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = syncer.applyGithubWorkingTreeTarSeedStrict(
+		ctx,
+		GithubWorkingTreeTar{Body: io.NopCloser(strings.NewReader(""))},
+		map[string]githubTreeFile{
+			"README.md": {
+				RemotePath: "/github/repos/AgentWorkforce/cloud/contents/README.md@head.json",
+				Type:       remoteTypeFile,
+			},
+		},
+		nil,
+		bootstrapProgress{},
+		true,
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("tar seed apply error = %v, want context canceled", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(localDir, "README.md")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("canceled tar seed published README.md: %v", statErr)
+	}
+}
+
 type unsupportedGithubTreeClient struct{ *fakeClient }
 
 func (c *unsupportedGithubTreeClient) ListTree(context.Context, string, string, int, string) (TreeResponse, error) {
@@ -3942,7 +4086,7 @@ func TestGithubWorkingTreeSourceArchiveStripsTopLevelDirectory(t *testing.T) {
 		t.Fatalf("close tar: %v", err)
 	}
 
-	remotePaths, err := syncer.applyGithubWorkingTreeTarSeedStrict(GithubWorkingTreeTar{
+	remotePaths, err := syncer.applyGithubWorkingTreeTarSeedStrict(context.Background(), GithubWorkingTreeTar{
 		Body: io.NopCloser(bytes.NewReader(buf.Bytes())), ContentType: "application/x-tar", StripComponents: 1,
 	}, map[string]githubTreeFile{
 		"README.md": {RemotePath: remotePath, Revision: "rev_1", ContentHash: hashBytes(body), Type: remoteTypeFile, Mode: 0},
@@ -3995,7 +4139,7 @@ func TestGithubWorkingTreeTarSeedStagesBeforePublishing(t *testing.T) {
 		t.Fatalf("close tar: %v", err)
 	}
 
-	_, err = syncer.applyGithubWorkingTreeTarSeedStrict(GithubWorkingTreeTar{
+	_, err = syncer.applyGithubWorkingTreeTarSeedStrict(context.Background(), GithubWorkingTreeTar{
 		Body: io.NopCloser(bytes.NewReader(buf.Bytes())), ContentType: "application/x-tar", StripComponents: 1,
 	}, map[string]githubTreeFile{
 		"first.txt":  {RemotePath: firstRemote, Revision: "rev_1", ContentHash: hashBytes(firstBody), Type: remoteTypeFile, Mode: 0o644},
@@ -4054,7 +4198,7 @@ func TestGithubWorkingTreeTarSeedReclaimsAbandonedPerMountStage(t *testing.T) {
 	if err := tw.Close(); err != nil {
 		t.Fatalf("close tar: %v", err)
 	}
-	_, err = syncer.applyGithubWorkingTreeTarSeedStrict(GithubWorkingTreeTar{
+	_, err = syncer.applyGithubWorkingTreeTarSeedStrict(context.Background(), GithubWorkingTreeTar{
 		Body: io.NopCloser(bytes.NewReader(buf.Bytes())), ContentType: "application/x-tar",
 	}, map[string]githubTreeFile{
 		"fresh.txt": {RemotePath: remotePath, Revision: "rev_1", ContentHash: hashBytes(body), Type: remoteTypeFile, Mode: 0o644},
@@ -4122,7 +4266,7 @@ func TestGithubWorkingTreeTarSeedPreservesEditThatBecomesDirtyAfterStaging(t *te
 	go func() {
 		syncer.mu.Lock()
 		syncer.fullPullActive = true
-		_, applyErr := syncer.applyGithubWorkingTreeTarSeedStrict(GithubWorkingTreeTar{
+		_, applyErr := syncer.applyGithubWorkingTreeTarSeedStrict(context.Background(), GithubWorkingTreeTar{
 			Body: io.NopCloser(body), ContentType: "application/x-tar",
 		}, tree, nil, bootstrapProgress{}, true)
 		syncer.fullPullActive = false
@@ -4212,7 +4356,7 @@ func TestGithubWorkingTreeTarSeedPreservesEditBeforeWatcherMarksDirty(t *testing
 	go func() {
 		syncer.mu.Lock()
 		syncer.fullPullActive = true
-		_, applyErr := syncer.applyGithubWorkingTreeTarSeedStrict(GithubWorkingTreeTar{
+		_, applyErr := syncer.applyGithubWorkingTreeTarSeedStrict(context.Background(), GithubWorkingTreeTar{
 			Body: io.NopCloser(body), ContentType: "application/x-tar",
 		}, tree, nil, bootstrapProgress{}, true)
 		syncer.fullPullActive = false
@@ -4282,7 +4426,7 @@ func TestGithubWorkingTreeTarSeedSkipsUnreadableChangedPathAndPublishesOthers(t 
 	if err := tw.Close(); err != nil {
 		t.Fatalf("close tar: %v", err)
 	}
-	_, err = syncer.applyGithubWorkingTreeTarSeedStrict(GithubWorkingTreeTar{
+	_, err = syncer.applyGithubWorkingTreeTarSeedStrict(context.Background(), GithubWorkingTreeTar{
 		Body: io.NopCloser(bytes.NewReader(buf.Bytes())), ContentType: "application/x-tar",
 	}, map[string]githubTreeFile{
 		"first.txt": {
@@ -4348,7 +4492,7 @@ func TestGithubWorkingTreeTarSeedPreScanYieldsAndTouchesProgress(t *testing.T) {
 		syncer.fullPullActive = true
 		close(lockHeld)
 		<-startApply
-		_, applyErr := syncer.applyGithubWorkingTreeTarSeedStrict(GithubWorkingTreeTar{
+		_, applyErr := syncer.applyGithubWorkingTreeTarSeedStrict(context.Background(), GithubWorkingTreeTar{
 			Body: io.NopCloser(reader), ContentType: "application/x-tar",
 		}, map[string]githubTreeFile{
 			"file.txt": {
@@ -4433,7 +4577,7 @@ func TestGithubWorkingTreeSourceArchiveMaterializesRealisticTree(t *testing.T) {
 		t.Fatalf("close gzip: %v", err)
 	}
 
-	remotePaths, err := syncer.applyGithubWorkingTreeTarSeedStrict(GithubWorkingTreeTar{
+	remotePaths, err := syncer.applyGithubWorkingTreeTarSeedStrict(context.Background(), GithubWorkingTreeTar{
 		Body: io.NopCloser(bytes.NewReader(buf.Bytes())), ContentType: "application/gzip", StripComponents: 1,
 	}, tree, nil, bootstrapProgress{}, true)
 	if err != nil {
@@ -10786,13 +10930,16 @@ type deleteCall struct {
 
 type fakeExportClient struct {
 	*fakeClient
-	exportCalls   int
-	tarCalls      int
-	lastTarSeed   GithubWorkingTreeSeedRequest
-	tarFiles      map[string][]byte
-	tarErr        error
-	readFileCalls int
-	exportErr     error
+	exportCalls int
+	tarCalls    int
+	lastTarSeed GithubWorkingTreeSeedRequest
+	tarFiles    map[string][]byte
+	tarErr      error
+	// tarBlockUntilCancel simulates a retained archive whose headers/body do
+	// not arrive before the seed sub-deadline.
+	tarBlockUntilCancel bool
+	readFileCalls       int
+	exportErr           error
 	// exportBlockUntilCancel makes ExportFiles block until its ctx is
 	// cancelled, simulating a slow atomic export that exceeds the export
 	// sub-deadline (or the bootstrap watchdog).
@@ -10974,10 +11121,13 @@ func (c *fakeExportClient) ReadFile(ctx context.Context, workspaceID, path strin
 }
 
 func (c *fakeExportClient) ExportGithubWorkingTreeTar(ctx context.Context, workspaceID string, seed GithubWorkingTreeSeedRequest) (GithubWorkingTreeTar, error) {
-	_ = ctx
 	_ = workspaceID
 	c.tarCalls++
 	c.lastTarSeed = seed
+	if c.tarBlockUntilCancel {
+		<-ctx.Done()
+		return GithubWorkingTreeTar{}, ctx.Err()
+	}
 	if c.tarErr != nil {
 		return GithubWorkingTreeTar{}, c.tarErr
 	}
