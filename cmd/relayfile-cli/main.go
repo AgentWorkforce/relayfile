@@ -34,6 +34,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/agentworkforce/relayfile/internal/delegatedauth"
@@ -8215,12 +8216,23 @@ func (c *workspaceCommandClient) withBusyRetry(ctx context.Context, request func
 		}
 		delay := oneShotBusyRetryDelay(attempt, retryAfterFromErr(err))
 		if c.retryNotices != nil {
-			fmt.Fprintf(c.retryNotices, "%v; retrying in %s (attempt %d/%d)\n", err, delay.Round(100*time.Millisecond), attempt+1, oneShotBusyRetryMaxAttempts)
+			fmt.Fprintf(c.retryNotices, "%s; retrying in %s (attempt %d/%d)\n", oneLineNotice(err.Error()), delay.Round(100*time.Millisecond), attempt+1, oneShotBusyRetryMaxAttempts)
 		}
 		if sleepErr := oneShotBusyRetrySleep(ctx, delay); sleepErr != nil {
 			return err
 		}
 	}
+}
+
+// oneLineNotice keeps server-supplied error text to a single line and drops
+// control characters (newlines, ANSI escapes) before it reaches a terminal.
+func oneLineNotice(text string) string {
+	return strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, text)), " ")
 }
 
 func prepareWorkspaceCommandClient(workspaceValue, serverFlag, tokenFlag string, requestedScopes []string) (*workspaceCommandClient, error) {

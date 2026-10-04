@@ -162,3 +162,10 @@ func TestWorkspaceCommandClientDoesNotRetryWritesOnBusy(t *testing.T) {
 		t.Fatalf("expected writes to be attempted exactly once each, got %d requests", got)
 	}
 }
+
+func TestOneLineNoticeStripsControlCharacters(t *testing.T) {
+	got := oneLineNotice("http 429 workspace_busy: busy\n\x1b[31mred\x1b[0m\tdone")
+	if want := "http 429 workspace_busy: busy [31mred [0m done"; got != want {
+		t.Fatalf("oneLineNotice = %q, want %q", got, want)
+	}
+}
