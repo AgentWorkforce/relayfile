@@ -4144,6 +4144,98 @@ func TestGithubWorkingTreeTarSeedSkipsUnreadableChangedPathAndPublishesOthers(t 
 	}
 	assertLocalFileContent(t, firstPath, string(staleBody))
 	assertLocalFileContent(t, filepath.Join(localDir, "second.txt"), string(secondBody))
+	firstRemote := contentsRoot + "/first.txt@" + headSHA + ".json"
+	retry, ok := syncer.state.SkippedMaterializations[firstRemote]
+	if !ok || retry.AttemptCount != 1 || retry.Operation != "github source archive final snapshot" {
+		t.Fatalf("unreadable path retry record = %+v, exists=%v", retry, ok)
+	}
+}
+
+func TestGithubWorkingTreeTarSeedPreScanYieldsAndTouchesProgress(t *testing.T) {
+	localDir := t.TempDir()
+	contentsRoot := "/github/repos/AgentWorkforce/cloud/contents"
+	body := []byte("remote body\n")
+	localPath := filepath.Join(localDir, "file.txt")
+	if err := os.WriteFile(localPath, []byte("local body\n"), 0o644); err != nil {
+		t.Fatalf("write initial local file: %v", err)
+	}
+	syncer, err := NewSyncer(&fakeClient{}, SyncerOptions{
+		WorkspaceID: "ws_prescan_yield", RemoteRoot: contentsRoot, LocalRoot: localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+
+	var tarBytes bytes.Buffer
+	tw := tar.NewWriter(&tarBytes)
+	if err := tw.WriteHeader(&tar.Header{Name: "file.txt", Mode: 0o644, Size: int64(len(body))}); err != nil {
+		t.Fatalf("write tar header: %v", err)
+	}
+	if _, err := tw.Write(body); err != nil {
+		t.Fatalf("write tar body: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+	bodyStarted := make(chan struct{})
+	releaseBody := make(chan struct{})
+	reader := &blockingOffsetReader{
+		reader: bytes.NewReader(tarBytes.Bytes()), remaining: 0,
+		blocked: bodyStarted, release: releaseBody,
+	}
+	lastProgress := &atomic.Int64{}
+	lastProgress.Store(1)
+	lockHeld := make(chan struct{})
+	startApply := make(chan struct{})
+	applyDone := make(chan error, 1)
+	go func() {
+		syncer.mu.Lock()
+		syncer.fullPullActive = true
+		close(lockHeld)
+		<-startApply
+		_, applyErr := syncer.applyGithubWorkingTreeTarSeedStrict(GithubWorkingTreeTar{
+			Body: io.NopCloser(reader), ContentType: "application/x-tar",
+		}, map[string]githubTreeFile{
+			"file.txt": {
+				RemotePath: contentsRoot + "/file.txt@head123.json", Revision: "rev_1",
+				ContentHash: hashBytes(body), Type: remoteTypeFile, Mode: 0o644,
+			},
+		}, nil, bootstrapProgress{last: lastProgress}, true)
+		syncer.fullPullActive = false
+		syncer.mu.Unlock()
+		applyDone <- applyErr
+	}()
+	<-lockHeld
+	lockYielded := make(chan struct{})
+	go func() {
+		syncer.mu.Lock()
+		close(lockYielded)
+		syncer.mu.Unlock()
+	}()
+	close(startApply)
+	select {
+	case <-bodyStarted:
+	case <-time.After(time.Second):
+		close(releaseBody)
+		t.Fatal("archive body read did not start")
+	}
+	yieldedBeforeBody := false
+	select {
+	case <-lockYielded:
+		yieldedBeforeBody = true
+	default:
+	}
+	touchedBeforeBody := lastProgress.Load() > 1
+	close(releaseBody)
+	if err := <-applyDone; err != nil {
+		t.Fatalf("apply staged tar: %v", err)
+	}
+	if !yieldedBeforeBody {
+		t.Fatal("pre-scan did not yield the full-pull state lock before reading the archive")
+	}
+	if !touchedBeforeBody {
+		t.Fatal("pre-scan did not touch bootstrap progress before reading the archive")
+	}
 }
 
 func TestGithubWorkingTreeSourceArchiveMaterializesRealisticTree(t *testing.T) {

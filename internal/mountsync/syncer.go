@@ -7220,12 +7220,18 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 		snapshot localSnapshot
 		existed  bool
 		readable bool
+		readErr  error
 	}
 	// Capture the local baseline before consuming any archive bytes. Otherwise
 	// an edit made while a large tar entry streams could become the baseline and
 	// then be overwritten during publication.
 	localBaselines := make(map[string]localPathObservation, len(tree))
+	baselinePaths := make([]string, 0, len(tree))
 	for rel := range tree {
+		baselinePaths = append(baselinePaths, rel)
+	}
+	sort.Strings(baselinePaths)
+	for _, rel := range baselinePaths {
 		localPath, err := safeLocalPath(s.localRoot, rel)
 		if err != nil {
 			return nil, err
@@ -7234,8 +7240,13 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 			return nil, err
 		}
 		snapshot, readErr := s.readLocalSnapshot(localPath, false)
-		observation := localPathObservation{snapshot: snapshot, existed: readErr == nil, readable: readErr == nil || errors.Is(readErr, os.ErrNotExist)}
+		observation := localPathObservation{snapshot: snapshot, existed: readErr == nil, readable: readErr == nil || errors.Is(readErr, os.ErrNotExist), readErr: readErr}
 		localBaselines[rel] = observation
+		// A warm mount can hash thousands of local files here. Yield between
+		// paths so watcher/outbox work remains responsive, and expose liveness
+		// to both the internal and state-file watchdogs.
+		s.yieldFullPullStateLock()
+		prog.touch()
 	}
 	// Keep the unverified tree outside the visible mount root. Besides making
 	// publication explicit, this prevents the watcher from observing staging
@@ -7419,6 +7430,7 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 			// A transient editor replacement, unsupported local type, or
 			// oversized local file is not evidence that the remote is invalid.
 			// Preserve this path and continue publishing unrelated entries.
+			s.recordGithubSourceArchiveSkipped(meta.RemotePath, "github source archive baseline snapshot", localBaseline.readErr)
 			remotePaths[meta.RemotePath] = struct{}{}
 			prog.touch()
 			continue
@@ -7518,6 +7530,7 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 			// Treat an unreadable final snapshot as a local concurrent change.
 			// Skipping one uncertain path must not discard the verified archive
 			// or prevent unrelated staged entries from being published.
+			s.recordGithubSourceArchiveSkipped(entry.remotePath, "github source archive final snapshot", localReadErr)
 			prog.touch()
 			continue
 		}
@@ -7539,9 +7552,16 @@ func (s *Syncer) applyGithubWorkingTreeTarSeedStrict(tarBody GithubWorkingTreeTa
 			}
 		}
 		s.state.Files[entry.remotePath] = entry.state
+		s.clearSkippedMaterialization(entry.remotePath)
 		prog.touch()
 	}
 	return remotePaths, nil
+}
+
+func (s *Syncer) recordGithubSourceArchiveSkipped(remotePath, operation string, err error) {
+	s.recordSkippedMaterialization(remotePath, operation, err)
+	s.state.Counters.PathMaterializationSkipped++
+	s.logf("warning: preserving local file %s because %s failed: %v; queued for retry", normalizeRemotePath(remotePath), operation, err)
 }
 
 func sameLocalSnapshotIdentity(left, right localSnapshot) bool {
