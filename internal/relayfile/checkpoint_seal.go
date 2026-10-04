@@ -528,7 +528,7 @@ func (s *Store) VerifyConsumedCheckpointSeal(workspaceID string, req CheckpointS
 	if err != nil || workspaceID == "" || strings.TrimSpace(req.SealID) == "" || !checkpointSessionPattern.MatchString(strings.TrimSpace(req.SessionID)) || req.Generation == 0 || consumerPrincipal == "" {
 		return CheckpointSeal{}, ErrInvalidInput
 	}
-	if !validCheckpointDigest(req.Digest) || !checkpointRevisionPattern.MatchString(strings.TrimSpace(req.WorkspaceRevision)) || !checkpointEventCursorPattern.MatchString(strings.TrimSpace(req.EventCursor)) || strings.TrimSpace(req.ConsumedAt) == "" {
+	if !validCheckpointDigest(req.Digest) || !checkpointRevisionPattern.MatchString(strings.TrimSpace(req.WorkspaceRevision)) || !checkpointEventCursorPattern.MatchString(req.EventCursor) || strings.TrimSpace(req.ConsumedAt) == "" {
 		return CheckpointSeal{}, ErrInvalidInput
 	}
 	for _, raw := range []string{req.IssuedAt, req.ExpiresAt, req.ConsumedAt} {

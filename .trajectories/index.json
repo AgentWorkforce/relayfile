@@ -463,6 +463,13 @@
       "startedAt": "2026-10-04T15:50:26.132Z",
       "completedAt": "2026-10-04T16:07:54.908Z",
       "path": ".trajectories/completed/2026-10/traj_t8ngcsdcvvc7.json"
+    },
+    "traj_0qdrmrp6ijnu": {
+      "title": "Repair upstream event cursor checkpoint validation",
+      "status": "completed",
+      "startedAt": "2026-10-04T08:43:18.694Z",
+      "completedAt": "2026-10-04T08:43:23.917Z",
+      "path": "/home/daytona/.relayflow-v2-supervisor/durable/repository/.trajectories/completed/2026-10/traj_0qdrmrp6ijnu.json"
     }
   }
 }

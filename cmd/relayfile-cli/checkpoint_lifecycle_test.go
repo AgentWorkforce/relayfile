@@ -26,7 +26,7 @@ func (l *fakeCheckpointLease) Release() error { l.released = true; return nil }
 
 func TestCheckpointCursorPattern(t *testing.T) {
 	valid := []string{"0", "evt_42", "upstream:v1:notion:page_123", "upstream:v1:notion:page_123:2", "upstream:v1:" + strings.Repeat("a", 400)}
-	invalid := []string{"", "   ", "evt_", "upstream:v1:", "upstream:v1:notion page_123", "upstream:v1:notion\npage_123", "upstream:v1:" + strings.Repeat("a", 401)}
+	invalid := []string{"", "   ", "evt_", "upstream:v1:", "upstream:v1:notion page_123", " upstream:v1:notion:page_123 ", "upstream:v1:notion\npage_123", "upstream:v1:" + strings.Repeat("a", 401)}
 	for _, cursor := range valid {
 		if !checkpointCursorPattern.MatchString(cursor) {
 			t.Errorf("valid cursor rejected: %q", cursor)

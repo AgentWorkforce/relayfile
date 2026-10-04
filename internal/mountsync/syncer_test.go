@@ -10887,6 +10887,7 @@ func TestVerifyCheckpointRequiresLocalExactnessAndServerReattestation(t *testing
 		for name, mutate := range map[string]func(*CheckpointSeal){
 			"bare revision": func(receipt *CheckpointSeal) { receipt.WorkspaceRevision = "12" },
 			"bare cursor":   func(receipt *CheckpointSeal) { receipt.EventCursor = "12" },
+			"padded cursor": func(receipt *CheckpointSeal) { receipt.EventCursor = " evt_2 " },
 		} {
 			t.Run(name, func(t *testing.T) {
 				client := &fakeClient{}
@@ -10919,6 +10920,7 @@ func TestCheckpointEventCursorPattern(t *testing.T) {
 		"12",
 		"upstream:v1:",
 		"upstream:v1:linear issue_123",
+		" upstream:v1:linear:issue_123 ",
 		"upstream:v1:linear/issue_123",
 		"upstream:v1:linear\nissue_123",
 		"upstream:v1:" + strings.Repeat("a", 401),
