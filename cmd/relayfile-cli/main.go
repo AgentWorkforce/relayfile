@@ -8225,10 +8225,11 @@ func (c *workspaceCommandClient) withBusyRetry(ctx context.Context, request func
 }
 
 // oneLineNotice keeps server-supplied error text to a single line and drops
-// control characters (newlines, ANSI escapes) before it reaches a terminal.
+// control and format characters (newlines, ANSI escapes, bidi overrides)
+// before it reaches a terminal.
 func oneLineNotice(text string) string {
 	return strings.Join(strings.Fields(strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			return ' '
 		}
 		return r

@@ -164,7 +164,7 @@ func TestWorkspaceCommandClientDoesNotRetryWritesOnBusy(t *testing.T) {
 }
 
 func TestOneLineNoticeStripsControlCharacters(t *testing.T) {
-	got := oneLineNotice("http 429 workspace_busy: busy\n\x1b[31mred\x1b[0m\tdone")
+	got := oneLineNotice("http 429 workspace_busy: busy\n\x1b[31mred\x1b[0m\tdone\u202e")
 	if want := "http 429 workspace_busy: busy [31mred [0m done"; got != want {
 		t.Fatalf("oneLineNotice = %q, want %q", got, want)
 	}
