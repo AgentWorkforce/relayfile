@@ -45,6 +45,10 @@ export const REGISTRY_FETCH_RETRY_MIN_TIMEOUT_MS = 1000;
 export const REGISTRY_FETCH_RETRY_MAX_TIMEOUT_MS = 5000;
 // Keep post-publish registry verification bounded when npm stays unavailable.
 export const MAX_TOTAL_RETRY_DELAY_MS = 5 * 60 * 1000;
+// Parallel publish jobs can finish several minutes apart. Do not expose an
+// installable consumer until the registry can resolve its lockstep dependencies.
+export const DEPENDENCY_ATTEMPTS = 30;
+export const DEPENDENCY_WAIT_BUDGET_MS = 10 * 60 * 1000;
 
 export function backoffDelay({
   attempt,
@@ -275,6 +279,65 @@ async function packPackage({ packageDir, npm = run }) {
   );
 }
 
+async function waitForInternalDependencies({
+  manifest,
+  packageDir,
+  npm,
+  sleep,
+  now,
+  attempts,
+  budgetMs,
+  queryTimeoutMs,
+}) {
+  const startedAt = now();
+  let consumedMs = 0;
+  // Optional platform packages may be absent by design, and dev dependencies
+  // are not part of the published install contract. Required internal packages
+  // are versioned together by the release workflow, so demand exact pins.
+  for (const [name, version] of Object.entries(manifest.dependencies ?? {})) {
+    if (!name.startsWith("@relayfile/")) continue;
+    if (
+      typeof version !== "string" ||
+      !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)
+    ) {
+      throw new Error(
+        `internal dependency ${name} must be exactly pinned; refusing to release`,
+      );
+    }
+    let ready = false;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const remainingMs = budgetMs - Math.max(consumedMs, now() - startedAt);
+      if (remainingMs <= 0) break;
+      const queryStartedAt = now();
+      const result = await queryRegistry({
+        name,
+        version,
+        cwd: packageDir,
+        npm,
+        timeoutMs: Math.min(queryTimeoutMs, remainingMs),
+      });
+      consumedMs += Math.max(0, now() - queryStartedAt);
+      if (result.kind === "present") {
+        ready = true;
+        break;
+      }
+      if (attempt === attempts) break;
+      const delayMs = Math.min(
+        backoffDelay({ attempt }),
+        budgetMs - Math.max(consumedMs, now() - startedAt),
+      );
+      if (delayMs <= 0) break;
+      const sleepStartedAt = now();
+      await sleep(delayMs);
+      consumedMs += Math.max(delayMs, now() - sleepStartedAt);
+    }
+    if (!ready)
+      throw new Error(
+        `internal dependency ${name}@${version} not visible in registry; refusing to publish ${manifest.name}@${manifest.version}`,
+      );
+  }
+}
+
 function parseArgs(argv) {
   const values = {};
   for (let i = 0; i < argv.length; i += 1) {
@@ -302,6 +365,8 @@ export async function reconcilePackage({
   maxDelayMs = MAX_DELAY_MS,
   maxTotalRetryDelayMs = MAX_TOTAL_RETRY_DELAY_MS,
   registryQueryTimeoutMs = REGISTRY_QUERY_TIMEOUT_MS,
+  dependencyAttempts = DEPENDENCY_ATTEMPTS,
+  dependencyWaitBudgetMs = DEPENDENCY_WAIT_BUDGET_MS,
   now = () => performance.now(),
 }) {
   const manifest = JSON.parse(
@@ -357,6 +422,16 @@ export async function reconcilePackage({
       // publish, retaining the race-safe check after the barrier.
       status = "absent";
     } else {
+      await waitForInternalDependencies({
+        manifest,
+        packageDir,
+        npm,
+        sleep,
+        now,
+        attempts: dependencyAttempts,
+        budgetMs: dependencyWaitBudgetMs,
+        queryTimeoutMs: registryQueryTimeoutMs,
+      });
       const published = await npm(
         "npm",
         [
