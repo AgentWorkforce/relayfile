@@ -328,6 +328,7 @@ async function waitForInternalDependencies({
         "internal dependency closure exceeds safety limit; refusing to release",
       );
     let ready = false;
+    let lastFailure = "absent";
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       const remainingMs = budgetMs - Math.max(consumedMs, now() - startedAt);
       if (remainingMs <= 0) break;
@@ -342,8 +343,10 @@ async function waitForInternalDependencies({
           timeoutMs: Math.min(queryTimeoutMs, remainingMs),
           includeManifest: true,
         });
+        lastFailure = "absent";
       } catch (error) {
         if (!(error instanceof RegistryQueryError)) throw error;
+        lastFailure = "ambiguous";
         // Still closed to publication. Retry command failures only; parsing
         // errors and missing/invalid integrity remain immediately fatal.
       }
@@ -367,7 +370,9 @@ async function waitForInternalDependencies({
     }
     if (!ready)
       throw new Error(
-        `internal dependency ${name}@${version} not visible in registry; refusing to publish ${manifest.name}@${manifest.version}`,
+        lastFailure === "ambiguous"
+          ? `registry queries for ${key} stayed ambiguous within the wait budget; refusing to publish ${manifest.name}@${manifest.version}`
+          : `internal dependency ${key} not visible in registry; refusing to publish ${manifest.name}@${manifest.version}`,
       );
   }
 }

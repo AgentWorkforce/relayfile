@@ -171,6 +171,121 @@ test("transitive required peers are checked once and malformed contracts fail cl
   }
 });
 
+test("transitive dependency waits consume the original shared budget", async () => {
+  const dir = sandbox();
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({
+      name: "@relayfile/test",
+      version: "1.2.3",
+      dependencies: { "@relayfile/sdk": "1.2.3" },
+    }),
+  );
+  const state = { views: 0, publishes: 0 };
+  let elapsed = 0;
+  const caps = [];
+  const waits = [];
+  const npm = async (command, args, options) => {
+    if (args[0] === "view" && args[1] === "@relayfile/sdk@1.2.3") {
+      assert.equal(options.timeout, 12000);
+      elapsed += 8000;
+      return {
+        code: 0,
+        stdout: JSON.stringify(
+          dependencyMetadata("@relayfile/sdk", "1.2.3", {
+            dependencies: { "@relayfile/core": "1.2.3" },
+          }),
+        ),
+        stderr: "",
+      };
+    }
+    if (args[0] === "view" && args[1] === "@relayfile/core@1.2.3") {
+      caps.push(options.timeout);
+      elapsed += 3000;
+      return { code: 1, stdout: "", stderr: "npm error code E404" };
+    }
+    if (args[0] === "view")
+      return { code: 1, stdout: "", stderr: "npm error code E404" };
+    return fakeNpm({ state })(command, args, options);
+  };
+  try {
+    await assert.rejects(
+      reconcilePackage({
+        packageDir: dir,
+        tag: "latest",
+        npm,
+        dependencyWaitBudgetMs: 12000,
+        now: () => elapsed,
+        sleep: async (ms) => {
+          waits.push(ms);
+          elapsed += ms;
+        },
+      }),
+      /core.*not visible/,
+    );
+    assert.deepEqual(caps, [4000]);
+    assert.deepEqual(waits, [1000]);
+    assert.equal(elapsed, 12000);
+    assert.equal(state.publishes, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("registry dependency expansion is bounded at the node limit", async () => {
+  for (const count of [128, 129]) {
+    const dir = sandbox();
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({
+        name: "@relayfile/test",
+        version: "1.2.3",
+        dependencies: { "@relayfile/node-0": "1.2.3" },
+      }),
+    );
+    const state = { views: 0, publishes: 0 };
+    let queries = 0;
+    const npm = async (command, args, options) => {
+      if (args[0] === "view" && args[1].startsWith("@relayfile/node-")) {
+        queries++;
+        const name = args[1].split("@")[1];
+        const index = Number(name.split("-").at(-1));
+        const next = index + 1 < count ? index + 1 : 0;
+        return {
+          code: 0,
+          stdout: JSON.stringify(
+            dependencyMetadata(`@${name}`, "1.2.3", {
+              dependencies: { [`@relayfile/node-${next}`]: "1.2.3" },
+            }),
+          ),
+          stderr: "",
+        };
+      }
+      if (args[0] === "view" && state.publishes === 0)
+        return { code: 1, stdout: "", stderr: "npm error code E404" };
+      return fakeNpm({ state, registry: { integrity: VALID_INTEGRITY } })(
+        command,
+        args,
+        options,
+      );
+    };
+    try {
+      const invoke = () =>
+        reconcilePackage({ packageDir: dir, tag: "latest", npm });
+      if (count === 128) {
+        await invoke();
+        assert.equal(state.publishes, 1);
+      } else {
+        await assert.rejects(invoke(), /closure exceeds safety limit/);
+        assert.equal(state.publishes, 0);
+      }
+      assert.equal(queries, 128);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 function sandbox() {
   const dir = mkdtempSync(join(tmpdir(), "relayfile-reconcile-"));
   writeFileSync(
@@ -306,7 +421,9 @@ test("missing or ambiguous internal dependencies cannot publish a consumer", asy
           dependencyAttempts: 2,
           sleep: async () => {},
         }),
-        /registry query|dependency.*not visible/,
+        dependencyError.includes("E404")
+          ? /dependency.*not visible/
+          : /registry queries.*stayed ambiguous/,
       );
       assert.equal(state.publishes, 0);
     } finally {
