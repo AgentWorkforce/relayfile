@@ -12,7 +12,8 @@
  * (dependencies, optionalDependencies, peerDependencies) must either
  *
  *   - already resolve on the registry (`npm view name@spec version`), or
- *   - be produced by this same release (exact pin on a release-set package),
+ *   - be produced by this same release (a pin on a release-set package in
+ *     bare, ^, ~ or = form of the release version, per rangeTargetsVersion),
  *     in which case we WAIT for it to appear on the registry, because
  *     publishing first would reopen the gap.
  *
