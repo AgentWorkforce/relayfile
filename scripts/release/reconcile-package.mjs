@@ -221,6 +221,10 @@ export function comparePackageContent(local, registry) {
   return { kind: "identical" };
 }
 
+// Command failures can be transient; a successful but malformed metadata
+// response is a separate trust failure and must never be retried into a pass.
+class RegistryQueryError extends Error {}
+
 async function queryRegistry({
   name,
   version,
@@ -246,7 +250,7 @@ async function queryRegistry({
   if (result.code !== 0) {
     const kind = registryErrorKind(result);
     if (kind === "absent") return { kind: "absent" };
-    throw new Error(
+    throw new RegistryQueryError(
       `registry query for ${name}@${version} was ambiguous; refusing to release`,
     );
   }
@@ -316,15 +320,22 @@ async function waitForInternalDependencies({
       const remainingMs = budgetMs - Math.max(consumedMs, now() - startedAt);
       if (remainingMs <= 0) break;
       const queryStartedAt = now();
-      const result = await queryRegistry({
-        name,
-        version,
-        cwd: packageDir,
-        npm,
-        timeoutMs: Math.min(queryTimeoutMs, remainingMs),
-      });
+      let result;
+      try {
+        result = await queryRegistry({
+          name,
+          version,
+          cwd: packageDir,
+          npm,
+          timeoutMs: Math.min(queryTimeoutMs, remainingMs),
+        });
+      } catch (error) {
+        if (!(error instanceof RegistryQueryError)) throw error;
+        // Still closed to publication. Retry command failures only; parsing
+        // errors and missing/invalid integrity remain immediately fatal.
+      }
       consumedMs += Math.max(0, now() - queryStartedAt);
-      if (result.kind === "present") {
+      if (result?.kind === "present") {
         ready = true;
         break;
       }

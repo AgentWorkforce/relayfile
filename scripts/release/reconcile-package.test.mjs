@@ -164,6 +164,72 @@ test("missing or ambiguous internal dependencies cannot publish a consumer", asy
   }
 });
 
+test("transient dependency query failures retry but malformed metadata aborts", async () => {
+  for (const mode of ["timeout", "bad-metadata"]) {
+    const dir = sandbox();
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({
+        name: "@relayfile/test",
+        version: "1.2.3",
+        dependencies: { "@relayfile/core": "1.2.3" },
+      }),
+    );
+    const state = { views: 0, publishes: 0 };
+    let dependencyQueries = 0;
+    const waits = [];
+    const npm = async (command, args, options) => {
+      if (args[0] === "view") {
+        if (args[1] === "@relayfile/core@1.2.3") {
+          dependencyQueries += 1;
+          if (mode === "bad-metadata")
+            return {
+              code: 0,
+              stdout: JSON.stringify({ integrity: "invalid" }),
+              stderr: "",
+            };
+          if (dependencyQueries === 1)
+            return { code: 1, stdout: "", stderr: "npm error code ETIMEDOUT" };
+          return {
+            code: 0,
+            stdout: JSON.stringify({ integrity: VALID_INTEGRITY }),
+            stderr: "",
+          };
+        }
+        if (state.publishes === 0)
+          return { code: 1, stdout: "", stderr: "npm error code E404" };
+      }
+      if (args[0] === "publish") assert.equal(dependencyQueries, 2);
+      return fakeNpm({ state, registry: { integrity: VALID_INTEGRITY } })(
+        command,
+        args,
+        options,
+      );
+    };
+    try {
+      const invoke = () =>
+        reconcilePackage({
+          packageDir: dir,
+          tag: "latest",
+          npm,
+          sleep: async (ms) => waits.push(ms),
+        });
+      if (mode === "timeout") {
+        await invoke();
+        assert.equal(state.publishes, 1);
+        assert.deepEqual(waits, [5000]);
+      } else {
+        await assert.rejects(invoke(), /no usable digest/);
+        assert.equal(dependencyQueries, 1);
+        assert.equal(state.publishes, 0);
+        assert.deepEqual(waits, []);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 test("read-only preflight and dry run do not wait on unpublished release dependencies", async () => {
   for (const flags of [{ preflight: true }, { dryRun: true }]) {
     const dir = sandbox();
