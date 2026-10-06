@@ -6784,7 +6784,15 @@ func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubW
 			PathPrefix:    s.githubWorkingTree.ContentsRoot,
 			HeadSHA:       headSHA,
 			SourceProfile: manifest.SourceProfile,
-			Gzip:          true,
+			// Raw tar, not gzip: the flag only affects server-generated
+			// tars — the retained source archive is served from R2 either
+			// way. A gzipped generated tar is held to the server's 128 MiB
+			// buffered ceiling, so any repo past that size 413s on the
+			// merged/base-snapshot paths (including the ACL deny
+			// fall-through) and drops to per-file pulls. Raw tar gets the
+			// multi-GiB streaming ceiling and skips the CompressionStream
+			// CPU the ceiling exists to protect.
+			Gzip:          false,
 			SourceArchive: true,
 		})
 	})
