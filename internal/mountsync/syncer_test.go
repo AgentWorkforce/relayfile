@@ -3389,6 +3389,67 @@ func TestPullRemoteFullGithubTarSeedRejectsUndercountWithWriteOnlyMarker(t *test
 	}
 }
 
+func TestPullRemoteFullGithubTarSeedToleratesAclFilteredCountWithSemanticsMarker(t *testing.T) {
+	localDir := t.TempDir()
+	contentsRoot := "/github/repos/AgentWorkforce/cloud/contents"
+	headSHA := "head123"
+	readme := []byte("# Cloud\n")
+	readmeRemote := contentsRoot + "/README.md@" + headSHA + ".json"
+	sentinelPath := "/github/repos/AgentWorkforce/cloud/.relayfile/clone.json"
+	markerPath := "/.relayfile.acl"
+	// Production markers keep rules in structured semantics; the body is not
+	// guaranteed to contain them.
+	client := &fakeExportClient{
+		fakeClient: &fakeClient{
+			files: map[string]RemoteFile{
+				sentinelPath: {
+					Path:        sentinelPath,
+					Revision:    "rev_1",
+					ContentType: "application/json",
+					Content:     `{"headSha":"` + headSHA + `","defaultBranch":"main","sourceProfile":"complete-v1","filesExpected":2}`,
+				},
+				markerPath: {
+					Path:        markerPath,
+					Revision:    "rev_9",
+					ContentType: "application/json",
+					Semantics: &RemoteFileSemantics{
+						Permissions: []string{"deny:scope:workspace:noop:read:/**/credentials*"},
+					},
+				},
+				readmeRemote: {
+					Path:        readmeRemote,
+					Revision:    "rev_2",
+					ContentType: "application/json",
+					Content:     string(readme),
+					ContentHash: hashBytes(readme),
+				},
+			},
+			events: []FilesystemEvent{
+				{EventID: "evt_1", Type: "file.created", Path: readmeRemote, Revision: "rev_2", ContentHash: hashBytes(readme)},
+				{EventID: "evt_2", Type: "file.updated", Path: sentinelPath, Revision: "rev_1"},
+			},
+		},
+		tarFiles: map[string][]byte{"README.md": readme},
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:   "ws_tar_seed_semantics_marker",
+		RemoteRoot:    contentsRoot,
+		LocalRoot:     localDir,
+		StateFile:     filepath.Join(localDir, ".relayfile-mount-state.json"),
+		WebSocket:     boolPtr(false),
+		FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+	if err := syncer.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile failed with semantics-only ACL marker: %v", err)
+	}
+	if client.tarCalls != 1 {
+		t.Fatalf("expected github tar export to be used once, got %d", client.tarCalls)
+	}
+}
+
 type descendingManifestEventClient struct {
 	*fakeClient
 	feeds            []EventFeed

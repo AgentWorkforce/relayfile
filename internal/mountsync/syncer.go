@@ -531,6 +531,14 @@ type RemoteFile struct {
 	Content     string `json:"content"`
 	Encoding    string `json:"encoding,omitempty"`
 	ContentHash string `json:"contentHash,omitempty"`
+	// Semantics carries structured file semantics — for `.relayfile.acl`
+	// markers this is the authoritative permissions list, which the Content
+	// field may not contain.
+	Semantics *RemoteFileSemantics `json:"semantics,omitempty"`
+}
+
+type RemoteFileSemantics struct {
+	Permissions []string `json:"permissions,omitempty"`
 }
 
 type BulkReadFileError struct {
@@ -7231,10 +7239,11 @@ func (s *Syncer) githubWorkingTreeSnapshot(ctx context.Context, prog bootstrapPr
 	return files, maxObservedRevision, aclMarkers, nil
 }
 
-// aclMarkerEvidenceLimit bounds how many marker paths one traversal records or
-// probes. A pathological tree of only markers cannot turn verification into an
-// unbounded probe loop; beyond the cap presence alone is no longer trusted.
-const aclMarkerEvidenceLimit = 8
+// aclMarkerEvidenceLimit bounds how many marker paths one traversal records
+// for later probing. The probe loop early-exits on the first marker carrying
+// read-deny evidence, so the cap only bounds pathological marker-only trees —
+// it must be generous enough that legitimate markers beyond it are unlikely.
+const aclMarkerEvidenceLimit = 256
 
 // aclMarkerDeniesReadUnder reports whether marker content carries at least one
 // deny rule that can hide reads under root. Marker bodies carry rules either as
@@ -7257,15 +7266,17 @@ func aclMarkerRules(content string) []string {
 	if trimmed == "" {
 		return nil
 	}
-	var decoded struct {
-		Semantics struct {
-			Permissions []string `json:"permissions"`
-		} `json:"semantics"`
-	}
 	if strings.HasPrefix(trimmed, "{") {
+		var decoded struct {
+			Semantics struct {
+				Permissions []string `json:"permissions"`
+			} `json:"semantics"`
+		}
 		if err := json.Unmarshal([]byte(trimmed), &decoded); err == nil && len(decoded.Semantics.Permissions) > 0 {
 			return decoded.Semantics.Permissions
 		}
+	}
+	if strings.HasPrefix(trimmed, "[") {
 		var asArray []string
 		if err := json.Unmarshal([]byte(trimmed), &asArray); err == nil && len(asArray) > 0 {
 			return asArray
@@ -7318,8 +7329,12 @@ func aclRuleDeniesReadUnder(rule, root string) bool {
 		literalPrefix = glob[:idx]
 	}
 	normalizedRoot := normalizeRemotePath(root)
+	// literalPrefix extending past root must break on a path boundary —
+	// `.../contents-old/` must not count as covering `.../contents`. The
+	// reverse direction needs no boundary: a glob literal prefix can end
+	// mid-segment (`.../cont` still covers `.../contents/x`).
 	return strings.HasPrefix(normalizedRoot, literalPrefix) ||
-		strings.HasPrefix(literalPrefix, normalizedRoot)
+		strings.HasPrefix(literalPrefix, normalizedRoot+"/")
 }
 
 // workspaceAclMayFilterView reports whether workspace ACL markers could
@@ -7345,7 +7360,19 @@ func (s *Syncer) workspaceAclMayFilterView(ctx context.Context, root string, sub
 			})
 		})
 		if err == nil {
-			return aclMarkerDeniesReadUnder(marker.Content, normalizedRoot), nil
+			// Mirror the server's precedence: structured semantics is the
+			// authoritative rule source when populated; the body only
+			// carries rules when seeded as text or a semantics JSON blob.
+			rules := aclMarkerRules(marker.Content)
+			if marker.Semantics != nil && len(marker.Semantics.Permissions) > 0 {
+				rules = marker.Semantics.Permissions
+			}
+			for _, rule := range rules {
+				if aclRuleDeniesReadUnder(rule, normalizedRoot) {
+					return true, nil
+				}
+			}
+			return false, nil
 		}
 		var httpErr *HTTPError
 		if !errors.As(err, &httpErr) {
@@ -8188,7 +8215,8 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 				// A live `.relayfile.acl` row inside the mounted subtree can
 				// legitimately filter the caller's view below the manifest's
 				// filesExpected count.
-				if path.Base(remotePath) == relayfile.DirectoryPermissionMarkerFile && len(traversalAclMarkers) < aclMarkerEvidenceLimit {
+				if path.Base(remotePath) == relayfile.DirectoryPermissionMarkerFile &&
+					len(traversalAclMarkers) < aclMarkerEvidenceLimit {
 					traversalAclMarkers = append(traversalAclMarkers, remotePath)
 					s.state.BootstrapAclMarkers = traversalAclMarkers
 				}
@@ -8208,7 +8236,12 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 				s.githubWorkingTreeRemotePathHasStaleHead(remotePath) {
 				continue
 			}
-			if strictCompleteGithubSource && (entry.Type == remoteTypeFile || entry.Type == remoteTypeSymlink) && runtimeRoot == "" {
+			// Live markers are not manifest entries — counting them would
+			// mask a missing snapshot file or force a false overcount.
+			if strictCompleteGithubSource &&
+				(entry.Type == remoteTypeFile || entry.Type == remoteTypeSymlink) &&
+				runtimeRoot == "" &&
+				path.Base(remotePath) != relayfile.DirectoryPermissionMarkerFile {
 				strictFilesThisChunk++
 			}
 			if runtimeRoot != "" {
