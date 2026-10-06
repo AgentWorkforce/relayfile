@@ -905,10 +905,13 @@ test("reconcile-package is the only internal-dependency wait on the publish path
     "a second dependency gate would poll and time out independently of reconcile-package",
   );
   assert.doesNotMatch(WORKFLOW, /assert-internal-deps/);
-  for (const job of ["publish-packages", "publish-single"]) {
+  for (const [job, next] of [
+    ["publish-packages", "publish-single"],
+    ["publish-single", "create-release"],
+  ]) {
     const start = WORKFLOW.indexOf(`\n  ${job}:`);
     assert.ok(start > 0, `${job} missing`);
-    const body = WORKFLOW.slice(start, WORKFLOW.indexOf("\n  create-release:"));
+    const body = WORKFLOW.slice(start, WORKFLOW.indexOf(`\n  ${next}:`));
     assert.match(body, /scripts\/release\/reconcile-package\.mjs/);
   }
 });
