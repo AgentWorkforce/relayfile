@@ -290,6 +290,79 @@ test("required SDK peers wait on their version floor, optional peers do not", as
   }
 });
 
+test("an overscheduled dependency sleep never starts another query or publish", async () => {
+  const dir = sandbox();
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({
+      name: "@relayfile/test",
+      version: "1.2.3",
+      dependencies: { "@relayfile/core": "1.2.3" },
+    }),
+  );
+  const state = { views: 0, publishes: 0 };
+  let elapsedMs = 0;
+  let dependencyQueries = 0;
+  const waits = [];
+  const npm = async (command, args, options) => {
+    if (args[0] === "view") {
+      if (args[1] === "@relayfile/core@1.2.3") dependencyQueries += 1;
+      return { code: 1, stdout: "", stderr: "npm error code E404" };
+    }
+    return fakeNpm({ state })(command, args, options);
+  };
+  try {
+    await assert.rejects(
+      reconcilePackage({
+        packageDir: dir,
+        tag: "latest",
+        npm,
+        dependencyWaitBudgetMs: 12000,
+        now: () => elapsedMs,
+        sleep: async (ms) => {
+          waits.push(ms);
+          elapsedMs += 20000;
+        },
+      }),
+      /dependency.*not visible/,
+    );
+    assert.deepEqual(waits, [5000]);
+    assert.equal(dependencyQueries, 1);
+    assert.equal(state.publishes, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("unpinnable or non-string required internal specs cannot publish", async () => {
+  for (const range of [">=1.2.0", "1.x", "latest", 123, null]) {
+    const dir = sandbox();
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({
+        name: "@relayfile/test",
+        version: "1.2.3",
+        dependencies: { "@relayfile/core": range },
+      }),
+    );
+    const state = { views: 0, publishes: 0 };
+    const npm = fakeNpm({
+      state,
+      viewError: "npm error code E404",
+      onView: (args) => assert.equal(args[1], "@relayfile/test@1.2.3"),
+    });
+    try {
+      await assert.rejects(
+        reconcilePackage({ packageDir: dir, tag: "latest", npm }),
+        /must name an exact version or version floor/,
+      );
+      assert.equal(state.publishes, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 test("dependency pins preserve valid prerelease and build metadata", async () => {
   const dir = sandbox();
   writeFileSync(
