@@ -22,6 +22,270 @@ const OTHER_INTEGRITY = `sha512-${"A".repeat(85)}Q==`;
 const VALID_SHASUM = "a".repeat(40);
 const OTHER_SHASUM = "b".repeat(40);
 
+function dependencyMetadata(name, version, fields = {}) {
+  return { name, version, dist: { integrity: VALID_INTEGRITY }, ...fields };
+}
+
+test("an already-published SDK cannot expose CLI until its transitive core is ready", async () => {
+  for (const becomesReady of [true, false]) {
+    const dir = sandbox();
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({
+        name: "@relayfile/test",
+        version: "1.2.3",
+        dependencies: { "@relayfile/sdk": "1.2.3" },
+      }),
+    );
+    const state = { views: 0, publishes: 0 };
+    let coreQueries = 0;
+    const npm = async (command, args, options) => {
+      if (args[0] === "view" && args[1] === "@relayfile/sdk@1.2.3") {
+        return {
+          code: 0,
+          stdout: JSON.stringify(
+            dependencyMetadata("@relayfile/sdk", "1.2.3", {
+              dependencies: { "@relayfile/core": "1.2.3" },
+            }),
+          ),
+          stderr: "",
+        };
+      }
+      if (args[0] === "view" && args[1] === "@relayfile/core@1.2.3") {
+        coreQueries++;
+        if (!becomesReady || coreQueries === 1)
+          return { code: 1, stdout: "", stderr: "npm error code E404" };
+        return {
+          code: 0,
+          stdout: JSON.stringify(
+            dependencyMetadata("@relayfile/core", "1.2.3"),
+          ),
+          stderr: "",
+        };
+      }
+      if (args[0] === "view" && state.publishes === 0)
+        return { code: 1, stdout: "", stderr: "npm error code E404" };
+      if (args[0] === "publish") assert.equal(coreQueries, 2);
+      return fakeNpm({ state, registry: { integrity: VALID_INTEGRITY } })(
+        command,
+        args,
+        options,
+      );
+    };
+    try {
+      const invoke = () =>
+        reconcilePackage({
+          packageDir: dir,
+          tag: "latest",
+          npm,
+          dependencyAttempts: 2,
+          sleep: async () => {},
+        });
+      if (becomesReady) {
+        await invoke();
+        assert.equal(state.publishes, 1);
+      } else {
+        await assert.rejects(invoke(), /core.*not visible/);
+        assert.equal(state.publishes, 0);
+      }
+      assert.equal(coreQueries, 2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("transitive required peers are checked once and malformed contracts fail closed", async () => {
+  for (const mode of ["cycle", "invalid-map", "wrong-identity"]) {
+    const dir = sandbox();
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({
+        name: "@relayfile/test",
+        version: "1.2.3",
+        dependencies: { "@relayfile/sdk": "1.2.3" },
+      }),
+    );
+    const state = { views: 0, publishes: 0 };
+    const seen = [];
+    const npm = async (command, args, options) => {
+      if (args[0] === "view" && args[1] !== "@relayfile/test@1.2.3") {
+        assert.equal(args.includes("dist"), false);
+        seen.push(args[1]);
+        const sdk = args[1] === "@relayfile/sdk@1.2.3";
+        const fields = sdk
+          ? {
+              peerDependencies:
+                mode === "invalid-map"
+                  ? []
+                  : {
+                      "@relayfile/core": "^1.2.3",
+                      "@relayfile/optional": "^1.2.3",
+                    },
+              peerDependenciesMeta: {
+                "@relayfile/optional": { optional: true },
+              },
+            }
+          : { dependencies: { "@relayfile/sdk": "1.2.3" } };
+        return {
+          code: 0,
+          stdout: JSON.stringify(
+            dependencyMetadata(
+              sdk ? "@relayfile/sdk" : "@relayfile/core",
+              mode === "wrong-identity" ? "1.2.4" : "1.2.3",
+              fields,
+            ),
+          ),
+          stderr: "",
+        };
+      }
+      if (args[0] === "view" && state.publishes === 0)
+        return { code: 1, stdout: "", stderr: "npm error code E404" };
+      return fakeNpm({ state, registry: { integrity: VALID_INTEGRITY } })(
+        command,
+        args,
+        options,
+      );
+    };
+    try {
+      const invoke = () =>
+        reconcilePackage({ packageDir: dir, tag: "latest", npm });
+      if (mode === "cycle") {
+        await invoke();
+        assert.equal(state.publishes, 1);
+        assert.deepEqual(seen, [
+          "@relayfile/sdk@1.2.3",
+          "@relayfile/core@1.2.3",
+        ]);
+      } else {
+        await assert.rejects(
+          invoke(),
+          /invalid peerDependencies|identity mismatch/,
+        );
+        assert.equal(state.publishes, 0);
+        assert.equal(seen.length, 1);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("transitive dependency waits consume the original shared budget", async () => {
+  const dir = sandbox();
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({
+      name: "@relayfile/test",
+      version: "1.2.3",
+      dependencies: { "@relayfile/sdk": "1.2.3" },
+    }),
+  );
+  const state = { views: 0, publishes: 0 };
+  let elapsed = 0;
+  const caps = [];
+  const waits = [];
+  const npm = async (command, args, options) => {
+    if (args[0] === "view" && args[1] === "@relayfile/sdk@1.2.3") {
+      assert.equal(options.timeout, 12000);
+      elapsed += 8000;
+      return {
+        code: 0,
+        stdout: JSON.stringify(
+          dependencyMetadata("@relayfile/sdk", "1.2.3", {
+            dependencies: { "@relayfile/core": "1.2.3" },
+          }),
+        ),
+        stderr: "",
+      };
+    }
+    if (args[0] === "view" && args[1] === "@relayfile/core@1.2.3") {
+      caps.push(options.timeout);
+      elapsed += 3000;
+      return { code: 1, stdout: "", stderr: "npm error code E404" };
+    }
+    if (args[0] === "view")
+      return { code: 1, stdout: "", stderr: "npm error code E404" };
+    return fakeNpm({ state })(command, args, options);
+  };
+  try {
+    await assert.rejects(
+      reconcilePackage({
+        packageDir: dir,
+        tag: "latest",
+        npm,
+        dependencyWaitBudgetMs: 12000,
+        now: () => elapsed,
+        sleep: async (ms) => {
+          waits.push(ms);
+          elapsed += ms;
+        },
+      }),
+      /core.*not visible/,
+    );
+    assert.deepEqual(caps, [4000]);
+    assert.deepEqual(waits, [1000]);
+    assert.equal(elapsed, 12000);
+    assert.equal(state.publishes, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("registry dependency expansion is bounded at the node limit", async () => {
+  for (const count of [128, 129]) {
+    const dir = sandbox();
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({
+        name: "@relayfile/test",
+        version: "1.2.3",
+        dependencies: { "@relayfile/node-0": "1.2.3" },
+      }),
+    );
+    const state = { views: 0, publishes: 0 };
+    let queries = 0;
+    const npm = async (command, args, options) => {
+      if (args[0] === "view" && args[1].startsWith("@relayfile/node-")) {
+        queries++;
+        const name = args[1].split("@")[1];
+        const index = Number(name.split("-").at(-1));
+        const next = index + 1 < count ? index + 1 : 0;
+        return {
+          code: 0,
+          stdout: JSON.stringify(
+            dependencyMetadata(`@${name}`, "1.2.3", {
+              dependencies: { [`@relayfile/node-${next}`]: "1.2.3" },
+            }),
+          ),
+          stderr: "",
+        };
+      }
+      if (args[0] === "view" && state.publishes === 0)
+        return { code: 1, stdout: "", stderr: "npm error code E404" };
+      return fakeNpm({ state, registry: { integrity: VALID_INTEGRITY } })(
+        command,
+        args,
+        options,
+      );
+    };
+    try {
+      const invoke = () =>
+        reconcilePackage({ packageDir: dir, tag: "latest", npm });
+      if (count === 128) {
+        await invoke();
+        assert.equal(state.publishes, 1);
+      } else {
+        await assert.rejects(invoke(), /closure exceeds safety limit/);
+        assert.equal(state.publishes, 0);
+      }
+      assert.equal(queries, 128);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 function sandbox() {
   const dir = mkdtempSync(join(tmpdir(), "relayfile-reconcile-"));
   writeFileSync(
@@ -66,6 +330,416 @@ function fakeNpm({ state, registry, viewError, onView }) {
     throw new Error(`unexpected npm command: ${args.join(" ")}`);
   };
 }
+
+test("consumer publication waits until its required internal dependency is visible", async () => {
+  const dir = sandbox();
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({
+      name: "@relayfile/test",
+      version: "1.2.3",
+      dependencies: { "@relayfile/core": "1.2.3", external: "^1.0.0" },
+      optionalDependencies: { "@relayfile/mount-linux-arm64": "1.2.3" },
+      devDependencies: { "@relayfile/sdk": "1.2.3" },
+    }),
+  );
+  const state = { views: 0, publishes: 0 };
+  let dependencyViews = 0;
+  const waits = [];
+  const npm = async (command, args, options) => {
+    if (args[0] === "view" && args[1] === "@relayfile/core@1.2.3") {
+      dependencyViews += 1;
+      return dependencyViews === 1
+        ? { code: 1, stdout: "", stderr: "npm error code E404" }
+        : {
+            code: 0,
+            stdout: JSON.stringify(
+              dependencyMetadata("@relayfile/core", "1.2.3"),
+            ),
+            stderr: "",
+          };
+    }
+    if (args[0] === "view" && state.publishes === 0) {
+      return { code: 1, stdout: "", stderr: "npm error code E404" };
+    }
+    if (args[0] === "publish") assert.equal(dependencyViews, 2);
+    return fakeNpm({ state, registry: { integrity: VALID_INTEGRITY } })(
+      command,
+      args,
+      options,
+    );
+  };
+  try {
+    await reconcilePackage({
+      packageDir: dir,
+      tag: "latest",
+      sourceSha: "a".repeat(40),
+      npm,
+      sleep: async (ms) => waits.push(ms),
+    });
+    assert.equal(state.publishes, 1);
+    assert.equal(dependencyViews, 2);
+    assert.deepEqual(waits, [5000]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("missing or ambiguous internal dependencies cannot publish a consumer", async () => {
+  for (const dependencyError of [
+    "npm error code E404",
+    "npm error code E503",
+  ]) {
+    const dir = sandbox();
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({
+        name: "@relayfile/test",
+        version: "1.2.3",
+        dependencies: { "@relayfile/core": "1.2.3" },
+      }),
+    );
+    const state = { views: 0, publishes: 0 };
+    const npm = async (command, args, options) => {
+      if (args[0] === "view")
+        return {
+          code: 1,
+          stdout: "",
+          stderr:
+            args[1] === "@relayfile/core@1.2.3"
+              ? dependencyError
+              : "npm error code E404",
+        };
+      return fakeNpm({ state })(command, args, options);
+    };
+    try {
+      await assert.rejects(
+        reconcilePackage({
+          packageDir: dir,
+          tag: "latest",
+          npm,
+          dependencyAttempts: 2,
+          sleep: async () => {},
+        }),
+        dependencyError.includes("E404")
+          ? /dependency.*not visible/
+          : /registry queries.*stayed ambiguous/,
+      );
+      assert.equal(state.publishes, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("transient dependency query failures retry but malformed metadata aborts", async () => {
+  for (const mode of ["timeout", "bad-metadata"]) {
+    const dir = sandbox();
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({
+        name: "@relayfile/test",
+        version: "1.2.3",
+        dependencies: { "@relayfile/core": "1.2.3" },
+      }),
+    );
+    const state = { views: 0, publishes: 0 };
+    let dependencyQueries = 0;
+    const waits = [];
+    const npm = async (command, args, options) => {
+      if (args[0] === "view") {
+        if (args[1] === "@relayfile/core@1.2.3") {
+          dependencyQueries += 1;
+          if (mode === "bad-metadata")
+            return {
+              code: 0,
+              stdout: JSON.stringify({ integrity: "invalid" }),
+              stderr: "",
+            };
+          if (dependencyQueries === 1)
+            return { code: 1, stdout: "", stderr: "npm error code ETIMEDOUT" };
+          return {
+            code: 0,
+            stdout: JSON.stringify(
+              dependencyMetadata("@relayfile/core", "1.2.3"),
+            ),
+            stderr: "",
+          };
+        }
+        if (state.publishes === 0)
+          return { code: 1, stdout: "", stderr: "npm error code E404" };
+      }
+      if (args[0] === "publish") assert.equal(dependencyQueries, 2);
+      return fakeNpm({ state, registry: { integrity: VALID_INTEGRITY } })(
+        command,
+        args,
+        options,
+      );
+    };
+    try {
+      const invoke = () =>
+        reconcilePackage({
+          packageDir: dir,
+          tag: "latest",
+          npm,
+          sleep: async (ms) => waits.push(ms),
+        });
+      if (mode === "timeout") {
+        await invoke();
+        assert.equal(state.publishes, 1);
+        assert.deepEqual(waits, [5000]);
+      } else {
+        await assert.rejects(invoke(), /no usable digest/);
+        assert.equal(dependencyQueries, 1);
+        assert.equal(state.publishes, 0);
+        assert.deepEqual(waits, []);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("read-only preflight and dry run do not wait on unpublished release dependencies", async () => {
+  for (const flags of [{ preflight: true }, { dryRun: true }]) {
+    const dir = sandbox();
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({
+        name: "@relayfile/test",
+        version: "1.2.3",
+        dependencies: { "@relayfile/core": "1.2.3" },
+      }),
+    );
+    const state = { views: 0, publishes: 0 };
+    const npm = fakeNpm({
+      state,
+      viewError: "npm error code E404",
+      onView: (args) => assert.equal(args[1], "@relayfile/test@1.2.3"),
+    });
+    try {
+      await reconcilePackage({ packageDir: dir, tag: "latest", npm, ...flags });
+      assert.equal(state.publishes, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("dependency queries and retry delays share one bounded wait budget", async () => {
+  const dir = sandbox();
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({
+      name: "@relayfile/test",
+      version: "1.2.3",
+      dependencies: { "@relayfile/core": "1.2.3" },
+    }),
+  );
+  const state = { views: 0, publishes: 0 };
+  let elapsedMs = 0;
+  const queryCaps = [];
+  const waits = [];
+  const npm = async (command, args, options) => {
+    if (args[0] === "view") {
+      if (args[1] === "@relayfile/core@1.2.3") {
+        queryCaps.push(options.timeout);
+        elapsedMs += 3000;
+      }
+      return { code: 1, stdout: "", stderr: "npm error code E404" };
+    }
+    return fakeNpm({ state })(command, args, options);
+  };
+  try {
+    await assert.rejects(
+      reconcilePackage({
+        packageDir: dir,
+        tag: "latest",
+        npm,
+        dependencyWaitBudgetMs: 12000,
+        now: () => elapsedMs,
+        sleep: async (ms) => {
+          waits.push(ms);
+          elapsedMs += ms;
+        },
+      }),
+      /dependency.*not visible/,
+    );
+    assert.deepEqual(queryCaps, [12000, 4000]);
+    assert.deepEqual(waits, [5000, 1000]);
+    assert.equal(elapsedMs, 12000);
+    assert.equal(state.publishes, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("required SDK peers wait on their version floor, optional peers do not", async () => {
+  const dir = sandbox();
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({
+      name: "@relayfile/test",
+      version: "1.2.3",
+      peerDependencies: {
+        "@relayfile/sdk": "^1.2.3",
+        "@relayfile/optional": "^1.2.3",
+      },
+      peerDependenciesMeta: { "@relayfile/optional": { optional: true } },
+    }),
+  );
+  const state = { views: 0, publishes: 0 };
+  let sdkViews = 0;
+  const npm = async (command, args, options) => {
+    if (args[0] === "view") {
+      assert.notEqual(args[1], "@relayfile/optional@1.2.3");
+      if (args[1] === "@relayfile/sdk@1.2.3") {
+        sdkViews += 1;
+        if (sdkViews === 1)
+          return { code: 1, stdout: "", stderr: "npm error code E404" };
+        return {
+          code: 0,
+          stdout: JSON.stringify(dependencyMetadata("@relayfile/sdk", "1.2.3")),
+          stderr: "",
+        };
+      }
+      if (state.publishes === 0)
+        return { code: 1, stdout: "", stderr: "npm error code E404" };
+    }
+    if (args[0] === "publish") assert.equal(sdkViews, 2);
+    return fakeNpm({ state, registry: { integrity: VALID_INTEGRITY } })(
+      command,
+      args,
+      options,
+    );
+  };
+  try {
+    await reconcilePackage({
+      packageDir: dir,
+      tag: "latest",
+      npm,
+      sleep: async () => {},
+    });
+    assert.equal(state.publishes, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an overscheduled dependency sleep never starts another query or publish", async () => {
+  const dir = sandbox();
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({
+      name: "@relayfile/test",
+      version: "1.2.3",
+      dependencies: { "@relayfile/core": "1.2.3" },
+    }),
+  );
+  const state = { views: 0, publishes: 0 };
+  let elapsedMs = 0;
+  let dependencyQueries = 0;
+  const waits = [];
+  const npm = async (command, args, options) => {
+    if (args[0] === "view") {
+      if (args[1] === "@relayfile/core@1.2.3") dependencyQueries += 1;
+      return { code: 1, stdout: "", stderr: "npm error code E404" };
+    }
+    return fakeNpm({ state })(command, args, options);
+  };
+  try {
+    await assert.rejects(
+      reconcilePackage({
+        packageDir: dir,
+        tag: "latest",
+        npm,
+        dependencyWaitBudgetMs: 12000,
+        now: () => elapsedMs,
+        sleep: async (ms) => {
+          waits.push(ms);
+          elapsedMs += 20000;
+        },
+      }),
+      /dependency.*not visible/,
+    );
+    assert.deepEqual(waits, [5000]);
+    assert.equal(dependencyQueries, 1);
+    assert.equal(state.publishes, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("unpinnable or non-string required internal specs cannot publish", async () => {
+  for (const range of [">=1.2.0", "1.x", "latest", 123, null]) {
+    const dir = sandbox();
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({
+        name: "@relayfile/test",
+        version: "1.2.3",
+        dependencies: { "@relayfile/core": range },
+      }),
+    );
+    const state = { views: 0, publishes: 0 };
+    const npm = fakeNpm({
+      state,
+      viewError: "npm error code E404",
+      onView: (args) => assert.equal(args[1], "@relayfile/test@1.2.3"),
+    });
+    try {
+      await assert.rejects(
+        reconcilePackage({ packageDir: dir, tag: "latest", npm }),
+        /must name an exact version or version floor/,
+      );
+      assert.equal(state.publishes, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("dependency pins preserve valid prerelease and build metadata", async () => {
+  const dir = sandbox();
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({
+      name: "@relayfile/test",
+      version: "1.2.3",
+      dependencies: { "@relayfile/core": "1.2.3-rc.1+build.1" },
+    }),
+  );
+  const state = { views: 0, publishes: 0 };
+  let dependencySeen = false;
+  const npm = async (command, args, options) => {
+    if (args[0] === "view") {
+      if (args[1] === "@relayfile/core@1.2.3-rc.1+build.1") {
+        dependencySeen = true;
+        return {
+          code: 0,
+          stdout: JSON.stringify(
+            dependencyMetadata("@relayfile/core", "1.2.3-rc.1+build.1"),
+          ),
+          stderr: "",
+        };
+      }
+      if (state.publishes === 0)
+        return { code: 1, stdout: "", stderr: "npm error code E404" };
+    }
+    if (args[0] === "publish") assert.equal(dependencySeen, true);
+    return fakeNpm({ state, registry: { integrity: VALID_INTEGRITY } })(
+      command,
+      args,
+      options,
+    );
+  };
+  try {
+    await reconcilePackage({ packageDir: dir, tag: "latest", npm });
+    assert.equal(state.publishes, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("reconciliation publishes an absent version and verifies it afterwards", async () => {
   const dir = sandbox();

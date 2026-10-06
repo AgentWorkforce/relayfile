@@ -727,7 +727,9 @@ jobs:
             --run-id "$RELEASE_RUN_ID" \
             --run-attempt "$RELEASE_RUN_ATTEMPT"
 
-  # Publish all packages in parallel after the read-only barrier.
+  # Publish in parallel after the read-only barrier. Reconciliation waits for
+  # required internal dependencies to become registry-visible before exposing
+  # their consumers (e.g. core -> sdk -> cli), avoiding public ETARGET windows.
   publish-packages:
     name: Publish ${{ matrix.package }}
     needs: [build, build-mount-binaries, preflight-packages]

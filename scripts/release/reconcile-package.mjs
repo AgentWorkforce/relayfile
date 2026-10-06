@@ -32,6 +32,7 @@ import {
   isOptionalSha1Shasum,
   isOptionalSha512Integrity,
 } from "./create-release-attestation.mjs";
+import { parseStrictVersion } from "./resolve-release-baseline.mjs";
 
 export const DEFAULT_ATTEMPTS = 10;
 export const DEFAULT_DELAY_MS = 5000;
@@ -45,6 +46,11 @@ export const REGISTRY_FETCH_RETRY_MIN_TIMEOUT_MS = 1000;
 export const REGISTRY_FETCH_RETRY_MAX_TIMEOUT_MS = 5000;
 // Keep post-publish registry verification bounded when npm stays unavailable.
 export const MAX_TOTAL_RETRY_DELAY_MS = 5 * 60 * 1000;
+// Parallel publish jobs can finish several minutes apart. Do not expose an
+// installable consumer until the registry can resolve its lockstep dependencies.
+export const DEPENDENCY_ATTEMPTS = 30;
+export const DEPENDENCY_WAIT_BUDGET_MS = 10 * 60 * 1000;
+const MAX_INTERNAL_DEPENDENCY_NODES = 128;
 
 export function backoffDelay({
   attempt,
@@ -216,19 +222,24 @@ export function comparePackageContent(local, registry) {
   return { kind: "identical" };
 }
 
+// Command failures can be transient; a successful but malformed metadata
+// response is a separate trust failure and must never be retried into a pass.
+class RegistryQueryError extends Error {}
+
 async function queryRegistry({
   name,
   version,
   cwd,
   npm = run,
   timeoutMs = REGISTRY_QUERY_TIMEOUT_MS,
+  includeManifest = false,
 }) {
   const result = await npm(
     "npm",
     [
       "view",
       `${name}@${version}`,
-      "dist",
+      ...(includeManifest ? [] : ["dist"]),
       "--json",
       "--prefer-online",
       "--no-fund",
@@ -241,7 +252,7 @@ async function queryRegistry({
   if (result.code !== 0) {
     const kind = registryErrorKind(result);
     if (kind === "absent") return { kind: "absent" };
-    throw new Error(
+    throw new RegistryQueryError(
       `registry query for ${name}@${version} was ambiguous; refusing to release`,
     );
   }
@@ -259,7 +270,15 @@ async function queryRegistry({
     throw new Error(
       `registry metadata for ${name}@${version} has no usable digest; refusing to release`,
     );
-  return { kind: "present", record };
+  if (includeManifest && (raw?.name !== name || raw?.version !== version))
+    throw new Error(
+      `registry manifest identity mismatch for ${name}@${version}; refusing to release`,
+    );
+  return {
+    kind: "present",
+    record,
+    manifest: includeManifest ? raw : undefined,
+  };
 }
 
 async function packPackage({ packageDir, npm = run }) {
@@ -273,6 +292,114 @@ async function packPackage({ packageDir, npm = run }) {
     parseJsonOutput(result.stdout, "npm pack output"),
     packageDir,
   );
+}
+
+async function waitForInternalDependencies({
+  manifest,
+  packageDir,
+  npm,
+  sleep,
+  now,
+  attempts,
+  budgetMs,
+  queryTimeoutMs,
+}) {
+  const startedAt = now();
+  let consumedMs = 0;
+  const required = requiredInternalDependencies(manifest);
+  const visited = new Set();
+  for (let index = 0; index < required.length; index += 1) {
+    const [name, range] = required[index];
+    if (!name.startsWith("@relayfile/")) continue;
+    // The workflow writes bare dependency pins and ^version peer floors.
+    // Waiting on the floor itself avoids accidentally accepting an older SDK.
+    const version =
+      typeof range === "string" ? range.replace(/^[=^~]/, "") : "";
+    if (!parseStrictVersion(version)) {
+      throw new Error(
+        `internal dependency ${name} must name an exact version or version floor; refusing to release`,
+      );
+    }
+    const key = `${name}@${version}`;
+    if (visited.has(key)) continue;
+    visited.add(key);
+    if (visited.size > MAX_INTERNAL_DEPENDENCY_NODES)
+      throw new Error(
+        "internal dependency closure exceeds safety limit; refusing to release",
+      );
+    let ready = false;
+    let lastFailure = "absent";
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const remainingMs = budgetMs - Math.max(consumedMs, now() - startedAt);
+      if (remainingMs <= 0) break;
+      const queryStartedAt = now();
+      let result;
+      try {
+        result = await queryRegistry({
+          name,
+          version,
+          cwd: packageDir,
+          npm,
+          timeoutMs: Math.min(queryTimeoutMs, remainingMs),
+          includeManifest: true,
+        });
+        lastFailure = "absent";
+      } catch (error) {
+        if (!(error instanceof RegistryQueryError)) throw error;
+        lastFailure = "ambiguous";
+        // Still closed to publication. Retry command failures only; parsing
+        // errors and missing/invalid integrity remain immediately fatal.
+      }
+      consumedMs += Math.max(0, now() - queryStartedAt);
+      if (result?.kind === "present") {
+        // A prior partial release may already expose sdk while core is absent.
+        // Verify the registry-owned transitive contract, not just sdk's tarball.
+        required.push(...requiredInternalDependencies(result.manifest));
+        ready = true;
+        break;
+      }
+      if (attempt === attempts) break;
+      const delayMs = Math.min(
+        backoffDelay({ attempt }),
+        budgetMs - Math.max(consumedMs, now() - startedAt),
+      );
+      if (delayMs <= 0) break;
+      const sleepStartedAt = now();
+      await sleep(delayMs);
+      consumedMs += Math.max(delayMs, now() - sleepStartedAt);
+    }
+    if (!ready)
+      throw new Error(
+        lastFailure === "ambiguous"
+          ? `registry queries for ${key} stayed ambiguous within the wait budget; refusing to publish ${manifest.name}@${manifest.version}`
+          : `internal dependency ${key} not visible in registry; refusing to publish ${manifest.name}@${manifest.version}`,
+      );
+  }
+}
+
+function requiredInternalDependencies(manifest) {
+  for (const field of [
+    "dependencies",
+    "peerDependencies",
+    "peerDependenciesMeta",
+  ]) {
+    const value = manifest[field];
+    if (
+      value !== undefined &&
+      (!value || typeof value !== "object" || Array.isArray(value))
+    )
+      throw new Error(
+        `invalid ${field} in registry manifest; refusing to release`,
+      );
+  }
+  // npm auto-installs required peers. Optional platform packages/peers and dev
+  // deps are not part of this required install contract.
+  return [
+    ...Object.entries(manifest.dependencies ?? {}),
+    ...Object.entries(manifest.peerDependencies ?? {}).filter(
+      ([name]) => manifest.peerDependenciesMeta?.[name]?.optional !== true,
+    ),
+  ].filter(([name]) => name.startsWith("@relayfile/"));
 }
 
 function parseArgs(argv) {
@@ -302,6 +429,8 @@ export async function reconcilePackage({
   maxDelayMs = MAX_DELAY_MS,
   maxTotalRetryDelayMs = MAX_TOTAL_RETRY_DELAY_MS,
   registryQueryTimeoutMs = REGISTRY_QUERY_TIMEOUT_MS,
+  dependencyAttempts = DEPENDENCY_ATTEMPTS,
+  dependencyWaitBudgetMs = DEPENDENCY_WAIT_BUDGET_MS,
   now = () => performance.now(),
 }) {
   const manifest = JSON.parse(
@@ -357,6 +486,16 @@ export async function reconcilePackage({
       // publish, retaining the race-safe check after the barrier.
       status = "absent";
     } else {
+      await waitForInternalDependencies({
+        manifest,
+        packageDir,
+        npm,
+        sleep,
+        now,
+        attempts: dependencyAttempts,
+        budgetMs: dependencyWaitBudgetMs,
+        queryTimeoutMs: registryQueryTimeoutMs,
+      });
       const published = await npm(
         "npm",
         [
