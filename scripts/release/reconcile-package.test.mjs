@@ -22,6 +22,155 @@ const OTHER_INTEGRITY = `sha512-${"A".repeat(85)}Q==`;
 const VALID_SHASUM = "a".repeat(40);
 const OTHER_SHASUM = "b".repeat(40);
 
+function dependencyMetadata(name, version, fields = {}) {
+  return { name, version, dist: { integrity: VALID_INTEGRITY }, ...fields };
+}
+
+test("an already-published SDK cannot expose CLI until its transitive core is ready", async () => {
+  for (const becomesReady of [true, false]) {
+    const dir = sandbox();
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({
+        name: "@relayfile/test",
+        version: "1.2.3",
+        dependencies: { "@relayfile/sdk": "1.2.3" },
+      }),
+    );
+    const state = { views: 0, publishes: 0 };
+    let coreQueries = 0;
+    const npm = async (command, args, options) => {
+      if (args[0] === "view" && args[1] === "@relayfile/sdk@1.2.3") {
+        return {
+          code: 0,
+          stdout: JSON.stringify(
+            dependencyMetadata("@relayfile/sdk", "1.2.3", {
+              dependencies: { "@relayfile/core": "1.2.3" },
+            }),
+          ),
+          stderr: "",
+        };
+      }
+      if (args[0] === "view" && args[1] === "@relayfile/core@1.2.3") {
+        coreQueries++;
+        if (!becomesReady || coreQueries === 1)
+          return { code: 1, stdout: "", stderr: "npm error code E404" };
+        return {
+          code: 0,
+          stdout: JSON.stringify(
+            dependencyMetadata("@relayfile/core", "1.2.3"),
+          ),
+          stderr: "",
+        };
+      }
+      if (args[0] === "view" && state.publishes === 0)
+        return { code: 1, stdout: "", stderr: "npm error code E404" };
+      if (args[0] === "publish") assert.equal(coreQueries, 2);
+      return fakeNpm({ state, registry: { integrity: VALID_INTEGRITY } })(
+        command,
+        args,
+        options,
+      );
+    };
+    try {
+      const invoke = () =>
+        reconcilePackage({
+          packageDir: dir,
+          tag: "latest",
+          npm,
+          dependencyAttempts: 2,
+          sleep: async () => {},
+        });
+      if (becomesReady) {
+        await invoke();
+        assert.equal(state.publishes, 1);
+      } else {
+        await assert.rejects(invoke(), /core.*not visible/);
+        assert.equal(state.publishes, 0);
+      }
+      assert.equal(coreQueries, 2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("transitive required peers are checked once and malformed contracts fail closed", async () => {
+  for (const mode of ["cycle", "invalid-map", "wrong-identity"]) {
+    const dir = sandbox();
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({
+        name: "@relayfile/test",
+        version: "1.2.3",
+        dependencies: { "@relayfile/sdk": "1.2.3" },
+      }),
+    );
+    const state = { views: 0, publishes: 0 };
+    const seen = [];
+    const npm = async (command, args, options) => {
+      if (args[0] === "view" && args[1] !== "@relayfile/test@1.2.3") {
+        assert.equal(args.includes("dist"), false);
+        seen.push(args[1]);
+        const sdk = args[1] === "@relayfile/sdk@1.2.3";
+        const fields = sdk
+          ? {
+              peerDependencies:
+                mode === "invalid-map"
+                  ? []
+                  : {
+                      "@relayfile/core": "^1.2.3",
+                      "@relayfile/optional": "^1.2.3",
+                    },
+              peerDependenciesMeta: {
+                "@relayfile/optional": { optional: true },
+              },
+            }
+          : { dependencies: { "@relayfile/sdk": "1.2.3" } };
+        return {
+          code: 0,
+          stdout: JSON.stringify(
+            dependencyMetadata(
+              sdk ? "@relayfile/sdk" : "@relayfile/core",
+              mode === "wrong-identity" ? "1.2.4" : "1.2.3",
+              fields,
+            ),
+          ),
+          stderr: "",
+        };
+      }
+      if (args[0] === "view" && state.publishes === 0)
+        return { code: 1, stdout: "", stderr: "npm error code E404" };
+      return fakeNpm({ state, registry: { integrity: VALID_INTEGRITY } })(
+        command,
+        args,
+        options,
+      );
+    };
+    try {
+      const invoke = () =>
+        reconcilePackage({ packageDir: dir, tag: "latest", npm });
+      if (mode === "cycle") {
+        await invoke();
+        assert.equal(state.publishes, 1);
+        assert.deepEqual(seen, [
+          "@relayfile/sdk@1.2.3",
+          "@relayfile/core@1.2.3",
+        ]);
+      } else {
+        await assert.rejects(
+          invoke(),
+          /invalid peerDependencies|identity mismatch/,
+        );
+        assert.equal(state.publishes, 0);
+        assert.equal(seen.length, 1);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 function sandbox() {
   const dir = mkdtempSync(join(tmpdir(), "relayfile-reconcile-"));
   writeFileSync(
@@ -89,7 +238,9 @@ test("consumer publication waits until its required internal dependency is visib
         ? { code: 1, stdout: "", stderr: "npm error code E404" }
         : {
             code: 0,
-            stdout: JSON.stringify({ integrity: VALID_INTEGRITY }),
+            stdout: JSON.stringify(
+              dependencyMetadata("@relayfile/core", "1.2.3"),
+            ),
             stderr: "",
           };
     }
@@ -192,7 +343,9 @@ test("transient dependency query failures retry but malformed metadata aborts", 
             return { code: 1, stdout: "", stderr: "npm error code ETIMEDOUT" };
           return {
             code: 0,
-            stdout: JSON.stringify({ integrity: VALID_INTEGRITY }),
+            stdout: JSON.stringify(
+              dependencyMetadata("@relayfile/core", "1.2.3"),
+            ),
             stderr: "",
           };
         }
@@ -329,7 +482,7 @@ test("required SDK peers wait on their version floor, optional peers do not", as
           return { code: 1, stdout: "", stderr: "npm error code E404" };
         return {
           code: 0,
-          stdout: JSON.stringify({ integrity: VALID_INTEGRITY }),
+          stdout: JSON.stringify(dependencyMetadata("@relayfile/sdk", "1.2.3")),
           stderr: "",
         };
       }
@@ -447,7 +600,9 @@ test("dependency pins preserve valid prerelease and build metadata", async () =>
         dependencySeen = true;
         return {
           code: 0,
-          stdout: JSON.stringify({ integrity: VALID_INTEGRITY }),
+          stdout: JSON.stringify(
+            dependencyMetadata("@relayfile/core", "1.2.3-rc.1+build.1"),
+          ),
           stderr: "",
         };
       }

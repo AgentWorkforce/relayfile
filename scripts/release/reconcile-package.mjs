@@ -50,6 +50,7 @@ export const MAX_TOTAL_RETRY_DELAY_MS = 5 * 60 * 1000;
 // installable consumer until the registry can resolve its lockstep dependencies.
 export const DEPENDENCY_ATTEMPTS = 30;
 export const DEPENDENCY_WAIT_BUDGET_MS = 10 * 60 * 1000;
+const MAX_INTERNAL_DEPENDENCY_NODES = 128;
 
 export function backoffDelay({
   attempt,
@@ -231,13 +232,14 @@ async function queryRegistry({
   cwd,
   npm = run,
   timeoutMs = REGISTRY_QUERY_TIMEOUT_MS,
+  includeManifest = false,
 }) {
   const result = await npm(
     "npm",
     [
       "view",
       `${name}@${version}`,
-      "dist",
+      ...(includeManifest ? [] : ["dist"]),
       "--json",
       "--prefer-online",
       "--no-fund",
@@ -268,7 +270,15 @@ async function queryRegistry({
     throw new Error(
       `registry metadata for ${name}@${version} has no usable digest; refusing to release`,
     );
-  return { kind: "present", record };
+  if (includeManifest && (raw?.name !== name || raw?.version !== version))
+    throw new Error(
+      `registry manifest identity mismatch for ${name}@${version}; refusing to release`,
+    );
+  return {
+    kind: "present",
+    record,
+    manifest: includeManifest ? raw : undefined,
+  };
 }
 
 async function packPackage({ packageDir, npm = run }) {
@@ -296,15 +306,10 @@ async function waitForInternalDependencies({
 }) {
   const startedAt = now();
   let consumedMs = 0;
-  // npm auto-installs required peers too (agents -> sdk). Optional platform
-  // packages/peers and dev deps are not part of this required install contract.
-  const required = [
-    ...Object.entries(manifest.dependencies ?? {}),
-    ...Object.entries(manifest.peerDependencies ?? {}).filter(
-      ([name]) => manifest.peerDependenciesMeta?.[name]?.optional !== true,
-    ),
-  ];
-  for (const [name, range] of required) {
+  const required = requiredInternalDependencies(manifest);
+  const visited = new Set();
+  for (let index = 0; index < required.length; index += 1) {
+    const [name, range] = required[index];
     if (!name.startsWith("@relayfile/")) continue;
     // The workflow writes bare dependency pins and ^version peer floors.
     // Waiting on the floor itself avoids accidentally accepting an older SDK.
@@ -315,6 +320,13 @@ async function waitForInternalDependencies({
         `internal dependency ${name} must name an exact version or version floor; refusing to release`,
       );
     }
+    const key = `${name}@${version}`;
+    if (visited.has(key)) continue;
+    visited.add(key);
+    if (visited.size > MAX_INTERNAL_DEPENDENCY_NODES)
+      throw new Error(
+        "internal dependency closure exceeds safety limit; refusing to release",
+      );
     let ready = false;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       const remainingMs = budgetMs - Math.max(consumedMs, now() - startedAt);
@@ -328,6 +340,7 @@ async function waitForInternalDependencies({
           cwd: packageDir,
           npm,
           timeoutMs: Math.min(queryTimeoutMs, remainingMs),
+          includeManifest: true,
         });
       } catch (error) {
         if (!(error instanceof RegistryQueryError)) throw error;
@@ -336,6 +349,9 @@ async function waitForInternalDependencies({
       }
       consumedMs += Math.max(0, now() - queryStartedAt);
       if (result?.kind === "present") {
+        // A prior partial release may already expose sdk while core is absent.
+        // Verify the registry-owned transitive contract, not just sdk's tarball.
+        required.push(...requiredInternalDependencies(result.manifest));
         ready = true;
         break;
       }
@@ -354,6 +370,31 @@ async function waitForInternalDependencies({
         `internal dependency ${name}@${version} not visible in registry; refusing to publish ${manifest.name}@${manifest.version}`,
       );
   }
+}
+
+function requiredInternalDependencies(manifest) {
+  for (const field of [
+    "dependencies",
+    "peerDependencies",
+    "peerDependenciesMeta",
+  ]) {
+    const value = manifest[field];
+    if (
+      value !== undefined &&
+      (!value || typeof value !== "object" || Array.isArray(value))
+    )
+      throw new Error(
+        `invalid ${field} in registry manifest; refusing to release`,
+      );
+  }
+  // npm auto-installs required peers. Optional platform packages/peers and dev
+  // deps are not part of this required install contract.
+  return [
+    ...Object.entries(manifest.dependencies ?? {}),
+    ...Object.entries(manifest.peerDependencies ?? {}).filter(
+      ([name]) => manifest.peerDependenciesMeta?.[name]?.optional !== true,
+    ),
+  ].filter(([name]) => name.startsWith("@relayfile/"));
 }
 
 function parseArgs(argv) {
