@@ -3107,8 +3107,8 @@ func TestPullRemoteFullGithubWorkingTreeTarSeedsAndStoresCursor(t *testing.T) {
 	if client.lastTarSeed.SourceProfile != "complete-v1" {
 		t.Fatalf("expected complete source profile on tar export, got %q", client.lastTarSeed.SourceProfile)
 	}
-	if !client.lastTarSeed.SourceArchive || !client.lastTarSeed.Gzip {
-		t.Fatalf("expected native gzip source archive request, got %+v", client.lastTarSeed)
+	if !client.lastTarSeed.SourceArchive || client.lastTarSeed.Gzip {
+		t.Fatalf("expected source archive request with raw (gzip=0) generated tar, got %+v", client.lastTarSeed)
 	}
 	gotReadme, err := os.ReadFile(filepath.Join(localDir, "README.md"))
 	if err != nil {
