@@ -2076,7 +2076,13 @@ type mountState struct {
 	// from FilesSynced because denied, skipped, and already-materialized files
 	// do not all advance that progress counter in the same way.
 	BootstrapStrictFilesSeen int `json:"bootstrapStrictFilesSeen,omitempty"`
-	BootstrapFilesTotal      int `json:"bootstrapFilesTotal,omitempty"`
+	// BootstrapAclMarkers durably records live `.relayfile.acl` rows observed
+	// during a resumable strict traversal. The count persists across cycles
+	// (BootstrapStrictFilesSeen), so the marker evidence must too — otherwise
+	// a resume that started after the marker's page would lose the only proof
+	// that an undercount is ACL-filtered rather than corrupt.
+	BootstrapAclMarkers []string `json:"bootstrapAclMarkers,omitempty"`
+	BootstrapFilesTotal int      `json:"bootstrapFilesTotal,omitempty"`
 	// BootstrapFilesTotalUnavailable is persisted once traversal prunes a
 	// reserved runtime subtree. The server's total includes those descendants,
 	// but the mount intentionally never enumerates them, so retaining that
@@ -6726,9 +6732,9 @@ func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubW
 
 	var tree map[string]githubTreeFile
 	var maxObservedRevision string
-	var aclMarkerSeen bool
+	var aclMarkers []string
 	s.runFullPullIO(func() {
-		tree, maxObservedRevision, aclMarkerSeen, err = s.githubWorkingTreeSnapshot(ctx, prog, strings.EqualFold(strings.TrimSpace(manifest.SourceProfile), "complete-v1"))
+		tree, maxObservedRevision, aclMarkers, err = s.githubWorkingTreeSnapshot(ctx, prog, strings.EqualFold(strings.TrimSpace(manifest.SourceProfile), "complete-v1"))
 	})
 	if err != nil {
 		s.logf("github tar seed unavailable: tree verification snapshot failed: %v", err)
@@ -6742,7 +6748,7 @@ func (s *Syncer) pullRemoteFullGithubTarSeed(ctx context.Context, client githubW
 		// An undercount is only legitimate when workspace ACL markers can hide
 		// part of the caller's view — the tar↔tree checks below still verify
 		// every visible entry against the downloaded archive.
-		aclMayFilter, aclErr := s.workspaceAclMayFilterView(ctx, s.githubWorkingTree.ContentsRoot, aclMarkerSeen)
+		aclMayFilter, aclErr := s.workspaceAclMayFilterView(ctx, s.githubWorkingTree.ContentsRoot, aclMarkers)
 		if aclErr != nil {
 			return true, fmt.Errorf("%w; acl marker probe failed: %v", countErr, aclErr)
 		}
@@ -6871,6 +6877,7 @@ func (s *Syncer) pullRemoteFullExport(ctx context.Context, client exportSnapshot
 	if !s.state.BootstrapComplete {
 		s.state.BootstrapFilesSynced = 0
 		s.state.BootstrapStrictFilesSeen = 0
+		s.state.BootstrapAclMarkers = nil
 		if s.lazyRepos {
 			// The export total includes intentionally-unhydrated GitHub repo
 			// contents, so it is not a valid materialization denominator.
@@ -7139,13 +7146,15 @@ type githubTreeFile struct {
 // revision, and whether the listing saw a live (unencoded) `.relayfile.acl`
 // row inside the contents subtree — live markers filter the caller's view,
 // so their presence means an undercount against the manifest's filesExpected
-// is expected rather than corrupt.
-func (s *Syncer) githubWorkingTreeSnapshot(ctx context.Context, prog bootstrapProgress, strictComplete bool) (map[string]githubTreeFile, string, bool, error) {
+// may be legitimate rather than corrupt. Marker paths (capped) are returned
+// so the verifier can re-read each and confirm it carries a read-deny rule
+// covering the subtree.
+func (s *Syncer) githubWorkingTreeSnapshot(ctx context.Context, prog bootstrapProgress, strictComplete bool) (map[string]githubTreeFile, string, []string, error) {
 	files := map[string]githubTreeFile{}
 	cursor := ""
 	seenCursors := make(map[string]struct{})
 	maxObservedRevision := ""
-	aclMarkerSeen := false
+	var aclMarkers []string
 	for {
 		pageStartCursor := cursor
 		var page TreeResponse
@@ -7155,22 +7164,22 @@ func (s *Syncer) githubWorkingTreeSnapshot(ctx context.Context, prog bootstrapPr
 			return listErr
 		})
 		if err != nil {
-			return nil, "", false, err
+			return nil, "", nil, err
 		}
 		s.recordCloudSuccess()
 		prog.touch()
 		for _, entry := range page.Entries {
 			if !isMaterializableTreeEntryType(entry.Type) {
 				if strictComplete && entry.Type != "dir" {
-					return nil, "", false, fmt.Errorf("complete-v1 github tree contains unsupported entry type %q at %s", entry.Type, entry.Path)
+					return nil, "", nil, fmt.Errorf("complete-v1 github tree contains unsupported entry type %q at %s", entry.Type, entry.Path)
 				}
 				continue
 			}
 			// Live ACL markers inside the snapshot subtree appear as plain
 			// (unencoded) rows — a manifest-carried marker keeps the `@<sha>`
 			// suffix and fails closed server-side instead.
-			if path.Base(normalizeRemotePath(entry.Path)) == relayfile.DirectoryPermissionMarkerFile {
-				aclMarkerSeen = true
+			if remote := normalizeRemotePath(entry.Path); path.Base(remote) == relayfile.DirectoryPermissionMarkerFile && len(aclMarkers) < aclMarkerEvidenceLimit {
+				aclMarkers = append(aclMarkers, remote)
 			}
 			if revisionAdvances(maxObservedRevision, entry.Revision) {
 				maxObservedRevision = entry.Revision
@@ -7184,7 +7193,7 @@ func (s *Syncer) githubWorkingTreeSnapshot(ctx context.Context, prog bootstrapPr
 			}
 			contentHash := strings.TrimSpace(entry.ContentHash)
 			if contentHash == "" {
-				return nil, "", false, fmt.Errorf("tree entry %s missing contentHash", entry.Path)
+				return nil, "", nil, fmt.Errorf("tree entry %s missing contentHash", entry.Path)
 			}
 			files[rel] = githubTreeFile{
 				RemotePath:  normalizeRemotePath(entry.Path),
@@ -7209,7 +7218,7 @@ func (s *Syncer) githubWorkingTreeSnapshot(ctx context.Context, prog bootstrapPr
 			reason = "next cursor repeated a previous page"
 		}
 		if _, seen := seenCursors[nextCursor]; seen || nextCursor == pageStartCursor {
-			return nil, "", false, &MalformedPaginationError{
+			return nil, "", nil, &MalformedPaginationError{
 				Feed:       "github working-tree",
 				Cursor:     pageStartCursor,
 				NextCursor: nextCursor,
@@ -7219,22 +7228,149 @@ func (s *Syncer) githubWorkingTreeSnapshot(ctx context.Context, prog bootstrapPr
 		seenCursors[nextCursor] = struct{}{}
 		cursor = nextCursor
 	}
-	return files, maxObservedRevision, aclMarkerSeen, nil
+	return files, maxObservedRevision, aclMarkers, nil
+}
+
+// aclMarkerEvidenceLimit bounds how many marker paths one traversal records or
+// probes. A pathological tree of only markers cannot turn verification into an
+// unbounded probe loop; beyond the cap presence alone is no longer trusted.
+const aclMarkerEvidenceLimit = 8
+
+// aclMarkerDeniesReadUnder reports whether marker content carries at least one
+// deny rule that can hide reads under root. Marker bodies carry rules either as
+// newline-delimited `deny:scope:...` text or as a
+// `{"semantics":{"permissions":[...]}}` JSON blob (bulk-write seeding). A
+// marker that exists but denies no reads under this subtree is NOT evidence —
+// presence alone cannot prove which manifest entries were filtered.
+func aclMarkerDeniesReadUnder(content, root string) bool {
+	for _, rule := range aclMarkerRules(content) {
+		if aclRuleDeniesReadUnder(rule, root) {
+			return true
+		}
+	}
+	return false
+}
+
+// aclMarkerRules extracts raw permission rule strings from a marker body.
+func aclMarkerRules(content string) []string {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return nil
+	}
+	var decoded struct {
+		Semantics struct {
+			Permissions []string `json:"permissions"`
+		} `json:"semantics"`
+	}
+	if strings.HasPrefix(trimmed, "{") {
+		if err := json.Unmarshal([]byte(trimmed), &decoded); err == nil && len(decoded.Semantics.Permissions) > 0 {
+			return decoded.Semantics.Permissions
+		}
+		var asArray []string
+		if err := json.Unmarshal([]byte(trimmed), &asArray); err == nil && len(asArray) > 0 {
+			return asArray
+		}
+	}
+	var rules []string
+	for _, line := range strings.Split(trimmed, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			rules = append(rules, line)
+		}
+	}
+	return rules
+}
+
+// aclRuleDeniesReadUnder reports whether one raw ACL rule denies reads beneath
+// root. Only `deny:scope:...` rules carry filesystem actions; the scope's path
+// glob must intersect the subtree — its literal prefix (everything before the
+// first glob metachar) must be a string-prefix of root or vice versa, because a
+// glob can match mid-segment. Rules without a path glob (e.g. `fs:read`) cover
+// the whole workspace.
+func aclRuleDeniesReadUnder(rule, root string) bool {
+	rule = strings.TrimSpace(rule)
+	lower := strings.ToLower(rule)
+	if !strings.HasPrefix(lower, "deny:") {
+		return false
+	}
+	rest := strings.TrimSpace(rule[len("deny:"):])
+	if !strings.HasPrefix(strings.ToLower(rest), "scope:") {
+		return false
+	}
+	scope := strings.TrimSpace(rest[len("scope:"):])
+	segs := strings.SplitN(scope, ":", 4)
+	var action, glob string
+	switch {
+	case len(segs) == 2 && segs[0] == "fs":
+		action = segs[1]
+	case len(segs) == 4:
+		action, glob = segs[2], segs[3]
+	default:
+		return false
+	}
+	if action != "read" && action != "manage" && action != "*" {
+		return false
+	}
+	if glob == "" {
+		return true
+	}
+	literalPrefix := glob
+	if idx := strings.IndexAny(glob, "*?["); idx >= 0 {
+		literalPrefix = glob[:idx]
+	}
+	normalizedRoot := normalizeRemotePath(root)
+	return strings.HasPrefix(normalizedRoot, literalPrefix) ||
+		strings.HasPrefix(literalPrefix, normalizedRoot)
 }
 
 // workspaceAclMayFilterView reports whether workspace ACL markers could
 // legitimately hide part of the caller's view under root — the only reason a
 // strict complete-v1 listing may undercount the clone manifest's
-// filesExpected. Live markers at or below root are visible in the listing
-// (markerSeen); markers at ancestors of root never appear in the listing, so
-// each ancestor dir is probed directly. A denied marker read (403) still
-// proves ACL enforcement is active. Probe failures fail closed: the caller
-// keeps the strict count check rather than guessing.
-func (s *Syncer) workspaceAclMayFilterView(ctx context.Context, root string, markerSeen bool) (bool, error) {
-	if markerSeen {
-		return true, nil
+// filesExpected. Evidence requires a marker that actually denies reads under
+// root: a marker observed in the listing is re-read to confirm it carries a
+// read-deny rule covering this subtree, and markers at ancestors of root (which
+// never appear in the listing) are probed directly the same way. A denied
+// marker read (403) proves ACL enforcement is active on this caller. Probe
+// failures fail closed: the caller keeps the strict count check rather than
+// guessing.
+func (s *Syncer) workspaceAclMayFilterView(ctx context.Context, root string, subtreeMarkers []string) (bool, error) {
+	normalizedRoot := normalizeRemotePath(root)
+	probeMarker := func(markerPath string) (bool, error) {
+		var marker RemoteFile
+		var err error
+		s.runFullPullIO(func() {
+			err = fullPullReadGate.do(ctx, func() error {
+				var readErr error
+				marker, readErr = s.client.ReadFile(ctx, s.workspace, markerPath)
+				return readErr
+			})
+		})
+		if err == nil {
+			return aclMarkerDeniesReadUnder(marker.Content, normalizedRoot), nil
+		}
+		var httpErr *HTTPError
+		if !errors.As(err, &httpErr) {
+			return false, err
+		}
+		switch httpErr.StatusCode {
+		case http.StatusForbidden:
+			// The read itself was ACL-enforced — filtering is active.
+			return true, nil
+		case http.StatusNotFound:
+			return false, nil
+		default:
+			return false, err
+		}
 	}
-	dir := normalizeRemotePath(root)
+	for _, markerPath := range subtreeMarkers {
+		filtered, err := probeMarker(markerPath)
+		if err != nil {
+			return false, err
+		}
+		if filtered {
+			return true, nil
+		}
+	}
+	dir := normalizedRoot
 	for {
 		markerPath := dir
 		if markerPath == "/" {
@@ -7242,27 +7378,12 @@ func (s *Syncer) workspaceAclMayFilterView(ctx context.Context, root string, mar
 		} else {
 			markerPath += "/" + relayfile.DirectoryPermissionMarkerFile
 		}
-		var probeErr error
-		s.runFullPullIO(func() {
-			probeErr = fullPullReadGate.do(ctx, func() error {
-				_, err := s.client.ReadFile(ctx, s.workspace, markerPath)
-				return err
-			})
-		})
-		if probeErr == nil {
-			return true, nil
+		filtered, err := probeMarker(markerPath)
+		if err != nil {
+			return false, err
 		}
-		var httpErr *HTTPError
-		if !errors.As(probeErr, &httpErr) {
-			return false, probeErr
-		}
-		switch httpErr.StatusCode {
-		case http.StatusForbidden:
+		if filtered {
 			return true, nil
-		case http.StatusNotFound:
-			// No marker at this level — keep walking ancestors.
-		default:
-			return false, probeErr
 		}
 		parent := path.Dir(dir)
 		if parent == dir || parent == "." {
@@ -7789,7 +7910,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		)
 	}()
 	remotePaths := map[string]struct{}{}
-	traversalSawAclMarker := false
+	var traversalAclMarkers []string
 	// Traverse in bounded-depth chunks. A depth=200 ListTree request makes the
 	// server enumerate every descendant before the client can reject reserved
 	// runtime paths. A small fixed depth sees a nested .relay directory before
@@ -7822,6 +7943,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 				expectedFiles = s.state.BootstrapFilesTotal
 			}
 			strictFilesSeen = s.state.BootstrapStrictFilesSeen
+			traversalAclMarkers = append(traversalAclMarkers, s.state.BootstrapAclMarkers...)
 			if strictCompleteGithubSource && strictFilesSeen == 0 && s.state.BootstrapFilesSynced > 0 {
 				// Older checkpoints predate the strict counter. Their synced
 				// count is a safe lower-bound compatibility signal; any denied
@@ -7948,6 +8070,8 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 						queuedDirectories = map[string]struct{}{s.remoteRoot: {}}
 						strictFilesSeen = 0
 						filesThisTraversal = 0
+						traversalAclMarkers = nil
+						s.state.BootstrapAclMarkers = nil
 						s.state.BootstrapStrictFilesSeen = 0
 						s.state.BootstrapFilesSynced = 0
 						s.state.BootstrapDirectoriesDiscovered = 1
@@ -8064,8 +8188,9 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 				// A live `.relayfile.acl` row inside the mounted subtree can
 				// legitimately filter the caller's view below the manifest's
 				// filesExpected count.
-				if path.Base(remotePath) == relayfile.DirectoryPermissionMarkerFile {
-					traversalSawAclMarker = true
+				if path.Base(remotePath) == relayfile.DirectoryPermissionMarkerFile && len(traversalAclMarkers) < aclMarkerEvidenceLimit {
+					traversalAclMarkers = append(traversalAclMarkers, remotePath)
+					s.state.BootstrapAclMarkers = traversalAclMarkers
 				}
 			case "dir":
 				metrics.directoriesSeen++
@@ -8248,6 +8373,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		strictFilesSeen += strictFilesThisChunk
 		if strictCompleteGithubSource {
 			s.state.BootstrapStrictFilesSeen = strictFilesSeen
+			s.state.BootstrapAclMarkers = traversalAclMarkers
 		}
 		pageOffset = entryEnd
 		filesThisTraversal += fileEntriesThisChunk
@@ -8312,6 +8438,7 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 	// positive server total independently proves an empty listing is incomplete.
 	// A resumed final page may legitimately contain no files after earlier
 	// cycles mirrored the prefix, and pruned/lazy totals are not comparable.
+	aclFilteredUndercount := false
 	if strictCompleteGithubSource && strictFilesSeen != expectedFiles {
 		countErr := fmt.Errorf("complete-v1 github tree verification failed: listed %d files, manifest expected %d", strictFilesSeen, expectedFiles)
 		if strictFilesSeen > expectedFiles {
@@ -8320,16 +8447,17 @@ func (s *Syncer) pullRemoteFullTree(ctx context.Context, conflicted map[string]s
 		// An undercount is only legitimate when workspace ACL markers can hide
 		// part of the caller's view — every listed file was still verified
 		// against the snapshot above.
-		aclMayFilter, aclErr := s.workspaceAclMayFilterView(ctx, s.githubWorkingTree.ContentsRoot, traversalSawAclMarker)
+		aclMayFilter, aclErr := s.workspaceAclMayFilterView(ctx, s.githubWorkingTree.ContentsRoot, traversalAclMarkers)
 		if aclErr != nil {
 			return fmt.Errorf("%w; acl marker probe failed: %v", countErr, aclErr)
 		}
 		if !aclMayFilter {
 			return countErr
 		}
+		aclFilteredUndercount = true
 		s.logf("complete-v1 github tree listed %d of %d manifest files; workspace ACL markers filter this caller's view", strictFilesSeen, expectedFiles)
 	}
-	if len(remotePaths) == 0 && (startedFromEmpty || s.state.BootstrapFilesSynced == 0) && !s.lazyRepos && !(strictCompleteGithubSource && expectedFiles == 0) {
+	if len(remotePaths) == 0 && (startedFromEmpty || s.state.BootstrapFilesSynced == 0) && !s.lazyRepos && !aclFilteredUndercount && !(strictCompleteGithubSource && expectedFiles == 0) {
 		if s.state.BootstrapFilesTotalUnavailable {
 			expectedFiles = 0
 		}
@@ -8841,6 +8969,7 @@ func (s *Syncer) markBootstrapComplete() {
 	s.state.BootstrapStartedAt = ""
 	s.state.BootstrapFilesSynced = 0
 	s.state.BootstrapStrictFilesSeen = 0
+	s.state.BootstrapAclMarkers = nil
 	s.state.BootstrapFilesTotal = 0
 	s.state.BootstrapFilesTotalUnavailable = false
 	s.state.BootstrapStallCycles = 0

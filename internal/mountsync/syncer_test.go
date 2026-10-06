@@ -3190,7 +3190,7 @@ func TestPullRemoteFullGithubTarSeedToleratesAclFilteredCount(t *testing.T) {
 					Path:        markerPath,
 					Revision:    "rev_9",
 					ContentType: "application/json",
-					Content:     "deny:scope:fs:read:/**/credentials*",
+					Content:     "deny:scope:workspace:noop:read:/**/credentials*",
 				},
 				readmeRemote: {
 					Path:        readmeRemote,
@@ -3295,6 +3295,94 @@ func TestPullRemoteFullGithubTarSeedRejectsUndercountWithoutAclMarkers(t *testin
 	err = syncer.Reconcile(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "tree listed 1 entries, clone manifest expected 2") {
 		t.Fatalf("expected strict count mismatch without ACL markers, got %v", err)
+	}
+	if client.tarCalls != 0 {
+		t.Fatalf("tar export must not run after the count check fails, got %d calls", client.tarCalls)
+	}
+}
+
+func TestAclMarkerDeniesReadUnder(t *testing.T) {
+	const root = "/github/repos/AgentWorkforce/cloud/contents"
+	cases := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"read deny wildcard", "deny:scope:workspace:noop:read:/**/*.key", true},
+		{"read deny covering subtree", "deny:scope:relayfile:fs:read:" + root + "/private/**", true},
+		{"read deny unrelated subtree", "deny:scope:relayfile:fs:read:/other/repo/**", false},
+		{"write deny only", "deny:scope:workspace:noop:write:/**/*.key", false},
+		{"allow rule", "allow:scope:workspace:noop:read:/**/*.key", false},
+		{"agent deny", "deny:agent:code-agent", false},
+		{"fs shorthand read", "deny:scope:fs:read", true},
+		{"json semantics blob", `{"semantics":{"permissions":["deny:scope:workspace:noop:read:/**/*.pem"]}}`, true},
+		{"json semantics write-only", `{"semantics":{"permissions":["deny:scope:workspace:noop:write:/**"]}}`, false},
+		{"empty", "", false},
+		{"multiline mixed", "# comment\nallow:public\ndeny:scope:workspace:noop:read:/**/secret/*\n", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := aclMarkerDeniesReadUnder(tc.content, root); got != tc.want {
+				t.Fatalf("aclMarkerDeniesReadUnder(%q, %q) = %v, want %v", tc.content, root, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPullRemoteFullGithubTarSeedRejectsUndercountWithWriteOnlyMarker(t *testing.T) {
+	localDir := t.TempDir()
+	contentsRoot := "/github/repos/AgentWorkforce/cloud/contents"
+	headSHA := "head123"
+	readme := []byte("# Cloud\n")
+	readmeRemote := contentsRoot + "/README.md@" + headSHA + ".json"
+	sentinelPath := "/github/repos/AgentWorkforce/cloud/.relayfile/clone.json"
+	markerPath := "/.relayfile.acl"
+	// A marker exists but denies only writes — it cannot explain the missing
+	// file, so the undercount must still fail closed.
+	client := &fakeExportClient{
+		fakeClient: &fakeClient{
+			files: map[string]RemoteFile{
+				sentinelPath: {
+					Path:        sentinelPath,
+					Revision:    "rev_1",
+					ContentType: "application/json",
+					Content:     `{"headSha":"` + headSHA + `","defaultBranch":"main","sourceProfile":"complete-v1","filesExpected":2}`,
+				},
+				markerPath: {
+					Path:        markerPath,
+					Revision:    "rev_9",
+					ContentType: "application/json",
+					Content:     "deny:scope:workspace:noop:write:/**",
+				},
+				readmeRemote: {
+					Path:        readmeRemote,
+					Revision:    "rev_2",
+					ContentType: "application/json",
+					Content:     string(readme),
+					ContentHash: hashBytes(readme),
+				},
+			},
+			events: []FilesystemEvent{
+				{EventID: "evt_1", Type: "file.created", Path: readmeRemote, Revision: "rev_2", ContentHash: hashBytes(readme)},
+				{EventID: "evt_2", Type: "file.updated", Path: sentinelPath, Revision: "rev_1"},
+			},
+		},
+		tarFiles: map[string][]byte{"README.md": readme},
+	}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID:   "ws_tar_seed_write_marker",
+		RemoteRoot:    contentsRoot,
+		LocalRoot:     localDir,
+		StateFile:     filepath.Join(localDir, ".relayfile-mount-state.json"),
+		WebSocket:     boolPtr(false),
+		FullPullEvery: -1,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer failed: %v", err)
+	}
+	err = syncer.Reconcile(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "tree listed 1 entries, clone manifest expected 2") {
+		t.Fatalf("expected strict count mismatch for write-only marker, got %v", err)
 	}
 	if client.tarCalls != 0 {
 		t.Fatalf("tar export must not run after the count check fails, got %d calls", client.tarCalls)
