@@ -750,30 +750,6 @@ jobs:
             path: packages/core
             mount_binary: ""
             cli_binary: ""
-          - package: sdk
-            path: packages/sdk/typescript
-            mount_binary: ""
-            cli_binary: ""
-          - package: client
-            path: packages/client
-            mount_binary: ""
-            cli_binary: ""
-          - package: agents
-            path: packages/agents
-            mount_binary: ""
-            cli_binary: ""
-          - package: cli
-            path: packages/cli
-            mount_binary: ""
-            cli_binary: ""
-          - package: file-observer
-            path: packages/file-observer
-            mount_binary: ""
-            cli_binary: ""
-          - package: local-mount
-            path: packages/local-mount
-            mount_binary: ""
-            cli_binary: ""
           - package: mount-darwin-arm64
             path: packages/mount-darwin-arm64
             mount_binary: relayfile-mount-darwin-arm64
@@ -814,6 +790,30 @@ jobs:
             path: packages/cli-win32-x64
             mount_binary: ""
             cli_binary: relayfile-cli-windows-amd64.exe
+          - package: sdk
+            path: packages/sdk/typescript
+            mount_binary: ""
+            cli_binary: ""
+          - package: client
+            path: packages/client
+            mount_binary: ""
+            cli_binary: ""
+          - package: agents
+            path: packages/agents
+            mount_binary: ""
+            cli_binary: ""
+          - package: cli
+            path: packages/cli
+            mount_binary: ""
+            cli_binary: ""
+          - package: file-observer
+            path: packages/file-observer
+            mount_binary: ""
+            cli_binary: ""
+          - package: local-mount
+            path: packages/local-mount
+            mount_binary: ""
+            cli_binary: ""
 
     steps:
       - name: Checkout code
@@ -878,6 +878,19 @@ jobs:
       # 2026-07-13 when npm 12 dropped support for the runner's node 22.14.
       - name: Update npm for OIDC support
         run: npm install -g npm@11
+
+      # Fail closed: never publish a dependent before every internal
+      # @relayfile/* dependency it pins resolves on the registry. The matrix is
+      # parallel, so this is what orders sdk/client/cli-* after core.
+      - name: Assert internal dependencies are published
+        env:
+          RELEASE_DRY_RUN: ${{ needs.build.outputs.release_dry_run }}
+        run: |
+          set -euo pipefail
+          node "$GITHUB_WORKSPACE/scripts/release/assert-internal-deps.mjs" \
+            --package-dir "$GITHUB_WORKSPACE/${{ matrix.path }}" \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --dry-run "$RELEASE_DRY_RUN"
 
       - name: Reconcile package with NPM
         env:
@@ -1013,6 +1026,19 @@ jobs:
       # 2026-07-13 when npm 12 dropped support for the runner's node 22.14.
       - name: Update npm for OIDC support
         run: npm install -g npm@11
+
+      # Fail closed: never publish a dependent before every internal
+      # @relayfile/* dependency it pins resolves on the registry. The matrix is
+      # parallel, so this is what orders sdk/client/cli-* after core.
+      - name: Assert internal dependencies are published
+        env:
+          RELEASE_DRY_RUN: ${{ needs.build.outputs.release_dry_run }}
+        run: |
+          set -euo pipefail
+          node "$GITHUB_WORKSPACE/scripts/release/assert-internal-deps.mjs" \
+            --package-dir "$GITHUB_WORKSPACE/${{ steps.resolve-package.outputs.path }}" \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --dry-run "$RELEASE_DRY_RUN"
 
       - name: Reconcile package with NPM
         env:
