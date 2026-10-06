@@ -881,19 +881,6 @@ jobs:
       - name: Update npm for OIDC support
         run: npm install -g npm@11
 
-      # Fail closed: never publish a dependent before every internal
-      # @relayfile/* dependency it pins resolves on the registry. The matrix is
-      # parallel, so this is what orders sdk/client/cli-* after core.
-      - name: Assert internal dependencies are published
-        env:
-          RELEASE_DRY_RUN: ${{ needs.build.outputs.release_dry_run }}
-        run: |
-          set -euo pipefail
-          node "$GITHUB_WORKSPACE/scripts/release/assert-internal-deps.mjs" \
-            --package-dir "$GITHUB_WORKSPACE/${{ matrix.path }}" \
-            --repo-root "$GITHUB_WORKSPACE" \
-            --dry-run "$RELEASE_DRY_RUN"
-
       - name: Reconcile package with NPM
         env:
           NPM_TAG: ${{ github.event.inputs.tag }}
@@ -1028,19 +1015,6 @@ jobs:
       # 2026-07-13 when npm 12 dropped support for the runner's node 22.14.
       - name: Update npm for OIDC support
         run: npm install -g npm@11
-
-      # Fail closed: never publish a dependent before every internal
-      # @relayfile/* dependency it pins resolves on the registry. The matrix is
-      # parallel, so this is what orders sdk/client/cli-* after core.
-      - name: Assert internal dependencies are published
-        env:
-          RELEASE_DRY_RUN: ${{ needs.build.outputs.release_dry_run }}
-        run: |
-          set -euo pipefail
-          node "$GITHUB_WORKSPACE/scripts/release/assert-internal-deps.mjs" \
-            --package-dir "$GITHUB_WORKSPACE/${{ steps.resolve-package.outputs.path }}" \
-            --repo-root "$GITHUB_WORKSPACE" \
-            --dry-run "$RELEASE_DRY_RUN"
 
       - name: Reconcile package with NPM
         env:

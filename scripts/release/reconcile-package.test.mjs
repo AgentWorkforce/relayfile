@@ -346,7 +346,19 @@ test("consumer publication waits until its required internal dependency is visib
   const state = { views: 0, publishes: 0 };
   let dependencyViews = 0;
   const waits = [];
+  let optionalViews = 0;
   const npm = async (command, args, options) => {
+    if (args[0] === "view" && args[1] === "@relayfile/mount-linux-arm64@1.2.3") {
+      optionalViews += 1;
+      return {
+        code: 0,
+        stdout: JSON.stringify(
+          dependencyMetadata("@relayfile/mount-linux-arm64", "1.2.3"),
+        ),
+        stderr: "",
+      };
+    }
+    assert.notEqual(args[1], "@relayfile/sdk@1.2.3", "devDependencies are not an install contract");
     if (args[0] === "view" && args[1] === "@relayfile/core@1.2.3") {
       dependencyViews += 1;
       return dependencyViews === 1
@@ -379,6 +391,7 @@ test("consumer publication waits until its required internal dependency is visib
     });
     assert.equal(state.publishes, 1);
     assert.equal(dependencyViews, 2);
+    assert.equal(optionalViews, 1);
     assert.deepEqual(waits, [5000]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -571,6 +584,53 @@ test("dependency queries and retry delays share one bounded wait budget", async 
     assert.equal(state.publishes, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("optionalDependencies on release packages gate the consumer, directly and via the registry manifest", async () => {
+  for (const direct of [true, false]) {
+    const dir = sandbox();
+    const optional = { "@relayfile/cli-linux-x64": "1.2.3" };
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify(
+        direct
+          ? { name: "@relayfile/test", version: "1.2.3", optionalDependencies: optional }
+          : { name: "@relayfile/test", version: "1.2.3", dependencies: { "@relayfile/sdk": "1.2.3" } },
+      ),
+    );
+    const state = { views: 0, publishes: 0 };
+    let platformViews = 0;
+    const npm = async (command, args, options) => {
+      if (args[0] === "view" && args[1] === "@relayfile/sdk@1.2.3")
+        return {
+          code: 0,
+          stdout: JSON.stringify(
+            dependencyMetadata("@relayfile/sdk", "1.2.3", { optionalDependencies: optional }),
+          ),
+          stderr: "",
+        };
+      if (args[0] === "view" && args[1] === "@relayfile/cli-linux-x64@1.2.3") {
+        platformViews += 1;
+        if (platformViews === 1) return { code: 1, stdout: "", stderr: "npm error code E404" };
+        return {
+          code: 0,
+          stdout: JSON.stringify(dependencyMetadata("@relayfile/cli-linux-x64", "1.2.3")),
+          stderr: "",
+        };
+      }
+      if (args[0] === "view" && state.publishes === 0)
+        return { code: 1, stdout: "", stderr: "npm error code E404" };
+      if (args[0] === "publish") assert.equal(platformViews, 2);
+      return fakeNpm({ state, registry: { integrity: VALID_INTEGRITY } })(command, args, options);
+    };
+    try {
+      await reconcilePackage({ packageDir: dir, tag: "latest", npm, sleep: async () => {} });
+      assert.equal(state.publishes, 1);
+      assert.equal(platformViews, 2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
 
