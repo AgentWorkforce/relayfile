@@ -25,6 +25,7 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RELEASE_PACKAGE_PATHS } from "./resolve-release-baseline.mjs";
+import { rangeTargetsVersion } from "./regenerate-release-lockfiles.mjs";
 
 export const INTERNAL_SCOPE = "@relayfile/";
 export const DEP_FIELDS = [
@@ -88,7 +89,7 @@ export async function assertInternalDeps({
 }) {
   const problems = [];
   for (const { name, spec, field } of internalDeps(pkg)) {
-    const inSet = releaseSet.get(name) === spec;
+    const inSet = rangeTargetsVersion(spec, releaseSet.get(name) ?? "");
     if (await resolves(name, spec)) {
       log(`ok ${name}@${spec} (${field}) is on the registry`);
       continue;

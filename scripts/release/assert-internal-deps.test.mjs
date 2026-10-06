@@ -42,15 +42,57 @@ test("a dependent is refused when its in-release dependency never reaches the re
 
 test("a dependent waits for its in-release dependency and then proceeds", async () => {
   let calls = 0;
+  const c = clock();
   const result = await assertInternalDeps({
     pkg: sdk,
     releaseSet,
     resolves: async () => ++calls > 3,
     timeoutMs: 600_000,
     pollMs: 10_000,
-    ...clock(),
+    ...c,
   });
   assert.equal(result.ok, true);
+  // 1 initial probe + 2 polls that miss + 1 that hits: the fake clock must
+  // have advanced by exactly three poll intervals, not spun in a tight loop.
+  assert.equal(calls, 4);
+  assert.equal(c.now(), 30_000);
+});
+
+const agents = {
+  name: "@relayfile/agents",
+  version: "0.10.73",
+  peerDependencies: { "@relayfile/sdk": "^0.10.73" },
+};
+
+test("a caret peer pin on an in-release package waits, then passes when it appears", async () => {
+  let calls = 0;
+  const c = clock();
+  const result = await assertInternalDeps({
+    pkg: agents,
+    releaseSet,
+    resolves: async () => ++calls > 2,
+    timeoutMs: 600_000,
+    pollMs: 10_000,
+    ...c,
+  });
+  assert.equal(result.ok, true, result.problems.join("; "));
+  assert.equal(calls, 3);
+  assert.equal(c.now(), 20_000);
+});
+
+test("a caret peer pin on an in-release package that never appears fails after the bound", async () => {
+  const c = clock();
+  const result = await assertInternalDeps({
+    pkg: agents,
+    releaseSet,
+    resolves: async () => false,
+    timeoutMs: 60_000,
+    pollMs: 10_000,
+    ...c,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.problems[0], /did not appear on the registry within 60s/);
+  assert.equal(c.now(), 60_000);
 });
 
 test("a dependency outside the release that is not on the registry fails immediately", async () => {
