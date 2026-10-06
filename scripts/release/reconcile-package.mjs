@@ -32,6 +32,7 @@ import {
   isOptionalSha1Shasum,
   isOptionalSha512Integrity,
 } from "./create-release-attestation.mjs";
+import { parseStrictVersion } from "./resolve-release-baseline.mjs";
 
 export const DEFAULT_ATTEMPTS = 10;
 export const DEFAULT_DELAY_MS = 5000;
@@ -291,17 +292,23 @@ async function waitForInternalDependencies({
 }) {
   const startedAt = now();
   let consumedMs = 0;
-  // Optional platform packages may be absent by design, and dev dependencies
-  // are not part of the published install contract. Required internal packages
-  // are versioned together by the release workflow, so demand exact pins.
-  for (const [name, version] of Object.entries(manifest.dependencies ?? {})) {
+  // npm auto-installs required peers too (agents -> sdk). Optional platform
+  // packages/peers and dev deps are not part of this required install contract.
+  const required = [
+    ...Object.entries(manifest.dependencies ?? {}),
+    ...Object.entries(manifest.peerDependencies ?? {}).filter(
+      ([name]) => manifest.peerDependenciesMeta?.[name]?.optional !== true,
+    ),
+  ];
+  for (const [name, range] of required) {
     if (!name.startsWith("@relayfile/")) continue;
-    if (
-      typeof version !== "string" ||
-      !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)
-    ) {
+    // The workflow writes bare dependency pins and ^version peer floors.
+    // Waiting on the floor itself avoids accidentally accepting an older SDK.
+    const version =
+      typeof range === "string" ? range.replace(/^[=^~]/, "") : "";
+    if (!parseStrictVersion(version)) {
       throw new Error(
-        `internal dependency ${name} must be exactly pinned; refusing to release`,
+        `internal dependency ${name} must name an exact version or version floor; refusing to release`,
       );
     }
     let ready = false;

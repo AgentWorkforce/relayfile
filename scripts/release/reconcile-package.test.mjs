@@ -238,6 +238,98 @@ test("dependency queries and retry delays share one bounded wait budget", async 
   }
 });
 
+test("required SDK peers wait on their version floor, optional peers do not", async () => {
+  const dir = sandbox();
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({
+      name: "@relayfile/test",
+      version: "1.2.3",
+      peerDependencies: {
+        "@relayfile/sdk": "^1.2.3",
+        "@relayfile/optional": "^1.2.3",
+      },
+      peerDependenciesMeta: { "@relayfile/optional": { optional: true } },
+    }),
+  );
+  const state = { views: 0, publishes: 0 };
+  let sdkViews = 0;
+  const npm = async (command, args, options) => {
+    if (args[0] === "view") {
+      assert.notEqual(args[1], "@relayfile/optional@1.2.3");
+      if (args[1] === "@relayfile/sdk@1.2.3") {
+        sdkViews += 1;
+        if (sdkViews === 1)
+          return { code: 1, stdout: "", stderr: "npm error code E404" };
+        return {
+          code: 0,
+          stdout: JSON.stringify({ integrity: VALID_INTEGRITY }),
+          stderr: "",
+        };
+      }
+      if (state.publishes === 0)
+        return { code: 1, stdout: "", stderr: "npm error code E404" };
+    }
+    if (args[0] === "publish") assert.equal(sdkViews, 2);
+    return fakeNpm({ state, registry: { integrity: VALID_INTEGRITY } })(
+      command,
+      args,
+      options,
+    );
+  };
+  try {
+    await reconcilePackage({
+      packageDir: dir,
+      tag: "latest",
+      npm,
+      sleep: async () => {},
+    });
+    assert.equal(state.publishes, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dependency pins preserve valid prerelease and build metadata", async () => {
+  const dir = sandbox();
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({
+      name: "@relayfile/test",
+      version: "1.2.3",
+      dependencies: { "@relayfile/core": "1.2.3-rc.1+build.1" },
+    }),
+  );
+  const state = { views: 0, publishes: 0 };
+  let dependencySeen = false;
+  const npm = async (command, args, options) => {
+    if (args[0] === "view") {
+      if (args[1] === "@relayfile/core@1.2.3-rc.1+build.1") {
+        dependencySeen = true;
+        return {
+          code: 0,
+          stdout: JSON.stringify({ integrity: VALID_INTEGRITY }),
+          stderr: "",
+        };
+      }
+      if (state.publishes === 0)
+        return { code: 1, stdout: "", stderr: "npm error code E404" };
+    }
+    if (args[0] === "publish") assert.equal(dependencySeen, true);
+    return fakeNpm({ state, registry: { integrity: VALID_INTEGRITY } })(
+      command,
+      args,
+      options,
+    );
+  };
+  try {
+    await reconcilePackage({ packageDir: dir, tag: "latest", npm });
+    assert.equal(state.publishes, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("reconciliation publishes an absent version and verifies it afterwards", async () => {
   const dir = sandbox();
   const state = { views: 0, publishes: 0 };
