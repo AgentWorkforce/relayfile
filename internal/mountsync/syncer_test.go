@@ -10731,6 +10731,25 @@ func TestCheckpointOwnershipEndToEndHandbackPreservesDestinationTurn(t *testing.
 }
 
 func TestVerifyCheckpointRequiresLocalExactnessAndServerReattestation(t *testing.T) {
+	t.Run("upstream cursor is opaque and server-attested", func(t *testing.T) {
+		client := &fakeClient{}
+		syncer, _ := newManagedCheckpointSyncer(t, client)
+		receipt := consumedCheckpointReceiptForTest(t, syncer)
+		receipt.EventCursor = "upstream:v1:linear:issue_123:2"
+		client.checkpointVerifySeal = receipt
+		syncer.state.EventsCursor = receipt.EventCursor
+		if err := syncer.saveStateWithoutLocalScan(); err != nil {
+			t.Fatal(err)
+		}
+		verification, err := syncer.VerifyCheckpoint(context.Background(), receipt)
+		if err != nil {
+			t.Fatalf("verify upstream cursor: %v", err)
+		}
+		if verification.Observed.EventCursor != receipt.EventCursor || client.checkpointVerifyCalls != 1 {
+			t.Fatalf("verification=%+v calls=%d", verification, client.checkpointVerifyCalls)
+		}
+	})
+
 	t.Run("empty local cursor normalizes to canonical zero", func(t *testing.T) {
 		client := &fakeClient{}
 		syncer, _ := newManagedCheckpointSyncer(t, client)
@@ -10868,6 +10887,7 @@ func TestVerifyCheckpointRequiresLocalExactnessAndServerReattestation(t *testing
 		for name, mutate := range map[string]func(*CheckpointSeal){
 			"bare revision": func(receipt *CheckpointSeal) { receipt.WorkspaceRevision = "12" },
 			"bare cursor":   func(receipt *CheckpointSeal) { receipt.EventCursor = "12" },
+			"padded cursor": func(receipt *CheckpointSeal) { receipt.EventCursor = " evt_2 " },
 		} {
 			t.Run(name, func(t *testing.T) {
 				client := &fakeClient{}
@@ -10883,6 +10903,75 @@ func TestVerifyCheckpointRequiresLocalExactnessAndServerReattestation(t *testing
 			})
 		}
 	})
+}
+
+func TestUpstreamCheckpointHandbackAndResume(t *testing.T) {
+	client := &fakeClient{}
+	syncer, _ := newManagedCheckpointSyncer(t, client)
+	receipt := consumedCheckpointReceiptForTest(t, syncer)
+	cursor := "upstream:v1:" + strings.Repeat("p", 64) + ":" + strings.Repeat("i", 384) + ":2"
+	receipt.EventCursor = cursor
+	syncer.state.EventsCursor = cursor
+	if err := syncer.saveStateWithoutLocalScan(); err != nil {
+		t.Fatal(err)
+	}
+	preparedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	client.checkpointHandbackFunc = func(_ context.Context, workspaceID string, request CheckpointSealHandbackRequest) (CheckpointSealOwnership, error) {
+		now := preparedAt
+		proof := CheckpointSealOwnership{SealID: request.SealID, WorkspaceID: workspaceID, Root: request.Root,
+			SessionID: request.SessionID, Generation: request.Generation, Digest: request.ExpectedDigest,
+			WorkspaceRevision: "rev_1", EventCursor: cursor, ConsumedAt: request.ConsumedAt, PreparedAt: now, Status: "prepared"}
+		if request.Phase == CheckpointHandbackPhaseCommit {
+			proof.Status = "released"
+			proof.ReleasedAt = now
+		}
+		return proof, nil
+	}
+	proof, _, err := syncer.HandbackCheckpoint(context.Background(), receipt, "cutover-upstream", "handback-upstream")
+	if err != nil {
+		t.Fatalf("upstream prepare/commit: %v", err)
+	}
+	if client.checkpointHandbackCalls != 2 || proof.EventCursor != cursor {
+		t.Fatalf("proof=%+v calls=%d", proof, client.checkpointHandbackCalls)
+	}
+	proof.Status = "source-resumed"
+	proof.SourceResumedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	verification, err := syncer.VerifyCheckpointOwnership(context.Background(), proof)
+	if err != nil || verification.Observed.EventCursor != cursor {
+		t.Fatalf("upstream resume: %+v, %v", verification, err)
+	}
+}
+
+func TestCheckpointEventCursorPattern(t *testing.T) {
+	valid := []string{
+		"0",
+		"evt_42",
+		"upstream:v1:linear:issue_123",
+		"upstream:v1:linear:issue_123:2",
+		"upstream:v1:" + strings.Repeat("a", 501),
+	}
+	invalid := []string{
+		"",
+		"   ",
+		"evt_",
+		"12",
+		"upstream:v1:",
+		"upstream:v1:linear issue_123",
+		" upstream:v1:linear:issue_123 ",
+		"upstream:v1:linear/issue_123",
+		"upstream:v1:linear\nissue_123",
+		"upstream:v1:slack:bad\\id", "upstream:v1:slack:bad\x7fid", "upstream:v1:" + strings.Repeat("a", 502),
+	}
+	for _, cursor := range valid {
+		if !checkpointEventCursorPattern.MatchString(cursor) {
+			t.Errorf("valid cursor rejected: %q", cursor)
+		}
+	}
+	for _, cursor := range invalid {
+		if checkpointEventCursorPattern.MatchString(cursor) {
+			t.Errorf("invalid cursor accepted: %q", cursor)
+		}
+	}
 }
 
 func consumedCheckpointReceiptForTest(t *testing.T, syncer *Syncer) CheckpointSeal {

@@ -1,0 +1,53 @@
+{
+  "id": "traj_36h89bsoig5x",
+  "version": 1,
+  "task": {
+    "title": "Accept upstream event cursors in mountsync checkpoints"
+  },
+  "status": "completed",
+  "startedAt": "2026-10-04T08:46:27.242Z",
+  "completedAt": "2026-10-04T08:50:31.407Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-10-04T08:50:27.813Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_ar50dfcveu54",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-10-04T08:50:27.813Z",
+      "endedAt": "2026-10-04T08:50:31.407Z",
+      "events": [
+        {
+          "ts": 1791103827813,
+          "type": "decision",
+          "content": "Treat SDK ErrorEvent failure as toolchain setup mismatch: Treat SDK ErrorEvent failure as toolchain setup mismatch",
+          "raw": {
+            "question": "Treat SDK ErrorEvent failure as toolchain setup mismatch",
+            "chosen": "Treat SDK ErrorEvent failure as toolchain setup mismatch",
+            "alternatives": [],
+            "reasoning": ""
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Verified upstream checkpoint cursor support and repaired the local check environment to match CI Node 22; full repository checks pass.",
+    "approach": "Standard approach",
+    "confidence": 0.98
+  },
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "767ae7c90dee98904b36099f5d398bee5a1a4816",
+    "endRef": "767ae7c90dee98904b36099f5d398bee5a1a4816"
+  }
+}

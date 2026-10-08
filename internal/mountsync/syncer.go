@@ -51,7 +51,7 @@ var (
 	ErrCheckpointNonConverged       = errors.New("local and durable Relayfile state did not converge")
 	checkpointSessionPattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$`)
 	checkpointRevisionPattern       = regexp.MustCompile(`^(?:0|rev_[0-9]+)$`)
-	checkpointEventCursorPattern    = regexp.MustCompile(`^(?:0|evt_[0-9]+)$`)
+	checkpointEventCursorPattern    = regexp.MustCompile(`^(?:0|evt_[0-9]+|upstream:v1:[A-Za-z0-9._:\-]{1,501})$`)
 	mountCorrelationIDPattern       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$`)
 )
 
@@ -3244,7 +3244,7 @@ func (s *Syncer) HandbackCheckpoint(ctx context.Context, consumed CheckpointSeal
 	// requiring a second (impossible) transition.
 	if prepared.Status == "released" {
 		if prepared.SealID != consumed.SealID || prepared.WorkspaceID != s.workspace || prepared.Root != "/" || prepared.SessionID != consumed.SessionID || prepared.Generation != consumed.Generation ||
-			prepared.Digest != secondDigest || !checkpointEventCursorPattern.MatchString(strings.TrimSpace(prepared.EventCursor)) || !checkpointRevisionPattern.MatchString(strings.TrimSpace(prepared.WorkspaceRevision)) || prepared.ConsumedAt != consumed.ConsumedAt || strings.TrimSpace(prepared.PreparedAt) == "" || strings.TrimSpace(prepared.ReleasedAt) == "" || prepared.SourceResumedAt != "" {
+			prepared.Digest != secondDigest || !checkpointEventCursorPattern.MatchString(prepared.EventCursor) || !checkpointRevisionPattern.MatchString(strings.TrimSpace(prepared.WorkspaceRevision)) || prepared.ConsumedAt != consumed.ConsumedAt || strings.TrimSpace(prepared.PreparedAt) == "" || strings.TrimSpace(prepared.ReleasedAt) == "" || prepared.SourceResumedAt != "" {
 			return CheckpointSealOwnership{}, health, fmt.Errorf("%w: server returned a changed released handback replay", ErrCheckpointNonConverged)
 		}
 		for _, raw := range []string{prepared.PreparedAt, prepared.ReleasedAt} {
@@ -3263,7 +3263,7 @@ func (s *Syncer) HandbackCheckpoint(ctx context.Context, consumed CheckpointSeal
 		return prepared, health, nil
 	}
 	if prepared.Status != "prepared" || prepared.SealID != consumed.SealID || prepared.WorkspaceID != s.workspace || prepared.Root != "/" || prepared.SessionID != consumed.SessionID || prepared.Generation != consumed.Generation ||
-		prepared.Digest != secondDigest || !checkpointEventCursorPattern.MatchString(strings.TrimSpace(prepared.EventCursor)) || !checkpointRevisionPattern.MatchString(strings.TrimSpace(prepared.WorkspaceRevision)) || prepared.ConsumedAt != consumed.ConsumedAt || strings.TrimSpace(prepared.PreparedAt) == "" || prepared.ReleasedAt != "" || prepared.SourceResumedAt != "" {
+		prepared.Digest != secondDigest || !checkpointEventCursorPattern.MatchString(prepared.EventCursor) || !checkpointRevisionPattern.MatchString(strings.TrimSpace(prepared.WorkspaceRevision)) || prepared.ConsumedAt != consumed.ConsumedAt || strings.TrimSpace(prepared.PreparedAt) == "" || prepared.ReleasedAt != "" || prepared.SourceResumedAt != "" {
 		return CheckpointSealOwnership{}, health, fmt.Errorf("%w: server returned a changed handback preparation", ErrCheckpointNonConverged)
 	}
 	if _, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(prepared.PreparedAt)); err != nil {
@@ -3434,7 +3434,7 @@ func (s *Syncer) VerifyCheckpointOwnership(ctx context.Context, proof Checkpoint
 	}
 	if proof.Status != "source-resumed" || strings.TrimSpace(proof.SealID) == "" || proof.WorkspaceID != s.workspace || proof.Root != "/" || s.remoteRoot != "/" ||
 		!checkpointSessionPattern.MatchString(strings.TrimSpace(proof.SessionID)) || proof.Generation == 0 || !validCheckpointDigestString(proof.Digest) ||
-		!checkpointRevisionPattern.MatchString(strings.TrimSpace(proof.WorkspaceRevision)) || !checkpointEventCursorPattern.MatchString(strings.TrimSpace(proof.EventCursor)) ||
+		!checkpointRevisionPattern.MatchString(strings.TrimSpace(proof.WorkspaceRevision)) || !checkpointEventCursorPattern.MatchString(proof.EventCursor) ||
 		strings.TrimSpace(proof.ReleasedAt) == "" || strings.TrimSpace(proof.SourceResumedAt) == "" {
 		return verification, fmt.Errorf("%w: malformed or mismatched source-resume proof", ErrCheckpointNonConverged)
 	}
@@ -3497,7 +3497,7 @@ func (s *Syncer) VerifyCheckpointOwnership(ctx context.Context, proof Checkpoint
 
 func validateConsumedCheckpointReceipt(seal CheckpointSeal) error {
 	if strings.TrimSpace(seal.SealID) == "" || strings.TrimSpace(seal.SealToken) != "" || strings.TrimSpace(seal.WorkspaceID) == "" || seal.Root != "/" ||
-		!checkpointSessionPattern.MatchString(strings.TrimSpace(seal.SessionID)) || seal.Generation == 0 || !validCheckpointDigestString(seal.Digest) || !checkpointRevisionPattern.MatchString(strings.TrimSpace(seal.WorkspaceRevision)) || !checkpointEventCursorPattern.MatchString(strings.TrimSpace(seal.EventCursor)) || strings.TrimSpace(seal.ConsumedAt) == "" {
+		!checkpointSessionPattern.MatchString(strings.TrimSpace(seal.SessionID)) || seal.Generation == 0 || !validCheckpointDigestString(seal.Digest) || !checkpointRevisionPattern.MatchString(strings.TrimSpace(seal.WorkspaceRevision)) || !checkpointEventCursorPattern.MatchString(seal.EventCursor) || strings.TrimSpace(seal.ConsumedAt) == "" {
 		return errors.New("receipt must be an exact consumed full-root seal without sealToken")
 	}
 	for _, raw := range []string{seal.IssuedAt, seal.ExpiresAt, seal.ConsumedAt} {

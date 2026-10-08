@@ -24,6 +24,21 @@ type fakeCheckpointLease struct{ released bool }
 
 func (l *fakeCheckpointLease) Release() error { l.released = true; return nil }
 
+func TestCheckpointCursorPattern(t *testing.T) {
+	valid := []string{"0", "evt_42", "upstream:v1:notion:page_123", "upstream:v1:notion:page_123:2", "upstream:v1:" + strings.Repeat("a", 501)}
+	invalid := []string{"", "   ", "evt_", "upstream:v1:", "upstream:v1:notion page_123", " upstream:v1:notion:page_123 ", "upstream:v1:notion\npage_123", "upstream:v1:slack:bad\\id", "upstream:v1:slack:bad\x7fid", "upstream:v1:" + strings.Repeat("a", 502)}
+	for _, cursor := range valid {
+		if !checkpointCursorPattern.MatchString(cursor) {
+			t.Errorf("valid cursor rejected: %q", cursor)
+		}
+	}
+	for _, cursor := range invalid {
+		if checkpointCursorPattern.MatchString(cursor) {
+			t.Errorf("invalid cursor accepted: %q", cursor)
+		}
+	}
+}
+
 func installCheckpointLifecycleSeams(t *testing.T, active activeCheckpointMount, receipt mountsync.CheckpointSeal) (*fakeCheckpointLease, *int, *int) {
 	t.Helper()
 	originalResolve := checkpointResolveActive

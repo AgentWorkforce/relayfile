@@ -463,6 +463,20 @@
       "startedAt": "2026-10-04T15:50:26.132Z",
       "completedAt": "2026-10-04T16:07:54.908Z",
       "path": ".trajectories/completed/2026-10/traj_t8ngcsdcvvc7.json"
+    },
+    "traj_0qdrmrp6ijnu": {
+      "title": "Repair upstream event cursor checkpoint validation",
+      "status": "completed",
+      "startedAt": "2026-10-04T08:43:18.694Z",
+      "completedAt": "2026-10-04T08:43:23.917Z",
+      "path": ".trajectories/completed/2026-10/traj_0qdrmrp6ijnu.json"
+    },
+    "traj_36h89bsoig5x": {
+      "title": "Accept upstream event cursors in mountsync checkpoints",
+      "status": "completed",
+      "startedAt": "2026-10-04T08:46:27.242Z",
+      "completedAt": "2026-10-04T08:50:31.407Z",
+      "path": ".trajectories/completed/2026-10/traj_36h89bsoig5x.json"
     }
   }
 }
