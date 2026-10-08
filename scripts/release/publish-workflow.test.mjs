@@ -898,6 +898,43 @@ test("package publication goes through reconciliation and post-publish attestati
   );
 });
 
+test("reconcile-package is the only internal-dependency wait on the publish path", () => {
+  assert.equal(
+    existsSync(join(REPO, "scripts/release/assert-internal-deps.mjs")),
+    false,
+    "a second dependency gate would poll and time out independently of reconcile-package",
+  );
+  assert.doesNotMatch(WORKFLOW, /assert-internal-deps/);
+  for (const [job, next] of [
+    ["publish-packages", "publish-single"],
+    ["publish-single", "create-release"],
+  ]) {
+    const start = WORKFLOW.indexOf(`\n  ${job}:`);
+    assert.ok(start > 0, `${job} missing`);
+    const body = WORKFLOW.slice(start, WORKFLOW.indexOf(`\n  ${next}:`));
+    assert.match(body, /scripts\/release\/reconcile-package\.mjs/);
+  }
+});
+
+test("publish matrix lists every internal dependency before its dependents", () => {
+  // max-parallel is smaller than the matrix, so a dependent scheduled ahead of
+  // its dependency can hold a slot while waiting for a package that has not
+  // started.
+  const start = WORKFLOW.indexOf("\n  publish-packages:");
+  const end = WORKFLOW.indexOf("\n  publish-single:");
+  const paths = [...WORKFLOW.slice(start, end).matchAll(/path: (packages\/[^\n]+)/g)].map((m) => m[1]);
+  const manifests = paths.map((p) => JSON.parse(readFileSync(join(REPO, p, "package.json"), "utf8")));
+  const names = manifests.map((m) => m.name);
+  manifests.forEach((pkg, i) => {
+    for (const field of ["dependencies", "optionalDependencies", "peerDependencies"]) {
+      for (const dep of Object.keys(pkg[field] ?? {})) {
+        const j = names.indexOf(dep);
+        if (j >= 0) assert.ok(j < i, `${pkg.name} is scheduled before its dependency ${dep}`);
+      }
+    }
+  });
+});
+
 test("all package publication is behind a successful read-only reconciliation barrier", () => {
   assert.match(WORKFLOW, /preflight-packages:/);
   assert.match(WORKFLOW, /--preflight true/);
