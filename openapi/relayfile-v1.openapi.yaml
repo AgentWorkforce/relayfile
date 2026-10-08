@@ -4121,7 +4121,7 @@ components:
           pattern: '^(0|rev_[0-9]+)$'
         eventCursor:
           type: string
-          pattern: '^(0|evt_[0-9]+|upstream:v1:[A-Za-z0-9._:\-]{1,501})$'
+          pattern: '^(0|evt_[0-9]+|upstream:v1:[A-Za-z0-9._:\-]{1,500})$'
         issuedAt:
           type: string
           format: date-time
@@ -4219,7 +4219,7 @@ components:
           pattern: '^(0|rev_[0-9]+)$'
         eventCursor:
           type: string
-          pattern: '^(0|evt_[0-9]+|upstream:v1:[A-Za-z0-9._:\-]{1,501})$'
+          pattern: '^(0|evt_[0-9]+|upstream:v1:[A-Za-z0-9._:\-]{1,500})$'
         consumedAt:
           type: string
           format: date-time
@@ -4262,7 +4262,7 @@ components:
           pattern: '^(0|rev_[0-9]+)$'
         eventCursor:
           type: string
-          pattern: '^(0|evt_[0-9]+|upstream:v1:[A-Za-z0-9._:\-]{1,501})$'
+          pattern: '^(0|evt_[0-9]+|upstream:v1:[A-Za-z0-9._:\-]{1,500})$'
         issuedAt:
           type: string
           format: date-time
