@@ -52,6 +52,7 @@ env:
 
 jobs:
   evals:
+    if: (github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.head_ref == 'trunk'
     name: Provider-backed evals
     runs-on: ubuntu-latest
 
