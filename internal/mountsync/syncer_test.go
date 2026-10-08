@@ -10905,13 +10905,49 @@ func TestVerifyCheckpointRequiresLocalExactnessAndServerReattestation(t *testing
 	})
 }
 
+func TestUpstreamCheckpointHandbackAndResume(t *testing.T) {
+	client := &fakeClient{}
+	syncer, _ := newManagedCheckpointSyncer(t, client)
+	receipt := consumedCheckpointReceiptForTest(t, syncer)
+	cursor := "upstream:v1:" + strings.Repeat("p", 64) + ":" + strings.Repeat("i", 384) + ":2"
+	receipt.EventCursor = cursor
+	syncer.state.EventsCursor = cursor
+	if err := syncer.saveStateWithoutLocalScan(); err != nil {
+		t.Fatal(err)
+	}
+	client.checkpointHandbackFunc = func(_ context.Context, workspaceID string, request CheckpointSealHandbackRequest) (CheckpointSealOwnership, error) {
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		proof := CheckpointSealOwnership{SealID: request.SealID, WorkspaceID: workspaceID, Root: request.Root,
+			SessionID: request.SessionID, Generation: request.Generation, Digest: request.ExpectedDigest,
+			WorkspaceRevision: "rev_1", EventCursor: cursor, ConsumedAt: request.ConsumedAt, PreparedAt: now, Status: "prepared"}
+		if request.Phase == CheckpointHandbackPhaseCommit {
+			proof.Status = "released"
+			proof.ReleasedAt = now
+		}
+		return proof, nil
+	}
+	proof, _, err := syncer.HandbackCheckpoint(context.Background(), receipt, "cutover-upstream", "handback-upstream")
+	if err != nil {
+		t.Fatalf("upstream prepare/commit: %v", err)
+	}
+	if client.checkpointHandbackCalls != 2 || proof.EventCursor != cursor {
+		t.Fatalf("proof=%+v calls=%d", proof, client.checkpointHandbackCalls)
+	}
+	proof.Status = "source-resumed"
+	proof.SourceResumedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	verification, err := syncer.VerifyCheckpointOwnership(context.Background(), proof)
+	if err != nil || verification.Observed.EventCursor != cursor {
+		t.Fatalf("upstream resume: %+v, %v", verification, err)
+	}
+}
+
 func TestCheckpointEventCursorPattern(t *testing.T) {
 	valid := []string{
 		"0",
 		"evt_42",
 		"upstream:v1:linear:issue_123",
 		"upstream:v1:linear:issue_123:2",
-		"upstream:v1:" + strings.Repeat("a", 400),
+		"upstream:v1:" + strings.Repeat("a", 501),
 	}
 	invalid := []string{
 		"",
@@ -10923,7 +10959,7 @@ func TestCheckpointEventCursorPattern(t *testing.T) {
 		" upstream:v1:linear:issue_123 ",
 		"upstream:v1:linear/issue_123",
 		"upstream:v1:linear\nissue_123",
-		"upstream:v1:" + strings.Repeat("a", 401),
+		"upstream:v1:" + strings.Repeat("a", 502),
 	}
 	for _, cursor := range valid {
 		if !checkpointEventCursorPattern.MatchString(cursor) {

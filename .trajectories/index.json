@@ -469,14 +469,14 @@
       "status": "completed",
       "startedAt": "2026-10-04T08:43:18.694Z",
       "completedAt": "2026-10-04T08:43:23.917Z",
-      "path": "/home/daytona/.relayflow-v2-supervisor/durable/repository/.trajectories/completed/2026-10/traj_0qdrmrp6ijnu.json"
+      "path": ".trajectories/completed/2026-10/traj_0qdrmrp6ijnu.json"
     },
     "traj_36h89bsoig5x": {
       "title": "Accept upstream event cursors in mountsync checkpoints",
       "status": "completed",
       "startedAt": "2026-10-04T08:46:27.242Z",
       "completedAt": "2026-10-04T08:50:31.407Z",
-      "path": "/home/daytona/.relayflow-v2-supervisor/durable/repository/.trajectories/completed/2026-10/traj_36h89bsoig5x.json"
+      "path": ".trajectories/completed/2026-10/traj_36h89bsoig5x.json"
     }
   }
 }
