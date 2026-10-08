@@ -380,6 +380,7 @@ async function waitForInternalDependencies({
 function requiredInternalDependencies(manifest) {
   for (const field of [
     "dependencies",
+    "optionalDependencies",
     "peerDependencies",
     "peerDependenciesMeta",
   ]) {
@@ -392,10 +393,13 @@ function requiredInternalDependencies(manifest) {
         `invalid ${field} in registry manifest; refusing to release`,
       );
   }
-  // npm auto-installs required peers. Optional platform packages/peers and dev
-  // deps are not part of this required install contract.
+  // npm auto-installs required peers. Optional peers and dev deps are not part
+  // of the install contract. optionalDependencies are: npm silently skips an
+  // unresolvable optional dependency, so a consumer published ahead of its
+  // platform binaries installs without them (sdk -> cli-*/mount-*).
   return [
     ...Object.entries(manifest.dependencies ?? {}),
+    ...Object.entries(manifest.optionalDependencies ?? {}),
     ...Object.entries(manifest.peerDependencies ?? {}).filter(
       ([name]) => manifest.peerDependenciesMeta?.[name]?.optional !== true,
     ),
