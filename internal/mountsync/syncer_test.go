@@ -10948,7 +10948,7 @@ func TestCheckpointEventCursorPattern(t *testing.T) {
 		"evt_42",
 		"upstream:v1:linear:issue_123",
 		"upstream:v1:linear:issue_123:2",
-		"upstream:v1:" + strings.Repeat("a", 501),
+		"upstream:v1:" + strings.Repeat("a", 500),
 	}
 	invalid := []string{
 		"",
@@ -10960,7 +10960,7 @@ func TestCheckpointEventCursorPattern(t *testing.T) {
 		" upstream:v1:linear:issue_123 ",
 		"upstream:v1:linear/issue_123",
 		"upstream:v1:linear\nissue_123",
-		"upstream:v1:slack:bad\\id", "upstream:v1:slack:bad\x7fid", "upstream:v1:" + strings.Repeat("a", 502),
+		"upstream:v1:slack:bad\\id", "upstream:v1:slack:bad\x7fid", "upstream:v1:" + strings.Repeat("a", 501),
 	}
 	for _, cursor := range valid {
 		if !checkpointEventCursorPattern.MatchString(cursor) {

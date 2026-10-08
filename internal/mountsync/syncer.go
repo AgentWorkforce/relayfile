@@ -51,7 +51,7 @@ var (
 	ErrCheckpointNonConverged       = errors.New("local and durable Relayfile state did not converge")
 	checkpointSessionPattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$`)
 	checkpointRevisionPattern       = regexp.MustCompile(`^(?:0|rev_[0-9]+)$`)
-	checkpointEventCursorPattern    = regexp.MustCompile(`^(?:0|evt_[0-9]+|upstream:v1:[A-Za-z0-9._:\-]{1,501})$`)
+	checkpointEventCursorPattern    = regexp.MustCompile(`^(?:0|evt_[0-9]+|upstream:v1:[A-Za-z0-9._:\-]{1,500})$`)
 	mountCorrelationIDPattern       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$`)
 )
 
