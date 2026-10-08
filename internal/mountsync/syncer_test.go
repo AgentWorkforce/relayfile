@@ -10915,8 +10915,9 @@ func TestUpstreamCheckpointHandbackAndResume(t *testing.T) {
 	if err := syncer.saveStateWithoutLocalScan(); err != nil {
 		t.Fatal(err)
 	}
+	preparedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	client.checkpointHandbackFunc = func(_ context.Context, workspaceID string, request CheckpointSealHandbackRequest) (CheckpointSealOwnership, error) {
-		now := time.Now().UTC().Format(time.RFC3339Nano)
+		now := preparedAt
 		proof := CheckpointSealOwnership{SealID: request.SealID, WorkspaceID: workspaceID, Root: request.Root,
 			SessionID: request.SessionID, Generation: request.Generation, Digest: request.ExpectedDigest,
 			WorkspaceRevision: "rev_1", EventCursor: cursor, ConsumedAt: request.ConsumedAt, PreparedAt: now, Status: "prepared"}
