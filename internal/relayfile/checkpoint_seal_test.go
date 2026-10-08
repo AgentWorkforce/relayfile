@@ -14,7 +14,7 @@ const checkpointTestConsumerPrincipal = "cloud-dashboard-observer"
 
 func TestCheckpointEventCursorPattern(t *testing.T) {
 	valid := []string{"0", "evt_42", "upstream:v1:github:pull_123", "upstream:v1:github:pull_123:2", "upstream:v1:" + strings.Repeat("a", 501)}
-	invalid := []string{"", "   ", "evt_", "upstream:v1:", "upstream:v1:github pull_123", " upstream:v1:github:pull_123 ", "upstream:v1:github\tpull_123", "upstream:v1:" + strings.Repeat("a", 502)}
+	invalid := []string{"", "   ", "evt_", "upstream:v1:", "upstream:v1:github pull_123", " upstream:v1:github:pull_123 ", "upstream:v1:github\tpull_123", "upstream:v1:slack:bad\\id", "upstream:v1:slack:bad\x7fid", "upstream:v1:" + strings.Repeat("a", 502)}
 	for _, cursor := range valid {
 		if !checkpointEventCursorPattern.MatchString(cursor) {
 			t.Errorf("valid cursor rejected: %q", cursor)
