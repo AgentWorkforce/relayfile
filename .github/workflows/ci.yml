@@ -19,6 +19,7 @@ env:
 
 jobs:
   go-test:
+    if: (github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.head_ref == 'trunk'
     name: Go Test
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -36,6 +37,7 @@ jobs:
         run: go test ./...
 
   go-build:
+    if: (github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.head_ref == 'trunk'
     name: Go Build
     runs-on: ubuntu-latest
     needs: go-test
@@ -66,6 +68,7 @@ jobs:
           if-no-files-found: error
 
   sdk-typecheck:
+    if: (github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.head_ref == 'trunk'
     name: SDK Typecheck
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -108,6 +111,7 @@ jobs:
         run: npm run test:bundle:bun --workspace=packages/sdk/typescript
 
   client-typecheck:
+    if: (github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.head_ref == 'trunk'
     name: Client Typecheck
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -140,6 +144,7 @@ jobs:
         run: npm run test --workspace=@relayfile/client
 
   e2e:
+    if: (github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.head_ref == 'trunk'
     name: E2E
     runs-on: ubuntu-latest
     needs: go-build
@@ -179,6 +184,7 @@ jobs:
           npx tsx scripts/e2e.ts --ci
 
   backend-conformance:
+    if: (github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.head_ref == 'trunk'
     name: Backend Conformance (Go oracle)
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -219,6 +225,7 @@ jobs:
           retention-days: 14
 
   release-tooling:
+    if: (github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.head_ref == 'trunk'
     name: Release Tooling
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -242,6 +249,7 @@ jobs:
         run: npm run test:release
 
   workers-typecheck:
+    if: (github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.head_ref == 'trunk'
     name: Workers Typecheck
     runs-on: ubuntu-latest
     timeout-minutes: 15
