@@ -63,7 +63,12 @@ test("feature PRs into trunk get the ready check the sweeper requires", () => {
   assert.equal(jobs.length, 1);
   const [job] = jobs;
   assert.equal(job.name, "Merge-train ready check");
-  assert.match(job.if, /head\.repo\.full_name == github\.repository/);
+  // Fork PRs get the check too (no secrets under `pull_request`); trust is the sweeper's gate.
+  assert.doesNotMatch(job.if, /head\.repo\.full_name/);
+  assert.deepEqual(Object.keys(ready.on), ["pull_request"]);
+  const raw = readFileSync(path.join(ROOT, ".github/workflows/merge-train-ready.yml"), "utf8");
+  assert.doesNotMatch(raw, /secrets\./);
+  assert.equal(job.steps[0].with?.["persist-credentials"], false);
   assert.match(job.if, /contains\(github\.event\.pull_request\.labels\.\*\.name, 'mergeable'\)/);
   // The sweeper kicks missing runs with `ready:check`: the job runs on ANY label event.
   assert.doesNotMatch(job.if, /event\.label\.name/);
