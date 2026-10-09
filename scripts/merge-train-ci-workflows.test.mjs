@@ -15,7 +15,10 @@ import { parse } from "yaml";
  */
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const load = (file) => parse(readFileSync(path.join(ROOT, ".github/workflows", file), "utf8"));
-const LABEL_FILTER = "(github.event.action != 'labeled' || github.event.label.name == 'ci:run')";
+/** The complete trunk-PR + ci:run gate. Asserted exactly: a substring check would
+ * still pass if a job appended an `|| ...` bypass. */
+const TRUNK_CI_GATE =
+  "(github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || (github.head_ref == 'trunk' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'main' && (github.event.action != 'labeled' || github.event.label.name == 'ci:run'))";
 const IGNORED_GROUP =
   "(github.event.action == 'labeled' && github.event.label.name != 'ci:run') && format('ignored-{0}', github.run_id)";
 
@@ -34,8 +37,7 @@ for (const file of PROMOTION_WORKFLOWS) {
     for (const [id, job] of jobs) {
       // A job with `needs` and no `if` is skipped whenever its gated parent skips.
       if (!job.if && job.needs) continue;
-      assert.ok(String(job.if ?? "").includes("github.head_ref == 'trunk'"), `${file} ${id}: trunk PR gate`);
-      assert.ok(String(job.if ?? "").includes(LABEL_FILTER), `${file} ${id}: must skip label events other than ci:run`);
+      assert.equal(job.if, TRUNK_CI_GATE, `${file} ${id}: exact trunk PR + ci:run gate`);
     }
   });
 }
