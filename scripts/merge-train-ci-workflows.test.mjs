@@ -32,6 +32,8 @@ for (const file of PROMOTION_WORKFLOWS) {
   test(`${file} runs the trunk PR only on opened/reopened/ci:run, never on synchronize`, () => {
     const workflow = load(file);
     assert.deepEqual(workflow.on.pull_request?.types, ["opened", "reopened", "labeled"]);
+    // Trunk -> main PRs only (where a branches filter exists, it must name the default branch).
+    if (workflow.on.pull_request?.branches) assert.deepEqual(workflow.on.pull_request.branches, ["main"]);
     const jobs = Object.entries(workflow.jobs);
     assert.ok(jobs.length > 0);
     for (const [id, job] of jobs) {
@@ -65,6 +67,11 @@ test("feature PRs into trunk get the ready check the sweeper requires", () => {
   assert.equal(jobs.length, 1);
   const [job] = jobs;
   assert.equal(job.name, "Merge-train ready check");
+  // A skip-bound event (no `mergeable`) must not cancel a real ready-check run.
+  assert.equal(
+    ready.concurrency.group,
+    "merge-train-ready-${{ contains(github.event.pull_request.labels.*.name, 'mergeable') && format('pr-{0}', github.event.pull_request.number) || format('ignored-{0}', github.run_id) }}",
+  );
   // Fork PRs get the check too (no secrets under `pull_request`); trust is the sweeper's gate.
   assert.doesNotMatch(job.if, /head\.repo\.full_name/);
   assert.deepEqual(Object.keys(ready.on), ["pull_request"]);
