@@ -18,7 +18,7 @@ const load = (file) => parse(readFileSync(path.join(ROOT, ".github/workflows", f
 /** The complete trunk-PR + ci:run gate. Asserted exactly: a substring check would
  * still pass if a job appended an `|| ...` bypass. */
 const TRUNK_CI_GATE =
-  "(github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || (github.head_ref == 'trunk' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'main' && (github.event.action != 'labeled' || github.event.label.name == 'ci:run'))";
+  "(github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || (github.head_ref == 'trunk' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'main' && github.event.action == 'labeled' && github.event.label.name == 'ci:run')";
 const IGNORED_GROUP =
   "(github.event.action == 'labeled' && github.event.label.name != 'ci:run') && format('ignored-{0}', github.run_id)";
 
@@ -29,9 +29,9 @@ const CONCURRENCY_WORKFLOWS = ["ci.yml", "contract.yml", "relayfile-evals.yml"];
 const MARKER = { file: "ci.yml", job: "go-test", name: "Go Test" };
 
 for (const file of PROMOTION_WORKFLOWS) {
-  test(`${file} runs the trunk PR only on opened/reopened/ci:run, never on synchronize`, () => {
+  test(`${file} runs the trunk PR only when the ci:run label is added, never on opened/reopened/synchronize`, () => {
     const workflow = load(file);
-    assert.deepEqual(workflow.on.pull_request?.types, ["opened", "reopened", "labeled"]);
+    assert.deepEqual(workflow.on.pull_request?.types, ["labeled"]);
     // Trunk -> main PRs only (where a branches filter exists, it must name the default branch).
     if (workflow.on.pull_request?.branches) assert.deepEqual(workflow.on.pull_request.branches, ["main"]);
     const jobs = Object.entries(workflow.jobs);
