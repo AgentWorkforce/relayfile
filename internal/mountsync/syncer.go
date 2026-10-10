@@ -1877,6 +1877,7 @@ type Syncer struct {
 	wsLastPingAt              time.Time
 	listenerHeartbeatAt       time.Time
 	bulkFlushThreshold        int
+	bulkUploadConcurrency     int
 	mode                      string
 	interval                  time.Duration
 	fullPullEvery             int
@@ -1931,6 +1932,13 @@ type Syncer struct {
 	circuit               *CloudErrorCircuit
 	maxOutboxAttempts     int
 	nowFn                 func() time.Time
+
+	// retainPushLocalScan asks pushLocal to keep its hash-only scan in
+	// lastPushLocalScan so a one-shot caller can derive the public state from
+	// it instead of re-hashing the whole tree (PushLocalAndFlushOnce).
+	retainPushLocalScan bool
+	lastPushLocalScan   map[string]localSnapshot
+
 	// Test seam for proving that background local-tree hashing yields the
 	// real-time state lock. Production uses readLocalSnapshot directly.
 	readLocalSnapshotFn func(string, bool) (localSnapshot, error)
@@ -2723,6 +2731,7 @@ func NewSyncer(client RemoteClient, opts SyncerOptions) (*Syncer, error) {
 		logger:                    opts.Logger,
 		denialLogPath:             filepath.Join(localRoot, ".relay", "permissions-denied.log"),
 		bulkFlushThreshold:        bulkFlushThreshold,
+		bulkUploadConcurrency:     bulkUploadConcurrencyFromEnv(opts.Logger),
 		mode:                      strings.TrimSpace(opts.Mode),
 		pullOnly:                  normalizeSyncMode(opts.SyncMode) == "pull-only",
 		writeOnly:                 normalizeSyncMode(opts.SyncMode) == "write-only",
@@ -2951,6 +2960,12 @@ func (s *Syncer) PushLocalAndFlushOnce(ctx context.Context) error {
 	if err := s.loadState(); err != nil {
 		return err
 	}
+	s.retainPushLocalScan = true
+	s.lastPushLocalScan = nil
+	defer func() {
+		s.retainPushLocalScan = false
+		s.lastPushLocalScan = nil
+	}()
 	conflicted, err := s.pushLocal(ctx)
 	if err != nil {
 		s.markSyncError(err)
@@ -2976,6 +2991,14 @@ func (s *Syncer) PushLocalAndFlushOnce(ctx context.Context) error {
 		return err
 	}
 	s.markSyncSuccess()
+	if s.lastPushLocalScan != nil {
+		// pushLocal just walked and hashed the tree. Reuse that scan rather
+		// than hashing every file a third time. The public state reads only
+		// presence and skip status from it, and the flush can remove local
+		// files (e.g. materializeSchemaInvalid deletes a rejected new draft),
+		// so first drop entries whose files have since vanished.
+		return s.saveStateWithLocalFiles(s.dropVanishedPushScanEntries(s.lastPushLocalScan))
+	}
 	return s.saveState()
 }
 
@@ -4102,12 +4125,7 @@ func (s *Syncer) flushSelectedOutboxRecords(ctx context.Context, records []outbo
 	}
 	flushCtx, cancel := s.outboxContext(ctx)
 	defer cancel()
-	for _, chunk := range chunkOutboxRecords(due, maxWritebackBatchBytes()) {
-		if err := s.flushOutboxRecordChunk(flushCtx, chunk, conflicted, settleReceipts, unlockDuringUpload); err != nil {
-			return err
-		}
-	}
-	return nil
+	return s.flushOutboxChunks(flushCtx, chunkOutboxRecords(due, maxWritebackBatchBytes()), conflicted, settleReceipts, unlockDuringUpload)
 }
 
 func (s *Syncer) flushDueOutboxRecords(ctx context.Context, conflicted map[string]struct{}) error {
@@ -4155,19 +4173,190 @@ func (s *Syncer) flushOutboxRecords(ctx context.Context, conflicted map[string]s
 	// writeback mid-flight and leave it retrying for minutes (see outboxContext).
 	flushCtx, cancel := s.outboxContext(ctx)
 	defer cancel()
-	for _, chunk := range chunkOutboxRecords(due, maxWritebackBatchBytes()) {
-		if err := s.flushOutboxRecordChunk(flushCtx, chunk, conflicted, settleReceipts, false); err != nil {
-			return err
+	return s.flushOutboxChunks(flushCtx, chunkOutboxRecords(due, maxWritebackBatchBytes()), conflicted, settleReceipts, false)
+}
+
+// flushOutboxChunks flushes chunks in order. With a single chunk, a
+// concurrency of 1, or unlockDuringUpload (the watcher path, whose state lock
+// handoff is per request), it is the original serial loop.
+//
+// Otherwise it pipelines up to bulkUploadConcurrency POSTs while keeping
+// every state transition serial and in chunk order on the calling goroutine,
+// which holds s.mu throughout:
+//
+//   - prepare (receipt settlement, capability gate) runs under s.mu, in order;
+//   - only the immutable request upload runs on a worker goroutine;
+//   - responses are applied under s.mu strictly in chunk order, so acks,
+//     failures, backoff and conflict handling see the same sequence as the
+//     serial loop, and a record is acked only after the server confirmed it;
+//   - a chunk sharing any path with an in-flight chunk waits for it, so two
+//     commands for one path are never in flight together;
+//   - completed uploads (not only the head) are inspected before every
+//     refill: a transport error or a failed receipt stops dispatch for good,
+//     and a completed chunk with per-path errors pauses dispatch until it has
+//     been applied, so no chunk is sent once a failure is observable (the
+//     serial loop's stop-on-first-error). Uploads already in flight are
+//     still applied, so a write the server accepted is acked, not re-sent.
+func (s *Syncer) flushOutboxChunks(ctx context.Context, chunks [][]outboxRecord, conflicted map[string]struct{}, settleReceipts, unlockDuringUpload bool) error {
+	limit := s.bulkUploadConcurrencyValue()
+	if len(chunks) <= 1 || limit <= 1 || unlockDuringUpload {
+		for _, chunk := range chunks {
+			if err := s.flushOutboxRecordChunk(ctx, chunk, conflicted, settleReceipts, unlockDuringUpload); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	type uploadResult struct {
+		response BulkWriteResponse
+		err      error
+	}
+	type inflightChunk struct {
+		upload  outboxChunkUpload
+		paths   []string
+		started time.Time
+		done    chan uploadResult
+		result  *uploadResult // set once the upload has completed
+	}
+	var (
+		queue        []*inflightChunk
+		inflightBy   = map[string]int{}
+		next         int
+		firstErr     error
+		stopDispatch bool
+	)
+	conflictsInflight := func(chunk []outboxRecord) bool {
+		for _, record := range chunk {
+			if inflightBy[normalizeRemotePath(record.RemotePath)] > 0 {
+				return true
+			}
+		}
+		return false
+	}
+	// observeCompleted collects every upload that has already finished —
+	// not only the head — so a failure is acted on before any refill. It
+	// returns true while dispatch must pause: a completed chunk carries
+	// per-path errors whose handling (applied in order) may still fail the
+	// flush. A transport error always fails its chunk, so it stops dispatch
+	// for good, exactly as the serial loop stops at the first failed chunk.
+	observeCompleted := func() (hold bool) {
+		for _, item := range queue {
+			if item.result == nil {
+				select {
+				case result := <-item.done:
+					item.result = &result
+				default:
+					continue
+				}
+			}
+			if item.result.err != nil {
+				stopDispatch = true
+			}
+			if len(item.result.response.Errors) > 0 || item.result.response.ErrorCount > 0 {
+				hold = true
+			}
+		}
+		return hold
+	}
+	for {
+		for next < len(chunks) && len(queue) < limit && !conflictsInflight(chunks[next]) {
+			if hold := observeCompleted(); hold || stopDispatch {
+				break
+			}
+			chunk := chunks[next]
+			next++
+			upload, done, err := s.prepareOutboxChunkUpload(ctx, chunk, settleReceipts)
+			if done {
+				if err != nil {
+					if firstErr == nil {
+						firstErr = err
+					}
+					stopDispatch = true
+				}
+				continue
+			}
+			if upload.firstErr != nil {
+				// A receipt in this chunk already failed; the chunk's own new
+				// records still upload (as in the serial loop), but nothing
+				// after it may be sent.
+				stopDispatch = true
+			}
+			item := &inflightChunk{upload: upload, started: time.Now(), done: make(chan uploadResult, 1)}
+			for _, record := range upload.records {
+				path := normalizeRemotePath(record.RemotePath)
+				item.paths = append(item.paths, path)
+				inflightBy[path]++
+			}
+			queue = append(queue, item)
+			go func(files []BulkWriteFile, done chan<- uploadResult) {
+				response, err := s.client.WriteFilesBulk(ctx, s.workspace, files)
+				done <- uploadResult{response: response, err: err}
+			}(upload.files, item.done)
+		}
+		if len(queue) == 0 {
+			break
+		}
+		head := queue[0]
+		queue = queue[1:]
+		if head.result == nil {
+			result := <-head.done
+			head.result = &result
+		}
+		result := *head.result
+		for _, path := range head.paths {
+			if inflightBy[path]--; inflightBy[path] <= 0 {
+				delete(inflightBy, path)
+			}
+		}
+		s.traceLatency("bulk_response", head.started, "records", len(head.upload.records))
+		if err := s.applyOutboxChunkResponse(ctx, head.upload, result.response, result.err, conflicted, settleReceipts); err != nil && firstErr == nil {
+			firstErr = err
+			stopDispatch = true
 		}
 	}
-	return nil
+	return firstErr
 }
 
 func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRecord, conflicted map[string]struct{}, settleReceipts, unlockDuringUpload bool) error {
 	traceStarted := time.Now()
+	upload, done, err := s.prepareOutboxChunkUpload(ctx, records, settleReceipts)
+	if done {
+		return err
+	}
+	var response BulkWriteResponse
+	if unlockDuringUpload {
+		// The watcher has already persisted immutable outbox records, so the
+		// network wait no longer needs exclusive access to mount state. Let the
+		// WebSocket apply loop materialize peer edits while our own POST is in
+		// flight; reacquire before interpreting the response or mutating state.
+		s.mu.Unlock()
+		response, err = s.client.WriteFilesBulk(ctx, s.workspace, upload.files)
+		s.mu.Lock()
+	} else {
+		response, err = s.client.WriteFilesBulk(ctx, s.workspace, upload.files)
+	}
+	s.traceLatency("bulk_response", traceStarted, "records", len(upload.records))
+	return s.applyOutboxChunkResponse(ctx, upload, response, err, conflicted, settleReceipts)
+}
+
+// outboxChunkUpload is the network-only part of one outbox chunk flush: the
+// records that still need a POST and their immutable request files. The
+// upload itself touches no Syncer state, so it may run without s.mu and
+// concurrently with other chunks' uploads (see flushOutboxChunks).
+type outboxChunkUpload struct {
+	records  []outboxRecord
+	files    []BulkWriteFile
+	firstErr error
+}
+
+// prepareOutboxChunkUpload runs the state-touching pre-upload half of a chunk
+// flush under s.mu: control-path skips, receipt settlement for records that
+// already hold an opId, and the symlink capability gate. done reports that
+// nothing remains to upload, in which case err is the chunk's result.
+func (s *Syncer) prepareOutboxChunkUpload(ctx context.Context, records []outboxRecord, settleReceipts bool) (outboxChunkUpload, bool, error) {
 	var firstErr error
 	uploadRecords := make([]outboxRecord, 0, len(records))
-	deferredReceipts := make([]outboxRecord, 0, len(records))
 	for _, record := range records {
 		if isMountRuntimeRemotePath(record.RemotePath) {
 			s.logMountControlPathSkipped(strings.TrimPrefix(normalizeRemotePath(record.RemotePath), "/"))
@@ -4187,14 +4376,14 @@ func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRec
 		uploadRecords = append(uploadRecords, record)
 	}
 	if len(uploadRecords) == 0 {
-		return firstErr
+		return outboxChunkUpload{}, true, firstErr
 	}
 
 	files := outboxRecordsAsBulkFiles(uploadRecords)
 	if hasSymlinkBulkWrite(files) {
 		capabilityClient, ok := s.client.(symlinkCapabilityClient)
 		if !ok {
-			return fmt.Errorf("%w: client did not advertise a capability check", ErrSymlinkUnsupported)
+			return outboxChunkUpload{}, true, fmt.Errorf("%w: client did not advertise a capability check", ErrSymlinkUnsupported)
 		}
 		if err := capabilityClient.EnsureSymlinkSupport(ctx); err != nil {
 			for _, record := range uploadRecords {
@@ -4203,25 +4392,22 @@ func (s *Syncer) flushOutboxRecordChunk(ctx context.Context, records []outboxRec
 				}
 			}
 			if firstErr != nil {
-				return firstErr
+				return outboxChunkUpload{}, true, firstErr
 			}
-			return err
+			return outboxChunkUpload{}, true, err
 		}
 	}
-	var response BulkWriteResponse
-	var err error
-	if unlockDuringUpload {
-		// The watcher has already persisted immutable outbox records, so the
-		// network wait no longer needs exclusive access to mount state. Let the
-		// WebSocket apply loop materialize peer edits while our own POST is in
-		// flight; reacquire before interpreting the response or mutating state.
-		s.mu.Unlock()
-		response, err = s.client.WriteFilesBulk(ctx, s.workspace, files)
-		s.mu.Lock()
-	} else {
-		response, err = s.client.WriteFilesBulk(ctx, s.workspace, files)
-	}
-	s.traceLatency("bulk_response", traceStarted, "records", len(uploadRecords))
+	return outboxChunkUpload{records: uploadRecords, files: files, firstErr: firstErr}, false, nil
+}
+
+// applyOutboxChunkResponse is the post-upload half of a chunk flush, run under
+// s.mu: it records the cloud outcome and acks, fails, or schedules a retry
+// for every uploaded record. Records are acknowledged only from a server
+// response; a transport error leaves them pending with backoff.
+func (s *Syncer) applyOutboxChunkResponse(ctx context.Context, upload outboxChunkUpload, response BulkWriteResponse, err error, conflicted map[string]struct{}, settleReceipts bool) error {
+	firstErr := upload.firstErr
+	uploadRecords := upload.records
+	deferredReceipts := make([]outboxRecord, 0, len(uploadRecords))
 	if err != nil {
 		s.recordCloudFailure(err)
 		for _, record := range uploadRecords {
@@ -4551,15 +4737,24 @@ func chunkOutboxRecords(records []outboxRecord, maxBytes int64) [][]outboxRecord
 	if maxBytes <= 0 {
 		return [][]outboxRecord{records}
 	}
+	// Each record is encoded exactly once and the request size is tracked
+	// incrementally. The boundaries are byte-identical to measuring
+	// bulkWriteRequestSize(current+record) on every append (see
+	// TestChunkOutboxRecordsMatchesLegacyBoundaries), without re-encoding the
+	// whole pending chunk per record — that was O(n^2) in bytes and dominated
+	// large --push-local-once seeds.
 	chunks := make([][]outboxRecord, 0, 1)
 	current := make([]outboxRecord, 0, len(records))
+	var sizer bulkWriteRequestSizer
 	for _, record := range records {
-		candidate := append(append([]outboxRecord(nil), current...), record)
-		if len(current) > 0 && bulkWriteRequestSize(outboxRecordsAsBulkFiles(candidate)) > maxBytes {
+		itemSize, ok := bulkWriteFileEncodedSize(outboxRecordAsBulkFile(record))
+		if len(current) > 0 && sizer.sizeWith(itemSize, ok) > maxBytes {
 			chunks = append(chunks, append([]outboxRecord(nil), current...))
 			current = current[:0]
+			sizer = bulkWriteRequestSizer{}
 		}
 		current = append(current, record)
+		sizer.add(itemSize, ok)
 	}
 	if len(current) > 0 {
 		chunks = append(chunks, current)
@@ -4570,19 +4765,23 @@ func chunkOutboxRecords(records []outboxRecord, maxBytes int64) [][]outboxRecord
 func outboxRecordsAsBulkFiles(records []outboxRecord) []BulkWriteFile {
 	files := make([]BulkWriteFile, 0, len(records))
 	for _, record := range records {
-		files = append(files, BulkWriteFile{
-			Path:            record.RemotePath,
-			Type:            normalizeRemoteType(record.Type),
-			Target:          record.Target,
-			Mode:            record.Mode,
-			ContentType:     record.ContentType,
-			Content:         record.Content,
-			Encoding:        record.Encoding,
-			ContentIdentity: outboxRecordContentIdentity(record),
-			IfMatch:         record.ExpectedRevision,
-		})
+		files = append(files, outboxRecordAsBulkFile(record))
 	}
 	return files
+}
+
+func outboxRecordAsBulkFile(record outboxRecord) BulkWriteFile {
+	return BulkWriteFile{
+		Path:            record.RemotePath,
+		Type:            normalizeRemoteType(record.Type),
+		Target:          record.Target,
+		Mode:            record.Mode,
+		ContentType:     record.ContentType,
+		Content:         record.Content,
+		Encoding:        record.Encoding,
+		ContentIdentity: outboxRecordContentIdentity(record),
+		IfMatch:         record.ExpectedRevision,
+	}
 }
 
 // outboxRecordContentIdentity derives the server-side dedupe key for a durable
@@ -4608,18 +4807,22 @@ func outboxRecordContentIdentity(record outboxRecord) *ContentIdentity {
 func bulkWriteFilesForPending(workspaceID string, pending []pendingBulkWrite) []BulkWriteFile {
 	files := make([]BulkWriteFile, 0, len(pending))
 	for _, pendingWrite := range pending {
-		files = append(files, BulkWriteFile{
-			Path:            pendingWrite.remotePath,
-			Type:            normalizeRemoteType(pendingWrite.snapshot.Type),
-			Target:          pendingWrite.snapshot.Target,
-			Mode:            pendingWrite.snapshot.Mode,
-			ContentType:     pendingWrite.snapshot.ContentType,
-			Content:         pendingWrite.snapshot.WireContent,
-			Encoding:        pendingWrite.snapshot.Encoding,
-			ContentIdentity: mountWritebackCreateDraftContentIdentity(workspaceID, pendingWrite.remotePath, pendingWrite.snapshot.Hash),
-		})
+		files = append(files, bulkWriteFileForPending(workspaceID, pendingWrite))
 	}
 	return files
+}
+
+func bulkWriteFileForPending(workspaceID string, pendingWrite pendingBulkWrite) BulkWriteFile {
+	return BulkWriteFile{
+		Path:            pendingWrite.remotePath,
+		Type:            normalizeRemoteType(pendingWrite.snapshot.Type),
+		Target:          pendingWrite.snapshot.Target,
+		Mode:            pendingWrite.snapshot.Mode,
+		ContentType:     pendingWrite.snapshot.ContentType,
+		Content:         pendingWrite.snapshot.WireContent,
+		Encoding:        pendingWrite.snapshot.Encoding,
+		ContentIdentity: mountWritebackCreateDraftContentIdentity(workspaceID, pendingWrite.remotePath, pendingWrite.snapshot.Hash),
+	}
 }
 
 func hasSymlinkBulkWrite(files []BulkWriteFile) bool {
@@ -4681,13 +4884,16 @@ func chunkPendingBulkWrites(workspaceID string, pending []pendingBulkWrite, maxB
 	}
 	chunks := make([][]pendingBulkWrite, 0, 1)
 	current := make([]pendingBulkWrite, 0, len(pending))
+	var sizer bulkWriteRequestSizer
 	for _, item := range pending {
-		candidate := append(append([]pendingBulkWrite(nil), current...), item)
-		if len(current) > 0 && bulkWriteRequestSize(bulkWriteFilesForPending(workspaceID, candidate)) > maxBytes {
+		itemSize, ok := bulkWriteFileEncodedSize(bulkWriteFileForPending(workspaceID, item))
+		if len(current) > 0 && sizer.sizeWith(itemSize, ok) > maxBytes {
 			chunks = append(chunks, append([]pendingBulkWrite(nil), current...))
 			current = current[:0]
+			sizer = bulkWriteRequestSizer{}
 		}
 		current = append(current, item)
+		sizer.add(itemSize, ok)
 	}
 	if len(current) > 0 {
 		chunks = append(chunks, current)
@@ -4704,6 +4910,55 @@ func bulkWriteRequestSize(files []BulkWriteFile) int64 {
 		return 0
 	}
 	return int64(len(data))
+}
+
+// bulkWriteRequestEnvelopeBytes is len(`{"files":[`) + len(`]}`): the fixed
+// framing json.Marshal emits around a non-empty files array.
+const bulkWriteRequestEnvelopeBytes int64 = int64(len(`{"files":[`) + len(`]}`))
+
+// bulkWriteFileEncodedSize returns the length of file's JSON encoding as an
+// element of the bulk request array. encoding/json encodes slice elements
+// with the same encoder state (including HTML escaping) as a standalone
+// json.Marshal of the element, so the request body is exactly the envelope
+// plus each element plus one comma between elements.
+func bulkWriteFileEncodedSize(file BulkWriteFile) (int64, bool) {
+	data, err := json.Marshal(file)
+	if err != nil {
+		return 0, false
+	}
+	return int64(len(data)), true
+}
+
+// bulkWriteRequestSizer incrementally tracks bulkWriteRequestSize for a
+// growing files slice. It reproduces bulkWriteRequestSize exactly, including
+// its "0 on encode error" result, so callers keep identical batch boundaries.
+type bulkWriteRequestSizer struct {
+	count     int
+	itemBytes int64
+	invalid   bool
+}
+
+func (z *bulkWriteRequestSizer) add(itemSize int64, ok bool) {
+	if !ok {
+		z.invalid = true
+	}
+	z.count++
+	z.itemBytes += itemSize
+}
+
+// size is bulkWriteRequestSize of the files added so far (non-empty).
+func (z bulkWriteRequestSizer) size() int64 {
+	if z.invalid || z.count == 0 {
+		return 0
+	}
+	return bulkWriteRequestEnvelopeBytes + z.itemBytes + int64(z.count-1)
+}
+
+// sizeWith is bulkWriteRequestSize of the files added so far plus one more
+// element of itemSize bytes.
+func (z bulkWriteRequestSizer) sizeWith(itemSize int64, ok bool) int64 {
+	z.add(itemSize, ok)
+	return z.size()
 }
 
 func (s *Syncer) reconcileBulkWrite(ctx context.Context, pendingWrite pendingBulkWrite, revision string) error {
@@ -5167,6 +5422,43 @@ func bulkWriteErrorAsError(writeErr BulkWriteError) error {
 		}
 	}
 	return fmt.Errorf("bulk write failed for %s", normalizeRemotePath(writeErr.Path))
+}
+
+// defaultBulkUploadConcurrency bounds concurrent /fs/bulk POSTs while one
+// flush drains several outbox chunks. Two full 8 MiB chunks fit the Cloud
+// workspace's 16 MiB in-flight body budget; a third would only trade time for
+// 429 workspace_busy retries.
+const defaultBulkUploadConcurrency = 2
+
+// maxBulkUploadConcurrency caps RELAYFILE_MOUNT_BULK_UPLOAD_CONCURRENCY.
+const maxBulkUploadConcurrency = 8
+
+func (s *Syncer) bulkUploadConcurrencyValue() int {
+	if s.bulkUploadConcurrency > 0 {
+		return s.bulkUploadConcurrency
+	}
+	return defaultBulkUploadConcurrency
+}
+
+// bulkUploadConcurrencyFromEnv reads RELAYFILE_MOUNT_BULK_UPLOAD_CONCURRENCY:
+// a positive integer (1 restores strictly serial uploads), clamped to
+// maxBulkUploadConcurrency. Invalid values keep the default.
+func bulkUploadConcurrencyFromEnv(logger Logger) int {
+	raw := strings.TrimSpace(os.Getenv("RELAYFILE_MOUNT_BULK_UPLOAD_CONCURRENCY"))
+	if raw == "" {
+		return defaultBulkUploadConcurrency
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v <= 0 {
+		if logger != nil {
+			logger.Printf("ignoring invalid RELAYFILE_MOUNT_BULK_UPLOAD_CONCURRENCY=%q", raw)
+		}
+		return defaultBulkUploadConcurrency
+	}
+	if v > maxBulkUploadConcurrency {
+		return maxBulkUploadConcurrency
+	}
+	return v
 }
 
 func (s *Syncer) bulkFlushThresholdValue() int {
@@ -10759,9 +11051,12 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 	if !s.recoverStartupDrift && s.localWatcherActive && !s.pollLocalChanges {
 		return conflicted, nil
 	}
-	localFiles, err := s.scanLocalFiles()
+	localFiles, capturedContent, err := s.scanLocalFilesCapturing(true)
 	if err != nil {
 		return nil, err
+	}
+	if s.retainPushLocalScan {
+		s.lastPushLocalScan = localFiles
 	}
 
 	localRemotePaths := make([]string, 0, len(localFiles))
@@ -10896,11 +11191,23 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 			s.state.Files[remotePath] = tracked
 			continue
 		}
-		fullSnapshot, err := s.readLocalSnapshot(localPath, true)
-		if err != nil {
-			return nil, err
+		if captured, ok := capturedContent[remotePath]; ok && !exists && captured.fresh(localPath) {
+			// The scan already read this untracked file whole and it is
+			// provably unchanged since (same inode, size and mtime as before
+			// that read). Release the map's reference so content is retained
+			// only as long as the pending batch needs it.
+			delete(capturedContent, remotePath)
+			snapshot = captured.snapshot
+		} else {
+			// Not captured, or the file changed after the scan read it: read
+			// the current bytes, exactly as before content capture existed.
+			delete(capturedContent, remotePath)
+			fullSnapshot, err := s.readLocalSnapshot(localPath, true)
+			if err != nil {
+				return nil, err
+			}
+			snapshot = fullSnapshot
 		}
-		snapshot = fullSnapshot
 		pendingWrite, err := s.preparePendingBulkWrite(ctx, remotePath, localPath, snapshot, tracked, exists)
 		if err != nil {
 			return nil, err
@@ -11022,11 +11329,65 @@ func (s *Syncer) applyWriteDenied(ctx context.Context, remotePath, localPath str
 }
 
 func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
+	results, _, err := s.scanLocalFilesCapturing(false)
+	return results, err
+}
+
+// capturedLocalFile is a full snapshot read during pushLocal's scan plus the
+// Lstat taken immediately before that read.
+type capturedLocalFile struct {
+	snapshot localSnapshot
+	info     os.FileInfo
+}
+
+// fresh reports whether localPath is still the same regular file, with the
+// same size and modification time, that was observed before the captured
+// read. Any write that began during or after the read moves mtime past the
+// pre-read stat, so a match proves the captured bytes are still current.
+func (c capturedLocalFile) fresh(localPath string) bool {
+	if c.info == nil {
+		return false
+	}
+	current, err := os.Lstat(localPath)
+	if err != nil || !current.Mode().IsRegular() {
+		return false
+	}
+	return os.SameFile(c.info, current) &&
+		current.Size() == c.info.Size() &&
+		current.ModTime().Equal(c.info.ModTime()) &&
+		current.Mode() == c.info.Mode()
+}
+
+const (
+	// localScanCaptureMaxFileBytes bounds which untracked files pushLocal's
+	// scan keeps in memory instead of hashing and then re-reading them.
+	localScanCaptureMaxFileBytes int64 = 1 << 20
+	// localScanCaptureBudgetBytes bounds the total raw bytes captured by one
+	// scan. Beyond it the scan falls back to hash-only reads, so a huge
+	// untracked tree costs no more memory than before.
+	localScanCaptureBudgetBytes int64 = 64 << 20
+)
+
+// scanLocalFilesCapturing is scanLocalFiles that, when captureUntracked is
+// set, reads small untracked regular files whole during the walk and returns
+// those full snapshots in captured (keyed by remote path), together with the
+// file's pre-read Lstat. pushLocal must read every untracked file in full
+// anyway; capturing it here turns the hash-then-reread double read into one
+// read. The scan map keeps its usual hash-only shape, derived from the very
+// same read, so the hash and the captured content always agree. Consumers
+// must check capturedLocalFile.fresh before using the content; a file that
+// changed after the scan read it is re-read, so the latest bytes are pushed.
+func (s *Syncer) scanLocalFilesCapturing(captureUntracked bool) (map[string]localSnapshot, map[string]capturedLocalFile, error) {
 	results := map[string]localSnapshot{}
+	var captured map[string]capturedLocalFile
+	captureBudget := localScanCaptureBudgetBytes
+	if captureUntracked && !s.lowMemory {
+		captured = map[string]capturedLocalFile{}
+	}
 	githubPathIndex := s.githubWorkingTreePathIndex()
 	statePathAbs, err := filepath.Abs(s.stateFile)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	err = filepath.WalkDir(s.localRoot, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -11139,9 +11500,15 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 			s.state.Counters.SkippedOversizeWriteback++
 			return nil
 		}
+		skipLazyUntracked := s.shouldSkipLazyUntrackedPush(remotePath)
+		capture := false
+		if captured != nil && !skipLazyUntracked && info.Size() <= localScanCaptureMaxFileBytes && info.Size() <= captureBudget {
+			_, tracked := s.state.Files[remotePath]
+			capture = !tracked
+		}
 		var snapshot localSnapshot
 		s.runReservedSyncIO(func() {
-			snapshot, err = s.readLocalSnapshot(path, false)
+			snapshot, err = s.readLocalSnapshot(path, capture)
 		})
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
@@ -11149,7 +11516,18 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 			}
 			return err
 		}
-		if s.shouldSkipLazyUntrackedPush(remotePath) {
+		if capture && !isSymlinkType(snapshot.Type) {
+			captureBudget -= int64(len(snapshot.RawContent))
+			captured[remotePath] = capturedLocalFile{snapshot: snapshot, info: info}
+			snapshot = localSnapshot{
+				ContentType: snapshot.ContentType,
+				Type:        snapshot.Type,
+				Mode:        snapshot.Mode,
+				Hash:        snapshot.Hash,
+				LocalPath:   snapshot.LocalPath,
+			}
+		}
+		if skipLazyUntracked {
 			// Only flag the snapshot here; do NOT increment
 			// Counters.SkippedLazyUntrackedPush in this function.
 			// scanLocalFiles also runs from savePublicState (status-display
@@ -11165,9 +11543,9 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return results, nil
+	return results, captured, nil
 }
 
 // githubAdapterCreateCommandPathPatterns enumerate the GitHub Relayfile
@@ -11600,6 +11978,43 @@ func (s *Syncer) savePublicStateWithLocalScan(scanLocal bool) error {
 			return err
 		}
 	}
+	return s.savePublicStateWithLocalFiles(currentFiles, scanLocal)
+}
+
+// dropVanishedPushScanEntries removes, from a scan taken before a flush, the
+// paths whose local files no longer exist. Only entries the public state
+// would publish from the scan itself are checked — untracked paths (listed as
+// writeback-pending/skipped) and tracked DeletePending paths — so after a
+// successful drain this is a handful of Lstats, not a tree walk.
+func (s *Syncer) dropVanishedPushScanEntries(scan map[string]localSnapshot) map[string]localSnapshot {
+	for remotePath, snapshot := range scan {
+		if tracked, ok := s.state.Files[remotePath]; ok && !tracked.DeletePending {
+			continue
+		}
+		localPath := snapshot.LocalPath
+		if strings.TrimSpace(localPath) == "" {
+			var err error
+			if localPath, err = s.remoteToLocalPath(remotePath); err != nil {
+				continue
+			}
+		}
+		if _, err := os.Lstat(localPath); errors.Is(err, os.ErrNotExist) {
+			delete(scan, remotePath)
+		}
+	}
+	return scan
+}
+
+// saveStateWithLocalFiles is saveState with a caller-supplied local scan
+// (the hash-only map scanLocalFiles returns) instead of a fresh tree walk.
+func (s *Syncer) saveStateWithLocalFiles(currentFiles map[string]localSnapshot) error {
+	if err := s.savePrivateState(); err != nil {
+		return err
+	}
+	return s.savePublicStateWithLocalFiles(currentFiles, !s.lowMemory)
+}
+
+func (s *Syncer) savePublicStateWithLocalFiles(currentFiles map[string]localSnapshot, scanLocal bool) error {
 	conflictsByPath, pendingConflicts, err := s.listConflictArtifacts()
 	if err != nil {
 		return err

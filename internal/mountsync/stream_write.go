@@ -18,15 +18,11 @@ func (c *HTTPClient) WriteFilesBulk(ctx context.Context, workspaceID string, fil
 		return BulkWriteResponse{}, ErrEmptyBulkWrite
 	}
 	var aggregate BulkWriteResponse
-	for start := 0; start < len(files); {
-		end := start + 1
-		for end < len(files) && bulkWriteRequestSize(files[start:end+1]) <= defaultMaxWritebackBatchBytes {
-			end++
-		}
-		chunk := files[start:end]
+	for _, bounds := range bulkWriteChunkBounds(files, defaultMaxWritebackBatchBytes) {
+		chunk := files[bounds.start:bounds.end]
 		var out BulkWriteResponse
 		var err error
-		if len(chunk) == 1 && bulkWriteRequestSize(chunk) > defaultMaxWritebackBatchBytes {
+		if len(chunk) == 1 && bounds.size > defaultMaxWritebackBatchBytes {
 			out, err = c.writeLargeFile(ctx, workspaceID, chunk[0])
 		} else {
 			out, err = c.writeFilesBulkJSON(ctx, workspaceID, chunk)
@@ -39,9 +35,42 @@ func (c *HTTPClient) WriteFilesBulk(ctx context.Context, workspaceID string, fil
 		aggregate.Errors = append(aggregate.Errors, out.Errors...)
 		aggregate.Results = append(aggregate.Results, out.Results...)
 		aggregate.CorrelationID = out.CorrelationID
-		start = end
 	}
 	return aggregate, nil
+}
+
+type bulkWriteChunkBound struct {
+	start, end int
+	// size is bulkWriteRequestSize(files[start:end]).
+	size int64
+}
+
+// bulkWriteChunkBounds greedily packs files into JSON requests of at most
+// maxBytes, always taking at least one file per request. Each file is encoded
+// once; the boundaries match re-measuring bulkWriteRequestSize on every
+// append (TestBulkWriteChunkBoundsMatchesLegacyBoundaries).
+func bulkWriteChunkBounds(files []BulkWriteFile, maxBytes int64) []bulkWriteChunkBound {
+	type encoded struct {
+		size int64
+		ok   bool
+	}
+	sizes := make([]encoded, len(files))
+	for i := range files {
+		sizes[i].size, sizes[i].ok = bulkWriteFileEncodedSize(files[i])
+	}
+	bounds := make([]bulkWriteChunkBound, 0, 1)
+	for start := 0; start < len(files); {
+		var sizer bulkWriteRequestSizer
+		sizer.add(sizes[start].size, sizes[start].ok)
+		end := start + 1
+		for end < len(files) && sizer.sizeWith(sizes[end].size, sizes[end].ok) <= maxBytes {
+			sizer.add(sizes[end].size, sizes[end].ok)
+			end++
+		}
+		bounds = append(bounds, bulkWriteChunkBound{start: start, end: end, size: sizer.size()})
+		start = end
+	}
+	return bounds
 }
 
 func (c *HTTPClient) writeLargeFile(ctx context.Context, workspaceID string, file BulkWriteFile) (BulkWriteResponse, error) {
