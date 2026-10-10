@@ -33,12 +33,14 @@ import (
 // .claude/rules/relayfile-integration-digests.md).
 
 const (
-	githubTarballMaxFileBytes    = 1 << 20 // per-file cap, mirrors cloud walker
-	githubTarballBinarySniffSize = 8 << 10
-	githubTarballBulkChunkSize   = 200
-	defaultMaxGithubTarballBytes = int64(1) << 30
-	githubTarballJobRetention    = time.Hour
-	githubTarballFetchTimeout    = 15 * time.Minute
+	githubTarballMaxFileBytes         = 1 << 20 // per-file cap, mirrors cloud walker
+	githubTarballCompleteMaxFileBytes = 64 << 20
+	githubTarballBinarySniffSize      = 8 << 10
+	githubTarballBulkChunkSize        = 200
+	defaultMaxGithubTarballBytes      = int64(1) << 30
+	githubTarballJobRetention         = time.Hour
+	githubTarballFetchTimeout         = 15 * time.Minute
+	githubTarballActiveJobTTL         = githubTarballFetchTimeout + time.Minute
 )
 
 var githubTarballIgnoreDirs = map[string]struct{}{
@@ -67,31 +69,35 @@ type githubTarImportSkip struct {
 // Status values match the cloud importer contract:
 // queued | fetching | importing | completed | failed.
 type githubTarImportJob struct {
-	JobID        string                     `json:"jobId"`
-	WorkspaceID  string                     `json:"workspaceId"`
-	Owner        string                     `json:"owner"`
-	Repo         string                     `json:"repo"`
-	Ref          string                     `json:"ref,omitempty"`
-	HeadSha      string                     `json:"headSha"`
-	Status       string                     `json:"status"`
-	Imported     int                        `json:"imported"`
-	ErrorCount   int                        `json:"errorCount"`
-	Errors       []relayfile.BulkWriteError `json:"errors"`
-	Skipped      []githubTarImportSkip      `json:"skipped"`
-	BytesWritten int64                      `json:"bytesWritten"`
-	LastError    string                     `json:"lastError,omitempty"`
-	CreatedAt    string                     `json:"createdAt"`
-	UpdatedAt    string                     `json:"updatedAt"`
-	CompletedAt  string                     `json:"completedAt,omitempty"`
+	JobID         string                     `json:"jobId"`
+	WorkspaceID   string                     `json:"workspaceId"`
+	Owner         string                     `json:"owner"`
+	Repo          string                     `json:"repo"`
+	Ref           string                     `json:"ref,omitempty"`
+	HeadSha       string                     `json:"headSha"`
+	Status        string                     `json:"status"`
+	Imported      int                        `json:"imported"`
+	ErrorCount    int                        `json:"errorCount"`
+	Errors        []relayfile.BulkWriteError `json:"errors"`
+	Skipped       []githubTarImportSkip      `json:"skipped"`
+	BytesWritten  int64                      `json:"bytesWritten"`
+	FilesExpected int                        `json:"filesExpected,omitempty"`
+	SourceProfile string                     `json:"sourceProfile,omitempty"`
+	LastError     string                     `json:"lastError,omitempty"`
+	CreatedAt     string                     `json:"createdAt"`
+	UpdatedAt     string                     `json:"updatedAt"`
+	CompletedAt   string                     `json:"completedAt,omitempty"`
 
 	tarballURL string
 }
 
 type githubTarImportSummary struct {
-	Imported     int
-	Errors       []relayfile.BulkWriteError
-	Skipped      []githubTarImportSkip
-	BytesWritten int64
+	Imported      int
+	Errors        []relayfile.BulkWriteError
+	Skipped       []githubTarImportSkip
+	BytesWritten  int64
+	FilesExpected int
+	SourceProfile string
 }
 
 type githubTarballEntry struct {
@@ -103,6 +109,21 @@ type githubTarballEntry struct {
 type githubTarballExtraction struct {
 	entries []githubTarballEntry
 	skipped []githubTarImportSkip
+}
+
+func normalizeGithubTarballSourceProfile(value string) (string, bool) {
+	switch strings.TrimSpace(value) {
+	case "", "filtered-v1":
+		return "filtered-v1", true
+	case "complete-v1":
+		return "complete-v1", true
+	default:
+		return "", false
+	}
+}
+
+func githubTarballCompleteSource(sourceProfile string) bool {
+	return sourceProfile == "complete-v1"
 }
 
 // validGithubSlugComponent rejects owner/repo values that could distort the
@@ -136,6 +157,15 @@ func (s *Server) handleGithubTarballImport(w http.ResponseWriter, r *http.Reques
 	repo := strings.TrimSpace(r.URL.Query().Get("repo"))
 	headSha := strings.TrimSpace(r.URL.Query().Get("headSha"))
 	jobID := strings.TrimSpace(r.URL.Query().Get("jobId"))
+	sourceProfile, ok := normalizeGithubTarballSourceProfile(r.URL.Query().Get("sourceProfile"))
+	if !ok {
+		writeError(w, http.StatusBadRequest, "bad_request", "sourceProfile must be filtered-v1 or complete-v1", correlationID)
+		return
+	}
+	if githubTarballCompleteSource(sourceProfile) {
+		writeError(w, http.StatusBadRequest, "bad_request", "complete-v1 imports require the asynchronous GitHub fetch endpoint", correlationID)
+		return
+	}
 	if owner == "" || repo == "" || headSha == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "missing owner, repo, or headSha query parameter", correlationID)
 		return
@@ -146,7 +176,7 @@ func (s *Server) handleGithubTarballImport(w http.ResponseWriter, r *http.Reques
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, s.maxGithubTarballBytes())
-	extraction, err := extractGithubTarball(r.Body)
+	extraction, err := extractGithubTarball(r.Body, sourceProfile)
 	if err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
@@ -157,7 +187,7 @@ func (s *Server) handleGithubTarballImport(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	summary := s.importGithubTarballEntries(workspaceID, owner, repo, headSha, "", jobID, correlationID, extraction, claims)
+	summary := s.importGithubTarballEntries(workspaceID, owner, repo, headSha, "", jobID, sourceProfile, correlationID, extraction, claims)
 	if jobID != "" {
 		s.recordCompletedGithubTarballJob(workspaceID, owner, repo, "", headSha, jobID, summary)
 	}
@@ -167,18 +197,20 @@ func (s *Server) handleGithubTarballImport(w http.ResponseWriter, r *http.Reques
 		"errors":        summary.Errors,
 		"skipped":       summary.Skipped,
 		"bytesWritten":  summary.BytesWritten,
+		"sourceProfile": summary.SourceProfile,
 		"correlationId": correlationID,
 	})
 }
 
 func (s *Server) handleGithubTarballFetch(w http.ResponseWriter, r *http.Request, workspaceID, correlationID string, claims tokenClaims) {
 	var body struct {
-		Owner      string `json:"owner"`
-		Repo       string `json:"repo"`
-		Ref        string `json:"ref"`
-		HeadSha    string `json:"headSha"`
-		JobID      string `json:"jobId"`
-		TarballURL string `json:"tarballUrl"`
+		Owner         string `json:"owner"`
+		Repo          string `json:"repo"`
+		Ref           string `json:"ref"`
+		HeadSha       string `json:"headSha"`
+		JobID         string `json:"jobId"`
+		TarballURL    string `json:"tarballUrl"`
+		SourceProfile string `json:"sourceProfile"`
 	}
 	if !s.decodeJSONBody(w, r, correlationID, &body) {
 		return
@@ -187,6 +219,11 @@ func (s *Server) handleGithubTarballFetch(w http.ResponseWriter, r *http.Request
 	repo := strings.TrimSpace(body.Repo)
 	headSha := strings.TrimSpace(body.HeadSha)
 	tarballURL := strings.TrimSpace(body.TarballURL)
+	sourceProfile, ok := normalizeGithubTarballSourceProfile(body.SourceProfile)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "bad_request", "sourceProfile must be filtered-v1 or complete-v1", correlationID)
+		return
+	}
 	if owner == "" || repo == "" || headSha == "" || tarballURL == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "missing owner, repo, headSha, or tarballUrl", correlationID)
 		return
@@ -216,25 +253,26 @@ func (s *Server) handleGithubTarballFetch(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusAccepted, snapshot)
 		return
 	}
-	if active := s.activeGithubTarballJobLocked(workspaceID, owner, repo, headSha); active != nil {
+	if active := s.activeGithubTarballJobLocked(workspaceID, owner, repo, headSha, sourceProfile, time.Now().UTC()); active != nil {
 		snapshot := active.snapshot()
 		s.githubTarJobsMu.Unlock()
 		writeJSON(w, http.StatusAccepted, snapshot)
 		return
 	}
 	job := &githubTarImportJob{
-		JobID:       jobID,
-		WorkspaceID: workspaceID,
-		Owner:       owner,
-		Repo:        repo,
-		Ref:         strings.TrimSpace(body.Ref),
-		HeadSha:     headSha,
-		Status:      "queued",
-		Errors:      []relayfile.BulkWriteError{},
-		Skipped:     []githubTarImportSkip{},
-		CreatedAt:   now,
-		UpdatedAt:   now,
-		tarballURL:  tarballURL,
+		JobID:         jobID,
+		WorkspaceID:   workspaceID,
+		Owner:         owner,
+		Repo:          repo,
+		Ref:           strings.TrimSpace(body.Ref),
+		HeadSha:       headSha,
+		SourceProfile: sourceProfile,
+		Status:        "queued",
+		Errors:        []relayfile.BulkWriteError{},
+		Skipped:       []githubTarImportSkip{},
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		tarballURL:    tarballURL,
 	}
 	s.githubTarJobs[githubTarballJobKey(workspaceID, jobID)] = job
 	snapshot := job.snapshot()
@@ -273,14 +311,22 @@ func (j *githubTarImportJob) snapshot() githubTarImportJob {
 	return copied
 }
 
-func (s *Server) activeGithubTarballJobLocked(workspaceID, owner, repo, headSha string) *githubTarImportJob {
+func (s *Server) activeGithubTarballJobLocked(workspaceID, owner, repo, headSha, sourceProfile string, now time.Time) *githubTarImportJob {
 	var active *githubTarImportJob
 	for _, job := range s.githubTarJobs {
-		if job.WorkspaceID != workspaceID || job.Owner != owner || job.Repo != repo || job.HeadSha != headSha {
+		if job.WorkspaceID != workspaceID || job.Owner != owner || job.Repo != repo || job.HeadSha != headSha || job.SourceProfile != sourceProfile {
 			continue
 		}
 		switch job.Status {
 		case "queued", "fetching", "importing":
+			updatedAt, err := time.Parse(time.RFC3339Nano, job.UpdatedAt)
+			if err == nil && now.Sub(updatedAt) > githubTarballActiveJobTTL {
+				job.Status = "failed"
+				job.LastError = "github tarball import job expired while active"
+				job.UpdatedAt = now.Format(time.RFC3339Nano)
+				job.CompletedAt = job.UpdatedAt
+				continue
+			}
 			if active == nil || job.CreatedAt < active.CreatedAt {
 				active = job
 			}
@@ -291,6 +337,16 @@ func (s *Server) activeGithubTarballJobLocked(workspaceID, owner, repo, headSha 
 
 func (s *Server) pruneGithubTarballJobsLocked(now time.Time) {
 	for key, job := range s.githubTarJobs {
+		switch job.Status {
+		case "queued", "fetching", "importing":
+			updatedAt, err := time.Parse(time.RFC3339Nano, job.UpdatedAt)
+			if err == nil && now.Sub(updatedAt) > githubTarballActiveJobTTL {
+				job.Status = "failed"
+				job.LastError = "github tarball import job expired while active"
+				job.UpdatedAt = now.Format(time.RFC3339Nano)
+				job.CompletedAt = job.UpdatedAt
+			}
+		}
 		if job.CompletedAt == "" {
 			continue
 		}
@@ -320,6 +376,8 @@ func (s *Server) completeGithubTarballJob(job *githubTarImportJob, summary githu
 	job.Errors = summary.Errors
 	job.Skipped = summary.Skipped
 	job.BytesWritten = summary.BytesWritten
+	job.FilesExpected = summary.FilesExpected
+	job.SourceProfile = summary.SourceProfile
 	job.UpdatedAt = now
 	job.CompletedAt = now
 	s.githubTarJobsMu.Unlock()
@@ -338,21 +396,23 @@ func (s *Server) failGithubTarballJob(job *githubTarImportJob, message string) {
 func (s *Server) recordCompletedGithubTarballJob(workspaceID, owner, repo, ref, headSha, jobID string, summary githubTarImportSummary) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	job := &githubTarImportJob{
-		JobID:        jobID,
-		WorkspaceID:  workspaceID,
-		Owner:        owner,
-		Repo:         repo,
-		Ref:          ref,
-		HeadSha:      headSha,
-		Status:       "completed",
-		Imported:     summary.Imported,
-		ErrorCount:   len(summary.Errors),
-		Errors:       summary.Errors,
-		Skipped:      summary.Skipped,
-		BytesWritten: summary.BytesWritten,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-		CompletedAt:  now,
+		JobID:         jobID,
+		WorkspaceID:   workspaceID,
+		Owner:         owner,
+		Repo:          repo,
+		Ref:           ref,
+		HeadSha:       headSha,
+		Status:        "completed",
+		Imported:      summary.Imported,
+		ErrorCount:    len(summary.Errors),
+		Errors:        summary.Errors,
+		Skipped:       summary.Skipped,
+		BytesWritten:  summary.BytesWritten,
+		FilesExpected: summary.FilesExpected,
+		SourceProfile: summary.SourceProfile,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		CompletedAt:   now,
 	}
 	s.githubTarJobsMu.Lock()
 	s.pruneGithubTarballJobsLocked(time.Now().UTC())
@@ -392,13 +452,13 @@ func (s *Server) runGithubTarballFetchJob(job *githubTarImportJob, githubToken, 
 
 	s.setGithubTarballJobStatus(job, "importing")
 	limited := io.LimitReader(resp.Body, s.maxGithubTarballBytes()+1)
-	extraction, err := extractGithubTarball(limited)
+	extraction, err := extractGithubTarball(limited, job.SourceProfile)
 	if err != nil {
 		s.failGithubTarballJob(job, "failed to extract gzip tarball: "+err.Error())
 		return
 	}
 
-	summary := s.importGithubTarballEntries(job.WorkspaceID, job.Owner, job.Repo, job.HeadSha, job.Ref, job.JobID, correlationID, extraction, claims)
+	summary := s.importGithubTarballEntries(job.WorkspaceID, job.Owner, job.Repo, job.HeadSha, job.Ref, job.JobID, job.SourceProfile, correlationID, extraction, claims)
 	s.completeGithubTarballJob(job, summary)
 }
 
@@ -439,13 +499,16 @@ func normalizeGithubTarballPath(entryPath string) string {
 	return repoPath
 }
 
-func githubTarballPathIgnored(repoPath string) bool {
+func githubTarballPathIgnored(repoPath, sourceProfile string) bool {
 	lowerPath := strings.ToLower(repoPath)
 	parts := strings.Split(lowerPath, "/")
 	for _, part := range parts {
 		if _, ok := githubTarballIgnoreDirs[part]; ok {
-			return true
+			return !githubTarballCompleteSource(sourceProfile) || part == ".git"
 		}
+	}
+	if githubTarballCompleteSource(sourceProfile) {
+		return false
 	}
 	if _, ok := githubTarballIgnoreFiles[parts[len(parts)-1]]; ok {
 		return true
@@ -487,7 +550,21 @@ func githubTarballLooksBinary(repoPath string, content []byte) bool {
 // extractGithubTarball walks a gzipped GitHub source tarball and converts
 // regular file entries into bulk-write inputs. Paths in skip/error records
 // are repo-relative, matching the cloud importer contract.
-func extractGithubTarball(r io.Reader) (*githubTarballExtraction, error) {
+func normalizeGithubTarballSymlinkTarget(repoPath, target string) (string, bool) {
+	if target == "" || strings.ContainsAny(target, "\x00\r\n") {
+		return "", false
+	}
+	if strings.HasPrefix(target, "/") || strings.Contains(target, "\\") || (len(target) >= 2 && target[1] == ':') {
+		return "", false
+	}
+	resolved := path.Clean(path.Join(path.Dir(repoPath), target))
+	if resolved == "." || resolved == ".." || strings.HasPrefix(resolved, "../") {
+		return "", false
+	}
+	return target, true
+}
+
+func extractGithubTarball(r io.Reader, sourceProfile string) (*githubTarballExtraction, error) {
 	gzr, err := gzip.NewReader(r)
 	if err != nil {
 		return nil, fmt.Errorf("invalid gzip stream: %w", err)
@@ -506,30 +583,74 @@ func extractGithubTarball(r io.Reader) (*githubTarballExtraction, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid tar stream: %w", err)
 		}
-		if header.Typeflag != tar.TypeReg {
-			continue
-		}
 		repoPath := normalizeGithubTarballPath(header.Name)
-		if repoPath == "" {
+		completeSource := githubTarballCompleteSource(sourceProfile)
+		if header.Typeflag == tar.TypeSymlink && completeSource {
+			if repoPath == "" {
+				return nil, fmt.Errorf("complete-v1 source export cannot represent a symlink with an invalid path")
+			}
+			if githubTarballPathIgnored(repoPath, sourceProfile) {
+				extraction.skipped = append(extraction.skipped, githubTarImportSkip{Path: repoPath, Reason: "ignored"})
+				continue
+			}
+			target, ok := normalizeGithubTarballSymlinkTarget(repoPath, header.Linkname)
+			if !ok {
+				return nil, fmt.Errorf("complete-v1 source export cannot represent unsafe symlink %s", repoPath)
+			}
+			extraction.entries = append(extraction.entries, githubTarballEntry{
+				repoPath: repoPath,
+				file: relayfile.BulkWriteFile{
+					Type:        "symlink",
+					Target:      target,
+					Mode:        0o777,
+					Content:     target,
+					Encoding:    "utf-8",
+					ContentType: "application/x-symlink",
+				},
+				size: 0,
+			})
 			continue
 		}
-		if githubTarballPathIgnored(repoPath) {
+		if header.Typeflag != tar.TypeReg {
+			if completeSource && header.Typeflag != tar.TypeDir {
+				return nil, fmt.Errorf("complete-v1 source export cannot represent non-regular tar entry type %d", header.Typeflag)
+			}
+			continue
+		}
+		if repoPath == "" {
+			if completeSource {
+				return nil, fmt.Errorf("complete-v1 source export cannot represent a tar entry with an invalid path")
+			}
+			continue
+		}
+		if githubTarballPathIgnored(repoPath, sourceProfile) {
 			extraction.skipped = append(extraction.skipped, githubTarImportSkip{Path: repoPath, Reason: "ignored"})
 			continue
 		}
-		if header.Size > githubTarballMaxFileBytes {
+		maxFileBytes := githubTarballMaxFileBytes
+		if completeSource {
+			maxFileBytes = githubTarballCompleteMaxFileBytes
+		}
+		if header.Size > int64(maxFileBytes) {
+			if completeSource {
+				return nil, fmt.Errorf("complete-v1 source export cannot represent tracked file %s: exceeds the %d-byte Relayfile file limit", repoPath, githubTarballCompleteMaxFileBytes)
+			}
 			extraction.skipped = append(extraction.skipped, githubTarImportSkip{Path: repoPath, Reason: "too-large"})
 			continue
 		}
-		content, err := io.ReadAll(io.LimitReader(tr, githubTarballMaxFileBytes+1))
+		content, err := io.ReadAll(io.LimitReader(tr, int64(maxFileBytes)+1))
 		if err != nil {
 			return nil, fmt.Errorf("read tar entry %q: %w", repoPath, err)
 		}
-		if len(content) > githubTarballMaxFileBytes {
+		if len(content) > maxFileBytes {
+			if completeSource {
+				return nil, fmt.Errorf("complete-v1 source export cannot represent tracked file %s: exceeds the %d-byte Relayfile file limit", repoPath, githubTarballCompleteMaxFileBytes)
+			}
 			extraction.skipped = append(extraction.skipped, githubTarImportSkip{Path: repoPath, Reason: "too-large"})
 			continue
 		}
 		file := relayfile.BulkWriteFile{}
+		file.Mode = uint32(header.Mode) & 0o777
 		if githubTarballLooksBinary(repoPath, content) {
 			file.Content = base64.StdEncoding.EncodeToString(content)
 			file.Encoding = "base64"
@@ -557,10 +678,11 @@ func githubTarballWorkspacePath(owner, repo, repoPath string) string {
 // importGithubTarballEntries writes extracted entries into the workspace via
 // the store bulk-write path so every file emits a filesystem event. Each file
 // is permission-checked the same way the /fs/bulk endpoint checks writes.
-func (s *Server) importGithubTarballEntries(workspaceID, owner, repo, headSha, ref, jobID, correlationID string, extraction *githubTarballExtraction, claims tokenClaims) githubTarImportSummary {
+func (s *Server) importGithubTarballEntries(workspaceID, owner, repo, headSha, ref, jobID, sourceProfile, correlationID string, extraction *githubTarballExtraction, claims tokenClaims) githubTarImportSummary {
 	summary := githubTarImportSummary{
-		Errors:  []relayfile.BulkWriteError{},
-		Skipped: extraction.skipped,
+		Errors:        []relayfile.BulkWriteError{},
+		Skipped:       extraction.skipped,
+		SourceProfile: sourceProfile,
 	}
 
 	allowed := make([]relayfile.BulkWriteFile, 0, len(extraction.entries))
@@ -592,6 +714,9 @@ func (s *Server) importGithubTarballEntries(workspaceID, owner, repo, headSha, r
 		for _, result := range results {
 			summary.BytesWritten += sizeByPath[result.Path]
 		}
+	}
+	if githubTarballCompleteSource(sourceProfile) {
+		summary.FilesExpected = len(extraction.entries)
 	}
 
 	markerPath := githubTarballCloneMarkerPath(owner, repo)
