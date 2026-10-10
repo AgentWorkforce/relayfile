@@ -12326,7 +12326,7 @@ var (
 	mountsyncTestPrivateKey *rsa.PrivateKey
 )
 
-func ensureMountsyncJWTVerifier(t *testing.T) {
+func ensureMountsyncJWTVerifier(t testing.TB) {
 	t.Helper()
 
 	mountsyncTestJWKSOnce.Do(func() {
@@ -12355,7 +12355,7 @@ func ensureMountsyncJWTVerifier(t *testing.T) {
 	})
 }
 
-func newMountsyncAPIHandler(t *testing.T, store *relayfile.Store) http.Handler {
+func newMountsyncAPIHandler(t testing.TB, store *relayfile.Store) http.Handler {
 	t.Helper()
 	ensureMountsyncJWTVerifier(t)
 
@@ -12369,7 +12369,7 @@ func newMountsyncAPIHandler(t *testing.T, store *relayfile.Store) http.Handler {
 	return handler
 }
 
-func mustMountsyncTestJWT(t *testing.T, secret, workspaceID, agentName string, scopes []string, exp time.Time) string {
+func mustMountsyncTestJWT(t testing.TB, secret, workspaceID, agentName string, scopes []string, exp time.Time) string {
 	t.Helper()
 	_ = secret
 	ensureMountsyncJWTVerifier(t)

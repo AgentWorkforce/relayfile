@@ -147,6 +147,7 @@ Queue backend precedence is:
 | `RELAYFILE_MOUNT_INTERVAL_JITTER` | float | `0.2` | No | Clamped into the `0..1` range |
 | `RELAYFILE_MOUNT_TIMEOUT` | duration | `15s` | No | Per-sync timeout |
 | `RELAYFILE_MOUNT_WEBSOCKET` | bool | `true` | No | Enables WebSocket streaming when available |
+| `RELAYFILE_MOUNT_BULK_UPLOAD_CONCURRENCY` | int | `2` | No | Maximum concurrent `/fs/bulk` POSTs while one outbox flush drains several request chunks; `1` restores strictly serial uploads; clamped to `8` |
 | `RELAYFILE_INCREMENTAL_READ_CONCURRENCY` | int | `16` | No | Bounded parallel reads for cursor/poll recovery; clamped to 64 |
 | `RELAYFILE_BOOTSTRAP_STALL_CYCLES` | int | `20` | No | Consecutive checkpoint-stable bootstrap cycles before the mount fails terminally |
 | `RELAYFILE_BOOTSTRAP_MAX_DIRECTORIES` | int | `50000` | No | Maximum distinct bounded-tree directories; raise only after inspecting the stalled path for cyclic/expanding aliases |
