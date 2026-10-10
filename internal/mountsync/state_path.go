@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const (
@@ -19,6 +20,7 @@ const (
 	MountKindInitialSync      = "initial-sync"
 	maxStatePathLength        = 1024
 	maxStatePathComponentSize = 255
+	staleMountStateTempAge    = 24 * time.Hour
 )
 
 type MountStatePathOptions struct {
@@ -174,6 +176,88 @@ func QuarantineLegacyMountState(localRoot, stateDir string) ([]string, error) {
 		moved = append(moved, target)
 	}
 	return moved, nil
+}
+
+// cleanupStaleMountStateTemps removes abandoned atomic-save files for one
+// resolved private mount state file. It intentionally scans only the hashed
+// mount directory: legacy temp files under the mounted tree are recoverable
+// migration candidates owned by QuarantineLegacyMountState.
+//
+// Fresh temp files are left alone because another mount process may still be
+// writing one. The generous age gate bounds crash leftovers without racing a
+// normal concurrent state save.
+func cleanupStaleMountStateTemps(stateFile string, now time.Time) (int, error) {
+	stateFile = strings.TrimSpace(stateFile)
+	if stateFile == "" {
+		return 0, nil
+	}
+	stateFile, err := cleanAbsolutePath(stateFile)
+	if err != nil {
+		return 0, err
+	}
+	stateDir := filepath.Dir(stateFile)
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	tempPrefix := strings.TrimSuffix(atomicTempPattern(stateFile), "*")
+	cutoff := now.Add(-staleMountStateTempAge)
+	removed := 0
+	var cleanupErr error
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), tempPrefix) || entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		candidate := filepath.Join(stateDir, entry.Name())
+		info, err := os.Lstat(candidate)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			if cleanupErr == nil {
+				cleanupErr = fmt.Errorf("inspect stale mount state temp %s: %w", candidate, err)
+			}
+			continue
+		}
+		if !info.Mode().IsRegular() || !info.ModTime().Before(cutoff) {
+			continue
+		}
+
+		// Re-check immediately before removal. A concurrent writer refreshes
+		// mtime/size as it progresses; if either changed, leave the file for a
+		// later remount instead of interfering with the live save.
+		latest, err := os.Lstat(candidate)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			if cleanupErr == nil {
+				cleanupErr = fmt.Errorf("reinspect stale mount state temp %s: %w", candidate, err)
+			}
+			continue
+		}
+		if !latest.Mode().IsRegular() ||
+			latest.ModTime() != info.ModTime() ||
+			latest.Size() != info.Size() ||
+			!latest.ModTime().Before(cutoff) {
+			continue
+		}
+		if err := os.Remove(candidate); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			if cleanupErr == nil {
+				cleanupErr = fmt.Errorf("remove stale mount state temp %s: %w", candidate, err)
+			}
+			continue
+		}
+		removed++
+	}
+	return removed, cleanupErr
 }
 
 func moveRegularFile(src, dst string, perm os.FileMode) error {
