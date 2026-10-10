@@ -2992,12 +2992,12 @@ func (s *Syncer) PushLocalAndFlushOnce(ctx context.Context) error {
 	}
 	s.markSyncSuccess()
 	if s.lastPushLocalScan != nil {
-		// pushLocal just walked and hashed the tree. The flush that followed
-		// only uploads; its conflict/read-only handling never changes which
-		// paths exist locally or whether they are writeback-skipped — the
-		// only facts the public state reads from a scan. Reuse that scan
-		// rather than hashing every file a third time.
-		return s.saveStateWithLocalFiles(s.lastPushLocalScan)
+		// pushLocal just walked and hashed the tree. Reuse that scan rather
+		// than hashing every file a third time. The public state reads only
+		// presence and skip status from it, and the flush can remove local
+		// files (e.g. materializeSchemaInvalid deletes a rejected new draft),
+		// so first drop entries whose files have since vanished.
+		return s.saveStateWithLocalFiles(s.dropVanishedPushScanEntries(s.lastPushLocalScan))
 	}
 	return s.saveState()
 }
@@ -4191,9 +4191,12 @@ func (s *Syncer) flushOutboxRecords(ctx context.Context, conflicted map[string]s
 //     serial loop, and a record is acked only after the server confirmed it;
 //   - a chunk sharing any path with an in-flight chunk waits for it, so two
 //     commands for one path are never in flight together;
-//   - after the first error no further chunk is dispatched (as before), but
-//     uploads already in flight are still applied, so a write the server
-//     accepted is acked instead of being re-sent.
+//   - completed uploads (not only the head) are inspected before every
+//     refill: a transport error or a failed receipt stops dispatch for good,
+//     and a completed chunk with per-path errors pauses dispatch until it has
+//     been applied, so no chunk is sent once a failure is observable (the
+//     serial loop's stop-on-first-error). Uploads already in flight are
+//     still applied, so a write the server accepted is acked, not re-sent.
 func (s *Syncer) flushOutboxChunks(ctx context.Context, chunks [][]outboxRecord, conflicted map[string]struct{}, settleReceipts, unlockDuringUpload bool) error {
 	limit := s.bulkUploadConcurrencyValue()
 	if len(chunks) <= 1 || limit <= 1 || unlockDuringUpload {
@@ -4214,6 +4217,7 @@ func (s *Syncer) flushOutboxChunks(ctx context.Context, chunks [][]outboxRecord,
 		paths   []string
 		started time.Time
 		done    chan uploadResult
+		result  *uploadResult // set once the upload has completed
 	}
 	var (
 		queue        []*inflightChunk
@@ -4230,17 +4234,53 @@ func (s *Syncer) flushOutboxChunks(ctx context.Context, chunks [][]outboxRecord,
 		}
 		return false
 	}
+	// observeCompleted collects every upload that has already finished —
+	// not only the head — so a failure is acted on before any refill. It
+	// returns true while dispatch must pause: a completed chunk carries
+	// per-path errors whose handling (applied in order) may still fail the
+	// flush. A transport error always fails its chunk, so it stops dispatch
+	// for good, exactly as the serial loop stops at the first failed chunk.
+	observeCompleted := func() (hold bool) {
+		for _, item := range queue {
+			if item.result == nil {
+				select {
+				case result := <-item.done:
+					item.result = &result
+				default:
+					continue
+				}
+			}
+			if item.result.err != nil {
+				stopDispatch = true
+			}
+			if len(item.result.response.Errors) > 0 || item.result.response.ErrorCount > 0 {
+				hold = true
+			}
+		}
+		return hold
+	}
 	for {
-		for !stopDispatch && next < len(chunks) && len(queue) < limit && !conflictsInflight(chunks[next]) {
+		for next < len(chunks) && len(queue) < limit && !conflictsInflight(chunks[next]) {
+			if hold := observeCompleted(); hold || stopDispatch {
+				break
+			}
 			chunk := chunks[next]
 			next++
 			upload, done, err := s.prepareOutboxChunkUpload(ctx, chunk, settleReceipts)
 			if done {
 				if err != nil {
-					firstErr = err
+					if firstErr == nil {
+						firstErr = err
+					}
 					stopDispatch = true
 				}
 				continue
+			}
+			if upload.firstErr != nil {
+				// A receipt in this chunk already failed; the chunk's own new
+				// records still upload (as in the serial loop), but nothing
+				// after it may be sent.
+				stopDispatch = true
 			}
 			item := &inflightChunk{upload: upload, started: time.Now(), done: make(chan uploadResult, 1)}
 			for _, record := range upload.records {
@@ -4259,7 +4299,11 @@ func (s *Syncer) flushOutboxChunks(ctx context.Context, chunks [][]outboxRecord,
 		}
 		head := queue[0]
 		queue = queue[1:]
-		result := <-head.done
+		if head.result == nil {
+			result := <-head.done
+			head.result = &result
+		}
+		result := *head.result
 		for _, path := range head.paths {
 			if inflightBy[path]--; inflightBy[path] <= 0 {
 				delete(inflightBy, path)
@@ -11147,13 +11191,17 @@ func (s *Syncer) pushLocal(ctx context.Context) (map[string]struct{}, error) {
 			s.state.Files[remotePath] = tracked
 			continue
 		}
-		if fullSnapshot, ok := capturedContent[remotePath]; ok && !exists {
-			// The scan already read this untracked file whole; its hash in
-			// localFiles came from that same read. Release the map's reference
-			// so content is retained only as long as the pending batch needs it.
+		if captured, ok := capturedContent[remotePath]; ok && !exists && captured.fresh(localPath) {
+			// The scan already read this untracked file whole and it is
+			// provably unchanged since (same inode, size and mtime as before
+			// that read). Release the map's reference so content is retained
+			// only as long as the pending batch needs it.
 			delete(capturedContent, remotePath)
-			snapshot = fullSnapshot
+			snapshot = captured.snapshot
 		} else {
+			// Not captured, or the file changed after the scan read it: read
+			// the current bytes, exactly as before content capture existed.
+			delete(capturedContent, remotePath)
 			fullSnapshot, err := s.readLocalSnapshot(localPath, true)
 			if err != nil {
 				return nil, err
@@ -11285,6 +11333,31 @@ func (s *Syncer) scanLocalFiles() (map[string]localSnapshot, error) {
 	return results, err
 }
 
+// capturedLocalFile is a full snapshot read during pushLocal's scan plus the
+// Lstat taken immediately before that read.
+type capturedLocalFile struct {
+	snapshot localSnapshot
+	info     os.FileInfo
+}
+
+// fresh reports whether localPath is still the same regular file, with the
+// same size and modification time, that was observed before the captured
+// read. Any write that began during or after the read moves mtime past the
+// pre-read stat, so a match proves the captured bytes are still current.
+func (c capturedLocalFile) fresh(localPath string) bool {
+	if c.info == nil {
+		return false
+	}
+	current, err := os.Lstat(localPath)
+	if err != nil || !current.Mode().IsRegular() {
+		return false
+	}
+	return os.SameFile(c.info, current) &&
+		current.Size() == c.info.Size() &&
+		current.ModTime().Equal(c.info.ModTime()) &&
+		current.Mode() == c.info.Mode()
+}
+
 const (
 	// localScanCaptureMaxFileBytes bounds which untracked files pushLocal's
 	// scan keeps in memory instead of hashing and then re-reading them.
@@ -11297,19 +11370,19 @@ const (
 
 // scanLocalFilesCapturing is scanLocalFiles that, when captureUntracked is
 // set, reads small untracked regular files whole during the walk and returns
-// those full snapshots in captured (keyed by remote path). pushLocal must
-// read every untracked file in full anyway; capturing it here turns the
-// hash-then-reread double read into one read. The scan map itself keeps its
-// usual hash-only shape, derived from the very same read, so the hash and the
-// captured content always agree. Files that change after the read are
-// indistinguishable from files that change right after a fresh re-read and
-// are picked up by the next scan or watcher event.
-func (s *Syncer) scanLocalFilesCapturing(captureUntracked bool) (map[string]localSnapshot, map[string]localSnapshot, error) {
+// those full snapshots in captured (keyed by remote path), together with the
+// file's pre-read Lstat. pushLocal must read every untracked file in full
+// anyway; capturing it here turns the hash-then-reread double read into one
+// read. The scan map keeps its usual hash-only shape, derived from the very
+// same read, so the hash and the captured content always agree. Consumers
+// must check capturedLocalFile.fresh before using the content; a file that
+// changed after the scan read it is re-read, so the latest bytes are pushed.
+func (s *Syncer) scanLocalFilesCapturing(captureUntracked bool) (map[string]localSnapshot, map[string]capturedLocalFile, error) {
 	results := map[string]localSnapshot{}
-	var captured map[string]localSnapshot
+	var captured map[string]capturedLocalFile
 	captureBudget := localScanCaptureBudgetBytes
 	if captureUntracked && !s.lowMemory {
-		captured = map[string]localSnapshot{}
+		captured = map[string]capturedLocalFile{}
 	}
 	githubPathIndex := s.githubWorkingTreePathIndex()
 	statePathAbs, err := filepath.Abs(s.stateFile)
@@ -11445,7 +11518,7 @@ func (s *Syncer) scanLocalFilesCapturing(captureUntracked bool) (map[string]loca
 		}
 		if capture && !isSymlinkType(snapshot.Type) {
 			captureBudget -= int64(len(snapshot.RawContent))
-			captured[remotePath] = snapshot
+			captured[remotePath] = capturedLocalFile{snapshot: snapshot, info: info}
 			snapshot = localSnapshot{
 				ContentType: snapshot.ContentType,
 				Type:        snapshot.Type,
@@ -11906,6 +11979,30 @@ func (s *Syncer) savePublicStateWithLocalScan(scanLocal bool) error {
 		}
 	}
 	return s.savePublicStateWithLocalFiles(currentFiles, scanLocal)
+}
+
+// dropVanishedPushScanEntries removes, from a scan taken before a flush, the
+// paths whose local files no longer exist. Only entries the public state
+// would publish from the scan itself are checked — untracked paths (listed as
+// writeback-pending/skipped) and tracked DeletePending paths — so after a
+// successful drain this is a handful of Lstats, not a tree walk.
+func (s *Syncer) dropVanishedPushScanEntries(scan map[string]localSnapshot) map[string]localSnapshot {
+	for remotePath, snapshot := range scan {
+		if tracked, ok := s.state.Files[remotePath]; ok && !tracked.DeletePending {
+			continue
+		}
+		localPath := snapshot.LocalPath
+		if strings.TrimSpace(localPath) == "" {
+			var err error
+			if localPath, err = s.remoteToLocalPath(remotePath); err != nil {
+				continue
+			}
+		}
+		if _, err := os.Lstat(localPath); errors.Is(err, os.ErrNotExist) {
+			delete(scan, remotePath)
+		}
+	}
+	return scan
 }
 
 // saveStateWithLocalFiles is saveState with a caller-supplied local scan

@@ -142,3 +142,105 @@ func TestPushLocalLowMemoryDoesNotCaptureContent(t *testing.T) {
 		t.Fatalf("low-memory scan captured %d files", len(captured))
 	}
 }
+
+// A file captured by the scan and edited before the push loop reaches it
+// must upload its latest bytes: the capture is revalidated (inode, size,
+// mtime) and a changed file is re-read. The one-shot drain does not rescan,
+// so stale captured bytes would otherwise be the final remote content.
+func TestPushLocalAndFlushOnceUploadsFileEditedAfterScan(t *testing.T) {
+	localDir := t.TempDir()
+	aPath := filepath.Join(localDir, "a.txt")
+	bPath := filepath.Join(localDir, "b.txt")
+	if err := os.WriteFile(aPath, []byte("v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bPath, []byte("b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeClient{files: map[string]RemoteFile{}}
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_capture_stale",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+	edited := false
+	syncer.readLocalSnapshotFn = func(path string, includeContent bool) (localSnapshot, error) {
+		snapshot, err := readLocalSnapshotLimitedUnderRoot(localDir, path, includeContent, maxWritebackBytes())
+		// The walk is lexical: a.txt is captured first, then b.txt. Edit
+		// a.txt while b.txt is being scanned, i.e. after a.txt's capture and
+		// before the push loop uses it.
+		if path == bPath && !edited {
+			edited = true
+			if err := os.WriteFile(aPath, []byte("v2 edited after scan\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return snapshot, err
+	}
+
+	if err := syncer.PushLocalAndFlushOnce(context.Background()); err != nil {
+		t.Fatalf("PushLocalAndFlushOnce: %v", err)
+	}
+	if !edited {
+		t.Fatal("test hook never edited a.txt")
+	}
+	got, ok := client.files["/a.txt"]
+	if !ok || got.Content != "v2 edited after scan\n" {
+		t.Fatalf("remote /a.txt = %q (present=%v), want the post-scan edit", got.Content, ok)
+	}
+	if hash := syncer.state.Files["/a.txt"].Hash; hash != hashBytes([]byte("v2 edited after scan\n")) {
+		t.Fatalf("tracked hash %s is not the uploaded latest content", hash)
+	}
+}
+
+// When the flush removes a local file — a new draft rejected with
+// schema_validation_failed that has no remote version to restore — the
+// public state derived from the reused pre-flush scan must not list it.
+func TestPushLocalAndFlushOnceOmitsFilesRemovedByFlushFromPublicState(t *testing.T) {
+	const draft = "/github/repos/acme/api/pulls/42/reviews/draft.json"
+	client := &fakeClient{
+		files: map[string]RemoteFile{},
+		bulkWriteResponseFunc: func(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
+			return BulkWriteResponse{ErrorCount: 1, Errors: []BulkWriteError{{
+				Path: draft, Code: "schema_validation_failed", Message: "body.event is required",
+			}}}, nil
+		},
+	}
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(client, SyncerOptions{
+		WorkspaceID: "ws_schema_removed_public_state",
+		RemoteRoot:  "/github",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer: %v", err)
+	}
+	localPath := filepath.Join(localDir, "repos", "acme", "api", "pulls", "42", "reviews", "draft.json")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(localPath, []byte(`{"body":"no event"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	keep := filepath.Join(localDir, "notes.txt")
+	if err := os.WriteFile(keep, []byte("kept\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := syncer.PushLocalAndFlushOnce(context.Background()); err != nil {
+		t.Fatalf("PushLocalAndFlushOnce: %v", err)
+	}
+	if _, err := os.Lstat(localPath); !os.IsNotExist(err) {
+		t.Fatalf("schema-rejected new draft should have been removed locally, stat err=%v", err)
+	}
+	state := readPublicState(t, localDir)
+	if entry, listed := state.Files[draft]; listed {
+		t.Fatalf("removed draft still published as %q", entry.Status)
+	}
+	if state.PendingWriteback != 0 {
+		t.Fatalf("pendingWriteback = %d, want 0 after the drain", state.PendingWriteback)
+	}
+}

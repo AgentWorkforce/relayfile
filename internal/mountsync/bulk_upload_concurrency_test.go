@@ -2,6 +2,7 @@ package mountsync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -30,6 +31,16 @@ type concurrentBulkClient struct {
 	failFirstPath string
 	failErr       error
 	failed        bool
+	// holdOthers delays every non-failing POST, so a failing one completes
+	// first and its result is buffered while an earlier head is in flight.
+	holdOthers time.Duration
+	// failureSeen is set once a failing POST has returned; every POST of
+	// the initial window has started by then (the failure is delayed by
+	// failDelay), so startsAfterFailure counts only refills sent after the
+	// failure was observable.
+	failDelay          time.Duration
+	failureSeen        bool
+	startsAfterFailure int
 }
 
 func newConcurrentBulkClient(overlap int) *concurrentBulkClient {
@@ -44,6 +55,9 @@ func newConcurrentBulkClient(overlap int) *concurrentBulkClient {
 
 func (c *concurrentBulkClient) WriteFilesBulk(ctx context.Context, workspaceID string, files []BulkWriteFile) (BulkWriteResponse, error) {
 	c.mu.Lock()
+	if c.failureSeen {
+		c.startsAfterFailure++
+	}
 	c.calls++
 	c.inFlight++
 	if c.inFlight > c.maxInFlight {
@@ -68,10 +82,20 @@ func (c *concurrentBulkClient) WriteFilesBulk(ctx context.Context, workspaceID s
 	c.mu.Unlock()
 
 	// Hold briefly so concurrently dispatched chunks really overlap.
-	time.Sleep(5 * time.Millisecond)
+	switch {
+	case fail:
+		time.Sleep(c.failDelay)
+	case c.holdOthers > 0:
+		time.Sleep(c.holdOthers)
+	default:
+		time.Sleep(5 * time.Millisecond)
+	}
 
 	c.mu.Lock()
 	c.inFlight--
+	if fail {
+		c.failureSeen = true
+	}
 	c.mu.Unlock()
 	if fail {
 		return BulkWriteResponse{}, c.failErr
@@ -192,8 +216,8 @@ func TestFlushOutboxChunksSerialWhenConcurrencyIsOne(t *testing.T) {
 }
 
 // A 429 workspace_busy that outlives the client's own Retry-After retries
-// fails only its chunk: those records stay pending with backoff, chunks
-// already in flight are still acked (never re-sent), no later chunk is
+// fails only its chunk: those records stay pending with backoff, the chunk
+// in flight beside it is still acked (never re-sent), no later chunk is
 // dispatched, and the next flush delivers the rest exactly once.
 func TestFlushOutboxChunksWorkspaceBusyKeepsAccountingExact(t *testing.T) {
 	t.Setenv("RELAYFILE_MAX_WRITEBACK_BATCH_BYTES", "4096")
@@ -233,11 +257,12 @@ func TestFlushOutboxChunksWorkspaceBusyKeepsAccountingExact(t *testing.T) {
 			t.Fatalf("%s failed-chunk record = attempts %d next %q err %q, want one backed-off attempt", path, record.AttemptCount, record.NextAttemptAt, record.LastError)
 		}
 	}
-	// With two in flight, the third chunk was dispatched alongside the failing
-	// second one and the server accepted it: it must be acked, not resent.
+	// The failure was observed before the window refilled, so the third
+	// chunk was never sent: it stays pending with no attempt recorded.
 	for _, path := range paths[6:9] {
-		if _, ok := acked[path]; !ok {
-			t.Fatalf("%s was accepted by the server while the failed chunk was in flight but not acked", path)
+		record, ok := pending[path]
+		if !ok || record.AttemptCount != 0 || client.uploads[path] != 0 {
+			t.Fatalf("%s after the failed chunk: pending=%v attempts=%d uploads=%d, want never sent", path, ok, record.AttemptCount, client.uploads[path])
 		}
 	}
 	for path := range pending {
@@ -245,8 +270,8 @@ func TestFlushOutboxChunksWorkspaceBusyKeepsAccountingExact(t *testing.T) {
 			t.Fatalf("pending %s was already accepted by the server %d time(s)", path, client.uploads[path])
 		}
 	}
-	if client.calls >= 10 {
-		t.Fatalf("chunks after the failure were still dispatched: %d POSTs", client.calls)
+	if client.calls != 2 {
+		t.Fatalf("chunks after the failure were dispatched: %d POSTs, want 2", client.calls)
 	}
 
 	// The next drain (FlushOutboxOnce forces due) delivers everything left.
@@ -337,4 +362,81 @@ func (c *pathOrderClient) WriteFilesBulk(ctx context.Context, workspaceID string
 	*c.order = append(*c.order, "end:"+files[0].Path)
 	c.mu.Unlock()
 	return response, err
+}
+
+// With concurrency above 1, once any chunk has failed — a workspace_busy or
+// transport error that completed while an earlier chunk was still in flight,
+// or a failed receipt in a chunk being prepared — no further chunk may be
+// sent, matching the serial loop's stop-on-first-error.
+func TestFlushOutboxChunksSendsNothingAfterFirstFailure(t *testing.T) {
+	failures := map[string]func(c *concurrentBulkClient, s *Syncer, paths []string){
+		"workspace_busy": func(c *concurrentBulkClient, _ *Syncer, paths []string) {
+			c.failFirstPath = paths[3]
+			c.failErr = &HTTPError{StatusCode: http.StatusTooManyRequests, Code: "workspace_busy", Message: "workspace busy"}
+		},
+		"transport": func(c *concurrentBulkClient, _ *Syncer, paths []string) {
+			c.failFirstPath = paths[3]
+			c.failErr = errors.New("connection reset by peer")
+		},
+		"receipt": func(c *concurrentBulkClient, s *Syncer, _ []string) {
+			// The second chunk holds a record whose provider dispatch already
+			// failed plus two new records; only those two may still upload.
+			record, err := s.readOutboxRecord(s.pendingOutboxPath("mountcmd_conc_003"))
+			if err != nil {
+				t.Fatalf("read seeded record: %v", err)
+			}
+			record.OpID = "op_failed"
+			if err := s.saveOutboxRecord(record); err != nil {
+				t.Fatalf("save receipt record: %v", err)
+			}
+			c.fakeClient.operations = map[string]OperationStatus{"op_failed": {OpID: "op_failed", Status: "failed"}}
+		},
+	}
+	for name, inject := range failures {
+		for _, limit := range []int{2, 8} {
+			t.Run(fmt.Sprintf("%s/concurrency=%d", name, limit), func(t *testing.T) {
+				t.Setenv("RELAYFILE_MAX_WRITEBACK_BATCH_BYTES", "4096")
+				client := newConcurrentBulkClient(1)
+				client.holdOthers = 80 * time.Millisecond
+				client.failDelay = 10 * time.Millisecond
+				syncer, localDir := newConcurrencySyncer(t, client, limit)
+				paths := seedConcurrencyOutbox(t, syncer, 30)
+				inject(client, syncer, paths)
+
+				if err := syncer.FlushOutboxOnce(context.Background()); err == nil {
+					t.Fatal("FlushOutboxOnce succeeded despite a failed chunk")
+				}
+				if client.startsAfterFailure != 0 {
+					t.Fatalf("%d chunk(s) were sent after the failure was observable (calls=%d)", client.startsAfterFailure, client.calls)
+				}
+				if name == "receipt" && client.calls != 2 {
+					// The receipt fails while preparing the second chunk: the
+					// first chunk and the second chunk's own new records are
+					// the only POSTs, whatever the concurrency.
+					t.Fatalf("receipt failure: %d POSTs, want 2", client.calls)
+				}
+				if limit == 2 && client.calls != 2 {
+					t.Fatalf("concurrency 2: %d POSTs, want only the two dispatched before the failure", client.calls)
+				}
+				if client.calls > limit {
+					t.Fatalf("%d POSTs exceed the initial window of %d", client.calls, limit)
+				}
+				acked := outboxRecordsByPathForTest(t, localDir, "acked")
+				pending := outboxRecordsByPathForTest(t, localDir, "pending")
+				for path := range pending {
+					if _, both := acked[path]; both {
+						t.Fatalf("%s both acked and pending", path)
+					}
+					if client.uploads[path] != 0 {
+						t.Fatalf("pending %s was accepted by the server", path)
+					}
+				}
+				for path := range acked {
+					if client.uploads[path] != 1 {
+						t.Fatalf("acked %s accepted %d times", path, client.uploads[path])
+					}
+				}
+			})
+		}
+	}
 }
