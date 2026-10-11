@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [0.10.75] - 2026-10-10
+
 - Bootstrap point reads are capped at four concurrent requests and reuse verified objects from `~/.relayfile/cache/objects/<sha256>`. The store holds raw bytes only (no paths or other workspace metadata) and is capped at 1 GiB with least-recently-used eviction. HTTP and WebSocket overload retries use full jitter without shortening `Retry-After`.
 
 ### Fixed
@@ -711,7 +715,8 @@ Initial release.
 - Directory-only ignore patterns (e.g. `cache/`) match directories without swallowing like-named files.
 - README documenting the mount lifecycle, dotfile semantics, and auto-sync behavior. ([#48])
 
-[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.10.56...HEAD
+[Unreleased]: https://github.com/AgentWorkforce/relayfile/compare/v0.10.75...HEAD
+[0.10.75]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.75
 [0.10.56]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.56
 [0.10.55]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.55
 [0.10.54]: https://github.com/AgentWorkforce/relayfile/releases/tag/v0.10.54
