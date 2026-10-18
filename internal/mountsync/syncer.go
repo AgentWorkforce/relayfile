@@ -751,6 +751,7 @@ type HTTPClient struct {
 	tokenMu            sync.RWMutex
 	tokenRefreshMu     sync.RWMutex
 	tokenRefreshFunc   AuthTokenRefreshFunc
+	tokenSourceFunc    AuthTokenSourceFunc
 	httpClient         *http.Client
 	maxRetries         int
 	baseDelay          time.Duration
@@ -763,6 +764,13 @@ type HTTPClient struct {
 // token has been rejected by the server. changed must be true only when the
 // replacement token should be installed and the failed request retried.
 type AuthTokenRefreshFunc func(currentToken string) (newToken string, changed bool, err error)
+
+// AuthTokenSourceFunc is consulted before every use of the bearer token. It
+// must be cheap (a stat, not a network call) and return changed=true only when
+// an external supervisor has published a different usable token, so a token
+// pushed into a credentials file is used by the next request rather than after
+// the old one is rejected.
+type AuthTokenSourceFunc func() (token string, changed bool)
 
 // NewSyncTransport builds the *http.Transport used by every mount-daemon
 // HTTP client. It deliberately sets GRANULAR timeouts that bound the parts
@@ -899,6 +907,13 @@ func (c *HTTPClient) SetTokenRefreshFunc(refresh AuthTokenRefreshFunc) {
 	c.tokenRefreshMu.Lock()
 	defer c.tokenRefreshMu.Unlock()
 	c.tokenRefreshFunc = refresh
+}
+
+// SetTokenSourceFunc installs a per-request token source; see AuthTokenSourceFunc.
+func (c *HTTPClient) SetTokenSourceFunc(source AuthTokenSourceFunc) {
+	c.tokenRefreshMu.Lock()
+	defer c.tokenRefreshMu.Unlock()
+	c.tokenSourceFunc = source
 }
 
 func (c *HTTPClient) logHTTPStatus(method, requestPath string, statusCode int, retryAfter string, attempt int) {
@@ -1574,6 +1589,16 @@ func (c *HTTPClient) doBytesWithLimit(ctx context.Context, method, requestPath s
 }
 
 func (c *HTTPClient) Token() string {
+	c.tokenRefreshMu.RLock()
+	source := c.tokenSourceFunc
+	c.tokenRefreshMu.RUnlock()
+	if source != nil {
+		if next, changed := source(); changed {
+			if next = strings.TrimSpace(next); next != "" {
+				c.SetToken(next)
+			}
+		}
+	}
 	c.tokenMu.RLock()
 	defer c.tokenMu.RUnlock()
 	return c.token
@@ -5829,6 +5854,7 @@ func (s *Syncer) connectWebSocket(ctx context.Context) error {
 		return nil
 	}
 
+	dialToken := httpClient.Token()
 	wsURL, err := httpClient.websocketURL(s.workspace, cursor, s.remoteRoot)
 	if err != nil {
 		s.finishWebSocketConnectFailure(generation, 0)
@@ -5836,7 +5862,7 @@ func (s *Syncer) connectWebSocket(ctx context.Context) error {
 	}
 	conn, response, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
 		HTTPHeader: http.Header{
-			"Authorization": []string{"Bearer " + httpClient.Token()},
+			"Authorization": []string{"Bearer " + dialToken},
 		},
 	})
 	if err != nil {
@@ -5866,12 +5892,27 @@ func (s *Syncer) connectWebSocket(ctx context.Context) error {
 	s.wsLastConnectedAt = time.Now().UTC()
 	s.mu.Unlock()
 
-	go s.readWebSocketLoop(readCtx, conn)
+	tokenRotated := func() bool {
+		current := httpClient.Token()
+		return current != "" && current != dialToken
+	}
+	go s.readWebSocketLoop(readCtx, conn, tokenRotated)
 	return nil
 }
 
-func (s *Syncer) readWebSocketLoop(ctx context.Context, conn *websocket.Conn) {
+// webSocketTokenCheckInterval bounds how long a socket stays authorized by a
+// bearer that a credential supervisor has already replaced.
+var webSocketTokenCheckInterval = 15 * time.Second
+
+func (s *Syncer) readWebSocketLoop(ctx context.Context, conn *websocket.Conn, tokenRotated func() bool) {
 	defer s.handleWebSocketDisconnect(conn)
+
+	var tokenCheckC <-chan time.Time
+	if tokenRotated != nil {
+		tokenCheck := time.NewTicker(webSocketTokenCheckInterval)
+		defer tokenCheck.Stop()
+		tokenCheckC = tokenCheck.C
+	}
 
 	eventCh := make(chan websocketEvent, webSocketApplyQueueSize)
 	readErrCh := make(chan error, 1)
@@ -5947,6 +5988,17 @@ func (s *Syncer) readWebSocketLoop(ctx context.Context, conn *websocket.Conn) {
 			}
 			s.logf("websocket read failed; falling back to polling: %v", err)
 			return
+		case <-tokenCheckC:
+			if tokenRotated() {
+				// Reconnect with the replacement bearer; the disconnect handler
+				// schedules an immediate redial from the durable cursor.
+				if err := flushCheckpoint(); err != nil {
+					s.logf("websocket checkpoint flush failed before token-rotation redial: %v", err)
+				}
+				s.logf("websocket bearer rotated; reconnecting")
+				s.releaseWebSocketForRedial(conn)
+				return
+			}
 		case <-checkpointC:
 			checkpointC = nil
 			if err := flushCheckpoint(); err != nil {
@@ -6239,6 +6291,25 @@ func (s *Syncer) handleWebSocketDisconnect(conn *websocket.Conn) {
 	}
 	s.wsConn = nil
 	s.scheduleWebSocketReconnectLocked(0)
+}
+
+// releaseWebSocketForRedial drops a healthy socket whose bearer was replaced.
+// Unlike a disconnect it is not a failure, so the next sync cycle redials
+// immediately instead of waiting out reconnect backoff.
+func (s *Syncer) releaseWebSocketForRedial(conn *websocket.Conn) {
+	_ = conn.Close(websocket.StatusNormalClosure, "bearer rotated")
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.wsConn != conn {
+		return
+	}
+	if s.wsCancel != nil {
+		s.wsCancel()
+		s.wsCancel = nil
+	}
+	s.wsConn = nil
+	s.wsNextAttempt = time.Time{}
 }
 
 func (s *Syncer) ResetWebSocket() {
