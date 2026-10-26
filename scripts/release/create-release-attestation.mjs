@@ -64,7 +64,6 @@ export const RELEASE_PACKAGE_NAMES = [
   "@relayfile/client",
   "@relayfile/agents",
   "relayfile",
-  "@relayfile/file-observer",
   "@relayfile/local-mount",
   "@relayfile/mount-darwin-arm64",
   "@relayfile/mount-darwin-x64",

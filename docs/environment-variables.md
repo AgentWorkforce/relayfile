@@ -167,7 +167,6 @@ the `workspace_id`/`wks` claim in the active token, then the default stored by
 | `RELAYFILE_WORKSPACE` | string | unset | Workspace override for CLI commands when no workspace argument is supplied |
 | `RELAYFILE_CLOUD_API_URL` | string | `https://agentrelay.com/cloud` | Cloud control-plane URL used by `relayfile`, `relayfile setup`, and integration lifecycle commands |
 | `RELAYFILE_CLOUD_TOKEN` | string | unset | Cloud access token used for headless setup/integration flows; skips browser login when set |
-| `RELAYFILE_OBSERVER_URL` | string | `https://agentrelay.com/observer/file` | Hosted observer URL used by `relayfile observer` |
 | `RELAYFILE_EVENT_SILENCE_THRESHOLD` | duration | `24h` | Provider event-idle age at which `relayfile status` reports the feed as `silent` |
 | `RELAYFILE_REMOTE_PATH` | string | `/` | Mount command default |
 | `RELAYFILE_MOUNT_PROVIDER` | string | unset | Mount command provider filter |

@@ -1,5 +1,0 @@
-name = "relayfile-file-observer"
-compatibility_date = "2024-12-01"
-
-# Public routing is handled by the AgentRelay router:
-# https://agentrelay.com/observer/file -> https://relayfile-file-observer.pages.dev

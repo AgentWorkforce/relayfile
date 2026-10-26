@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -173,75 +172,6 @@ func TestHealthyWebSocketAvoidsStopTheWorldReconcile(t *testing.T) {
 			t.Fatalf("unhealthy real-time cycle %d did not fall back to reconcile", cycle)
 		}
 	}
-}
-
-func TestObserverPrintsFragmentLaunchURL(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	clearRelayfileEnv(t)
-	token := testJWTWithWorkspace("ws_observer")
-	t.Setenv("RELAYFILE_TOKEN", token)
-	t.Setenv("RELAYFILE_SERVER", "https://api.example.test")
-
-	var stdout bytes.Buffer
-	if err := run([]string{"observer", "--no-open", "--url", "https://files.example.test/app"}, strings.NewReader(""), &stdout, &stdout); err != nil {
-		t.Fatalf("run observer failed: %v", err)
-	}
-
-	launchURL := strings.TrimSpace(stdout.String())
-	parsed, err := url.Parse(launchURL)
-	if err != nil {
-		t.Fatalf("parse observer url failed: %v", err)
-	}
-	if parsed.Scheme != "https" || parsed.Host != "files.example.test" || parsed.Path != "/app" {
-		t.Fatalf("unexpected observer url: %s", parsed.String())
-	}
-	fragment := parseBrowserFragment(t, launchURL)
-	if fragment.Get("baseUrl") != "https://api.example.test" {
-		t.Fatalf("expected baseUrl fragment, got %q", fragment.Get("baseUrl"))
-	}
-	if fragment.Get("workspaceId") != "ws_observer" {
-		t.Fatalf("expected workspaceId fragment, got %q", fragment.Get("workspaceId"))
-	}
-	if fragment.Get("token") != token {
-		t.Fatalf("expected token fragment to match")
-	}
-}
-
-func TestBuildObserverURLDefaultsToHostedRouterPath(t *testing.T) {
-	got, err := buildObserverURL("", "https://api.example.test", "test-token", "ws_observer")
-	if err != nil {
-		t.Fatalf("build observer url failed: %v", err)
-	}
-
-	parsed, err := url.Parse(got)
-	if err != nil {
-		t.Fatalf("parse observer url failed: %v", err)
-	}
-	if parsed.Scheme != "https" || parsed.Host != "agentrelay.com" || parsed.Path != "/observer/file" {
-		t.Fatalf("unexpected default observer url: %s", parsed.String())
-	}
-
-	fragment := parseBrowserFragment(t, got)
-	if fragment.Get("baseUrl") != "https://api.example.test" {
-		t.Fatalf("expected browser-decoded baseUrl fragment, got %q", fragment.Get("baseUrl"))
-	}
-}
-
-func parseBrowserFragment(t *testing.T, rawURL string) url.Values {
-	t.Helper()
-
-	_, rawFragment, ok := strings.Cut(rawURL, "#")
-	if !ok {
-		t.Fatalf("expected observer url to include a fragment: %s", rawURL)
-	}
-	if strings.Contains(rawFragment, "%25") {
-		t.Fatalf("observer fragment appears double-encoded: %s", rawFragment)
-	}
-	fragment, err := url.ParseQuery(rawFragment)
-	if err != nil {
-		t.Fatalf("parse observer fragment failed: %v", err)
-	}
-	return fragment
 }
 
 func TestQuickStartUsesProjectNameGitHubAndLocalMountDefaults(t *testing.T) {
@@ -428,7 +358,6 @@ func TestHelpFlagPrintsUsageForCommandsAndSubcommands(t *testing.T) {
 		{name: "stop", args: []string{"stop", "-h"}, want: "Usage: relayfile stop"},
 		{name: "off alias", args: []string{"off", "-h"}, want: "Usage: relayfile stop"},
 		{name: "logs", args: []string{"logs", "-h"}, want: "Usage: relayfile logs"},
-		{name: "observer", args: []string{"observer", "-h"}, want: "Usage: relayfile observer"},
 	}
 
 	for _, tc := range cases {

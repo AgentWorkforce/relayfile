@@ -14,7 +14,6 @@ on:
           - client
           - agents
           - cli
-          - file-observer
           - local-mount
           - mount-darwin-arm64
           - mount-darwin-x64
@@ -102,7 +101,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$PACKAGE_INPUT" in
-            all|core|sdk|client|agents|cli|file-observer|local-mount|mount-darwin-arm64|mount-darwin-x64|mount-linux-arm64|mount-linux-x64|cli-darwin-arm64|cli-darwin-x64|cli-linux-arm64|cli-linux-x64|cli-win32-arm64|cli-win32-x64)
+            all|core|sdk|client|agents|cli|local-mount|mount-darwin-arm64|mount-darwin-x64|mount-linux-arm64|mount-linux-x64|cli-darwin-arm64|cli-darwin-x64|cli-linux-arm64|cli-linux-x64|cli-win32-arm64|cli-win32-x64)
               RELEASE_PACKAGE="$PACKAGE_INPUT"
               ;;
             *)
@@ -297,7 +296,6 @@ jobs:
             "packages/client/package.json",
             "packages/agents/package.json",
             "packages/cli/package.json",
-            "packages/file-observer/package.json",
             "packages/local-mount/package.json",
             "packages/mount-darwin-arm64/package.json",
             "packages/mount-darwin-x64/package.json",
@@ -413,8 +411,6 @@ jobs:
           npm run build --workspace=packages/agents
           npm run build --workspace=packages/cli
           npm run build --workspace=packages/local-mount
-          npm ci --prefix packages/file-observer
-          npm run pages:build --prefix packages/file-observer
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -438,8 +434,6 @@ jobs:
             packages/cli/package.json
             packages/cli/bin/
             packages/cli/CHANGELOG.md
-            packages/file-observer/package.json
-            packages/file-observer/CHANGELOG.md
             packages/local-mount/package.json
             packages/local-mount/dist/
             packages/local-mount/CHANGELOG.md
@@ -595,10 +589,6 @@ jobs:
             cli_binary: ""
           - package: cli
             path: packages/cli
-            mount_binary: ""
-            cli_binary: ""
-          - package: file-observer
-            path: packages/file-observer
             mount_binary: ""
             cli_binary: ""
           - package: local-mount
@@ -808,10 +798,6 @@ jobs:
             path: packages/cli
             mount_binary: ""
             cli_binary: ""
-          - package: file-observer
-            path: packages/file-observer
-            mount_binary: ""
-            cli_binary: ""
           - package: local-mount
             path: packages/local-mount
             mount_binary: ""
@@ -967,7 +953,6 @@ jobs:
             client) echo "path=packages/client" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT"; echo "cli_binary=" >> "$GITHUB_OUTPUT" ;;
             agents) echo "path=packages/agents" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT"; echo "cli_binary=" >> "$GITHUB_OUTPUT" ;;
             cli) echo "path=packages/cli" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT"; echo "cli_binary=" >> "$GITHUB_OUTPUT" ;;
-            file-observer) echo "path=packages/file-observer" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT"; echo "cli_binary=" >> "$GITHUB_OUTPUT" ;;
             local-mount) echo "path=packages/local-mount" >> "$GITHUB_OUTPUT"; echo "mount_binary=" >> "$GITHUB_OUTPUT"; echo "cli_binary=" >> "$GITHUB_OUTPUT" ;;
             mount-darwin-arm64) echo "path=packages/mount-darwin-arm64" >> "$GITHUB_OUTPUT"; echo "mount_binary=relayfile-mount-darwin-arm64" >> "$GITHUB_OUTPUT"; echo "cli_binary=" >> "$GITHUB_OUTPUT" ;;
             mount-darwin-x64) echo "path=packages/mount-darwin-x64" >> "$GITHUB_OUTPUT"; echo "mount_binary=relayfile-mount-darwin-amd64" >> "$GITHUB_OUTPUT"; echo "cli_binary=" >> "$GITHUB_OUTPUT" ;;
@@ -1118,7 +1103,7 @@ jobs:
           done
           chmod +x mount-binaries/relayfile-mount-*
           test -d package-attestations
-          test "$(find package-attestations -type f -name '*.json' | wc -l | tr -d ' ')" -eq 17
+          test "$(find package-attestations -type f -name '*.json' | wc -l | tr -d ' ')" -eq 16
           for BINARY in \
             relayfile-mount-linux-amd64 \
             relayfile-mount-linux-arm64 \
@@ -1180,7 +1165,6 @@ jobs:
             packages/client/package.json packages/client/CHANGELOG.md \
             packages/agents/package.json packages/agents/CHANGELOG.md \
             packages/cli/package.json packages/cli/CHANGELOG.md \
-            packages/file-observer/package.json packages/file-observer/CHANGELOG.md \
             packages/local-mount/package.json packages/local-mount/CHANGELOG.md \
             packages/mount-darwin-arm64/package.json packages/mount-darwin-x64/package.json \
             packages/mount-linux-arm64/package.json packages/mount-linux-x64/package.json \
@@ -1291,7 +1275,6 @@ jobs:
             - `@relayfile/client@${{ needs.build.outputs.new_version }}`
             - `@relayfile/agents@${{ needs.build.outputs.new_version }}`
             - `relayfile@${{ needs.build.outputs.new_version }}`
-            - `@relayfile/file-observer@${{ needs.build.outputs.new_version }}`
             - `@relayfile/local-mount@${{ needs.build.outputs.new_version }}`
             - `@relayfile/mount-darwin-arm64@${{ needs.build.outputs.new_version }}`
             - `@relayfile/mount-darwin-x64@${{ needs.build.outputs.new_version }}`
@@ -1310,7 +1293,6 @@ jobs:
             npm install @relayfile/client@${{ needs.build.outputs.new_version }}
             npm install @relayfile/agents@${{ needs.build.outputs.new_version }}
             npm install relayfile@${{ needs.build.outputs.new_version }}
-            npm install @relayfile/file-observer@${{ needs.build.outputs.new_version }}
             npm install @relayfile/local-mount@${{ needs.build.outputs.new_version }}
             npm install @relayfile/sdk@${{ needs.build.outputs.new_version }} --include=optional
             ```

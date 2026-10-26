@@ -24,7 +24,6 @@ const changelogs = [
   'packages/sdk/typescript/CHANGELOG.md',
   'packages/client/CHANGELOG.md',
   'packages/cli/CHANGELOG.md',
-  'packages/file-observer/CHANGELOG.md',
   'packages/local-mount/CHANGELOG.md',
 ];
 

@@ -778,21 +778,6 @@ func relayfileCommands() []cliCommandSpec {
 			},
 		},
 		{
-			Name:        "observer",
-			Description: "Open the hosted file observer for a workspace",
-			flagSource:  "runObserver",
-			Args:        []cliArgSpec{workspaceArg},
-			Options: []cliOptionSpec{
-				serverFlagOption,
-				tokenFlagOption,
-				{Flags: "--url <url>", Description: "observer URL (default: $RELAYFILE_OBSERVER_URL or the hosted observer)"},
-				{Flags: "--no-open", Description: "print the observer URL without opening a browser", DefaultValue: false},
-			},
-			dispatch: func(inv cliInvocation) error {
-				return runObserver(inv.args, inv.stdout)
-			},
-		},
-		{
 			Name:        "listen",
 			Description: "Stream workspace file events, optionally running a command per event",
 			Aliases:     []string{"watch"},

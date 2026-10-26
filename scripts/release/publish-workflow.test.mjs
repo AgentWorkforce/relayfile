@@ -68,7 +68,6 @@ const EXPECTED_PACKAGE_PATHS = [
   "packages/client/package.json",
   "packages/agents/package.json",
   "packages/cli/package.json",
-  "packages/file-observer/package.json",
   "packages/local-mount/package.json",
   "packages/mount-darwin-arm64/package.json",
   "packages/mount-darwin-x64/package.json",

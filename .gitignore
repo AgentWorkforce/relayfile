@@ -74,9 +74,6 @@ opencode.json
 site/node_modules/
 site/dist/
 
-# observer
-.next/
-packages/file-observer/out/
 packages/agents/dist
 .scratch/
 .agentworkforce/

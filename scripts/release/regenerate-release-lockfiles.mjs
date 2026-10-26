@@ -45,7 +45,6 @@ export const RELEASE_MANIFESTS = [
   'packages/client/package.json',
   'packages/agents/package.json',
   'packages/cli/package.json',
-  'packages/file-observer/package.json',
   'packages/local-mount/package.json',
 ];
 

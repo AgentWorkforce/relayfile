@@ -42,7 +42,6 @@ export const RELEASE_PACKAGE_PATHS = [
   "packages/client/package.json",
   "packages/agents/package.json",
   "packages/cli/package.json",
-  "packages/file-observer/package.json",
   "packages/local-mount/package.json",
   "packages/mount-darwin-arm64/package.json",
   "packages/mount-darwin-x64/package.json",
@@ -70,7 +69,6 @@ export const RELEASE_COMMIT_PATHS = new Set([
   "packages/client/CHANGELOG.md",
   "packages/agents/CHANGELOG.md",
   "packages/cli/CHANGELOG.md",
-  "packages/file-observer/CHANGELOG.md",
   "packages/local-mount/CHANGELOG.md",
 ]);
 
