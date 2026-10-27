@@ -54,7 +54,6 @@ const (
 	defaultServerURL                          = "https://file.agentrelay.com"
 	defaultCloudAPIURL                        = "https://agentrelay.com/cloud"
 	defaultRelaycastAPIURL                    = "https://gateway.relaycast.dev"
-	defaultObserverURL                        = "https://agentrelay.com/observer/file"
 	minAgentRelayCLIVersion                   = "8.7.0"
 	messagingOnlyRelayfileWorkspaceNameSuffix = " (Relayfile)"
 	configDirName                             = ".relayfile"
@@ -768,8 +767,6 @@ func printHelpForArgs(args []string, stdout io.Writer) {
 		fmt.Fprintf(stdout, "Usage: %s supervisor <install|uninstall|status> [WORKSPACE] [LISTEN_FILTERS...]\n", programName())
 	case "logs":
 		fmt.Fprintf(stdout, "Usage: %s logs [WORKSPACE] [--lines N]\n", programName())
-	case "observer":
-		fmt.Fprintf(stdout, "Usage: %s observer [WORKSPACE] [--no-open]\n", programName())
 	case "listen", "watch":
 		fmt.Fprintf(stdout, "Usage: %s listen [WORKSPACE] [--provider PROVIDER] [--path GLOB] [--event TYPE] [--run CMD] [--format text|json] [--background]\n", programName())
 	case "control-plane":
@@ -963,7 +960,6 @@ Usage:
   %[1]s export [WORKSPACE] --format FORMAT [--output FILE]
   %[1]s status [WORKSPACE]
   %[1]s logs [WORKSPACE]
-  %[1]s observer [WORKSPACE] [--no-open]
   %[1]s control-plane serve [--sock PATH]
 
 Subcommands:
@@ -999,7 +995,6 @@ Subcommands:
   export      Export a workspace as json, tar, or patch
   status      Show sync status and local mirror state for a workspace
   logs        Print the background mount log
-  observer    Open the hosted file observer for a workspace
 `, programName())
 }
 
@@ -10251,72 +10246,6 @@ func runLogs(args []string, stdout io.Writer) error {
 		fmt.Fprintln(stdout, line)
 	}
 	return nil
-}
-
-func runObserver(args []string, stdout io.Writer) error {
-	fs := flag.NewFlagSet("observer", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	server := fs.String("server", "", "relayfile server URL override")
-	token := fs.String("token", "", "relayfile token override")
-	observerURL := fs.String("url", envOrDefault("RELAYFILE_OBSERVER_URL", defaultObserverURL), "observer URL")
-	noOpen := fs.Bool("no-open", false, "print the observer URL without opening a browser")
-	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
-		"server":  true,
-		"token":   true,
-		"url":     true,
-		"no-open": false,
-	})); err != nil {
-		return err
-	}
-	if fs.NArg() > 1 {
-		return fmt.Errorf("usage: %s observer [WORKSPACE] [--no-open]", programName())
-	}
-
-	workspaceValue := ""
-	if fs.NArg() == 1 {
-		workspaceValue = strings.TrimSpace(fs.Arg(0))
-	}
-	commandClient, err := prepareWorkspaceCommandClient(workspaceValue, *server, *token, defaultInspectScopes)
-	if err != nil {
-		return err
-	}
-	launchURL, err := buildObserverURL(*observerURL, commandClient.client.baseURL, commandClient.client.token, commandClient.workspaceID)
-	if err != nil {
-		return err
-	}
-	if _, err := upsertWorkspaceDetails(commandClient.record); err != nil {
-		return err
-	}
-	if *noOpen {
-		fmt.Fprintln(stdout, launchURL)
-		return nil
-	}
-	fmt.Fprintf(stdout, "Opening observer for workspace %s\n", commandClient.workspaceID)
-	if err := openBrowser(launchURL); err != nil {
-		return fmt.Errorf("open observer: %w (rerun with --no-open to print the URL)", err)
-	}
-	return nil
-}
-
-func buildObserverURL(observerURL, server, token, workspaceID string) (string, error) {
-	observerURL = strings.TrimSpace(observerURL)
-	if observerURL == "" {
-		observerURL = defaultObserverURL
-	}
-	parsed, err := url.Parse(observerURL)
-	if err != nil {
-		return "", err
-	}
-	if parsed.Scheme == "" || parsed.Host == "" {
-		return "", fmt.Errorf("observer URL must be absolute: %s", observerURL)
-	}
-	fragment := url.Values{}
-	fragment.Set("baseUrl", strings.TrimRight(strings.TrimSpace(server), "/"))
-	fragment.Set("token", strings.TrimSpace(token))
-	fragment.Set("workspaceId", strings.TrimSpace(workspaceID))
-	parsed.Fragment = ""
-	parsed.RawFragment = ""
-	return parsed.String() + "#" + fragment.Encode(), nil
 }
 
 func openBrowser(targetURL string) error {

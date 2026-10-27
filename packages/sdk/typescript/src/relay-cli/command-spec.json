@@ -1545,36 +1545,6 @@
     ]
   },
   {
-    "name": "observer",
-    "description": "Open the hosted file observer for a workspace",
-    "args": [
-      {
-        "name": "workspace",
-        "description": "workspace name or id; defaults to the active workspace",
-        "required": false
-      }
-    ],
-    "options": [
-      {
-        "flags": "--server <url>",
-        "description": "relayfile server URL override"
-      },
-      {
-        "flags": "--token <token>",
-        "description": "relayfile token override"
-      },
-      {
-        "flags": "--url <url>",
-        "description": "observer URL (default: $RELAYFILE_OBSERVER_URL or the hosted observer)"
-      },
-      {
-        "flags": "--no-open",
-        "description": "print the observer URL without opening a browser",
-        "defaultValue": false
-      }
-    ]
-  },
-  {
     "name": "listen",
     "description": "Stream workspace file events, optionally running a command per event",
     "aliases": [
