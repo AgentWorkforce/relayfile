@@ -11,7 +11,7 @@ import {
 } from "@relayfile/core";
 import type { ActorSql } from "./db.js";
 import { migrate } from "./schema.js";
-import { hasAnyScopeGrant, scopeMatches, scopeMatchesPath } from "./scopes.js";
+import { aclScopeRuleMatches, hasAnyScopeGrant, scopeMatches, scopeMatchesPath } from "./scopes.js";
 import {
   SqliteWorkspaceStorage,
   decodeContent,
@@ -167,6 +167,8 @@ export class WorkspaceRuntime {
     try {
       await this.fanOut(from);
     } catch (error) {
+      // Listing sockets failed: keep the cursor so the next flush retries these events.
+      this.fanOutFrom = Math.min(from, this.fanOutFrom ?? from);
       console.error(JSON.stringify({ event: "workspace.fanout_error", message: error instanceof Error ? error.message : String(error) }));
     }
   }
@@ -269,7 +271,7 @@ export class WorkspaceRuntime {
     return filePermissionAllows(permissions, this.workspaceId, this.claims(caller), {
       requestedPath: path,
       action,
-      scopeMatches: (scope) => granted.has(scope) || scopeMatches(granted, scope),
+      scopeMatches: (scope) => aclScopeRuleMatches(granted, scope, action, path),
     });
   }
 

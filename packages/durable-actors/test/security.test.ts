@@ -107,6 +107,21 @@ describe("ACL parity with the Go server", () => {
     expect((await api(gw, "GET", `/v1/workspaces/${WS}/fs/events`, { token: token(WS, ["fs:write"], "w") })).status).toBe(403);
   });
 
+  it("matches filesystem scope rules semantically, like Go aclScopeRuleMatches", async () => {
+    await api(gw, "POST", `/v1/workspaces/${WS}/fs/bulk`, {
+      token: owner,
+      body: { files: [{ path: "/team/ruled.md", content: "r", semantics: { permissions: ["scope:relayfile:fs:read:/team/**", "scope:relayfile:fs:write:/team/**"] } }] },
+    });
+    const broad = token(WS, ["relayfile:fs:read:*"], "agent-4");
+    expect((await api(gw, "GET", file("/team/ruled.md"), { token: broad })).status).toBe(200);
+    const elsewhere = token(WS, ["relayfile:fs:read:/other/**"], "agent-5");
+    expect((await api(gw, "GET", file("/team/ruled.md"), { token: elsewhere })).status).toBe(403);
+    // A deleted file's events stay visible to callers its rule admitted.
+    expect((await api(gw, "DELETE", file("/team/ruled.md"), { token: owner, headers: { "if-match": "*" } })).status).toBe(202);
+    const events = await api(gw, "GET", `/v1/workspaces/${WS}/fs/events?limit=100`, { token: broad });
+    expect(events.json.events.map((e: { type: string; path: string }) => `${e.type}:${e.path}`)).toContain("file.deleted:/team/ruled.md");
+  });
+
   it("gates bearer webhook ingestion by the caller's file permissions", async () => {
     const update = await api(gw, "POST", `/v1/workspaces/${WS}/webhooks/ingest`, {
       token: denied,
@@ -277,8 +292,7 @@ describe("workspace runtime", () => {
     expect(JSON.parse(res.body).written).toBe(1205);
     expect(frames).toHaveLength(0); // nothing is pushed before the transaction commits
     await runtime.flush();
-    expect(frames).toHaveLength(1205);
-    expect(frames.at(-1)).toMatchObject({ type: "file.created", path: "/github/repos/o/r/issues/f1204.md" });
+    expect(frames.map((frame) => frame.path)).toEqual(Array.from({ length: 1205 }, (_, i) => `/github/repos/o/r/issues/f${i}.md`));
     const pending = await runtime.handle({ method: "GET", path: "/writeback/pending", query: [], headers: {}, body: null }, caller);
     expect(JSON.parse(pending.body)).toHaveLength(1205);
   });

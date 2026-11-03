@@ -101,6 +101,25 @@ describe("bearer verification", () => {
     await expect(verifier.verifyToken(mintHs256("hs-secret", { ...base, nbf: Math.floor(Date.now() / 1000) + 600 }))).rejects.toMatchObject({ message: "token not yet valid" });
   });
 
+  it("lets concurrent requests for a rotated kid share the running refresh", async () => {
+    let release!: () => void;
+    let calls = 0;
+    const slow = (async () => {
+      calls += 1;
+      if (calls === 2) await new Promise<void>((resolve) => (release = resolve));
+      return jwks();
+    }) as unknown as typeof fetch;
+    const verifier = new BearerVerifier({ jwksUrl: "https://auth/jwks", fetch: slow });
+    await verifier.verifyToken(rs256(base));
+    jwk.kid = "k2"; // rotation: the JWKS now serves k2
+    const burst = Promise.all([1, 2, 3].map(() => verifier.verifyToken(rs256(base, "k2"))));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    release();
+    await expect(burst).resolves.toHaveLength(3);
+    expect(calls).toBe(2);
+    jwk.kid = "k1";
+  });
+
   it("reports an unreachable JWKS as 503", async () => {
     const verifier = new BearerVerifier({ jwksUrl: "https://auth/jwks", fetch: (async () => { throw new Error("down"); }) as unknown as typeof fetch });
     await expect(verifier.verifyToken(rs256(base))).rejects.toMatchObject({ status: 503 });

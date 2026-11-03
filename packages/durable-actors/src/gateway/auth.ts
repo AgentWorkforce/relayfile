@@ -32,6 +32,8 @@ const JWKS_TTL_MS = 5 * 60_000;
 const JWKS_STALE_GRACE_MS = 60_000;
 /** Minimum spacing of JWKS refetches triggered by an unknown `kid` (key rotation). */
 const JWKS_UNKNOWN_KID_REFRESH_MS = 30_000;
+/** Minimum spacing of JWKS fetch attempts after a failed one. */
+const JWKS_RETRY_MS = 5_000;
 const RFC3339 = /^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/;
 
 export interface VerifierOptions {
@@ -45,6 +47,7 @@ export class BearerVerifier {
   private jwks: { keys: Map<string, KeyObject>; fetchedAt: number } | undefined;
   private jwksInFlight: Promise<Map<string, KeyObject>> | null = null;
   private lastUnknownKidRefresh = Number.NEGATIVE_INFINITY;
+  private lastFailedFetch = Number.NEGATIVE_INFINITY;
   private readonly fetchImpl: typeof fetch;
   private readonly now: () => number;
   constructor(private readonly options: VerifierOptions) {
@@ -122,21 +125,35 @@ export class BearerVerifier {
 
   private async rsaKey(kid: string): Promise<KeyObject> {
     const now = this.now();
+    // A refresh already running (e.g. for a rotated kid): wait for it before deciding.
+    if (this.jwksInFlight) {
+      try {
+        this.jwks = { keys: await this.jwksInFlight, fetchedAt: now };
+      } catch {
+        // fall through to the cache / outage handling below
+      }
+    }
     const expired = !this.jwks || now - this.jwks.fetchedAt >= JWKS_TTL_MS;
     // An unknown kid refetches at most every JWKS_UNKNOWN_KID_REFRESH_MS, so
     // tokens with made-up kids cannot drive one JWKS request each.
     const unknownKid = !expired && !this.jwks!.keys.has(kid) && now - this.lastUnknownKidRefresh >= JWKS_UNKNOWN_KID_REFRESH_MS;
-    if (expired || unknownKid) {
+    // While the JWKS is unreachable, retry at most every JWKS_RETRY_MS instead of once per request.
+    const retryAllowed = now - this.lastFailedFetch >= JWKS_RETRY_MS;
+    if ((expired && retryAllowed) || unknownKid) {
       if (unknownKid) this.lastUnknownKidRefresh = now;
       try {
         this.jwksInFlight ??= this.fetchJwks().finally(() => (this.jwksInFlight = null));
         this.jwks = { keys: await this.jwksInFlight, fetchedAt: now };
       } catch {
+        this.lastFailedFetch = now;
         // Serve a slightly stale key set through a brief JWKS outage, like the Go server.
         if (!this.jwks || now - this.jwks.fetchedAt > JWKS_TTL_MS + JWKS_STALE_GRACE_MS) {
           throw new AuthError(503, "unavailable", "jwks unreachable");
         }
       }
+    }
+    if (expired && (!this.jwks || now - this.jwks.fetchedAt > JWKS_TTL_MS + JWKS_STALE_GRACE_MS)) {
+      throw new AuthError(503, "unavailable", "jwks unreachable");
     }
     const key = this.jwks?.keys.get(kid);
     if (!key) throw new AuthError(401, "unauthorized", "unknown jwt key id");

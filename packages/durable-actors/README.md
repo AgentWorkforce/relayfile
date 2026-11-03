@@ -77,10 +77,11 @@ in the API:
   context. The actor trusts that context, exactly as the Go handlers trust
   their own middleware: invoking a `Workspace` actor needs a project session,
   and project sessions come only from the internal session broker (admin key
-  holder, NetworkPolicy: gateway pods only). A session holder therefore *is*
-  the gateway; anyone who could mint sessions could also mint bearers, since
-  the gateway holds the JWT secret. Do not hand project sessions to anything
-  else.
+  holder, NetworkPolicy: gateway pods only). A session is therefore
+  gateway-equivalent access to every workspace actor, independent of how
+  bearers are signed (with relayauth RS256 the gateway holds only public
+  keys): protect the broker token and the broker's network path like the
+  admin key, and do not hand project sessions to anything else.
 - File bytes references (`contentBlob`) are minted by the gateway only, after
   it uploaded the bytes; references, hashes and sizes sent by clients are
   dropped.

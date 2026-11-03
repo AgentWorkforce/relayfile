@@ -111,6 +111,40 @@ export function scopePathMatches(scopePath: string, filePath: string): boolean {
   return false;
 }
 
+/**
+ * One `scope:<value>` ACL rule against the caller's grants, ported from
+ * aclScopeRuleMatches in internal/httpapi/acl.go. Filesystem rules are
+ * semantic: `relayfile:fs:read:/team/**` matches a caller holding the broader
+ * `relayfile:fs:read:*` for a path under /team; any other value must be held
+ * literally.
+ */
+export function aclScopeRuleMatches(granted: ScopeSet, scope: string, action: "read" | "write", path: string): boolean {
+  const parsed = parseAclFilesystemScope(scope);
+  if (!parsed) return granted.has(scope);
+  if (!scopeActionMatches(parsed.action, action)) return false;
+  if (parsed.path !== "*" && !scopePathMatches(parsed.path, path)) return false;
+  return scopeMatchesPath(granted, `fs:${action}`, path);
+}
+
+const ACL_WORKSPACE_RESOURCE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
+const isFsAction = (action: string) => action === "read" || action === "write" || action === "manage" || action === "*";
+
+function parseAclFilesystemScope(scope: string): { action: string; path: string } | null {
+  const segments = splitN(scope, ":", 4);
+  if (segments.length === 2 && segments[0] === "fs") return isFsAction(segments[1]!) ? { action: segments[1]!, path: "*" } : null;
+  if (segments.length !== 4) return null;
+  const [plane, resource, action, path] = segments as [string, string, string, string];
+  if (!path.trim()) return null;
+  if (plane === "relayfile" || plane === "*") {
+    if (resource !== "fs" && resource !== "*") return null;
+  } else if (plane === "workspace") {
+    if (!ACL_WORKSPACE_RESOURCE.test(resource)) return null;
+  } else {
+    return null;
+  }
+  return isFsAction(action) ? { action, path } : null;
+}
+
 /** Go's strings.SplitN semantics. */
 function splitN(value: string, sep: string, n: number): string[] {
   const out: string[] = [];
