@@ -10,7 +10,8 @@
     "packages/client",
     "packages/cli",
     "packages/local-mount",
-    "packages/agents"
+    "packages/agents",
+    "packages/durable-actors"
   ],
   "scripts": {
     "workflow": "agent-relay run",

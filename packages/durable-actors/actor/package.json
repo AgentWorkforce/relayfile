@@ -1,0 +1,13 @@
+{
+  "name": "relayfile-workspace-actors",
+  "private": true,
+  "type": "module",
+  "description": "durable-actors project for relayfile: compiled by the durable-actors SDK (Bun >= 1.4.2). Runtime logic lives in ../src/runtime.",
+  "scripts": {
+    "dev": "durable-actors dev"
+  },
+  "dependencies": {
+    "@relayfile/core": "0.10.56",
+    "durable-actors": "0.14.6"
+  }
+}

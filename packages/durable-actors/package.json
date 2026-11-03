@@ -1,0 +1,30 @@
+{
+  "name": "@relayfile/durable-actors",
+  "version": "0.10.56",
+  "private": true,
+  "description": "Run relayfile on TerseAI durable-actors: a Workspace actor per workspace plus a stateless HTTP gateway with GCS/S3 blob storage.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "relayfile-actors": "dist/bin.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@relayfile/core": "0.10.56",
+    "durable-actors": "0.14.6",
+    "ws": "8.20.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.12",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=22.13"
+  }
+}
