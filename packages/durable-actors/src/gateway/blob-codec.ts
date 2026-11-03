@@ -23,10 +23,21 @@ export class BlobCodec {
     return this.store !== null;
   }
 
-  /** Offload one file-shaped object in place. Returns the decoded size. */
+  /**
+   * Offload one file-shaped object in place.
+   *
+   * Byte references are minted here only: a client-supplied `contentBlob`
+   * (or `contentHash`/`contentSize`) is dropped first, so a client can never
+   * point a file at an object it did not upload (blob keys are shared across
+   * workspaces) or record a hash that does not describe its bytes.
+   */
   async offloadFile(file: Record<string, unknown>): Promise<void> {
+    delete file.contentBlob;
+    delete file.contentHash;
+    delete file.contentSize;
     if (typeof file.content !== "string") return;
-    const encoding = file.encoding === "base64" ? "base64" : "utf-8";
+    // Same normalization as the actor (trim + lower-case), so both sides agree on the bytes.
+    const encoding = normalizeEncoding(file.encoding) === "base64" ? "base64" : "utf-8";
     const bytes = decode(file.content, encoding);
     if (bytes === null) return; // let the actor reject invalid base64 with the canonical error
     const sha256 = sha256Hex(bytes);
@@ -40,7 +51,9 @@ export class BlobCodec {
   }
 
   /** Offload raw bytes (streaming PUT). */
-  async offloadBytes(bytes: Uint8Array, encoding: "utf-8" | "base64"): Promise<Record<string, unknown>> {
+  async offloadBytes(bytes: Uint8Array, requested: "utf-8" | "base64"): Promise<Record<string, unknown>> {
+    // Bytes that are not valid UTF-8 cannot round-trip through a utf-8 string: store them as base64.
+    const encoding = requested === "utf-8" && !isValidUtf8(bytes) ? "base64" : requested;
     const sha256 = sha256Hex(bytes);
     if (this.store && bytes.byteLength > this.inlineMaxBytes) {
       await this.store.put(blobKey(this.prefix, sha256), bytes);
@@ -85,6 +98,21 @@ export class BlobCodec {
     const bytes = await this.store.get(blobKey(this.prefix, ref.sha256));
     if (!bytes) throw new Error(`blob ${ref.sha256} is missing from object storage`);
     return bytes;
+  }
+}
+
+export function normalizeEncoding(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+
+function isValidUtf8(bytes: Uint8Array): boolean {
+  try {
+    strictUtf8.decode(bytes);
+    return true;
+  } catch {
+    return false;
   }
 }
 

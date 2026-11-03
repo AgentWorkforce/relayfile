@@ -9,7 +9,7 @@ import { loadGatewayConfig } from "../src/gateway/config.js";
 import { pathFilterMatches } from "../src/runtime/workspace-runtime.js";
 import { scopeMatches, scopeMatchesPath } from "../src/runtime/scopes.js";
 import { FakeActorDb } from "./fake-actor-db.js";
-import { migrate } from "../src/runtime/schema.js";
+import { migrate, SCHEMA_VERSION } from "../src/runtime/schema.js";
 
 describe("deploy plan", () => {
   it("derives a stable v4-shaped artifact id and the registerDeployment body", () => {
@@ -155,6 +155,9 @@ describe("schema migrations", () => {
     const db = new FakeActorDb();
     migrate(db);
     migrate(db);
-    expect(db.db.prepare("SELECT COUNT(*) AS n FROM rf_migrations").get()).toEqual({ n: 1 });
+    expect(db.db.prepare("SELECT COUNT(*) AS n FROM rf_migrations").get()).toEqual({ n: SCHEMA_VERSION });
+    expect(SCHEMA_VERSION).toBe(2);
+    const columns = (db.db.prepare("PRAGMA table_info(rf_events)").all() as Array<{ name: string }>).map((c) => c.name);
+    expect(columns).toContain("acl_permissions");
   });
 });

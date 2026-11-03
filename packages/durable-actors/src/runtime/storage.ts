@@ -10,6 +10,7 @@ import type {
   WebhookStorageAdapter,
   WritebackItem,
 } from "@relayfile/core";
+import { resolveFilePermissions } from "@relayfile/core";
 import { createHash } from "node:crypto";
 import type { ActorSql, SqlValue } from "./db.js";
 import { nullableStr, num, str } from "./db.js";
@@ -30,6 +31,8 @@ export interface StoredEvent extends EventRow {
   seq: number;
   contentHash: string;
   typeMetadata: { type?: string; target?: string; mode?: number } | null;
+  /** file.* events: the file's effective permissions when the event was appended; null = not captured. */
+  aclPermissions: string[] | null;
 }
 
 export interface StoredOperation extends OperationRow {
@@ -136,20 +139,36 @@ export class SqliteWorkspaceStorage implements WebhookStorageAdapter {
   }
 
   deleteFile(path: string): void {
+    // Snapshot the effective permissions (ancestor markers + the file's own
+    // rules) before the row disappears, for the file.deleted event that the
+    // caller (runtime or core) appends next.
+    this.lastDelete = { path, permissions: resolveFilePermissions(this, path, true) };
     this.sql.exec(`DELETE FROM rf_files WHERE path = ?`, path);
   }
+
+  private lastDelete: { path: string; permissions: string[] } | null = null;
 
   // ── Events ─────────────────────────────────────────────────────────────
   appendEvent(event: EventRow): void {
     const fileEvent = event.type === "file.created" || event.type === "file.updated";
     const put = fileEvent && this.lastPut?.path === event.path ? this.lastPut : null;
     const explicit = event as Partial<StoredEvent>;
+    // Effective permissions at event time (Go Event.ACLPermissions), so a
+    // file's events stay hidden from readers it denied even after the file
+    // is deleted or its rules change.
+    let aclPermissions: string[] | null = null;
+    if (event.type === "file.deleted") {
+      if (this.lastDelete?.path === event.path) aclPermissions = this.lastDelete.permissions;
+      this.lastDelete = null;
+    } else if (event.type.startsWith("file.") && event.path) {
+      aclPermissions = resolveFilePermissions(this, event.path, true);
+    }
     const typeMetadata =
       explicit.typeMetadata ??
       (put ? { type: put.nodeType, ...(put.target ? { target: put.target } : {}), ...(put.mode ? { mode: put.mode } : {}) } : null);
     this.sql.exec(
-      `INSERT INTO rf_events (event_id, type, path, revision, content_hash, origin, provider, correlation_id, timestamp, type_metadata)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO rf_events (event_id, type, path, revision, content_hash, origin, provider, correlation_id, timestamp, type_metadata, acl_permissions)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       event.eventId,
       event.type,
       event.path,
@@ -160,6 +179,7 @@ export class SqliteWorkspaceStorage implements WebhookStorageAdapter {
       event.correlationId ?? "",
       event.timestamp,
       typeMetadata ? JSON.stringify(typeMetadata) : null,
+      aclPermissions ? JSON.stringify(aclPermissions) : null,
     );
     this.lastEventSeq = num(this.sql.exec<{ seq: unknown }>(`SELECT last_insert_rowid() AS seq`)[0]?.seq);
   }
@@ -445,7 +465,7 @@ function toFile(row: Record<string, unknown>): StoredFile {
   };
 }
 
-function toEvent(row: Record<string, unknown>): StoredEvent {
+export function toEvent(row: Record<string, unknown>): StoredEvent {
   return {
     seq: num(row.seq),
     eventId: str(row.event_id),
@@ -458,6 +478,7 @@ function toEvent(row: Record<string, unknown>): StoredEvent {
     correlationId: str(row.correlation_id),
     timestamp: str(row.timestamp),
     typeMetadata: parseJson<StoredEvent["typeMetadata"]>(row.type_metadata, null),
+    aclPermissions: parseJson<string[] | null>(row.acl_permissions, null),
   };
 }
 

@@ -11,8 +11,16 @@ import {
 } from "@relayfile/core";
 import type { ActorSql } from "./db.js";
 import { migrate } from "./schema.js";
-import { scopeMatches, scopeMatchesPath } from "./scopes.js";
-import { SqliteWorkspaceStorage, decodeContent, encodedLength, type StoredEvent, type StoredFile, type StoredOperation } from "./storage.js";
+import { hasAnyScopeGrant, scopeMatches, scopeMatchesPath } from "./scopes.js";
+import {
+  SqliteWorkspaceStorage,
+  decodeContent,
+  encodedLength,
+  toEvent as rowToEvent,
+  type StoredEvent,
+  type StoredFile,
+  type StoredOperation,
+} from "./storage.js";
 import {
   HYDRATE_HEADER,
   type ActorHttpRequest,
@@ -40,6 +48,7 @@ const EXPORT_MAX_FILES = 50_000;
 const TREE_PAGE = 1000;
 const MAINTENANCE_INTERVAL_MS = 15 * 60_000;
 const DEDUP_TTL_SECONDS = 24 * 60 * 60;
+const FANOUT_PAGE = 1000;
 
 export interface SocketHandle {
   id: string;
@@ -126,26 +135,43 @@ export class WorkspaceRuntime {
   // HTTP
   // ─────────────────────────────────────────────────────────────────────────
 
-  async handle(request: ActorHttpRequest, caller: CallerContext): Promise<ActorHttpResponse> {
-    this.ensureSchema();
-    const seqBefore = this.latestSeq();
-    let response: ActorHttpResponse;
+  /**
+   * Every entry point runs inside the actor's transaction; when it throws, the
+   * transaction rolls back, including a migration applied in that call. Forget
+   * the "migrated" flag then, so the next call migrates again instead of
+   * running against tables that no longer exist.
+   */
+  private async guarded<T>(operation: () => Promise<T>): Promise<T> {
     try {
-      response = this.route(request, caller);
+      return await operation();
     } catch (error) {
-      if (error instanceof HttpError) {
-        response = jsonResponse(
-          error.status,
-          { code: error.code, message: error.message, correlationId: caller.correlationId, ...error.extra },
-          error.headers,
-        );
-      } else {
-        throw error;
-      }
+      this.migrated = false;
+      throw error;
     }
-    await this.fanOut(seqBefore);
-    this.scheduleMaintenance();
-    return response;
+  }
+
+  async handle(request: ActorHttpRequest, caller: CallerContext): Promise<ActorHttpResponse> {
+    return this.guarded(async () => {
+      this.ensureSchema();
+      const seqBefore = this.latestSeq();
+      let response: ActorHttpResponse;
+      try {
+        response = this.route(request, caller);
+      } catch (error) {
+        if (error instanceof HttpError) {
+          response = jsonResponse(
+            error.status,
+            { code: error.code, message: error.message, correlationId: caller.correlationId, ...error.extra },
+            error.headers,
+          );
+        } else {
+          throw error;
+        }
+      }
+      await this.fanOut(seqBefore);
+      this.scheduleMaintenance();
+      return response;
+    });
   }
 
   private route(request: ActorHttpRequest, caller: CallerContext): ActorHttpResponse {
@@ -213,7 +239,10 @@ export class WorkspaceRuntime {
   }
 
   private aclAllows(caller: CallerContext, path: string, action: "read" | "write", includeTarget = true): boolean {
-    const permissions = resolveFilePermissions(this.storage, path, includeTarget);
+    return this.permissionsAllow(caller, resolveFilePermissions(this.storage, path, includeTarget), path, action);
+  }
+
+  private permissionsAllow(caller: CallerContext, permissions: string[], path: string, action: "read" | "write"): boolean {
     if (permissions.length === 0) return true;
     const granted = this.scopes(caller);
     return filePermissionAllows(permissions, this.workspaceId, this.claims(caller), {
@@ -253,8 +282,9 @@ export class WorkspaceRuntime {
   private readFile(query: URLSearchParams, caller: CallerContext): ActorHttpResponse {
     const raw = query.get("path") ?? "";
     if (!raw) throw new HttpError(400, "bad_request", "missing path query");
-    this.requireScope(caller, "fs:read", raw);
+    // Scope-check the resolved path: `/team/../secret` must be judged as `/secret`.
     const path = normalizePath(raw);
+    this.requireScope(caller, "fs:read", path);
     const file = this.storage.getFile(path);
     if (!file) throw new HttpError(404, "not_found", "file not found");
     if (!this.aclAllows(caller, path, "read")) {
@@ -267,7 +297,7 @@ export class WorkspaceRuntime {
   private writeFileRoute(request: ActorHttpRequest, query: URLSearchParams, caller: CallerContext): ActorHttpResponse {
     const raw = query.get("path") ?? "";
     if (!raw) throw new HttpError(400, "bad_request", "missing path query");
-    this.requireScope(caller, "fs:write", raw);
+    this.requireScope(caller, "fs:write", normalizePath(raw));
     const ifMatch = normalizeIfMatch(request.headers["if-match"] ?? "");
     if (!ifMatch) throw new HttpError(412, "precondition_failed", "missing If-Match header");
     const body = parseJsonBody(request);
@@ -279,16 +309,16 @@ export class WorkspaceRuntime {
   private deleteFileRoute(request: ActorHttpRequest, query: URLSearchParams, caller: CallerContext): ActorHttpResponse {
     const raw = query.get("path") ?? "";
     if (!raw) throw new HttpError(400, "bad_request", "missing path query");
-    this.requireScope(caller, "fs:write", raw);
+    const path = normalizePath(raw);
+    this.requireScope(caller, "fs:write", path);
     const ifMatch = normalizeIfMatch(request.headers["if-match"] ?? "");
     if (!ifMatch) throw new HttpError(412, "precondition_failed", "missing If-Match header");
-    const path = normalizePath(raw);
     const existing = this.storage.getFile(path);
     if (!existing) throw new HttpError(404, "not_found", "file not found");
     if (!this.aclAllows(caller, path, "write")) {
       throw new HttpError(403, "forbidden", "file access denied by permission policy");
     }
-    if (ifMatch !== "*" && ifMatch !== existing.revision) throw conflict(ifMatch, existing);
+    if (ifMatch !== "*" && ifMatch !== existing.revision) throw this.conflict(ifMatch, existing, caller);
     const revision = this.storage.nextRevision();
     const now = this.now().toISOString();
     this.storage.deleteFile(path);
@@ -360,28 +390,34 @@ export class WorkspaceRuntime {
       size = input.content.length;
     }
 
+    // Permissions first, before dedup hits or revision details can answer:
+    // an existing file is judged by its own rules too, whatever If-Match says
+    // (Go handleWriteFile / handleBulkWrite); a new file by its ancestors.
+    const existing = this.storage.getFile(path);
+    if (!this.aclAllows(caller, path, "write", existing !== null)) {
+      throw bulkError(403, "forbidden", "file access denied by permission policy");
+    }
+
     // Idempotent writes keyed by contentIdentity (webhook retries, fan-in).
+    // A hit only answers for the same path it was recorded for.
     const identity = input.contentIdentity;
     if (identity && typeof identity.kind === "string" && typeof identity.key === "string" && identity.kind && identity.key) {
-      const hit = this.sql.exec<{ result: unknown }>(
-        `SELECT result FROM rf_dedup WHERE kind = ? AND key = ? AND expires_at > ?`,
+      const hit = this.sql.exec<{ result: unknown; op_id: unknown }>(
+        `SELECT result, op_id FROM rf_dedup WHERE kind = ? AND key = ? AND expires_at > ?`,
         identity.kind,
         identity.key,
         Math.floor(this.now().getTime() / 1000),
       )[0];
-      if (hit && typeof hit.result === "string") return JSON.parse(hit.result) as WriteOutcome;
+      if (hit && typeof hit.result === "string" && this.storage.getOperation(String(hit.op_id))?.path === path) {
+        return JSON.parse(hit.result) as WriteOutcome;
+      }
     }
 
-    const existing = this.storage.getFile(path);
     const ifMatch = input.ifMatch === undefined ? "" : normalizeIfMatch(String(input.ifMatch));
     if (opts.requireExplicitIfMatch && !ifMatch) throw new HttpError(412, "precondition_failed", "missing If-Match header");
     if (ifMatch) {
       if (!existing && ifMatch !== "0" && ifMatch !== "*") throw bulkError(404, "not_found", "file not found");
-      if (existing && ifMatch !== "*" && ifMatch !== existing.revision) throw conflict(ifMatch, existing);
-    }
-    const aclTargetIncluded = ifMatch !== "*";
-    if (!this.aclAllows(caller, path, "write", aclTargetIncluded)) {
-      throw bulkError(403, "forbidden", "file access denied by permission policy");
+      if (existing && ifMatch !== "*" && ifMatch !== existing.revision) throw this.conflict(ifMatch, existing, caller);
     }
 
     const revision = this.storage.nextRevision();
@@ -473,21 +509,33 @@ export class WorkspaceRuntime {
     return opId;
   }
 
+  /** 409 revision_conflict; the content preview only for callers who may read the file. */
+  private conflict(expected: string, existing: StoredFile, caller: CallerContext): HttpError {
+    const extra: Json = { expectedRevision: expected, currentRevision: existing.revision, bulkCode: "conflict" };
+    if (!existing.blobSha256 && this.canRead(caller, existing.path)) extra.currentContentPreview = existing.content.slice(0, 4000);
+    return new HttpError(409, "revision_conflict", "revision conflict", extra);
+  }
+
   private opState(opId: string): string {
     return this.storage.getOperation(opId)?.status ?? "pending";
   }
 
   private bulkWrite(request: ActorHttpRequest, caller: CallerContext): ActorHttpResponse {
-    this.requireScope(caller, "fs:write");
+    // Coarse gate: any fs:write grant, path-narrowed ones included. Each file
+    // is then checked against the caller's path scopes and its permissions.
+    if (!hasAnyScopeGrant(this.scopes(caller), "fs:write")) {
+      throw new HttpError(403, "forbidden", "missing required scope: fs:write");
+    }
     const body = parseJsonBody(request);
-    const files = Array.isArray(body.files) ? (body.files as Json[]) : null;
+    const files = Array.isArray(body.files) ? (body.files as unknown[]) : null;
     if (!files || files.length === 0) throw new HttpError(400, "bad_request", "missing files");
     const errors: Json[] = [];
     const results: Json[] = [];
-    for (const file of files) {
+    for (const entry of files) {
+      const file: Json = entry && typeof entry === "object" && !Array.isArray(entry) ? (entry as Json) : {};
       const rawPath = typeof file.path === "string" ? file.path : "";
       try {
-        if (rawPath && !scopeMatchesPath(this.scopes(caller), "fs:write", rawPath)) {
+        if (rawPath && !scopeMatchesPath(this.scopes(caller), "fs:write", normalizePath(rawPath))) {
           throw bulkError(403, "forbidden", "missing required scope: fs:write");
         }
         const input: FileInput = {
@@ -547,7 +595,7 @@ export class WorkspaceRuntime {
     }
     if (total > 32 * 1024) throw new HttpError(400, "bad_request", "paths too large");
     for (const path of paths as string[]) {
-      if (!scopeMatchesPath(this.scopes(caller), "fs:read", path)) {
+      if (!scopeMatchesPath(this.scopes(caller), "fs:read", normalizePath(path))) {
         throw new HttpError(403, "forbidden", "missing required scope: fs:read");
       }
     }
@@ -713,12 +761,28 @@ export class WorkspaceRuntime {
   }
 
   private eventVisible(caller: CallerContext, event: StoredEvent): boolean {
+    if (event.type === "file.deleted") {
+      // The file is gone, so its own rules come from the snapshot taken at
+      // delete time. No snapshot = cannot rule out a file-level deny: hide it
+      // (Go eventVisibleToClaims fails closed the same way).
+      if (!event.path || event.aclPermissions === null) return false;
+      return (
+        scopeMatchesPath(this.scopes(caller), "fs:read", event.path) &&
+        this.permissionsAllow(caller, event.aclPermissions, event.path, "read") &&
+        this.aclAllows(caller, event.path, "read", false)
+      );
+    }
     if (!event.path) return true; // pathless control events (sync.reconcile)
-    return scopeMatchesPath(this.scopes(caller), "fs:read", event.path) && this.aclAllows(caller, event.path, "read", event.type !== "file.deleted");
+    if (!scopeMatchesPath(this.scopes(caller), "fs:read", event.path)) return false;
+    if (event.aclPermissions !== null && !this.permissionsAllow(caller, event.aclPermissions, event.path, "read")) return false;
+    return this.aclAllows(caller, event.path, "read");
   }
 
   private events(query: URLSearchParams, caller: CallerContext): ActorHttpResponse {
-    this.requireScope(caller, "fs:read", "/");
+    // Any fs:read grant may read the feed; every event is filtered by eventVisible.
+    if (!hasAnyScopeGrant(this.scopes(caller), "fs:read")) {
+      throw new HttpError(403, "forbidden", "missing required scope: fs:read");
+    }
     const limit = boundedInt(query.get("limit"), 200, 1, 1000);
     const provider = query.get("provider") ?? "";
     const direction = query.get("direction") || "asc";
@@ -830,13 +894,17 @@ export class WorkspaceRuntime {
 
   private writebackPending(caller: CallerContext): ActorHttpResponse {
     this.requireScope(caller, "sync:read");
+    // Every pending item, oldest first, like the Go server (the endpoint has no cursor).
     const rows = this.sql.exec(
-      `SELECT op_id FROM rf_operations WHERE status IN ('pending', 'running') ORDER BY seq ASC LIMIT 1000`,
+      `SELECT op_id, path, revision, correlation_id FROM rf_operations WHERE status IN ('pending', 'running') ORDER BY seq ASC`,
     );
-    const items = rows.map((row) => {
-      const op = this.storage.getOperation(String(row.op_id))!;
-      return { id: op.opId, workspaceId: this.workspaceId, path: op.path, revision: op.revision, correlationId: op.correlationId };
-    });
+    const items = rows.map((row) => ({
+      id: String(row.op_id),
+      workspaceId: this.workspaceId,
+      path: String(row.path),
+      revision: String(row.revision),
+      correlationId: String(row.correlation_id ?? ""),
+    }));
     return jsonResponse(200, items);
   }
 
@@ -928,7 +996,7 @@ export class WorkspaceRuntime {
       { requireSignature: false, generateEnvelopeId: () => this.storage.nextEnvelopeId(), coalesceWindowMs: 0 },
     );
     if (result.status === "invalid_input") throw new HttpError(400, "bad_request", "invalid webhook envelope");
-    if (result.status === "queued") this.processEnvelope(result.envelopeId);
+    if (result.status === "queued") this.processEnvelope(result.envelopeId, caller);
     return jsonResponse(202, { status: "queued", id: result.envelopeId, correlationId: result.correlationId || caller.correlationId });
   }
 
@@ -959,16 +1027,36 @@ export class WorkspaceRuntime {
     return jsonResponse(202, { status: "queued", id: envelopeId, correlationId });
   }
 
-  /** Apply one queued envelope now, inside the same actor transaction. */
-  private processEnvelope(envelopeId: string): void {
+  /**
+   * Apply one queued envelope now, inside the same actor transaction.
+   * Bearer-submitted envelopes (`caller` given) may only create, overwrite or
+   * delete files the caller could write itself: file permission rules (an
+   * existing file's own rules included) gate the mutation, and a denied one is
+   * dead-lettered as `permission_denied`. HMAC-verified internal envelopes are
+   * trusted provider sync and are not gated. Webhook semantics never carry
+   * permissions (core strips them).
+   */
+  private processEnvelope(envelopeId: string, caller?: CallerContext): void {
     const envelope = this.storage.getEnvelope(envelopeId);
     if (!envelope || envelope.status !== "queued") return;
-    const result = applyWebhookEnvelope(this.storage, envelope, { now: () => this.now().toISOString() });
+    let denied = false;
+    const result = applyWebhookEnvelope(this.storage, envelope, {
+      now: () => this.now().toISOString(),
+      ...(caller
+        ? {
+            isPathWriteAllowed: (path: string) => {
+              const allowed = this.aclAllows(caller, path, "write", this.storage.getFile(normalizePath(path)) !== null);
+              if (!allowed) denied = true;
+              return allowed;
+            },
+          }
+        : {}),
+    });
     this.storage.putEnvelope({
       ...envelope,
-      status: result.status === "rejected" ? "dead_lettered" : "processed",
+      status: result.status === "rejected" || denied ? "dead_lettered" : "processed",
       attemptCount: envelope.attemptCount + 1,
-      lastError: result.reason ?? null,
+      lastError: denied ? "permission_denied" : (result.reason ?? null),
     });
   }
 
@@ -986,6 +1074,10 @@ export class WorkspaceRuntime {
 
   /** Event retention and dedup expiry. Re-arms while the workspace has data. */
   async maintain(): Promise<void> {
+    return this.guarded(async () => this.maintainNow());
+  }
+
+  private maintainNow(): void {
     this.ensureSchema();
     this.storage.trimEvents(EVENT_RETENTION);
     this.sql.exec(`DELETE FROM rf_dedup WHERE expires_at <= ?`, Math.floor(this.now().getTime() / 1000));
@@ -1001,6 +1093,10 @@ export class WorkspaceRuntime {
   // ─────────────────────────────────────────────────────────────────────────
 
   async connect(socket: SocketHandle, setTags: (tags: string[]) => void): Promise<void> {
+    return this.guarded(async () => this.connectNow(socket, setTags));
+  }
+
+  private connectNow(socket: SocketHandle, setTags: (tags: string[]) => void): void {
     this.ensureSchema();
     setTags(["fs"]);
     const meta = socket.metadata;
@@ -1058,15 +1154,20 @@ export class WorkspaceRuntime {
   private async fanOut(seqBefore: number): Promise<void> {
     const sockets = this.options.sockets;
     if (!sockets) return;
-    const events = this.storage.eventsAfterSeq(seqBefore, 10_000);
-    if (events.length === 0) return;
+    let batch = this.storage.eventsAfterSeq(seqBefore, FANOUT_PAGE);
+    if (batch.length === 0) return;
     const connections = await sockets.connections();
-    for (const socket of connections) {
-      const caller = socketCaller(socket.metadata);
-      for (const event of events) {
-        const frame = this.socketFrame(event, caller, socket.metadata);
-        if (frame) socket.send(frame);
+    // Page through every event this call appended (a large bulk write can append more than one page).
+    while (batch.length > 0) {
+      for (const socket of connections) {
+        const caller = socketCaller(socket.metadata);
+        for (const event of batch) {
+          const frame = this.socketFrame(event, caller, socket.metadata);
+          if (frame) socket.send(frame);
+        }
       }
+      if (batch.length < FANOUT_PAGE) break;
+      batch = this.storage.eventsAfterSeq(batch[batch.length - 1]!.seq, FANOUT_PAGE);
     }
   }
 }
@@ -1107,11 +1208,6 @@ function bulkError(status: number, code: string, message: string): HttpError {
   return new HttpError(status, httpCode, message, { bulkCode: code });
 }
 
-function conflict(expected: string, existing: StoredFile): HttpError {
-  const extra: Json = { expectedRevision: expected, currentRevision: existing.revision, bulkCode: "conflict" };
-  if (!existing.blobSha256) extra.currentContentPreview = existing.content.slice(0, 4000);
-  return new HttpError(409, "revision_conflict", "revision conflict", extra);
-}
 
 function writeResultJson(outcome: WriteOutcome): Json {
   return {
@@ -1163,30 +1259,6 @@ function isEmptySemantics(sem: ReturnType<typeof normalizeSemanticsInput>): bool
 function eventNumber(eventId: string): number | null {
   const match = /^evt_(\d+)$/.exec(eventId);
   return match ? Number(match[1]) : null;
-}
-
-function rowToEvent(row: Record<string, unknown>): StoredEvent {
-  let typeMetadata: StoredEvent["typeMetadata"] = null;
-  if (typeof row.type_metadata === "string" && row.type_metadata) {
-    try {
-      typeMetadata = JSON.parse(row.type_metadata);
-    } catch {
-      typeMetadata = null;
-    }
-  }
-  return {
-    seq: Number(row.seq),
-    eventId: String(row.event_id),
-    type: String(row.type),
-    path: String(row.path ?? ""),
-    revision: String(row.revision ?? ""),
-    contentHash: String(row.content_hash ?? ""),
-    origin: String(row.origin ?? ""),
-    provider: String(row.provider ?? ""),
-    correlationId: String(row.correlation_id ?? ""),
-    timestamp: String(row.timestamp),
-    typeMetadata,
-  };
 }
 
 /** /fs/ws path filters: exact, `*` = one segment, trailing `**` = any depth; else equal segment counts. */

@@ -90,6 +90,13 @@ const MIGRATIONS: ReadonlyArray<{ id: number; statements: readonly string[] }> =
       )`,
     ],
   },
+  {
+    // Effective file permissions captured when a file is deleted, so the
+    // file.deleted event stays hidden from readers the file denied (Go:
+    // Event.ACLPermissions). NULL on a file.deleted event = fail closed.
+    id: 2,
+    statements: [`ALTER TABLE rf_events ADD COLUMN acl_permissions TEXT`],
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.id;

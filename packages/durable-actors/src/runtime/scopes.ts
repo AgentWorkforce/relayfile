@@ -49,6 +49,16 @@ export function hasUnrestrictedScope(granted: ScopeSet, required: string): boole
   return scopeMatchesPath(granted, required, "") || (scopeMatches(granted, required) && !hasNarrowGrant(granted, required));
 }
 
+/**
+ * True when the caller holds `required` for at least some path: an
+ * unrestricted grant, or any path-narrowed one (`relayfile:fs:write:/team/**`,
+ * `workspace:<ws>:write:/x`). Routes that check each path themselves (bulk
+ * writes, the event feed) use it as their coarse gate.
+ */
+export function hasAnyScopeGrant(granted: ScopeSet, required: string): boolean {
+  return scopeMatches(granted, required) || scopeMatchesPath(granted, required, "") || hasNarrowGrant(granted, required);
+}
+
 function hasNarrowGrant(granted: ScopeSet, required: string): boolean {
   const idx = required.indexOf(":");
   if (idx < 0) return false;

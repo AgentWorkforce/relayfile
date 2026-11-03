@@ -42,7 +42,7 @@ writeback workers use:
 | `GET /fs/export?format=json`, `GET /fs/query` | |
 | `GET /ops`, `GET /ops/{id}` | |
 | `GET /writeback/pending`, `POST /writeback/{id}/ack` | pull-based writeback for provider workers |
-| `POST /webhooks/ingest`, `POST /v1/internal/webhook-envelopes` | provider events into files (bearer `sync:trigger`, or the HMAC internal path) |
+| `POST /webhooks/ingest`, `POST /v1/internal/webhook-envelopes` | provider events into files (bearer `sync:trigger`, or the HMAC internal path); a bearer envelope may only change files whose permission rules let the caller write (denied ones are dead-lettered `permission_denied`) |
 | `GET /sync/status` | |
 
 Not served (404, which every client already treats as "unavailable"): `fs/merge`
@@ -68,6 +68,28 @@ in the API:
   (`success: false` dead-letters the op). Writes under any other provider
   complete at once, as on the Go server without provider adapters, so mount
   outboxes never wait on a writeback nobody performs.
+
+## Trust boundary and permissions
+
+- The gateway is the only party that authenticates clients. It verifies the
+  bearer, derives the actor id from the verified workspace claim, and passes
+  the verified agent name and scopes to the actor as the call's caller
+  context. The actor trusts that context, exactly as the Go handlers trust
+  their own middleware: invoking a `Workspace` actor needs a project session,
+  and project sessions come only from the internal session broker (admin key
+  holder, NetworkPolicy: gateway pods only). A session holder therefore *is*
+  the gateway; anyone who could mint sessions could also mint bearers, since
+  the gateway holds the JWT secret. Do not hand project sessions to anything
+  else.
+- File bytes references (`contentBlob`) are minted by the gateway only, after
+  it uploaded the bytes; references, hashes and sizes sent by clients are
+  dropped.
+- Path scopes are checked against the resolved path (`/team/../x` is `/x`).
+- File permission rules follow the Go server: an existing file is always
+  judged by its own rules too (whatever `If-Match` says), conflicts include a
+  content preview only for callers who may read the file, and every `file.*`
+  event carries the file's effective rules from when it was appended, so a
+  deleted protected file stays hidden from the readers it denied.
 
 ## Multi-replica safety
 
@@ -153,6 +175,16 @@ Helm: `charts/relayfile` `runtime.backend: durable-actors` and the
 (`docs/self-hosted-durable-actors.md`).
 
 ## Known gaps
+
+- Digests (`/digests/today.md`, `yesterday.md`) are produced by the mount
+  daemon from the event feed (`internal/mountsync` digest scheduler), as with
+  the Go server; this backend does not regenerate them server-side like
+  hosted relayfile-cloud.
+- Writeback acks with `externalId` record the id on the operation's
+  `providerResult` but do not rename the agent's draft file to the canonical
+  path (the Go server's issue #242 draft reconciliation). The provider sync
+  that materializes the canonical record converges the tree; the draft stays
+  until removed.
 
 - Upstream durable-actors has no invoke-only API key yet; the session broker
   keeps the admin key off the internet-facing gateway in the meantime.

@@ -2,11 +2,12 @@ import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import WebSocket, { WebSocketServer } from "ws";
+import { normalizePath } from "@relayfile/core";
 import { scopeMatchesPath } from "../runtime/scopes.js";
 import { HYDRATE_HEADER, type ActorHttpRequest, type CallerContext, type SocketMetadata } from "../runtime/types.js";
 import type { WorkspaceActors } from "./actors.js";
 import { AuthError, BearerVerifier, verifyInternalHmac, type Principal } from "./auth.js";
-import { BlobCodec } from "./blob-codec.js";
+import { BlobCodec, normalizeEncoding } from "./blob-codec.js";
 import type { BlobStore } from "./blobs.js";
 
 /**
@@ -101,10 +102,13 @@ export function createGateway(options: GatewayOptions): Server {
     }
 
     let body: string | null = raw.length ? raw.toString("utf8") : null;
-    // Offload large file content before it reaches the actor.
-    if (body && req.method === "PUT" && subPath === "/fs/file") {
-      if ((req.headers["content-type"] ?? "").startsWith("application/octet-stream")) {
-        const encoding = header(req, "x-relayfile-encoding") === "base64" ? "base64" : "utf-8";
+    // Offload large file content before it reaches the actor. The raw-bytes
+    // branch is chosen by route and content type, so a zero-byte streaming
+    // write is still converted (wildcard If-Match default, X-Relayfile-* metadata).
+    const rawWrite = req.method === "PUT" && subPath === "/fs/file" && (req.headers["content-type"] ?? "").startsWith("application/octet-stream");
+    if (rawWrite || (body && req.method === "PUT" && subPath === "/fs/file")) {
+      if (rawWrite) {
+        const encoding = normalizeEncoding(header(req, "x-relayfile-encoding")) === "base64" ? "base64" : "utf-8";
         const file = await codec.offloadBytes(raw, encoding);
         const mode = header(req, "x-relayfile-mode");
         const identity = header(req, "x-relayfile-content-identity");
@@ -115,7 +119,7 @@ export function createGateway(options: GatewayOptions): Server {
           ...(identity ? { contentIdentity: safeJson(identity) } : {}),
         });
         if (!req.headers["if-match"]) req.headers["if-match"] = "*";
-      } else {
+      } else if (body) {
         const parsed = safeJson(body);
         if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
           await codec.offloadFile(parsed as Record<string, unknown>);
@@ -221,7 +225,7 @@ export function createGateway(options: GatewayOptions): Server {
       return rejectUpgrade(socket, status, code, error instanceof Error ? error.message : "unauthorized");
     }
     if (principal.workspaceId !== workspaceId) return rejectUpgrade(socket, 403, "forbidden", "workspace mismatch");
-    const paths = url.searchParams.getAll("path");
+    const paths = url.searchParams.getAll("path").map((path) => (path.trim() ? normalizePath(path) : path));
     const scopes = new Set(principal.scopes);
     for (const path of paths.length ? paths : ["/"]) {
       if (!scopeMatchesPath(scopes, "fs:read", path)) return rejectUpgrade(socket, 403, "forbidden", "missing required scope: fs:read");
