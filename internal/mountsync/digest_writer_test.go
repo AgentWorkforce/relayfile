@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,75 @@ import (
 
 	"github.com/agentworkforce/relayfile/internal/digest"
 )
+
+// Cloud's token materialization test covers canonical writes and adapter digest
+// classification. This test covers the separate runtime boundary: provider
+// changes schedule real digest writers, and both artifacts reach observers.
+func TestGitLabProviderChangesRefreshBothDailyDigests(t *testing.T) {
+	root := t.TempDir()
+	events, _, _ := startFileWatcher(t, root)
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	canonicalPath := "gitlab/projects/acme/atlas/issues/token-listener__7/meta.json"
+	source := digest.SliceSource{Items: []digest.ChangeEvent{
+		{Provider: "gitlab", Timestamp: now.Add(-24 * time.Hour), Identifier: "Issue-7", Verb: "was opened", CanonicalPath: canonicalPath},
+		{Provider: "gitlab", Timestamp: now, Identifier: "Issue-7", Verb: "was closed", CanonicalPath: canonicalPath},
+	}}
+	syncer, err := NewSyncer(&fakeClient{files: map[string]RemoteFile{}}, SyncerOptions{
+		WorkspaceID: "ws_gitlab_digest", LocalRoot: root,
+		DigestSource: source, DigestProviders: []string{"gitlab"},
+		DigestTimezone: "UTC", DigestNow: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, filepath.FromSlash(canonicalPath))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"id":"99","iid":"7","state":"closed"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncer.HandleLocalChange(context.Background(), canonicalPath, fsnotify.Write); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(30 * time.Second)
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, artifact := range []struct{ path, verb string }{
+		{digest.TodayPath, "was closed"}, {digest.YesterdayPath, "was opened"},
+	} {
+		body, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(artifact.path)))
+		if err != nil {
+			t.Fatalf("read %s: %v", artifact.path, err)
+		}
+		if !strings.Contains(string(body), canonicalPath) || !strings.Contains(string(body), artifact.verb) {
+			t.Fatalf("%s missing expected GitLab activity:\n%s", artifact.path, body)
+		}
+		if err := syncer.HandleLocalChange(context.Background(), artifact.path, fsnotify.Write); err != nil {
+			t.Fatalf("handle digest write %s: %v", artifact.path, err)
+		}
+	}
+	now = now.Add(time.Minute)
+	if syncer.rollingCoalescer.Due() {
+		t.Fatal("digest write events scheduled recursive regeneration")
+	}
+	wantedEvents := map[string]bool{digest.TodayPath: true, digest.YesterdayPath: true}
+	deadline := time.After(2 * time.Second)
+	for len(wantedEvents) > 0 {
+		select {
+		case event := <-events:
+			if event.op&(fsnotify.Create|fsnotify.Write) != 0 {
+				delete(wantedEvents, event.path)
+			}
+		case <-deadline:
+			t.Fatalf("missing digest filesystem events: %v", wantedEvents)
+		}
+	}
+	if body, err := os.ReadFile(path); err != nil || !strings.Contains(string(body), `"state":"closed"`) {
+		t.Fatalf("closed canonical issue must remain readable: body=%s err=%v", body, err)
+	}
+}
 
 // TestYesterdayCloseEmitsFSEventNoRecursion exercises gate E for the
 // yesterday slice: invoking the close-write path through digest.CloseLocalDay
