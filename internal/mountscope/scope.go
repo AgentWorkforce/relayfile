@@ -242,6 +242,8 @@ func NormalizeProviderID(provider string) string {
 	switch provider {
 	case "slack", "slack-sage":
 		return "slack"
+	case "gitlab", "gitlab-relay", "gitlab-pat", "gitlab-group-token":
+		return "gitlab"
 	default:
 		return provider
 	}

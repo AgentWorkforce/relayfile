@@ -26,6 +26,28 @@ export RELAYFILE_LOCAL_DIR="$PWD/relayfile-mount"
 
 The agent should read and write under `$RELAYFILE_LOCAL_DIR/<provider>/...` instead of calling provider APIs directly.
 
+### GitLab project and group tokens
+
+Select the auth variant when creating a workspace or connecting an existing one:
+
+```bash
+relayfile setup --provider gitlab-pat --backend nango --workspace my-agent --local-dir ./relayfile-mount
+relayfile integration connect gitlab-group-token --backend nango --workspace my-agent --wait-sync
+```
+
+Enter the token in the hosted Nango Connect page. Both variants use the logical
+provider `gitlab` and the same `/gitlab` filesystem tree as OAuth. The CLI keeps
+the selected auth config in saved connection metadata, polls GitLab status,
+and waits for GitLab sync without creating a separate token-provider directory.
+To change an existing OAuth connection to a token, disconnect it first; the
+CLI does not treat an OAuth connection as satisfying an explicit token request.
+
+Developer-scoped project tokens need a Maintainer to configure project hooks.
+Follow Cloud's [GitLab token setup guide](https://github.com/AgentWorkforce/cloud/blob/trunk/docs/flows/gitlab-token-connections.md)
+to select projects and configure externally managed hooks before validating a
+hosted listener. A successful connection alone does not verify webhook delivery
+or a listener run.
+
 ## Local OSS vs Hosted Cloud
 
 Use local OSS for development, tests, or fully self-hosted deployments. Use hosted Agent Relay when the user wants provider-backed files to work without operating the stack.

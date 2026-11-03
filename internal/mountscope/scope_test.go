@@ -313,6 +313,8 @@ func TestProviderRootMatchesPublicProviderStorage(t *testing.T) {
 		"slack-sage":             "slack",
 		"slack-my-senior-dev":    "slack-msd",
 		"slack-nightcto":         "slack-nightcto",
+		"gitlab-pat":             "gitlab",
+		"gitlab-group-token":     "gitlab",
 		"  SLACK-MY-SENIOR-DEV ": "slack-msd",
 	} {
 		if got := ProviderRoot(provider); got != want {
@@ -323,10 +325,12 @@ func TestProviderRootMatchesPublicProviderStorage(t *testing.T) {
 
 func TestNormalizeProviderIDOwnsPublicAliases(t *testing.T) {
 	for provider, want := range map[string]string{
-		"github":        "github",
-		"slack":         "slack",
-		"slack-sage":    "slack",
-		"  SLACK-SAGE ": "slack",
+		"github":             "github",
+		"slack":              "slack",
+		"slack-sage":         "slack",
+		"gitlab-pat":         "gitlab",
+		"gitlab-group-token": "gitlab",
+		"  SLACK-SAGE ":      "slack",
 	} {
 		if got := NormalizeProviderID(provider); got != want {
 			t.Fatalf("NormalizeProviderID(%q) = %q, want %q", provider, got, want)
