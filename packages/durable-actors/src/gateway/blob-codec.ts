@@ -1,3 +1,4 @@
+import { decodeContent } from "../runtime/storage.js";
 import type { ContentBlobRef } from "../runtime/types.js";
 import { blobKey, sha256Hex, type BlobStore } from "./blobs.js";
 
@@ -12,6 +13,15 @@ import { blobKey, sha256Hex, type BlobStore } from "./blobs.js";
  * Inbound (actor -> client): every object carrying `contentBlob` is hydrated
  * back to `content` in its declared encoding.
  */
+const HYDRATE_MAX_BYTES = 256 * 1024 * 1024;
+const HYDRATE_CONCURRENCY = 8;
+
+export class HydrateTooLarge extends Error {
+  constructor(readonly bytes: number) {
+    super(`response would hydrate ${bytes} bytes of file content`);
+  }
+}
+
 export class BlobCodec {
   constructor(
     private readonly store: BlobStore | null,
@@ -63,9 +73,14 @@ export class BlobCodec {
     return { content, contentHash: sha256, contentSize: bytes.byteLength, encoding };
   }
 
-  /** Replace every `contentBlob` ref in a parsed JSON value with its content. */
+  /**
+   * Replace every `contentBlob` ref in a parsed JSON value with its content.
+   * Bounded: at most HYDRATE_MAX_BYTES in one response (else HydrateTooLarge)
+   * and HYDRATE_CONCURRENCY object-store GETs at a time.
+   */
   async hydrate(value: unknown): Promise<void> {
-    const pending: Array<Promise<void>> = [];
+    const pending: Array<() => Promise<void>> = [];
+    let total = 0;
     const visit = (node: unknown) => {
       if (Array.isArray(node)) {
         for (const item of node) visit(item);
@@ -75,6 +90,7 @@ export class BlobCodec {
       const record = node as Record<string, unknown>;
       const ref = record.contentBlob as ContentBlobRef | undefined;
       if (ref && typeof ref === "object" && typeof ref.sha256 === "string") {
+        total += Number.isSafeInteger(ref.size) && ref.size > 0 ? ref.size : 0;
         pending.push(
           (async () => {
             if (!this.store) throw new Error("file content is in object storage but no blob store is configured");
@@ -83,14 +99,19 @@ export class BlobCodec {
             record.content =
               record.encoding === "base64" ? Buffer.from(bytes).toString("base64") : Buffer.from(bytes).toString("utf8");
             delete record.contentBlob;
-          })(),
+          }),
         );
         return;
       }
       for (const child of Object.values(record)) visit(child);
     };
     visit(value);
-    await Promise.all(pending);
+    if (total > HYDRATE_MAX_BYTES) throw new HydrateTooLarge(total);
+    let next = 0;
+    const worker = async () => {
+      while (next < pending.length) await pending[next++]!();
+    };
+    await Promise.all(Array.from({ length: Math.min(HYDRATE_CONCURRENCY, pending.length) }, worker));
   }
 
   async rawBytes(ref: ContentBlobRef): Promise<Uint8Array> {
@@ -116,8 +137,7 @@ function isValidUtf8(bytes: Uint8Array): boolean {
   }
 }
 
+/** Same validation as the actor (decodeContent), so small and large files get the same verdict. */
 function decode(content: string, encoding: "utf-8" | "base64"): Uint8Array | null {
-  if (encoding === "utf-8") return Buffer.from(content, "utf8");
-  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(content.replace(/\s+/g, ""))) return null;
-  return Buffer.from(content, "base64");
+  return decodeContent(content, encoding);
 }

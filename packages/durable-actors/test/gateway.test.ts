@@ -151,6 +151,7 @@ describe("relayfile gateway on workspace actors", () => {
         "content-type": "application/octet-stream",
         "x-relayfile-encoding": "base64",
         "x-relayfile-mode": "644",
+        "if-match": "0",
       },
       body: raw,
     });

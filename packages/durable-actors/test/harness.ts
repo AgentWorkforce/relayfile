@@ -16,7 +16,8 @@ export class LocalWorkspaceActors implements WorkspaceActors {
   readonly dbs = new Map<string, FakeActorDb>();
   readonly runtimes = new Map<string, WorkspaceRuntime>();
   private queues = new Map<string, Promise<unknown>>();
-  alarm: number | null = null;
+  /** Per-workspace alarm, like durable-actors' per-actor alarm port. */
+  readonly alarms = new Map<string, number | null>();
 
   runtime(workspaceId: string): WorkspaceRuntime {
     let runtime = this.runtimes.get(workspaceId);
@@ -24,7 +25,7 @@ export class LocalWorkspaceActors implements WorkspaceActors {
       const db = new FakeActorDb();
       this.dbs.set(workspaceId, db);
       runtime = new WorkspaceRuntime(db, workspaceId, {
-        alarm: { get: () => this.alarm, set: (ms) => (this.alarm = ms) },
+        alarm: { get: () => this.alarms.get(workspaceId) ?? null, set: (ms) => void this.alarms.set(workspaceId, ms) },
       });
       this.runtimes.set(workspaceId, runtime);
     }
@@ -36,7 +37,13 @@ export class LocalWorkspaceActors implements WorkspaceActors {
     const db = this.dbs.get(workspaceId)!;
     // Serialize like an actor mailbox, and wrap in a transaction like the Workspace actor does.
     const previous = this.queues.get(workspaceId) ?? Promise.resolve();
-    const next = previous.catch(() => undefined).then(() => db.transaction(() => runtime.handle(request, caller)));
+    const next = previous
+      .catch(() => undefined)
+      .then(async () => {
+        const response = await db.transaction(() => runtime.handle(request, caller));
+        await runtime.flush();
+        return response;
+      });
     this.queues.set(workspaceId, next);
     // JSON round trip, as actor RPC does.
     return JSON.parse(JSON.stringify(await next)) as ActorHttpResponse;

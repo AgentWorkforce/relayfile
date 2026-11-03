@@ -341,13 +341,16 @@ export class SqliteWorkspaceStorage implements WebhookStorageAdapter {
   enqueueWriteback(_item: WritebackItem): void {}
 
   getPendingWritebacks(): WritebackItem[] {
-    return this.listOperations({ status: "pending", limit: MAX_PAGE }).items.map((op) => ({
-      id: op.opId,
-      workspaceId: this.workspaceId,
-      path: op.path,
-      revision: op.revision,
-      correlationId: op.correlationId,
-    }));
+    const items: WritebackItem[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = this.listOperations({ status: "pending", cursor, limit: MAX_PAGE });
+      for (const op of page.items) {
+        items.push({ id: op.opId, workspaceId: this.workspaceId, path: op.path, revision: op.revision, correlationId: op.correlationId });
+      }
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+    return items;
   }
 
   // ── Webhook envelopes ──────────────────────────────────────────────────
@@ -485,7 +488,12 @@ export function toEvent(row: Record<string, unknown>): StoredEvent {
 /** Decoded bytes of stored content; null for invalid base64. */
 export function decodeContent(content: string, encoding: string | undefined): Uint8Array | null {
   if (encoding === "base64") {
+    // Strict: alphabet only (no whitespace), whole bytes (an unpadded tail of
+    // one char is invalid), padding only on a length that is a multiple of 4.
     if (!/^[A-Za-z0-9+/]*={0,2}$/.test(content)) return null;
+    const unpadded = content.replace(/=+$/, "");
+    if (unpadded.length % 4 === 1) return null;
+    if (unpadded.length !== content.length && content.length % 4 !== 0) return null;
     return Buffer.from(content, "base64");
   }
   return Buffer.from(content, "utf8");

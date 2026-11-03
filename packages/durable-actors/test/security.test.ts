@@ -162,6 +162,41 @@ describe("gateway byte handling", () => {
     expect((await api(gw, "GET", file("/mine3.txt"), { token: t })).json.content).toBe("");
   });
 
+  it("uploads nothing for callers that may not write the target", async () => {
+    const reader = token(WS, ["fs:read"], "reader");
+    const big = "r".repeat(5000);
+    const res = await api(gw, "PUT", file("/x.txt"), { token: reader, body: { content: big }, headers: { "if-match": "0" } });
+    expect(res.status).toBe(403);
+    const raw = await fetch(`${gw.url}${file("/y.bin")}`, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${reader}`, "x-correlation-id": "c", "content-type": "application/octet-stream", "if-match": "0" },
+      body: Buffer.alloc(5000, 1),
+    });
+    expect(raw.status).toBe(403);
+    const scoped = token(WS, ["relayfile:fs:write:/team/**"], "w");
+    await api(gw, "POST", `/v1/workspaces/${WS}/fs/bulk`, { token: scoped, body: { files: [{ path: "/other/z.txt", content: big }] } });
+    expect(gw.blobs.objects.size).toBe(0);
+  });
+
+  it("rejects malformed content the same way for small and large files", async () => {
+    for (const content of ["A", "QQ=", "QQ= ", "Q Q==", "A".repeat(4001)]) {
+      const res = await api(gw, "PUT", file("/b.bin"), { token: t, body: { content, encoding: "base64" }, headers: { "if-match": "*" } });
+      expect([content, res.status, res.json.code]).toEqual([content, 400, "bad_request"]);
+    }
+    expect(gw.blobs.objects.size).toBe(0);
+    expect((await api(gw, "PUT", file("/b.bin"), { token: t, body: { content: "QQ" , encoding: "base64" }, headers: { "if-match": "*" } })).status).toBe(202);
+    expect((await api(gw, "PUT", file("/n.txt"), { token: t, body: { content: 123 }, headers: { "if-match": "*" } })).status).toBe(400);
+    const bulk = await api(gw, "POST", `/v1/workspaces/${WS}/fs/bulk`, { token: t, body: { files: [{ path: "/n2.txt", content: { a: 1 } }] } });
+    expect(bulk.json.errors[0].code).toBe("invalid_input");
+    expect((await api(gw, "GET", file("/n.txt"), { token: t })).status).toBe(404);
+  });
+
+  it("reports byte sizes like the Go server", async () => {
+    await api(gw, "PUT", file("/u.md"), { token: t, body: { content: "héllo" }, headers: { "if-match": "0" } });
+    const tree = await api(gw, "GET", `/v1/workspaces/${WS}/fs/tree?path=/`, { token: t });
+    expect(tree.json.entries.find((e: { path: string }) => e.path === "/u.md").size).toBe(Buffer.byteLength("héllo"));
+  });
+
   it("normalizes the encoding like the actor before offloading", async () => {
     const bytes = Buffer.alloc(3000, 9);
     const b64 = bytes.toString("base64");
@@ -177,20 +212,22 @@ describe("gateway byte handling", () => {
 
   it("stores raw non-UTF-8 bytes losslessly", async () => {
     const bytes = Buffer.from([0xff, 0xfe, 0x00, 0x41, 0xc3]);
-    expect((await rawPut("/bin.dat", bytes)).status).toBe(202);
+    expect((await rawPut("/bin.dat", bytes, { "if-match": "0" })).status).toBe(202);
     const read = await api(gw, "GET", file("/bin.dat"), { token: t });
     expect(read.json.encoding).toBe("base64");
     expect(Buffer.from(read.json.content, "base64").equals(bytes)).toBe(true);
     expect(read.json.contentHash).toBe(sha(bytes));
     const text = Buffer.from("héllo", "utf8");
-    expect((await rawPut("/text.txt", text)).status).toBe(202);
+    expect((await rawPut("/text.txt", text, { "if-match": "0" })).status).toBe(202);
     const textRead = await api(gw, "GET", file("/text.txt"), { token: t });
     expect(textRead.json.encoding).toBeUndefined();
     expect(textRead.json.content).toBe("héllo");
   });
 
-  it("converts zero-byte streaming writes", async () => {
-    const res = await rawPut("/empty.txt", Buffer.alloc(0), { "x-relayfile-mode": "600", "x-relayfile-content-type": "text/plain" });
+  it("converts zero-byte streaming writes and keeps the If-Match precondition", async () => {
+    expect((await rawPut("/nomatch.txt", Buffer.from("x"))).status).toBe(412);
+    expect((await rawPut("/empty.txt", Buffer.alloc(0))).status).toBe(412);
+    const res = await rawPut("/empty.txt", Buffer.alloc(0), { "if-match": "0", "x-relayfile-mode": "600", "x-relayfile-content-type": "text/plain" });
     expect(res.status).toBe(202);
     const read = await api(gw, "GET", file("/empty.txt"), { token: t });
     expect(read.json).toMatchObject({ content: "", mode: 0o600, contentType: "text/plain", contentHash: sha("") });
@@ -208,18 +245,16 @@ describe("workspace runtime", () => {
   });
 
   it("re-migrates after a call that rolled back its migration", async () => {
-    const db = new FakeActorDb();
     let fail = true;
-    const runtime = new WorkspaceRuntime(db, "ws", {
-      sockets: {
-        broadcast() {},
-        connections: async () => {
-          if (fail) throw new Error("socket listing failed");
-          return [];
-        },
-      },
-    });
-    await expect(db.transaction(() => runtime.handle(bulk(1, "/a"), caller))).rejects.toThrow("socket listing failed");
+    class FailingDb extends FakeActorDb {
+      override exec<Row extends object>(sql: string, ...bindings: Parameters<FakeActorDb["exec"]>[1][]): Row[] {
+        if (fail && /^\s*INSERT INTO rf_events/.test(sql)) throw new Error("disk I/O error");
+        return super.exec<Row>(sql, ...bindings);
+      }
+    }
+    const db = new FailingDb();
+    const runtime = new WorkspaceRuntime(db, "ws");
+    await expect(db.transaction(() => runtime.handle(bulk(1, "/a"), caller))).rejects.toThrow("disk I/O error");
     fail = false;
     const res = await db.transaction(() => runtime.handle(bulk(1, "/a"), caller));
     expect(res.status).toBe(202);
@@ -240,9 +275,43 @@ describe("workspace runtime", () => {
     const runtime = new WorkspaceRuntime(db, "ws", { sockets: { broadcast() {}, connections: async () => [socket] } });
     const res = await db.transaction(() => runtime.handle(bulk(1205, "/github/repos/o/r/issues"), caller));
     expect(JSON.parse(res.body).written).toBe(1205);
+    expect(frames).toHaveLength(0); // nothing is pushed before the transaction commits
+    await runtime.flush();
     expect(frames).toHaveLength(1205);
     expect(frames.at(-1)).toMatchObject({ type: "file.created", path: "/github/repos/o/r/issues/f1204.md" });
     const pending = await runtime.handle({ method: "GET", path: "/writeback/pending", query: [], headers: {}, body: null }, caller);
     expect(JSON.parse(pending.body)).toHaveLength(1205);
+  });
+});
+
+describe("fan-out and envelope delivery", () => {
+  const caller: CallerContext = { agentName: "a", scopes: ["fs:read", "fs:write"], correlationId: "c" };
+  it("survives a failing socket without rolling the write back", async () => {
+    const good: Array<Record<string, unknown>> = [];
+    const meta = { agentName: "a", scopes: ["fs:read"], cursor: null, fromNow: true, paths: [] };
+    const sockets: SocketHandle[] = [
+      { id: "bad", metadata: meta, send: () => { throw new Error("closed"); } },
+      { id: "good", metadata: meta, send: (m) => good.push(m) },
+    ];
+    const db = new FakeActorDb();
+    const runtime = new WorkspaceRuntime(db, "ws", { sockets: { broadcast() {}, connections: async () => sockets } });
+    const put: ActorHttpRequest = { method: "PUT", path: "/fs/file", query: [["path", "/a.md"]], headers: { "if-match": "0" }, body: '{"content":"x"}' };
+    expect((await db.transaction(() => runtime.handle(put, caller))).status).toBe(202);
+    await runtime.flush();
+    expect(good).toHaveLength(1);
+    const read = await runtime.handle({ method: "GET", path: "/fs/file", query: [["path", "/a.md"]], headers: {}, body: null }, caller);
+    expect(read.status).toBe(200);
+  });
+
+  it("applies a signed internal envelope without deliveryId once, keyed on its signature", async () => {
+    const runtime = new WorkspaceRuntime(new FakeActorDb(), "ws");
+    const internal: CallerContext = { agentName: "relayfile-internal", scopes: [], correlationId: "c", internal: true };
+    const body = JSON.stringify({ workspaceId: "ws", provider: "linear", payload: { event_type: "file.updated", path: "/linear/issues/A-1.json", data: { content: "{}" } } });
+    const send = () => runtime.handle({ method: "POST", path: "/internal/webhook-envelopes", query: [], headers: { "x-relay-signature": "ab".repeat(32) }, body }, internal);
+    const first = JSON.parse((await send()).body);
+    const second = JSON.parse((await send()).body);
+    expect(second.id).toBe(first.id);
+    const events = await runtime.handle({ method: "GET", path: "/fs/events", query: [], headers: {}, body: null }, caller);
+    expect(JSON.parse(events.body).events.filter((e: { type: string }) => e.type === "file.updated")).toHaveLength(1);
   });
 });

@@ -37,7 +37,8 @@ export class MemoryBlobStore implements BlobStore {
     if (!this.objects.has(key)) this.objects.set(key, new Uint8Array(bytes));
   }
   async get(key: string): Promise<Uint8Array | null> {
-    return this.objects.get(key) ?? null;
+    const bytes = this.objects.get(key);
+    return bytes ? new Uint8Array(bytes) : null;
   }
   async probe(): Promise<void> {}
 }
@@ -85,8 +86,8 @@ export class S3BlobStore implements BlobStore {
 
   async put(key: string, bytes: Uint8Array): Promise<void> {
     const response = await this.send("PUT", this.objectUrl(key), bytes);
-    if (!response.ok) throw new Error(`s3 put failed: HTTP ${response.status}`);
     await response.body?.cancel();
+    if (!response.ok) throw new Error(`s3 put failed: HTTP ${response.status}`);
   }
 
   async get(key: string): Promise<Uint8Array | null> {
@@ -95,7 +96,10 @@ export class S3BlobStore implements BlobStore {
       await response.body?.cancel();
       return null;
     }
-    if (!response.ok) throw new Error(`s3 get failed: HTTP ${response.status}`);
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error(`s3 get failed: HTTP ${response.status}`);
+    }
     return new Uint8Array(await response.arrayBuffer());
   }
 
@@ -247,7 +251,10 @@ export class GcsBlobStore implements BlobStore {
       await response.body?.cancel();
       return null;
     }
-    if (!response.ok) throw new Error(`gcs get failed: HTTP ${response.status}`);
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error(`gcs get failed: HTTP ${response.status}`);
+    }
     return new Uint8Array(await response.arrayBuffer());
   }
 

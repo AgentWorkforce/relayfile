@@ -2,7 +2,7 @@ import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { describe, expect, it } from "vitest";
 import { artifactObject, artifactUuid, bundleSha256, deploymentBody, parseSecretRefs } from "../src/deploy/plan.js";
-import { AuthError, BearerVerifier } from "../src/gateway/auth.js";
+import { AuthError, BearerVerifier, mintHs256, verifyInternalHmac } from "../src/gateway/auth.js";
 import { createBroker } from "../src/gateway/broker.js";
 import { signV4 } from "../src/gateway/blobs.js";
 import { loadGatewayConfig } from "../src/gateway/config.js";
@@ -80,9 +80,38 @@ describe("bearer verification", () => {
     await expect(verifier.verifyToken(hs)).rejects.toMatchObject({ message: "unsupported jwt algorithm" });
   });
 
+  it("fails closed on missing kid and future nbf, and rate-limits unknown-kid JWKS refreshes", async () => {
+    let fetches = 0;
+    const counting = (async () => {
+      fetches += 1;
+      return jwks();
+    }) as unknown as typeof fetch;
+    const verifier = new BearerVerifier({ jwksUrl: "https://auth/jwks", hs256Secret: "hs-secret", fetch: counting });
+    const noKid = (() => {
+      const h = Buffer.from(JSON.stringify({ alg: "RS256" })).toString("base64url");
+      const p = Buffer.from(JSON.stringify(base)).toString("base64url");
+      return `${h}.${p}.${sign("RSA-SHA256", Buffer.from(`${h}.${p}`), privateKey).toString("base64url")}`;
+    })();
+    await expect(verifier.verifyToken(noKid)).rejects.toMatchObject({ message: "missing jwt kid" });
+    expect(fetches).toBe(0);
+    await expect(verifier.verifyToken(rs256({ ...base, nbf: Math.floor(Date.now() / 1000) + 600 }))).rejects.toMatchObject({ message: "token not yet valid" });
+    expect(fetches).toBe(1);
+    await Promise.all([1, 2, 3].map((n) => expect(verifier.verifyToken(rs256(base, `nope-${n}`))).rejects.toBeInstanceOf(AuthError)));
+    expect(fetches).toBe(2); // one refresh for the burst of unknown kids, then the cooldown applies
+    await expect(verifier.verifyToken(mintHs256("hs-secret", { ...base, nbf: Math.floor(Date.now() / 1000) + 600 }))).rejects.toMatchObject({ message: "token not yet valid" });
+  });
+
   it("reports an unreachable JWKS as 503", async () => {
     const verifier = new BearerVerifier({ jwksUrl: "https://auth/jwks", fetch: (async () => { throw new Error("down"); }) as unknown as typeof fetch });
     await expect(verifier.verifyToken(rs256(base))).rejects.toMatchObject({ status: 503 });
+  });
+});
+
+describe("internal HMAC", () => {
+  it("requires an RFC3339 timestamp like the Go verifier", () => {
+    const now = Date.parse("2026-11-03T10:00:00Z");
+    expect(verifyInternalHmac("k", "Tue, 03 Nov 2026 10:00:00 GMT", "00", new Uint8Array(), now)?.message).toBe("invalid timestamp");
+    expect(verifyInternalHmac("k", "2026-11-03T10:00:00Z", "00", new Uint8Array(), now)?.message).toBe("invalid signature");
   });
 });
 

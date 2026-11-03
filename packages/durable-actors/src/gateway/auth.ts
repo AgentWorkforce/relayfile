@@ -30,6 +30,9 @@ export class AuthError extends Error {
 const RELAYAUTH_PREFIXES = ["relay_pa_", "relay_ws_", "relay_id_", "relay_ag_"];
 const JWKS_TTL_MS = 5 * 60_000;
 const JWKS_STALE_GRACE_MS = 60_000;
+/** Minimum spacing of JWKS refetches triggered by an unknown `kid` (key rotation). */
+const JWKS_UNKNOWN_KID_REFRESH_MS = 30_000;
+const RFC3339 = /^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/;
 
 export interface VerifierOptions {
   jwksUrl?: string;
@@ -40,6 +43,8 @@ export interface VerifierOptions {
 
 export class BearerVerifier {
   private jwks: { keys: Map<string, KeyObject>; fetchedAt: number } | undefined;
+  private jwksInFlight: Promise<Map<string, KeyObject>> | null = null;
+  private lastUnknownKidRefresh = Number.NEGATIVE_INFINITY;
   private readonly fetchImpl: typeof fetch;
   private readonly now: () => number;
   constructor(private readonly options: VerifierOptions) {
@@ -83,7 +88,9 @@ export class BearerVerifier {
     const signature = Buffer.from(s, "base64url");
     const signingInput = Buffer.from(`${h}.${p}`);
     if (header.alg === "RS256" && this.options.jwksUrl) {
-      const key = await this.rsaKey(header.kid ?? "");
+      // Fail closed on a missing kid before any JWKS fetch (Go verifier).
+      if (typeof header.kid !== "string" || header.kid.trim() === "") throw new AuthError(401, "unauthorized", "missing jwt kid");
+      const key = await this.rsaKey(header.kid);
       if (!verifySignature("RSA-SHA256", signingInput, key, signature)) {
         throw new AuthError(401, "unauthorized", "jwt signature mismatch");
       }
@@ -103,6 +110,10 @@ export class BearerVerifier {
     const exp = payload.exp;
     if (typeof exp !== "number") throw new AuthError(401, "unauthorized", "invalid exp claim");
     if (Math.floor(this.now() / 1000) >= exp) throw new AuthError(401, "unauthorized", "token expired");
+    if (payload.nbf !== undefined) {
+      if (typeof payload.nbf !== "number") throw new AuthError(401, "unauthorized", "invalid nbf claim");
+      if (Math.floor(this.now() / 1000) < payload.nbf) throw new AuthError(401, "unauthorized", "token not yet valid");
+    }
     if (!hasAudience(payload.aud, "relayfile")) throw new AuthError(401, "unauthorized", "invalid aud claim");
     const scopes = parseScopes(payload.scopes);
     if (scopes.size === 0) throw new AuthError(403, "forbidden", "no scopes granted");
@@ -111,9 +122,15 @@ export class BearerVerifier {
 
   private async rsaKey(kid: string): Promise<KeyObject> {
     const now = this.now();
-    if (!this.jwks || now - this.jwks.fetchedAt >= JWKS_TTL_MS || !this.jwks.keys.has(kid)) {
+    const expired = !this.jwks || now - this.jwks.fetchedAt >= JWKS_TTL_MS;
+    // An unknown kid refetches at most every JWKS_UNKNOWN_KID_REFRESH_MS, so
+    // tokens with made-up kids cannot drive one JWKS request each.
+    const unknownKid = !expired && !this.jwks!.keys.has(kid) && now - this.lastUnknownKidRefresh >= JWKS_UNKNOWN_KID_REFRESH_MS;
+    if (expired || unknownKid) {
+      if (unknownKid) this.lastUnknownKidRefresh = now;
       try {
-        this.jwks = { keys: await this.fetchJwks(), fetchedAt: now };
+        this.jwksInFlight ??= this.fetchJwks().finally(() => (this.jwksInFlight = null));
+        this.jwks = { keys: await this.jwksInFlight, fetchedAt: now };
       } catch {
         // Serve a slightly stale key set through a brief JWKS outage, like the Go server.
         if (!this.jwks || now - this.jwks.fetchedAt > JWKS_TTL_MS + JWKS_STALE_GRACE_MS) {
@@ -176,7 +193,7 @@ export function verifyInternalHmac(
 ): AuthError | null {
   if (!secret) return new AuthError(503, "unavailable", "internal webhook ingestion is not configured");
   if (!timestamp || !signature) return new AuthError(401, "unauthorized", "missing signature headers");
-  const when = Date.parse(timestamp);
+  const when = RFC3339.test(timestamp) ? Date.parse(timestamp) : Number.NaN;
   if (!Number.isFinite(when)) return new AuthError(401, "unauthorized", "invalid timestamp");
   if (Math.abs(nowMs - when) > maxSkewMs) return new AuthError(401, "unauthorized", "timestamp outside allowed window");
   const mac = createHmac("sha256", secret).update(timestamp).update("\n").update(body).digest("hex");

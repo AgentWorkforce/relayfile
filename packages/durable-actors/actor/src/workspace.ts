@@ -36,7 +36,10 @@ export class Workspace extends Actor<SocketMetadata, Incoming, Outgoing> {
 
     /** Serve one relayfile API request for this workspace. */
     async handle(request: ActorHttpRequest, caller: CallerContext): Promise<ActorHttpResponse> {
-        return this.db.transaction(() => this.runtime.handle(request, caller))
+        const response = await this.db.transaction(() => this.runtime.handle(request, caller))
+        // Socket fan-out only after the write committed (still inside this actor call, so serialized).
+        await this.runtime.flush()
+        return response
     }
 
     /** Writeback retry scheduling and event retention. */

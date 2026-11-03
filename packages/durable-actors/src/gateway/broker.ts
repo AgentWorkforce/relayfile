@@ -59,7 +59,7 @@ export function createBroker(config: BrokerConfig): Server {
       if (req.method !== "POST") return send(405, { code: "method_not_allowed" });
       if (!authorized(req)) return send(401, { code: "unauthorized" });
       if (req.url === "/v1/session") {
-        await drain(req);
+        await readBody(req); // capped like /v1/socket-grant; the body is ignored
         const grant = await issueSession(fetchImpl, config.controlPlaneUrl, config.projectId, config.adminKey, "relayfile-gateway");
         return send(200, grant);
       }
@@ -93,10 +93,4 @@ async function readBody(req: IncomingMessage): Promise<string> {
     chunks.push(chunk as Buffer);
   }
   return Buffer.concat(chunks).toString("utf8") || "{}";
-}
-
-async function drain(req: IncomingMessage): Promise<void> {
-  for await (const _ of req) {
-    // discard
-  }
 }

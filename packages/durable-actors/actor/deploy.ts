@@ -99,6 +99,8 @@ async function main(): Promise<void> {
     const object = artifactObject(artifactUuid(bytes))
     log("deploy.compiled", { bytes: bytes.byteLength, object })
 
+    // Validate the registration body before the (immutable, never collected) upload.
+    deploymentBody({ organizationId, bucket, object, generation: 1, bytes, contract, secretRefs })
     const generation = await uploadImmutable(bucket, object, bytes)
     log("deploy.uploaded", { bucket, object, generation })
 

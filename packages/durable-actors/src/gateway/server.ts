@@ -3,11 +3,11 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Duplex } from "node:stream";
 import WebSocket, { WebSocketServer } from "ws";
 import { normalizePath } from "@relayfile/core";
-import { scopeMatchesPath } from "../runtime/scopes.js";
+import { hasAnyScopeGrant, scopeMatchesPath } from "../runtime/scopes.js";
 import { HYDRATE_HEADER, type ActorHttpRequest, type CallerContext, type SocketMetadata } from "../runtime/types.js";
 import type { WorkspaceActors } from "./actors.js";
 import { AuthError, BearerVerifier, verifyInternalHmac, type Principal } from "./auth.js";
-import { BlobCodec, normalizeEncoding } from "./blob-codec.js";
+import { BlobCodec, HydrateTooLarge, normalizeEncoding } from "./blob-codec.js";
 import type { BlobStore } from "./blobs.js";
 
 /**
@@ -78,9 +78,9 @@ export function createGateway(options: GatewayOptions): Server {
 
     const match = /^\/v1\/workspaces\/([^/]+)(\/.*)$/.exec(pathname);
     if (!match) return sendError(res, 404, "not_found", "route not found", "");
-    const workspaceId = decodeURIComponent(match[1]!);
+    const workspaceId = safeDecode(match[1]!);
     const subPath = match[2]!;
-    if (!WORKSPACE_ID.test(workspaceId)) return sendError(res, 400, "bad_request", "invalid workspace id", "");
+    if (workspaceId === null || !WORKSPACE_ID.test(workspaceId)) return sendError(res, 400, "bad_request", "invalid workspace id", "");
 
     let principal: Principal;
     try {
@@ -102,11 +102,18 @@ export function createGateway(options: GatewayOptions): Server {
     }
 
     let body: string | null = raw.length ? raw.toString("utf8") : null;
+    // Upload nothing for callers without write access to the target: the
+    // actor would reject the write and the object would be orphaned (no blob GC).
+    const scopes = new Set(principal.scopes);
+    const mayWrite = (path: unknown) => typeof path === "string" && path.trim() !== "" && scopeMatchesPath(scopes, "fs:write", normalizePath(path));
     // Offload large file content before it reaches the actor. The raw-bytes
     // branch is chosen by route and content type, so a zero-byte streaming
     // write is still converted (wildcard If-Match default, X-Relayfile-* metadata).
     const rawWrite = req.method === "PUT" && subPath === "/fs/file" && (req.headers["content-type"] ?? "").startsWith("application/octet-stream");
-    if (rawWrite || (body && req.method === "PUT" && subPath === "/fs/file")) {
+    if ((rawWrite || (body && req.method === "PUT" && subPath === "/fs/file")) && !mayWrite(url.searchParams.get("path"))) {
+      // Leave the body to the actor, which answers 400/403 with the canonical error.
+      if (rawWrite) body = null;
+    } else if (rawWrite || (body && req.method === "PUT" && subPath === "/fs/file")) {
       if (rawWrite) {
         const encoding = normalizeEncoding(header(req, "x-relayfile-encoding")) === "base64" ? "base64" : "utf-8";
         const file = await codec.offloadBytes(raw, encoding);
@@ -118,7 +125,6 @@ export function createGateway(options: GatewayOptions): Server {
           ...(mode ? { mode: Number.parseInt(mode, 8) } : {}),
           ...(identity ? { contentIdentity: safeJson(identity) } : {}),
         });
-        if (!req.headers["if-match"]) req.headers["if-match"] = "*";
       } else if (body) {
         const parsed = safeJson(body);
         if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
@@ -128,9 +134,18 @@ export function createGateway(options: GatewayOptions): Server {
       }
     } else if (body && req.method === "POST" && subPath === "/fs/bulk") {
       const parsed = safeJson(body) as { files?: unknown } | null;
-      if (parsed && Array.isArray(parsed.files)) {
+      if (parsed && Array.isArray(parsed.files) && hasAnyScopeGrant(scopes, "fs:write")) {
         await Promise.all(
-          parsed.files.map((file) => (file && typeof file === "object" ? codec.offloadFile(file as Record<string, unknown>) : undefined)),
+          parsed.files.map((file) => {
+            if (!file || typeof file !== "object") return undefined;
+            const record = file as Record<string, unknown>;
+            if (mayWrite(record.path)) return codec.offloadFile(record);
+            // Outside the caller's scopes: the actor rejects it; just never forward client refs.
+            delete record.contentBlob;
+            delete record.contentHash;
+            delete record.contentSize;
+            return undefined;
+          }),
         );
         body = JSON.stringify(parsed);
       }
@@ -165,6 +180,9 @@ export function createGateway(options: GatewayOptions): Server {
       try {
         await codec.hydrate(parsed);
       } catch (error) {
+        if (error instanceof HydrateTooLarge) {
+          return sendError(res, 413, "export_too_large", "too much file content for one response; narrow the path", correlationId);
+        }
         console.error(JSON.stringify({ event: "gateway.blob_error", workspaceId, message: error instanceof Error ? error.message : String(error) }));
         return sendError(res, 503, "unavailable", "file content unavailable; retry", correlationId, { "retry-after": "1" });
       }
@@ -196,14 +214,20 @@ export function createGateway(options: GatewayOptions): Server {
       return sendError(res, 400, "bad_request", "workspaceId and provider are required", correlationId);
     }
     try {
+      // The signature goes to the actor too: an envelope without a deliveryId
+      // is deduplicated on it there, so a replay through another gateway
+      // replica (whose replay cache never saw it) is not applied twice.
       const response = await options.actors.handle(
         parsed.workspaceId,
-        { method: "POST", path: "/internal/webhook-envelopes", query: [], headers: {}, body: raw.toString("utf8") },
+        { method: "POST", path: "/internal/webhook-envelopes", query: [], headers: { "x-relay-signature": signature }, body: raw.toString("utf8") },
         { agentName: "relayfile-internal", scopes: [], correlationId, internal: true, externalWritebackProviders: options.externalWritebackProviders },
       );
       res.writeHead(response.status, response.headers);
       res.end(response.body);
     } catch {
+      // Let the sender retry the same signed request: the actor deduplicates
+      // it (by deliveryId or signature) if the failed call had committed.
+      replayCache.delete(replayKey);
       return sendError(res, 503, "unavailable", "workspace unavailable; retry", correlationId, { "retry-after": "1" });
     }
   }
@@ -212,7 +236,8 @@ export function createGateway(options: GatewayOptions): Server {
     const url = new URL(req.url ?? "/", "http://gateway");
     const match = /^\/v1\/workspaces\/([^/]+)\/fs\/ws$/.exec(url.pathname);
     if (!match) return rejectUpgrade(socket, 404, "not_found", "route not found");
-    const workspaceId = decodeURIComponent(match[1]!);
+    const workspaceId = safeDecode(match[1]!);
+    if (workspaceId === null) return rejectUpgrade(socket, 400, "bad_request", "invalid workspace id");
     const token = url.searchParams.get("token");
     let principal: Principal;
     try {
@@ -238,7 +263,7 @@ export function createGateway(options: GatewayOptions): Server {
       paths,
     };
     const grantUrl = await options.actors.socketGrant(workspaceId, metadata);
-    const upstream = new WebSocket(grantUrl, { maxPayload: 8 * 1024 * 1024 });
+    const upstream = new WebSocket(grantUrl, { maxPayload: 8 * 1024 * 1024, handshakeTimeout: 10_000 });
     // Frames the actor sends before the client upgrade completes (catch-up) are buffered.
     const early: string[] = [];
     let client: WebSocket | null = null;
@@ -293,6 +318,14 @@ function pickHeaders(req: IncomingMessage): Record<string, string> {
     if (value) out[name] = value;
   }
   return out;
+}
+
+function safeDecode(value: string): string | null {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
 }
 
 function safeJson(text: string): unknown {

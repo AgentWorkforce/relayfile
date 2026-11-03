@@ -17,7 +17,8 @@ RUN cd packages/core && npx tsc -p tsconfig.json \
        --banner:js="import { createRequire as __cr } from 'node:module'; const require = __cr(import.meta.url);"
 
 FROM node:22.23.0-bookworm-slim
-ENV NODE_ENV=production PORT=8080
+# No image-level PORT: each command has its own default (gateway 8080, session-broker 8090).
+ENV NODE_ENV=production
 COPY --from=build /out/relayfile-actors.mjs /opt/relayfile/relayfile-actors.mjs
 USER 1000:1000
 EXPOSE 8080

@@ -58,7 +58,7 @@ if (command === "gateway") {
     port,
     controlPlaneUrl,
     projectId: env.DURABLE_ACTORS_PROJECT_ID?.trim() || "relayfile",
-    adminKey: (env.DURABLE_ACTORS_SECRET ?? env.DURABLE_ACTORS_API_KEY ?? "").trim(),
+    adminKey: env.DURABLE_ACTORS_SECRET?.trim() || env.DURABLE_ACTORS_API_KEY?.trim() || "",
     brokerToken: (env.RELAYFILE_ACTORS_BROKER_TOKEN ?? "").trim(),
   });
   server.listen(port, () => log("broker.listening", { port }));

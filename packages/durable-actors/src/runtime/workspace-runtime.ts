@@ -146,7 +146,28 @@ export class WorkspaceRuntime {
       return await operation();
     } catch (error) {
       this.migrated = false;
+      this.fanOutFrom = null; // the events this call appended were rolled back
       throw error;
+    }
+  }
+
+  /** Lowest seq whose successors still have to be pushed to sockets (set by handle, drained by flush). */
+  private fanOutFrom: number | null = null;
+
+  /**
+   * Push the events appended by committed `handle` calls to connected /fs/ws
+   * sockets. Call it AFTER the transaction around `handle` has committed, so
+   * clients never see an event that a rollback then erases, and a failed
+   * socket send can never roll a write back.
+   */
+  async flush(): Promise<void> {
+    const from = this.fanOutFrom;
+    this.fanOutFrom = null;
+    if (from === null) return;
+    try {
+      await this.fanOut(from);
+    } catch (error) {
+      console.error(JSON.stringify({ event: "workspace.fanout_error", message: error instanceof Error ? error.message : String(error) }));
     }
   }
 
@@ -168,7 +189,7 @@ export class WorkspaceRuntime {
           throw error;
         }
       }
-      await this.fanOut(seqBefore);
+      if (this.latestSeq() > seqBefore) this.fanOutFrom = Math.min(this.fanOutFrom ?? seqBefore, seqBefore);
       this.scheduleMaintenance();
       return response;
     });
@@ -301,7 +322,7 @@ export class WorkspaceRuntime {
     const ifMatch = normalizeIfMatch(request.headers["if-match"] ?? "");
     if (!ifMatch) throw new HttpError(412, "precondition_failed", "missing If-Match header");
     const body = parseJsonBody(request);
-    const input: FileInput = { ...(body as Partial<FileInput>), path: raw, ifMatch, content: stringField(body.content) };
+    const input: FileInput = { ...(body as Partial<FileInput>), path: raw, ifMatch, content: contentField(body.content) };
     const outcome = this.writeOne(input, caller, { requireExplicitIfMatch: true });
     return jsonResponse(202, writeResultJson(outcome));
   }
@@ -380,14 +401,15 @@ export class WorkspaceRuntime {
       if (typeof input.content !== "string") throw bulkError(400, "invalid_input", "content must be a string");
       const bytes = decodeContent(input.content, encoding);
       if (!bytes) throw bulkError(400, "invalid_content", "content is not valid base64");
-      if (input.content.length > MAX_INLINE_FILE_BYTES) {
+      const contentBytes = Buffer.byteLength(input.content);
+      if (contentBytes > MAX_INLINE_FILE_BYTES) {
         throw bulkError(413, "payload_too_large", "file exceeds the inline size limit; configure a blob store");
       }
       contentHash =
         typeof input.contentHash === "string" && /^[a-f0-9]{64}$/.test(input.contentHash)
           ? input.contentHash
           : createHash("sha256").update(bytes).digest("hex");
-      size = input.content.length;
+      size = contentBytes; // Go: len(file.Content), the stored string's byte length
     }
 
     // Permissions first, before dedup hits or revision details can answer:
@@ -542,7 +564,7 @@ export class WorkspaceRuntime {
           ...(file as Partial<FileInput>),
           path: rawPath,
           ifMatch: typeof file.ifMatch === "string" ? file.ifMatch : undefined,
-          content: stringField(file.content),
+          content: contentField(file.content),
         };
         const outcome = this.writeOne(input, caller, { requireExplicitIfMatch: false });
         results.push({
@@ -882,7 +904,7 @@ export class WorkspaceRuntime {
       const value = query.get(column);
       if (value) {
         clauses.push(`${column} = ?`);
-        bindings.push(value);
+        bindings.push(column === "provider" ? value.trim().toLowerCase() : value);
       }
     }
     const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
@@ -1004,7 +1026,15 @@ export class WorkspaceRuntime {
     const body = parseJsonBody(request);
     const provider = typeof body.provider === "string" ? body.provider.trim() : "";
     if (!provider) throw new HttpError(400, "bad_request", "missing provider");
-    const deliveryId = typeof body.deliveryId === "string" && body.deliveryId ? body.deliveryId : `${provider}:${this.storage.nextEnvelopeId()}`;
+    // No deliveryId: key the envelope on its HMAC signature (covers timestamp
+    // + body), so the same signed request is applied once across replicas.
+    const signature = (request.headers["x-relay-signature"] ?? "").trim().toLowerCase();
+    const deliveryId =
+      typeof body.deliveryId === "string" && body.deliveryId
+        ? body.deliveryId
+        : signature
+          ? `sig:${signature}`
+          : `${provider}:${this.storage.nextEnvelopeId()}`;
     const existing = this.storage.getEnvelopeByDelivery(this.workspaceId, provider, deliveryId);
     if (existing) return jsonResponse(202, { status: "queued", id: existing.envelopeId, correlationId: existing.correlationId });
     const envelopeId = typeof body.envelopeId === "string" && body.envelopeId ? body.envelopeId : this.storage.nextEnvelopeId();
@@ -1085,6 +1115,7 @@ export class WorkspaceRuntime {
       `DELETE FROM rf_envelopes WHERE status = 'processed' AND received_at < ?`,
       new Date(this.now().getTime() - 7 * 24 * 60 * 60_000).toISOString(),
     );
+    this.sql.exec(`DELETE FROM rf_envelope_aliases WHERE envelope_id NOT IN (SELECT envelope_id FROM rf_envelopes)`);
     if (this.storage.countFiles() > 0) this.options.alarm?.set(this.now().getTime() + MAINTENANCE_INTERVAL_MS);
   }
 
@@ -1161,9 +1192,13 @@ export class WorkspaceRuntime {
     while (batch.length > 0) {
       for (const socket of connections) {
         const caller = socketCaller(socket.metadata);
-        for (const event of batch) {
-          const frame = this.socketFrame(event, caller, socket.metadata);
-          if (frame) socket.send(frame);
+        try {
+          for (const event of batch) {
+            const frame = this.socketFrame(event, caller, socket.metadata);
+            if (frame) socket.send(frame);
+          }
+        } catch {
+          // One broken socket must not starve the others; it reconnects with its cursor.
         }
       }
       if (batch.length < FANOUT_PAGE) break;
@@ -1199,8 +1234,9 @@ function parseJsonBody(request: ActorHttpRequest): Json {
   }
 }
 
-function stringField(value: unknown): string {
-  return typeof value === "string" ? value : "";
+/** Missing content is an empty file (Go decodes it as ""); any other non-string is kept so writeOne answers 400. */
+function contentField(value: unknown): string {
+  return value === undefined || value === null ? "" : (value as string);
 }
 
 function bulkError(status: number, code: string, message: string): HttpError {

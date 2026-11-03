@@ -20,9 +20,7 @@ export class FakeActorDb implements ActorSql {
       throw new Error(`statement not allowed in actors: ${sql.split(/\s+/)[0]}`);
     }
     const statement = this.db.prepare(sql);
-    const params = bindings.map((value) => (typeof value === "bigint" ? Number(value) : value)) as Array<
-      string | number | null | Uint8Array
-    >;
+    const params = bindings as Array<string | number | bigint | null | Uint8Array>;
     if (/^\s*(SELECT|WITH|PRAGMA)\b/i.test(sql) || /\bRETURNING\b/i.test(sql)) {
       return statement.all(...params) as Row[];
     }

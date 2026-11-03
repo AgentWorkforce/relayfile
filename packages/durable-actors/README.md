@@ -36,7 +36,7 @@ writeback workers use:
 | --- | --- |
 | `GET /health`, `/healthz`, `/readyz` | `/health` advertises `features: ["symlink-v1"]`; `/readyz` checks the control plane (or broker) and the blob store |
 | `GET /fs/tree`, `GET/PUT/DELETE /fs/file`, `POST /fs/bulk`, `POST /fs/bulk-read` | If-Match semantics, 409 `revision_conflict` shape, symlinks, modes, semantics, `contentIdentity` dedupe, ACL markers and path-scoped tokens |
-| `PUT /fs/file` raw bytes | the streaming write (`application/octet-stream`, `X-Relayfile-*` headers) |
+| `PUT /fs/file` raw bytes | the streaming write (`application/octet-stream`, `X-Relayfile-*` headers, `If-Match` required like hosted); buffered up to `RELAYFILE_MAX_BODY_BYTES`, not advertised as `file-stream-v1` |
 | `GET /fs/events` | `evt_<n>` cursors, asc/desc; an evicted cursor answers 410 `cursor_expired` + `action: full_resync` |
 | `GET /fs/ws` | actor WebSocket; catch-up from `cursor`, `from=now`, `path` filters, inline content ≤ 1 MiB |
 | `GET /fs/export?format=json`, `GET /fs/query` | |
@@ -98,8 +98,10 @@ in the API:
   writes are serialized in its actor; every call is one SQLite transaction.
   Proven: 40 concurrent `If-Match: 0` creates of one path through two gateway
   replicas produce exactly one 202 and 39 409s and one `file.created` event.
-- Blobs are content-addressed and written create-only, so replicas uploading
-  the same bytes converge on one object.
+- Blobs are content-addressed (the key is the sha256 of the bytes), so
+  replicas uploading the same bytes converge on one object. GCS writes are
+  create-only (`ifGenerationMatch=0`); the S3 driver uses a plain `PUT`, which
+  can only ever rewrite a key with identical bytes.
 
 ## Env contract
 
@@ -119,9 +121,9 @@ in the API:
 | `RELAYFILE_EXTERNAL_WRITEBACK_PROVIDERS` | empty | comma list (or `*`) of providers with an external writeback worker |
 | `RELAYFILE_BLOB_STORE` | `inline` | `gcs`, `s3`, or `inline` (bytes in actor SQLite, max 10 MiB per file; dev only) |
 | `RELAYFILE_BLOB_BUCKET`, `RELAYFILE_BLOB_PREFIX` | | object location; keys are `<prefix>blobs/sha256/<aa>/<sha256>` |
-| `RELAYFILE_BLOB_INLINE_MAX_BYTES` | `65536` | larger decoded content goes to the blob store |
+| `RELAYFILE_BLOB_INLINE_MAX_BYTES` | `65536` | with `RELAYFILE_BLOB_STORE=gcs` or `s3`, larger decoded content goes to the blob store; `inline` mode keeps content in actor SQLite up to 10 MiB per file |
 | `STORAGE_EMULATOR_HOST` | | gcs: fake-gcs-server; otherwise credentials come from the metadata server (Workload Identity) |
-| `RELAYFILE_S3_ENDPOINT`, `RELAYFILE_S3_REGION`, `RELAYFILE_S3_FORCE_PATH_STYLE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | | s3: MinIO, AWS, R2, GCS-HMAC |
+| `RELAYFILE_S3_ENDPOINT`, `RELAYFILE_S3_REGION`, `RELAYFILE_S3_FORCE_PATH_STYLE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | | s3: MinIO, AWS, R2, GCS-HMAC. The credentials need `s3:GetObject`, `s3:PutObject` and `s3:ListBucket` (the `/readyz` probe lists one key) |
 | `RELAYFILE_MAX_BODY_BYTES` | `67108864` | request body cap |
 
 `session-broker`: `PORT` (8090), `DURABLE_ACTORS_CONTROL_PLANE_URL`,
