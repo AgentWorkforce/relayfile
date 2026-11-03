@@ -387,10 +387,16 @@ type cloudConnectSessionResponse struct {
 }
 
 type cloudIntegrationReadyResponse struct {
-	Ready        bool   `json:"ready"`
-	Provider     string `json:"provider,omitempty"`
-	ConnectionID string `json:"connectionId,omitempty"`
-	State        string `json:"state,omitempty"`
+	Ready               bool   `json:"ready"`
+	Provider            string `json:"provider,omitempty"`
+	ConnectionID        string `json:"connectionId,omitempty"`
+	State               string `json:"state,omitempty"`
+	ConfigKey           string `json:"configKey,omitempty"`
+	CurrentConnectionID string `json:"currentConnectionId,omitempty"`
+	ConnectionMatched   *bool  `json:"connectionMatched,omitempty"`
+	OAuth               *struct {
+		Connected bool `json:"connected"`
+	} `json:"oauth,omitempty"`
 }
 
 type cloudIntegrationCatalogResponse struct {
@@ -2730,16 +2736,13 @@ func ensureCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider, 
 	savedBackend := strings.TrimSpace(savedConnection.Backend)
 	configMatches := provider == logicalProvider
 	if logicalProvider == "gitlab" {
-		requestedConfigKey := provider
-		if requestedConfigKey == "gitlab" {
-			requestedConfigKey = "gitlab-relay"
-		}
+		requestedConfigKey := gitlabAuthConfigKey(provider)
 		configMatches = savedConnection.ProviderConfigKey == requestedConfigKey ||
 			// Before auth variants, saved GitLab state carried no config key.
 			(savedConnection.ProviderConfigKey == "" && requestedConfigKey == "gitlab-relay")
 	}
 	if connectionID != "" && configMatches && (requestedBackend == "" || requestedBackend == savedBackend) {
-		if ready, err := cloudIntegrationReady(cloudAPIURL, workspaceID, workspaceToken, logicalProvider, connectionID); err == nil && ready {
+		if status, err := cloudIntegrationStatus(cloudAPIURL, workspaceID, workspaceToken, logicalProvider, connectionID); err == nil && cloudIntegrationConnectedForConfig(status, gitlabAuthConfigKey(provider)) {
 			fmt.Fprintf(stdout, "%s already connected\n", logicalProvider)
 			return false, nil
 		}
@@ -2752,6 +2755,7 @@ func ensureCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider, 
 
 func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider, requestedBackend, localDir string, timeout time.Duration, shouldOpenBrowser bool, stdout io.Writer) error {
 	requestedProvider := requestedIntegrationProviderID(provider)
+	expectedGitLabConfig := gitlabAuthConfigKey(requestedProvider)
 	provider = normalizeProviderID(provider)
 	client, err := newAPIClient(cloudAPIURL, workspaceToken)
 	if err != nil {
@@ -2778,8 +2782,8 @@ func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider,
 		backend = requestedBackend
 	}
 	configKey := strings.TrimSpace(session.BackendIntegrationID)
-	if configKey == "" && requestedProvider != provider {
-		configKey = requestedProvider
+	if configKey == "" {
+		configKey = expectedGitLabConfig
 	}
 	_ = saveIntegrationConnection(localDir, integrationConnectionState{
 		Provider:          provider,
@@ -2814,14 +2818,14 @@ func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider,
 			statusErr = integrationConnectError(err)
 			return pollResult{err: err, httpStatus: httpStatusFromErr(err), retryAfter: retryAfterFromErr(err), done: true}
 		}
-		if !cloudIntegrationConnected(status) && connectionID != "" {
+		if !cloudIntegrationConnectedForConfig(status, expectedGitLabConfig) && connectionID != "" {
 			fallbackStatus, fallbackErr := cloudIntegrationStatus(cloudAPIURL, workspaceID, workspaceToken, provider, "")
-			if fallbackErr == nil && cloudIntegrationConnected(fallbackStatus) {
+			if fallbackErr == nil && cloudIntegrationConnectedForConfig(fallbackStatus, expectedGitLabConfig) {
 				status = fallbackStatus
 			}
 		}
-		if cloudIntegrationConnected(status) {
-			if resolvedConnectionID := strings.TrimSpace(status.ConnectionID); resolvedConnectionID != "" && resolvedConnectionID != connectionID {
+		if cloudIntegrationConnectedForConfig(status, expectedGitLabConfig) {
+			if resolvedConnectionID := strings.TrimSpace(firstNonEmpty(status.CurrentConnectionID, status.ConnectionID)); resolvedConnectionID != "" && resolvedConnectionID != connectionID {
 				connectionID = resolvedConnectionID
 				_ = saveIntegrationConnection(localDir, integrationConnectionState{
 					Provider:          provider,
@@ -2875,6 +2879,12 @@ func cloudIntegrationStatus(cloudAPIURL, workspaceID, workspaceToken, provider, 
 }
 
 func cloudIntegrationConnected(status cloudIntegrationReadyResponse) bool {
+	if status.ConnectionMatched != nil && !*status.ConnectionMatched {
+		return false
+	}
+	if status.OAuth != nil && status.OAuth.Connected {
+		return true
+	}
 	if status.Ready {
 		return true
 	}

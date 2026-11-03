@@ -35,7 +35,7 @@ func TestIntegrationConnectGitLabTokenVariants(t *testing.T) {
 					}
 					_ = json.NewEncoder(w).Encode(map[string]string{"connectionId": "token-connection", "backend": "nango", "backendIntegrationId": configKey})
 				case "/api/v1/workspaces/ws_123/integrations/gitlab/status":
-					_, _ = w.Write([]byte(`{"ready":true,"provider":"gitlab","connectionId":"token-connection"}`))
+					_ = json.NewEncoder(w).Encode(map[string]any{"ready": true, "provider": "gitlab", "currentConnectionId": "token-connection", "configKey": configKey, "connectionMatched": true})
 				case "/v1/workspaces/ws_123/sync/status":
 					_, _ = w.Write([]byte(`{"providers":[{"provider":"gitlab","status":"ready","lagSeconds":0}]}`))
 				default:
@@ -119,6 +119,55 @@ func TestGitLabStatusFailureDoesNotReportConnected(t *testing.T) {
 	}
 }
 
+func TestGitLabConnectReadsCloudStatusBinding(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	localDir := t.TempDir()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/connect-session") {
+			_, _ = w.Write([]byte(`{"connectionId":"session-id","backend":"nango","backendIntegrationId":"gitlab-pat"}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ready": false, "state": "pending", "configKey": "gitlab-pat",
+			"connectionMatched":   r.URL.Query().Get("connectionId") == "",
+			"currentConnectionId": "actual-nango-id", "oauth": map[string]bool{"connected": true},
+		})
+	}))
+	defer server.Close()
+	err := connectCloudIntegration(server.URL, "ws_123", "cloud-token", "gitlab-pat", "nango", localDir, time.Second, false, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loadSavedConnection(localDir, "gitlab").ConnectionID; got != "actual-nango-id" {
+		t.Fatalf("saved session id instead of Cloud binding: %q", got)
+	}
+}
+
+func TestGitLabConnectRejectsStatusForDifferentAuthConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/connect-session") {
+			_, _ = w.Write([]byte(`{"connectionId":"pending-oauth","backend":"nango","backendIntegrationId":"gitlab-relay"}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ready": true, "state": "ready", "configKey": "gitlab-pat",
+			"connectionMatched":   r.URL.Query().Get("connectionId") == "",
+			"currentConnectionId": "old-token-id", "oauth": map[string]bool{"connected": true},
+		})
+	}))
+	defer server.Close()
+	var stdout bytes.Buffer
+	err := connectCloudIntegration(server.URL, "ws_123", "cloud-token", "gitlab", "nango", t.TempDir(), 100*time.Millisecond, false, &stdout)
+	if err == nil || strings.Contains(stdout.String(), "gitlab connected") {
+		t.Fatalf("wrong auth configuration satisfied OAuth: err=%v output=%s", err, stdout.String())
+	}
+}
+
 func TestGitLabConnectionReuseRequiresMatchingAuthConfig(t *testing.T) {
 	for _, tc := range []struct {
 		requested, saved string
@@ -150,7 +199,11 @@ func TestGitLabConnectionReuseRequiresMatchingAuthConfig(t *testing.T) {
 					_, _ = w.Write([]byte(`{"error":"already_connected"}`))
 					return
 				}
-				_, _ = w.Write([]byte(`{"ready":true}`))
+				configKey := tc.saved
+				if configKey == "" {
+					configKey = "gitlab-relay"
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"ready": true, "configKey": configKey, "connectionMatched": true})
 			}))
 			defer server.Close()
 			created, err := ensureCloudIntegration(server.URL, "ws_123", "cloud-token", tc.requested, "nango", localDir, time.Second, false, &bytes.Buffer{})
@@ -208,7 +261,7 @@ func TestSetupPreservesGitLabGroupTokenSelection(t *testing.T) {
 			seenToken = len(body.AllowedIntegrations) == 1 && body.AllowedIntegrations[0] == "gitlab-group-token"
 			_, _ = w.Write([]byte(`{"connectionId":"token-connection","backend":"nango","backendIntegrationId":"gitlab-group-token"}`))
 		case "/api/v1/workspaces/ws_123/integrations/gitlab/status":
-			_, _ = w.Write([]byte(`{"ready":true}`))
+			_, _ = w.Write([]byte(`{"ready":true,"configKey":"gitlab-group-token","currentConnectionId":"token-connection","connectionMatched":true}`))
 		default:
 			http.Error(w, "unexpected path", 404)
 		}

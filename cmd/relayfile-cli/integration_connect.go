@@ -6,6 +6,20 @@ import (
 	"net/http"
 )
 
+func gitlabAuthConfigKey(requestedProvider string) string {
+	if normalizeProviderID(requestedProvider) != "gitlab" {
+		return ""
+	}
+	if requestedProvider == "gitlab" {
+		return "gitlab-relay"
+	}
+	return requestedProvider
+}
+
+func cloudIntegrationConnectedForConfig(status cloudIntegrationReadyResponse, configKey string) bool {
+	return cloudIntegrationConnected(status) && (configKey == "" || status.ConfigKey == configKey)
+}
+
 // Connect errors retain their HTTP status for callers without printing raw
 // Cloud/provider messages, which can contain private details or credentials.
 func integrationConnectError(err error) error {
