@@ -59,9 +59,13 @@ func TestGitLabProviderChangesRefreshBothDailyDigests(t *testing.T) {
 		if !strings.Contains(string(body), canonicalPath) || !strings.Contains(string(body), artifact.verb) {
 			t.Fatalf("%s missing expected GitLab activity:\n%s", artifact.path, body)
 		}
-		if syncer.rollingCoalescer.ObserveChange(artifact.path) {
-			t.Fatalf("digest artifact %s scheduled recursive regeneration", artifact.path)
+		if err := syncer.HandleLocalChange(context.Background(), artifact.path, fsnotify.Write); err != nil {
+			t.Fatalf("handle digest write %s: %v", artifact.path, err)
 		}
+	}
+	now = now.Add(time.Minute)
+	if syncer.rollingCoalescer.Due() {
+		t.Fatal("digest write events scheduled recursive regeneration")
 	}
 	wantedEvents := map[string]bool{digest.TodayPath: true, digest.YesterdayPath: true}
 	deadline := time.After(2 * time.Second)
