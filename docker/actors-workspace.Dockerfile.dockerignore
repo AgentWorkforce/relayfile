@@ -1,0 +1,10 @@
+**
+!packages/core/package.json
+!packages/core/tsconfig.json
+!packages/core/src
+packages/core/src/**/*.test.ts
+!packages/durable-actors/actor/src
+!packages/durable-actors/actor/package.json
+!packages/durable-actors/src/runtime
+!packages/durable-actors/src/deploy
+!packages/durable-actors/actor/deploy.ts

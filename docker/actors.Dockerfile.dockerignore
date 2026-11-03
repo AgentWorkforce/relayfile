@@ -1,0 +1,10 @@
+**
+!package.json
+!package-lock.json
+!packages/core/package.json
+!packages/core/tsconfig.json
+!packages/core/src
+!packages/durable-actors/package.json
+!packages/durable-actors/tsconfig.json
+!packages/durable-actors/src
+!packages/durable-actors/actor
