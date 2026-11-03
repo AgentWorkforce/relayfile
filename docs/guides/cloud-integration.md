@@ -28,11 +28,17 @@ The agent should read and write under `$RELAYFILE_LOCAL_DIR/<provider>/...` inst
 
 ### GitLab project and group tokens
 
-Select the auth variant when creating a workspace or connecting an existing one:
+To create a workspace with a project token:
 
 ```bash
 relayfile setup --provider gitlab-pat --backend nango --workspace my-agent --local-dir ./relayfile-mount
-relayfile integration connect gitlab-group-token --backend nango --workspace my-agent --wait-sync
+```
+
+Alternatively, connect a group token to an existing workspace that has no
+GitLab connection:
+
+```bash
+relayfile integration connect gitlab-group-token --backend nango --workspace existing-workspace --wait-sync
 ```
 
 Enter the token in the hosted Nango Connect page. Both variants use the logical

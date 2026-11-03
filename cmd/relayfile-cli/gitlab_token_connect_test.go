@@ -119,6 +119,52 @@ func TestGitLabStatusFailureDoesNotReportConnected(t *testing.T) {
 	}
 }
 
+func TestGitLabConnectionReuseRequiresMatchingAuthConfig(t *testing.T) {
+	for _, tc := range []struct {
+		requested, saved string
+		reuse            bool
+	}{
+		{"gitlab", "gitlab-pat", false},
+		{"gitlab", "gitlab-group-token", false},
+		{"gitlab", "gitlab-relay", true},
+		{"gitlab", "", true},
+		{"gitlab-pat", "gitlab-pat", true},
+		{"gitlab-group-token", "gitlab-group-token", true},
+	} {
+		t.Run(tc.requested+"_from_"+tc.saved, func(t *testing.T) {
+			_, localDir := setupAdoptWorkspace(t)
+			if err := saveIntegrationConnection(localDir, integrationConnectionState{Provider: "gitlab", ProviderConfigKey: tc.saved, ConnectionID: "existing-connection", Backend: "nango"}); err != nil {
+				t.Fatal(err)
+			}
+			seenConnect := false
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if strings.HasSuffix(r.URL.Path, "/connect-session") {
+					seenConnect = true
+					var body cloudConnectSessionRequest
+					_ = json.NewDecoder(r.Body).Decode(&body)
+					if len(body.AllowedIntegrations) != 1 || body.AllowedIntegrations[0] != tc.requested {
+						t.Errorf("wrong auth request: %#v", body)
+					}
+					w.WriteHeader(http.StatusConflict)
+					_, _ = w.Write([]byte(`{"error":"already_connected"}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"ready":true}`))
+			}))
+			defer server.Close()
+			created, err := ensureCloudIntegration(server.URL, "ws_123", "cloud-token", tc.requested, "nango", localDir, time.Second, false, &bytes.Buffer{})
+			if tc.reuse {
+				if err != nil || created || seenConnect {
+					t.Fatalf("matching auth was not reused: err=%v created=%v connect=%v", err, created, seenConnect)
+				}
+			} else if err == nil || !seenConnect || !strings.Contains(err.Error(), "Disconnect") {
+				t.Fatalf("OAuth request silently reused token auth: err=%v connect=%v", err, seenConnect)
+			}
+		})
+	}
+}
+
 func TestAdoptGitLabTokenPreservesAuthConfig(t *testing.T) {
 	_, localDir := setupAdoptWorkspace(t)
 	seen := false

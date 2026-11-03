@@ -2728,7 +2728,16 @@ func ensureCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider, 
 	savedConnection := loadSavedConnection(localDir, logicalProvider)
 	connectionID := strings.TrimSpace(savedConnection.ConnectionID)
 	savedBackend := strings.TrimSpace(savedConnection.Backend)
-	configMatches := provider == logicalProvider || savedConnection.ProviderConfigKey == provider
+	configMatches := provider == logicalProvider
+	if logicalProvider == "gitlab" {
+		requestedConfigKey := provider
+		if requestedConfigKey == "gitlab" {
+			requestedConfigKey = "gitlab-relay"
+		}
+		configMatches = savedConnection.ProviderConfigKey == requestedConfigKey ||
+			// Before auth variants, saved GitLab state carried no config key.
+			(savedConnection.ProviderConfigKey == "" && requestedConfigKey == "gitlab-relay")
+	}
 	if connectionID != "" && configMatches && (requestedBackend == "" || requestedBackend == savedBackend) {
 		if ready, err := cloudIntegrationReady(cloudAPIURL, workspaceID, workspaceToken, logicalProvider, connectionID); err == nil && ready {
 			fmt.Fprintf(stdout, "%s already connected\n", logicalProvider)
