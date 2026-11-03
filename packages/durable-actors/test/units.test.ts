@@ -7,7 +7,7 @@ import { createBroker } from "../src/gateway/broker.js";
 import { signV4 } from "../src/gateway/blobs.js";
 import { loadGatewayConfig } from "../src/gateway/config.js";
 import { pathFilterMatches } from "../src/runtime/workspace-runtime.js";
-import { scopeMatches, scopeMatchesPath } from "../src/runtime/scopes.js";
+import { goValidPermissionRules, scopeMatches, scopeMatchesPath, scopePathValid } from "../src/runtime/scopes.js";
 import { FakeActorDb } from "./fake-actor-db.js";
 import { migrate, SCHEMA_VERSION } from "../src/runtime/schema.js";
 
@@ -123,6 +123,26 @@ describe("bearer verification", () => {
   it("reports an unreachable JWKS as 503", async () => {
     const verifier = new BearerVerifier({ jwksUrl: "https://auth/jwks", fetch: (async () => { throw new Error("down"); }) as unknown as typeof fetch });
     await expect(verifier.verifyToken(rs256(base))).rejects.toMatchObject({ status: 503 });
+  });
+});
+
+describe("ACL rule grammar (Go isValidACLRuleValue)", () => {
+  it("ignores malformed rules instead of evaluating them", () => {
+    expect(scopePathValid("/github/x**")).toBe(false);
+    expect(scopePathValid("/team/**")).toBe(true);
+    expect(scopePathValid("/a/../b")).toBe(false);
+    expect(scopePathValid("/a/b*")).toBe(true);
+    expect(
+      goValidPermissionRules([
+        "scope:relayfile:fs:read:/github/x**",
+        "scope:relayfile:fs:read:/team/**",
+        "scope:finance",
+        "deny:agent:bad name",
+        "agent:agent-1",
+        "public",
+        "role:finance",
+      ]),
+    ).toEqual(["scope:relayfile:fs:read:/team/**", "scope:finance", "agent:agent-1", "public", "role:finance"]);
   });
 });
 

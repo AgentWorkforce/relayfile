@@ -127,6 +127,56 @@ export function aclScopeRuleMatches(granted: ScopeSet, scope: string, action: "r
 }
 
 const ACL_WORKSPACE_RESOURCE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
+const ACL_SCOPE_VALUE = /^[a-zA-Z][a-zA-Z0-9]*(?::[a-zA-Z][a-zA-Z0-9]*)*$/;
+const ACL_WORKSPACE_VALUE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,255}$/;
+
+/**
+ * Drop rules the Go server's parsePermissionRule rejects (isValidACLRuleValue),
+ * so they are ignored rather than evaluated: malformed filesystem scope paths
+ * (`/x**`, `..` segments, inner `*`), and agent/workspace values outside the
+ * Go grammars. Everything else is passed through to core unchanged.
+ */
+export function goValidPermissionRules(permissions: string[]): string[] {
+  return permissions.filter((raw) => {
+    let rule = raw.trim();
+    const lower = rule.toLowerCase();
+    if (lower.startsWith("allow:")) rule = rule.slice(6).trim();
+    else if (lower.startsWith("deny:")) rule = rule.slice(5).trim();
+    const normalized = rule.toLowerCase();
+    if (normalized === "public" || normalized === "any" || normalized === "*") return true;
+    const idx = rule.indexOf(":");
+    if (idx < 0) return true; // not an ACL rule; core ignores it too
+    const kind = rule.slice(0, idx).trim().toLowerCase();
+    const value = rule.slice(idx + 1).trim();
+    switch (kind) {
+      case "agent":
+        return ACL_WORKSPACE_RESOURCE.test(value);
+      case "workspace":
+        return ACL_WORKSPACE_VALUE.test(value);
+      case "scope": {
+        if (ACL_SCOPE_VALUE.test(value)) return true;
+        const parsed = value.trim() === value ? parseAclFilesystemScope(value) : null;
+        return parsed !== null && scopePathValid(parsed.path);
+      }
+      default:
+        return true;
+    }
+  });
+}
+
+/** contract/README.md path grammar (Go scopePathValid): suffix globs only. */
+export function scopePathValid(scopePath: string): boolean {
+  if (scopePath === "*" || scopePath === "/") return true;
+  if (!scopePath.startsWith("/")) return false;
+  const segments = scopePath.slice(1).split("/");
+  return segments.every((segment, i) => {
+    if (segment === "" || segment === "." || segment === "..") return false;
+    if (i !== segments.length - 1) return !segment.includes("*");
+    if (!segment.includes("*")) return true;
+    if (segment === "*" || segment === "**") return true;
+    return segment.split("*").length === 2 && segment.endsWith("*");
+  });
+}
 const isFsAction = (action: string) => action === "read" || action === "write" || action === "manage" || action === "*";
 
 function parseAclFilesystemScope(scope: string): { action: string; path: string } | null {

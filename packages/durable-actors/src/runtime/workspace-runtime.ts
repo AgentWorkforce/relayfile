@@ -11,7 +11,7 @@ import {
 } from "@relayfile/core";
 import type { ActorSql } from "./db.js";
 import { migrate } from "./schema.js";
-import { aclScopeRuleMatches, hasAnyScopeGrant, scopeMatches, scopeMatchesPath } from "./scopes.js";
+import { aclScopeRuleMatches, goValidPermissionRules, hasAnyScopeGrant, scopeMatches, scopeMatchesPath } from "./scopes.js";
 import {
   SqliteWorkspaceStorage,
   decodeContent,
@@ -266,6 +266,7 @@ export class WorkspaceRuntime {
   }
 
   private permissionsAllow(caller: CallerContext, permissions: string[], path: string, action: "read" | "write"): boolean {
+    permissions = goValidPermissionRules(permissions);
     if (permissions.length === 0) return true;
     const granted = this.scopes(caller);
     return filePermissionAllows(permissions, this.workspaceId, this.claims(caller), {
