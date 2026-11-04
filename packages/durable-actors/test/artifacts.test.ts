@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { defaultCredentialProvider } from "../src/aws/credentials.js";
 import { signV4 } from "../src/aws/sigv4.js";
-import { loadArtifactStoreConfig, uploadImmutable, type ArtifactStoreConfig } from "../src/deploy/artifacts.js";
+import { isPrivateHost, loadArtifactStoreConfig, uploadImmutable, type ArtifactStoreConfig } from "../src/deploy/artifacts.js";
 import { S3BlobStore } from "../src/gateway/blobs.js";
 import { loadGatewayConfig } from "../src/gateway/config.js";
 
@@ -10,6 +10,8 @@ interface Call {
   method: string;
   headers: Record<string, string>;
   body?: Uint8Array;
+  form?: URLSearchParams;
+  redirect?: RequestRedirect;
 }
 
 /** A fetch stub that records requests and answers them in order. */
@@ -21,6 +23,8 @@ function stubFetch(...responses: Array<() => Response>) {
       method: init?.method ?? "GET",
       headers: { ...((init?.headers as Record<string, string>) ?? {}) },
       body: init?.body as Uint8Array | undefined,
+      form: typeof init?.body === "string" ? new URLSearchParams(init.body) : undefined,
+      redirect: init?.redirect,
     });
     const next = responses.shift();
     if (!next) throw new Error(`unexpected request ${init?.method ?? "GET"} ${String(input)}`);
@@ -71,6 +75,19 @@ describe("artifact store config", () => {
     expect(() => loadArtifactStoreConfig({ ...base, DURABLE_ACTORS_S3_FORCE_PATH_STYLE: "maybe" })).toThrow(/FORCE_PATH_STYLE/);
     expect(() => loadArtifactStoreConfig({ ...base, DURABLE_ACTORS_S3_ENDPOINT: "ftp://x" })).toThrow(/http/);
   });
+
+  it("allows plain http only for in-cluster or private endpoints", () => {
+    const base = { DURABLE_ACTORS_ARTIFACT_STORE: "s3", DURABLE_ACTORS_S3_REGION: "us-east-1" };
+    for (const endpoint of ["http://minio:9000", "http://minio.storage.svc.cluster.local:9000", "http://10.0.0.5:9000", "http://127.0.0.1:9000"]) {
+      expect(loadArtifactStoreConfig({ ...base, DURABLE_ACTORS_S3_ENDPOINT: endpoint }).kind).toBe("s3");
+    }
+    expect(() => loadArtifactStoreConfig({ ...base, DURABLE_ACTORS_S3_ENDPOINT: "http://s3.example.com" })).toThrow(/https/);
+    expect(() => loadArtifactStoreConfig({ ...base, DURABLE_ACTORS_S3_ENDPOINT: "http://8.8.8.8" })).toThrow(/https/);
+    expect(isPrivateHost("172.20.1.1")).toBe(true);
+    expect(isPrivateHost("172.32.1.1")).toBe(false);
+    expect(isPrivateHost("[fd00:ec2::23]")).toBe(true);
+    expect(loadArtifactStoreConfig({ ...base, DURABLE_ACTORS_S3_ENDPOINT: "https://s3.example.com" }).kind).toBe("s3");
+  });
 });
 
 describe("S3 artifact upload", () => {
@@ -111,6 +128,50 @@ describe("S3 artifact upload", () => {
     expect(stub.calls.map((c) => c.method)).toEqual(["PUT", "HEAD"]);
     expect(stub.calls[1]!.url).toBe(stub.calls[0]!.url);
     expect(stub.calls[1]!.headers["if-none-match"]).toBeUndefined();
+  });
+
+  it("retries the conditional PUT when a 409 conflict leaves the object absent", async () => {
+    const sleeps: number[] = [];
+    const stub = stubFetch(
+      () => new Response("<Error><Code>ConditionalRequestConflict</Code></Error>", { status: 409 }),
+      () => new Response(null, { status: 404 }),
+      () => new Response(null, { status: 200 }),
+    );
+    const generation = await uploadImmutable(s3, "artifacts", object, bytes, {
+      fetch: stub.fetch,
+      credentials,
+      now,
+      sleep: async (ms) => void sleeps.push(ms),
+    });
+    expect(generation).toBe(1);
+    expect(stub.calls.map((c) => c.method)).toEqual(["PUT", "HEAD", "PUT"]);
+    expect(sleeps).toEqual([250]);
+  });
+
+  it("gives up after bounded 409 retries and does not retry a 412 whose object is missing", async () => {
+    const conflict = stubFetch(
+      ...Array.from({ length: 5 }, () => [() => new Response(null, { status: 409 }), () => new Response(null, { status: 404 })]).flat(),
+    );
+    const sleeps: number[] = [];
+    await expect(
+      uploadImmutable(s3, "artifacts", object, bytes, { fetch: conflict.fetch, credentials, now, sleep: async (ms) => void sleeps.push(ms) }),
+    ).rejects.toThrow(/metadata read failed: HTTP 404/);
+    expect(conflict.calls).toHaveLength(10);
+    expect(sleeps).toEqual([250, 500, 1000, 2000]);
+    const precondition = stubFetch(
+      () => new Response(null, { status: 412 }),
+      () => new Response(null, { status: 404 }),
+    );
+    await expect(
+      uploadImmutable(s3, "artifacts", object, bytes, { fetch: precondition.fetch, credentials, now, sleep: async () => {} }),
+    ).rejects.toThrow(/HTTP 404/);
+    expect(precondition.calls).toHaveLength(2);
+  });
+
+  it("uses path style for a dotted bucket over https", async () => {
+    const stub = stubFetch(() => new Response(null, { status: 200 }));
+    await uploadImmutable(s3, "team.artifacts", object, bytes, { fetch: stub.fetch, credentials, now });
+    expect(stub.calls[0]!.url).toBe(`https://s3.us-east-1.amazonaws.com/team.artifacts/${object}`);
   });
 
   it("fails clearly when the existing object has no da-generation metadata", async () => {
@@ -190,6 +251,56 @@ describe("AWS default credential chain", () => {
     await provider();
     expect(stub.calls).toHaveLength(1);
     expect(stub.calls[0]!.headers.authorization).toBe("pod-token");
+    // Never follow a redirect away from the checked host with the token.
+    expect(stub.calls[0]!.redirect).toBe("error");
+  });
+
+  it("refreshes inside the five-minute window, shares the refresh, and retries after a failed one", async () => {
+    let clock = new Date("2026-11-03T00:00:00Z");
+    const creds = (id: string, expiration: string) => () => Response.json({ AccessKeyId: id, SecretAccessKey: "s", Token: "t", Expiration: expiration });
+    const stub = stubFetch(
+      creds("ASIA1", "2026-11-03T01:00:00Z"),
+      () => new Response("unavailable", { status: 503 }),
+      creds("ASIA2", "2026-11-03T02:00:00Z"),
+    );
+    const provider = defaultCredentialProvider({
+      env: { AWS_CONTAINER_CREDENTIALS_FULL_URI: "http://169.254.170.23/v1/credentials" },
+      fetch: stub.fetch,
+      now: () => clock,
+    });
+    expect((await provider()).accessKeyId).toBe("ASIA1");
+    clock = new Date("2026-11-03T00:54:00Z"); // more than five minutes left: cached
+    expect((await provider()).accessKeyId).toBe("ASIA1");
+    expect(stub.calls).toHaveLength(1);
+    clock = new Date("2026-11-03T00:56:00Z"); // inside the refresh window
+    await expect(provider()).rejects.toThrow(/HTTP 503/);
+    const [a, b] = await Promise.all([provider(), provider()]);
+    expect([a.accessKeyId, b.accessKeyId]).toEqual(["ASIA2", "ASIA2"]);
+    expect(stub.calls).toHaveLength(3);
+  });
+
+  it("gives credentials without an Expiration a bounded lifetime", async () => {
+    let clock = new Date("2026-11-03T00:00:00Z");
+    const stub = stubFetch(
+      () => Response.json({ AccessKeyId: "ASIA1", SecretAccessKey: "s", Token: "t" }),
+      () => Response.json({ AccessKeyId: "ASIA2", SecretAccessKey: "s", Token: "t" }),
+    );
+    const provider = defaultCredentialProvider({
+      env: { AWS_CONTAINER_CREDENTIALS_FULL_URI: "http://169.254.170.23/v1/credentials" },
+      fetch: stub.fetch,
+      now: () => clock,
+    });
+    expect((await provider()).accessKeyId).toBe("ASIA1");
+    clock = new Date("2026-11-03T00:16:00Z");
+    expect((await provider()).accessKeyId).toBe("ASIA2");
+  });
+
+  it("rejects a half-configured static key pair instead of using another identity", async () => {
+    const provider = defaultCredentialProvider({
+      env: { AWS_ACCESS_KEY_ID: "AKID", AWS_CONTAINER_CREDENTIALS_FULL_URI: "http://169.254.170.23/v1/credentials" },
+      fetch: stubFetch().fetch,
+    });
+    await expect(provider()).rejects.toThrow(/must be set together/);
   });
 
   it("refuses plain-http container endpoints outside the allowed hosts", async () => {
@@ -213,10 +324,14 @@ describe("AWS default credential chain", () => {
       now,
     });
     expect((await provider()).accessKeyId).toBe("ASIAW");
-    const url = new URL(stub.calls[0]!.url);
-    expect(url.host).toBe("sts.us-east-1.amazonaws.com");
-    expect(url.searchParams.get("Action")).toBe("AssumeRoleWithWebIdentity");
-    expect(url.searchParams.get("WebIdentityToken")).toBe("jwt");
+    const call = stub.calls[0]!;
+    expect(call.url).toBe("https://sts.us-east-1.amazonaws.com/");
+    expect(call.method).toBe("POST");
+    expect(call.redirect).toBe("error");
+    expect(call.headers["content-type"]).toBe("application/x-www-form-urlencoded");
+    // The bearer token travels in the form body, not the URL.
+    expect(call.form?.get("Action")).toBe("AssumeRoleWithWebIdentity");
+    expect(call.form?.get("WebIdentityToken")).toBe("jwt");
   });
 
   it("fails clearly when no source is available", async () => {
@@ -226,21 +341,38 @@ describe("AWS default credential chain", () => {
 });
 
 describe("SigV4 extra headers", () => {
-  it("signs and returns caller headers, lower-cased", () => {
-    const headers = signV4({
+  // https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-header-based-auth.html
+  const example = {
+    region: "us-east-1",
+    service: "s3",
+    accessKeyId: "AKIAIOSFODNN7EXAMPLE",
+    secretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    now: new Date("2013-05-24T00:00:00Z"),
+  };
+  const prefix = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, ";
+
+  it("matches the AWS documented GET Object (Range) and PUT Object signatures", () => {
+    const get = signV4({ ...example, method: "GET", url: new URL("https://examplebucket.s3.amazonaws.com/test.txt"), body: new Uint8Array(), headers: { Range: "bytes=0-9" } });
+    expect(get.authorization).toBe(
+      `${prefix}SignedHeaders=host;range;x-amz-content-sha256;x-amz-date, Signature=f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41`,
+    );
+    expect(get.range).toBe("bytes=0-9");
+    const put = signV4({
+      ...example,
       method: "PUT",
-      url: new URL("https://b.s3.amazonaws.com/k"),
-      body: new Uint8Array(),
-      region: "us-east-1",
-      service: "s3",
-      accessKeyId: "AKID",
-      secretAccessKey: "s",
-      headers: { "If-None-Match": "*", "X-Amz-Meta-Da-Generation": "1" },
-      now: now(),
+      url: new URL("https://examplebucket.s3.amazonaws.com/test%24file.text"),
+      body: new TextEncoder().encode("Welcome to Amazon S3."),
+      headers: { Date: "Fri, 24 May 2013 00:00:00 GMT", "x-amz-storage-class": "REDUCED_REDUNDANCY" },
     });
-    expect(headers["if-none-match"]).toBe("*");
-    expect(headers["x-amz-meta-da-generation"]).toBe("1");
-    expect(headers.authorization).toContain("SignedHeaders=host;if-none-match;x-amz-content-sha256;x-amz-date;x-amz-meta-da-generation,");
+    expect(put.authorization).toBe(
+      `${prefix}SignedHeaders=date;host;x-amz-content-sha256;x-amz-date;x-amz-storage-class, Signature=98ad721746da40c64f1a55b78f14c238d841ea1380cd77a1b5971af0ece108bd`,
+    );
+  });
+
+  it("collapses runs of whitespace in header values (TrimAll)", () => {
+    const input = { ...example, method: "GET", url: new URL("https://examplebucket.s3.amazonaws.com/test.txt"), body: new Uint8Array() };
+    expect(signV4({ ...input, headers: { Range: "  bytes=0-9  " } }).authorization).toBe(signV4({ ...input, headers: { Range: "bytes=0-9" } }).authorization);
+    expect(signV4({ ...input, headers: { "x-amz-meta-a": "a   b" } }).authorization).toBe(signV4({ ...input, headers: { "x-amz-meta-a": "a b" } }).authorization);
   });
 });
 

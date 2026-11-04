@@ -149,9 +149,11 @@ durable-actors TypeScript runtime.
   - `DURABLE_ACTORS_ARTIFACT_STORE`: `gcs` (default) or `s3`.
   - With `s3`: `DURABLE_ACTORS_S3_REGION` (required; falls back to
     `AWS_REGION`), optional `DURABLE_ACTORS_S3_ENDPOINT` (e.g. MinIO) and
-    `DURABLE_ACTORS_S3_FORCE_PATH_STYLE` (boolean). Credentials come from the
-    AWS default chain (EKS Pod Identity, IRSA, instance metadata), never from
-    static keys in config. The upload is `PutObject` with `If-None-Match: *`,
+    `DURABLE_ACTORS_S3_FORCE_PATH_STYLE` (boolean). A plain-http endpoint is
+    accepted only for an in-cluster or private host. Credentials come from the
+    AWS default chain: `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` when set
+    (both, or neither), else container credentials (EKS Pod Identity, ECS),
+    IRSA, instance metadata. No credential settings of its own. The upload is `PutObject` with `If-None-Match: *`,
     `x-amz-meta-da-generation: 1` and `content-type: text/javascript`; when the
     object already exists (412/409) the deployer reads its `da-generation` with
     `HeadObject` and fails if that metadata is missing.
