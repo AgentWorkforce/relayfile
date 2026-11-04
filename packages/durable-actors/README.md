@@ -140,11 +140,21 @@ durable-actors TypeScript runtime.
 - `deploy` (production Job): `DURABLE_ACTORS_CONTROL_PLANE_URL`,
   `DURABLE_ACTORS_SECRET` (admin), `DURABLE_ACTORS_PROJECT_ID`,
   `DURABLE_ACTORS_ORGANIZATION_ID`, `DURABLE_ACTORS_ARTIFACT_BUCKET` (the
-  durable-actors chart's `storage.bucket`; write access via Workload Identity),
+  durable-actors chart's `storage.bucket`; write access via Workload Identity on
+  GKE or Pod Identity on EKS),
   optional `DURABLE_ACTORS_SECRET_REFS`. Compiles `src/actors.ts`, uploads
   `actors.mjs` create-only to
   `durable-actors/v3/artifacts/<uuid-from-sha256>/actors.mjs`, and registers it
   with `PUT /v1/projects/{project}/deployment`. Idempotent.
+  - `DURABLE_ACTORS_ARTIFACT_STORE`: `gcs` (default) or `s3`.
+  - With `s3`: `DURABLE_ACTORS_S3_REGION` (required; falls back to
+    `AWS_REGION`), optional `DURABLE_ACTORS_S3_ENDPOINT` (e.g. MinIO) and
+    `DURABLE_ACTORS_S3_FORCE_PATH_STYLE` (boolean). Credentials come from the
+    AWS default chain (EKS Pod Identity, IRSA, instance metadata), never from
+    static keys in config. The upload is `PutObject` with `If-None-Match: *`,
+    `x-amz-meta-da-generation: 1` and `content-type: text/javascript`; when the
+    object already exists (412/409) the deployer reads its `da-generation` with
+    `HeadObject` and fails if that metadata is missing.
 - `dev` (default; kind/CI only): `durable-actors dev` with
   `DURABLE_ACTORS_SECRET`, `DURABLE_ACTORS_PORT` (7100),
   `DURABLE_ACTORS_PROJECT_ID` (`local`), `DURABLE_ACTORS_DATA_DIR` (`/data/actors`).
