@@ -86,6 +86,9 @@ describe("artifact store config", () => {
     expect(isPrivateHost("172.20.1.1")).toBe(true);
     expect(isPrivateHost("172.32.1.1")).toBe(false);
     expect(isPrivateHost("[fd00:ec2::23]")).toBe(true);
+    expect(isPrivateHost("[::1]")).toBe(true);
+    expect(isPrivateHost("[2606:4700:4700::1111]")).toBe(false);
+    expect(() => loadArtifactStoreConfig({ ...base, DURABLE_ACTORS_S3_ENDPOINT: "http://[2606:4700:4700::1111]:9000" })).toThrow(/https/);
     expect(loadArtifactStoreConfig({ ...base, DURABLE_ACTORS_S3_ENDPOINT: "https://s3.example.com" }).kind).toBe("s3");
   });
 });

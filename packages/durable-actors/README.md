@@ -153,10 +153,14 @@ durable-actors TypeScript runtime.
     accepted only for an in-cluster or private host. Credentials come from the
     AWS default chain: `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` when set
     (both, or neither), else container credentials (EKS Pod Identity, ECS),
-    IRSA, instance metadata. No credential settings of its own. The upload is `PutObject` with `If-None-Match: *`,
-    `x-amz-meta-da-generation: 1` and `content-type: text/javascript`; when the
-    object already exists (412/409) the deployer reads its `da-generation` with
-    `HeadObject` and fails if that metadata is missing.
+    IRSA, instance metadata. No credential settings of its own.
+  - The upload is `PutObject` with `If-None-Match: *`,
+    `x-amz-meta-da-generation: 1` and `content-type: text/javascript`. On 412
+    (the object already exists) the deployer reads its `da-generation` with
+    `HeadObject` and fails if that metadata is missing. A 409 is a concurrent
+    write still in flight and can be transient: the deployer reads the object
+    the same way, and if it is not there yet (404) it backs off and retries the
+    PUT, failing after 5 attempts.
 - `dev` (default; kind/CI only): `durable-actors dev` with
   `DURABLE_ACTORS_SECRET`, `DURABLE_ACTORS_PORT` (7100),
   `DURABLE_ACTORS_PROJECT_ID` (`local`), `DURABLE_ACTORS_DATA_DIR` (`/data/actors`).

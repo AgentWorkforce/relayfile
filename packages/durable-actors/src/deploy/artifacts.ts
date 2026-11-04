@@ -42,10 +42,12 @@ export function loadArtifactStoreConfig(env: NodeJS.ProcessEnv = process.env): A
   return { kind, region, endpoint, forcePathStyle: ["true", "1", "yes"].includes(rawPathStyle) };
 }
 
-/** Loopback, RFC 1918 / ULA addresses, single-label names and cluster-internal DNS suffixes. */
+/** Loopback, RFC 1918 / IPv6 ULA addresses, single-label names and cluster-internal DNS suffixes. */
 export function isPrivateHost(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  if (host === "localhost" || host === "::1" || /^fd[0-9a-f]{2}:/.test(host)) return true;
+  if (host === "localhost") return true;
+  // IPv6 literal: only loopback and unique local (fc00::/7) are private.
+  if (host.includes(":")) return host === "::1" || /^f[cd][0-9a-f]{2}:/.test(host);
   const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
   if (ipv4) {
     const [a, b] = [Number(ipv4[1]), Number(ipv4[2])];
