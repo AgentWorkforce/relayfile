@@ -38,9 +38,10 @@ CI run is required before merge.
 - Describe what changed and why, and how you tested it.
 - Never commit secrets, credentials, real customer data or production
   identifiers, including in tests and fixtures. Use obviously fake values.
-- Pull request CI runs without repository secrets, including on forks. Jobs
-  that need a secret, such as the LLM evals, are skipped on fork pull requests;
-  publishing runs only when a maintainer starts it.
+- Fork pull request CI runs without repository secrets. Steps that need a
+  secret, such as the provider-backed LLM evals, are skipped on forks but run
+  on same-repository pull requests. Publishing runs only when a maintainer
+  starts it.
 
 A maintainer reviews every pull request. We may ask for changes, or decline a
 change that doesn't fit the project's direction.

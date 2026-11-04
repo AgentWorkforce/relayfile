@@ -39,9 +39,10 @@ publicly. We do not run a paid bug bounty.
 
 ## Supported versions
 
-Fixes ship in the latest release and the next published artifacts listed under
-Scope. We do not backport fixes to older releases; upgrade to the latest
-release to receive them.
+Each artifact (binaries, npm packages, Python package, container images) is
+versioned on its own. A fix ships in the next version of each affected
+artifact; we do not backport fixes to older versions, so upgrade that artifact
+to its latest version to receive them.
 
 ## Scope
 
