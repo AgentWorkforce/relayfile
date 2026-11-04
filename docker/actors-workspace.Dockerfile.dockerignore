@@ -7,4 +7,5 @@ packages/core/src/**/*.test.ts
 !packages/durable-actors/actor/package.json
 !packages/durable-actors/src/runtime
 !packages/durable-actors/src/deploy
+!packages/durable-actors/src/aws
 !packages/durable-actors/actor/deploy.ts
