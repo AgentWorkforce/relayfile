@@ -1,0 +1,156 @@
+name: Publish Actors Images
+
+# Publishes the two images for self-hosting relayfile on durable-actors to GHCR:
+#   relayfile-actors            docker/actors.Dockerfile            (gateway, session-broker)
+#   relayfile-actors-workspace  docker/actors-workspace.Dockerfile  (Workspace actor, deploy)
+#
+# Images ship to self-hosters, so they are published only from main or from
+# the exact release tag v<package.json version>, never from a PR branch.
+# Tags: sha-<short> always, plus <version> on a release-tag build.
+#
+# NOTE: a package created by Actions starts PRIVATE even from a public repo.
+# After the first successful run, set each package to public once in
+# Settings → Packages → <name> → Change visibility.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "site/**"
+  workflow_dispatch:
+
+concurrency:
+  group: publish-actors-images-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+
+jobs:
+  publish:
+    name: Build and push
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # A tag build must be the release tag of the version in package.json, not any v* tag.
+      - name: Resolve image tags
+        id: meta
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          short="${GITHUB_SHA::7}"
+          version="$(node -p "require('./package.json').version")"
+          release=""
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            if [ "$GITHUB_REF" != "refs/tags/v${version}" ]; then
+              echo "ref $GITHUB_REF is not the release tag v${version}" >&2
+              exit 1
+            fi
+            release="$version"
+          fi
+          for image in relayfile-actors relayfile-actors-workspace; do
+            {
+              echo "${image//-/_}<<EOF"
+              echo "ghcr.io/${owner}/${image}:sha-${short}"
+              [ -n "$release" ] && echo "ghcr.io/${owner}/${image}:${release}"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          done
+          echo "owner=${owner}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push relayfile-actors
+        id: gateway
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/actors.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          sbom: true
+          provenance: mode=max
+          tags: ${{ steps.meta.outputs.relayfile_actors }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.description=relayfile gateway and session-broker for durable-actors
+
+      - name: Build and push relayfile-actors-workspace
+        id: workspace
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/actors-workspace.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          sbom: true
+          provenance: mode=max
+          tags: ${{ steps.meta.outputs.relayfile_actors_workspace }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.description=relayfile Workspace actor and deployer for durable-actors
+
+      # Artifact attestations are unavailable on private repositories (a GitHub
+      # limitation), so only there a failed attestation does not fail the publish.
+      - name: Attest relayfile-actors
+        continue-on-error: ${{ github.event.repository.private }}
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/${{ steps.meta.outputs.owner }}/relayfile-actors
+          subject-digest: ${{ steps.gateway.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest relayfile-actors-workspace
+        continue-on-error: ${{ github.event.repository.private }}
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/${{ steps.meta.outputs.owner }}/relayfile-actors-workspace
+          subject-digest: ${{ steps.workspace.outputs.digest }}
+          push-to-registry: true
+
+      - name: Report the immutable references
+        env:
+          OWNER: ${{ steps.meta.outputs.owner }}
+          GATEWAY_TAGS: ${{ steps.meta.outputs.relayfile_actors }}
+          WORKSPACE_TAGS: ${{ steps.meta.outputs.relayfile_actors_workspace }}
+          GATEWAY_DIGEST: ${{ steps.gateway.outputs.digest }}
+          WORKSPACE_DIGEST: ${{ steps.workspace.outputs.digest }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Published"
+            echo
+            echo '```'
+            echo "$GATEWAY_TAGS"
+            echo "ghcr.io/${OWNER}/relayfile-actors@${GATEWAY_DIGEST}"
+            echo "$WORKSPACE_TAGS"
+            echo "ghcr.io/${OWNER}/relayfile-actors-workspace@${WORKSPACE_DIGEST}"
+            echo '```'
+            echo
+            echo "Pin the digests, not the tags: a tag can be moved, a digest cannot."
+            echo "Platforms: linux/amd64, linux/arm64"
+            echo "Source commit: ${GITHUB_SHA}"
+          } >> "$GITHUB_STEP_SUMMARY"
