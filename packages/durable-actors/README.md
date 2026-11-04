@@ -124,7 +124,7 @@ in the API:
 | `RELAYFILE_BLOB_BUCKET`, `RELAYFILE_BLOB_PREFIX` | | object location; keys are `<prefix>blobs/sha256/<aa>/<sha256>` |
 | `RELAYFILE_BLOB_INLINE_MAX_BYTES` | `65536` | with `RELAYFILE_BLOB_STORE=gcs` or `s3`, larger decoded content goes to the blob store; `inline` mode keeps content in actor SQLite up to 10 MiB per file |
 | `STORAGE_EMULATOR_HOST` | | gcs: fake-gcs-server; otherwise credentials come from the metadata server (Workload Identity) |
-| `RELAYFILE_S3_ENDPOINT`, `RELAYFILE_S3_REGION`, `RELAYFILE_S3_FORCE_PATH_STYLE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | | s3: MinIO, AWS, R2, GCS-HMAC. The credentials need `s3:GetObject`, `s3:PutObject` and `s3:ListBucket` (the `/readyz` probe lists one key) |
+| `RELAYFILE_S3_ENDPOINT`, `RELAYFILE_S3_REGION`, `RELAYFILE_S3_FORCE_PATH_STYLE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | | s3: MinIO, AWS, R2, GCS-HMAC. Static `AWS_*` keys win when set; otherwise credentials come from the pod's ambient identity (EKS Pod Identity, IRSA, instance metadata). The credentials need `s3:GetObject`, `s3:PutObject` and `s3:ListBucket` (the `/readyz` probe lists one key) |
 | `RELAYFILE_MAX_BODY_BYTES` | `67108864` | request body cap |
 
 `session-broker`: `PORT` (8090), `DURABLE_ACTORS_CONTROL_PLANE_URL`,

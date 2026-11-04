@@ -42,10 +42,15 @@ export function defaultCredentialProvider(options: CredentialChainOptions = {}):
   const read = options.readFile ?? ((path: string) => readFile(path, "utf8"));
   const now = options.now ?? (() => new Date());
   let cached: AwsCredentials | undefined;
+  let pending: Promise<AwsCredentials> | undefined;
 
   return async () => {
     if (cached && (!cached.expiration || cached.expiration.getTime() - REFRESH_MARGIN_MS > now().getTime())) return cached;
-    cached = await resolve();
+    // One refresh at a time: concurrent requests share it.
+    pending ??= resolve().finally(() => {
+      pending = undefined;
+    });
+    cached = await pending;
     return cached;
   };
 

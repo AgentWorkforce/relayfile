@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { defaultCredentialProvider, type CredentialProvider } from "../aws/credentials.js";
 import { s3ObjectUrl, signV4 } from "../aws/sigv4.js";
 
 export { signV4 } from "../aws/sigv4.js";
@@ -54,9 +55,11 @@ export interface S3Options {
   endpoint: string;
   region: string;
   bucket: string;
-  accessKeyId: string;
-  secretAccessKey: string;
-  sessionToken?: string;
+  /**
+   * Credential source; defaults to the AWS default chain: AWS_ACCESS_KEY_ID /
+   * AWS_SECRET_ACCESS_KEY first, then EKS Pod Identity, IRSA, instance metadata.
+   */
+  credentials?: CredentialProvider;
   forcePathStyle: boolean;
   fetch?: typeof fetch;
   now?: () => Date;
@@ -66,13 +69,12 @@ export class S3BlobStore implements BlobStore {
   readonly kind = "s3";
   private readonly fetchImpl: typeof fetch;
   private readonly now: () => Date;
+  private readonly credentials: CredentialProvider;
   constructor(private readonly options: S3Options) {
     if (!options.bucket) throw new Error("RELAYFILE_BLOB_BUCKET is required for the s3 blob store");
-    if (!options.accessKeyId || !options.secretAccessKey) {
-      throw new Error("AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are required for the s3 blob store");
-    }
     this.fetchImpl = options.fetch ?? fetch;
     this.now = options.now ?? (() => new Date());
+    this.credentials = options.credentials ?? defaultCredentialProvider({ fetch: this.fetchImpl });
   }
 
   private objectUrl(key: string): URL {
@@ -106,16 +108,17 @@ export class S3BlobStore implements BlobStore {
     if (!response.ok) throw new Error(`s3 bucket probe failed: HTTP ${response.status}`);
   }
 
-  private send(method: string, url: URL, body?: Uint8Array): Promise<Response> {
+  private async send(method: string, url: URL, body?: Uint8Array): Promise<Response> {
+    const creds = await this.credentials();
     const headers = signV4({
       method,
       url,
       body: body ?? new Uint8Array(),
       region: this.options.region,
       service: "s3",
-      accessKeyId: this.options.accessKeyId,
-      secretAccessKey: this.options.secretAccessKey,
-      sessionToken: this.options.sessionToken,
+      accessKeyId: creds.accessKeyId,
+      secretAccessKey: creds.secretAccessKey,
+      sessionToken: creds.sessionToken,
       now: this.now(),
     });
     return this.fetchImpl(url, {
