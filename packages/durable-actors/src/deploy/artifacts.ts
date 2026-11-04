@@ -13,6 +13,8 @@ import { s3ObjectUrl, signV4 } from "../aws/sigv4.js";
  */
 
 export const S3_ARTIFACT_GENERATION = 1;
+/** PUT attempts while a 409 conflict leaves the object absent. */
+export const S3_CONFLICT_ATTEMPTS = 5;
 
 export type ArtifactStoreConfig =
   | { kind: "gcs"; emulatorHost?: string }
@@ -28,11 +30,29 @@ export function loadArtifactStoreConfig(env: NodeJS.ProcessEnv = process.env): A
   const endpoint = get("DURABLE_ACTORS_S3_ENDPOINT") ?? `https://s3.${region}.amazonaws.com`;
   const url = new URL(endpoint);
   if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("DURABLE_ACTORS_S3_ENDPOINT must be an http(s) URL");
+  // Signed requests and the bundle travel over this connection: plain http only to
+  // an in-cluster or private endpoint (e.g. MinIO), never across the internet.
+  if (url.protocol === "http:" && !isPrivateHost(url.hostname)) {
+    throw new Error("DURABLE_ACTORS_S3_ENDPOINT must use https unless it is an in-cluster or private host");
+  }
   const rawPathStyle = (get("DURABLE_ACTORS_S3_FORCE_PATH_STYLE") ?? "false").toLowerCase();
   if (!["true", "1", "yes", "false", "0", "no"].includes(rawPathStyle)) {
     throw new Error("DURABLE_ACTORS_S3_FORCE_PATH_STYLE must be true or false");
   }
   return { kind, region, endpoint, forcePathStyle: ["true", "1", "yes"].includes(rawPathStyle) };
+}
+
+/** Loopback, RFC 1918 / ULA addresses, single-label names and cluster-internal DNS suffixes. */
+export function isPrivateHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host === "::1" || /^fd[0-9a-f]{2}:/.test(host)) return true;
+  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
+  if (ipv4) {
+    const [a, b] = [Number(ipv4[1]), Number(ipv4[2])];
+    return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+  }
+  if (!host.includes(".")) return true;
+  return [".svc", ".svc.cluster.local", ".cluster.local", ".internal", ".local"].some((suffix) => host.endsWith(suffix));
 }
 
 export interface UploadDeps {
@@ -42,6 +62,8 @@ export interface UploadDeps {
   /** GCS: bearer token source; defaults to the metadata server (Workload Identity). */
   gcsToken?: () => Promise<string>;
   now?: () => Date;
+  /** Backoff between S3 conflict retries (tests). */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /** Create-only upload; returns the object's generation (existing or new). */
@@ -117,6 +139,7 @@ async function uploadS3(
   deps: UploadDeps,
 ): Promise<number> {
   const fetchImpl = deps.fetch ?? fetch;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const credentials = deps.credentials ?? defaultCredentialProvider({ fetch: fetchImpl });
   const now = deps.now ?? (() => new Date());
   const url = s3ObjectUrl(config.endpoint, bucket, object, config.forcePathStyle);
@@ -137,28 +160,38 @@ async function uploadS3(
     return fetchImpl(url, { method, headers, body: body as BodyInit | undefined, signal: AbortSignal.timeout(timeoutMs) });
   };
 
-  const put = await send(
-    "PUT",
-    {
-      "content-type": "text/javascript",
-      "if-none-match": "*",
-      "x-amz-meta-da-generation": String(S3_ARTIFACT_GENERATION),
-    },
-    bytes,
-    120_000,
-  );
-  if (put.ok) {
+  // 412: the object exists. 409 (ConditionalRequestConflict): a concurrent
+  // conditional write to the same key is in flight, so the object may not exist
+  // yet; read it, and if it is still absent back off and retry the PUT.
+  let head: Response | undefined;
+  for (let attempt = 1; ; attempt++) {
+    const put = await send(
+      "PUT",
+      {
+        "content-type": "text/javascript",
+        "if-none-match": "*",
+        "x-amz-meta-da-generation": String(S3_ARTIFACT_GENERATION),
+      },
+      bytes,
+      120_000,
+    );
+    if (put.ok) {
+      await put.body?.cancel();
+      return S3_ARTIFACT_GENERATION;
+    }
+    if (put.status !== 412 && put.status !== 409) {
+      throw new Error(`artifact upload failed: HTTP ${put.status} ${await put.text()}`);
+    }
     await put.body?.cancel();
-    return S3_ARTIFACT_GENERATION;
+    head = await send("HEAD", {});
+    await head.body?.cancel();
+    if (head.ok) break;
+    if (put.status === 409 && head.status === 404 && attempt < S3_CONFLICT_ATTEMPTS) {
+      await sleep(Math.min(250 * 2 ** (attempt - 1), 4_000));
+      continue;
+    }
+    throw new Error(`artifact metadata read failed: HTTP ${head.status}`);
   }
-  if (put.status !== 412 && put.status !== 409) {
-    throw new Error(`artifact upload failed: HTTP ${put.status} ${await put.text()}`);
-  }
-  await put.body?.cancel();
-
-  const head = await send("HEAD", {});
-  await head.body?.cancel();
-  if (!head.ok) throw new Error(`artifact metadata read failed: HTTP ${head.status}`);
   const raw = head.headers.get("x-amz-meta-da-generation")?.trim();
   if (!raw) {
     throw new Error(
