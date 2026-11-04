@@ -11,7 +11,8 @@ import { readFile } from "node:fs/promises";
  * 3. web identity: IRSA (AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN via STS)
  * 4. EC2 instance metadata (IMDSv2)
  *
- * Credentials are cached until five minutes before they expire.
+ * Credentials are cached until five minutes before they expire. Credential
+ * requests never follow redirects, so a token cannot leave the checked host.
  */
 
 export interface AwsCredentials {
@@ -46,12 +47,16 @@ export function defaultCredentialProvider(options: CredentialChainOptions = {}):
 
   return async () => {
     if (cached && (!cached.expiration || cached.expiration.getTime() - REFRESH_MARGIN_MS > now().getTime())) return cached;
-    // One refresh at a time: concurrent requests share it.
-    pending ??= resolve().finally(() => {
-      pending = undefined;
-    });
-    cached = await pending;
-    return cached;
+    // One refresh at a time: concurrent requests share it. The shared promise
+    // is cleared only after the result is cached (or the refresh failed, so the
+    // next call retries).
+    const refresh = (pending ??= resolve());
+    try {
+      cached = await refresh;
+      return cached;
+    } finally {
+      if (pending === refresh) pending = undefined;
+    }
   };
 
   async function resolve(): Promise<AwsCredentials> {
@@ -59,6 +64,10 @@ export function defaultCredentialProvider(options: CredentialChainOptions = {}):
 
     const accessKeyId = get("AWS_ACCESS_KEY_ID");
     const secretAccessKey = get("AWS_SECRET_ACCESS_KEY");
+    // A half-configured static pair is a mistake: never fall through to a different identity.
+    if (!accessKeyId !== !secretAccessKey) {
+      throw new Error("AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be set together");
+    }
     if (accessKeyId && secretAccessKey) return { accessKeyId, secretAccessKey, sessionToken: get("AWS_SESSION_TOKEN") };
 
     const fullUri = get("AWS_CONTAINER_CREDENTIALS_FULL_URI");
@@ -72,10 +81,10 @@ export function defaultCredentialProvider(options: CredentialChainOptions = {}):
       const token = tokenFile ? (await read(tokenFile)).trim() : get("AWS_CONTAINER_AUTHORIZATION_TOKEN");
       const response = await fetchImpl(url, {
         headers: token ? { authorization: token } : {},
-        signal: AbortSignal.timeout(5_000),
+        redirect: "error", signal: AbortSignal.timeout(5_000),
       });
       if (!response.ok) throw new Error(`AWS container credentials request failed: HTTP ${response.status}`);
-      return fromJson(await response.json(), "container credentials");
+      return fromJson(await response.json(), "container credentials", now());
     }
 
     const tokenFile = get("AWS_WEB_IDENTITY_TOKEN_FILE");
@@ -83,20 +92,28 @@ export function defaultCredentialProvider(options: CredentialChainOptions = {}):
     if (tokenFile && roleArn) {
       const region = get("AWS_REGION") ?? get("AWS_DEFAULT_REGION");
       const url = new URL(region ? `https://sts.${region}.amazonaws.com/` : "https://sts.amazonaws.com/");
-      url.search = new URLSearchParams({
+      // POST form body: the bearer token stays out of the URL (and its length limits and logs).
+      const body = new URLSearchParams({
         Action: "AssumeRoleWithWebIdentity",
         Version: "2011-06-15",
         RoleArn: roleArn,
         RoleSessionName: get("AWS_ROLE_SESSION_NAME") ?? `relayfile-actors-${now().getTime()}`,
         WebIdentityToken: (await read(tokenFile)).trim(),
-      }).toString();
-      const response = await fetchImpl(url, { signal: AbortSignal.timeout(10_000) });
+      });
+      const response = await fetchImpl(url, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: body.toString(),
+        redirect: "error",
+        signal: AbortSignal.timeout(10_000),
+      });
       if (!response.ok) throw new Error(`STS AssumeRoleWithWebIdentity failed: HTTP ${response.status}`);
       const xml = await response.text();
       const tag = (name: string) => xml.match(new RegExp(`<${name}>([^<]+)</${name}>`))?.[1];
       return fromJson(
         { AccessKeyId: tag("AccessKeyId"), SecretAccessKey: tag("SecretAccessKey"), Token: tag("SessionToken"), Expiration: tag("Expiration") },
         "STS web identity",
+        now(),
       );
     }
 
@@ -104,16 +121,16 @@ export function defaultCredentialProvider(options: CredentialChainOptions = {}):
       const tokenResponse = await fetchImpl(`${IMDS}/latest/api/token`, {
         method: "PUT",
         headers: { "x-aws-ec2-metadata-token-ttl-seconds": "21600" },
-        signal: AbortSignal.timeout(1_000),
+        redirect: "error", signal: AbortSignal.timeout(1_000),
       }).catch(() => null);
       if (tokenResponse?.ok) {
         const headers = { "x-aws-ec2-metadata-token": await tokenResponse.text() };
         const base = `${IMDS}/latest/meta-data/iam/security-credentials/`;
-        const role = await fetchImpl(base, { headers, signal: AbortSignal.timeout(1_000) });
+        const role = await fetchImpl(base, { headers, redirect: "error", signal: AbortSignal.timeout(1_000) });
         if (role.ok) {
           const name = (await role.text()).split("\n")[0]!.trim();
-          const creds = await fetchImpl(`${base}${encodeURIComponent(name)}`, { headers, signal: AbortSignal.timeout(1_000) });
-          if (creds.ok) return fromJson(await creds.json(), "instance metadata");
+          const creds = await fetchImpl(`${base}${encodeURIComponent(name)}`, { headers, redirect: "error", signal: AbortSignal.timeout(1_000) });
+          if (creds.ok) return fromJson(await creds.json(), "instance metadata", now());
         }
       }
     }
@@ -124,16 +141,22 @@ export function defaultCredentialProvider(options: CredentialChainOptions = {}):
   }
 }
 
-function fromJson(body: unknown, source: string): AwsCredentials {
+/** Temporary credentials without a usable Expiration are refreshed after this long. */
+const DEFAULT_LIFETIME_MS = 15 * 60_000;
+
+function fromJson(body: unknown, source: string, now: Date): AwsCredentials {
   const value = (body ?? {}) as Record<string, unknown>;
   const accessKeyId = typeof value.AccessKeyId === "string" ? value.AccessKeyId : "";
   const secretAccessKey = typeof value.SecretAccessKey === "string" ? value.SecretAccessKey : "";
   if (!accessKeyId || !secretAccessKey) throw new Error(`AWS ${source} response had no access key`);
-  const expiration = typeof value.Expiration === "string" ? new Date(value.Expiration) : undefined;
+  const parsed = typeof value.Expiration === "string" ? new Date(value.Expiration) : undefined;
+  // Never cache temporary credentials forever: an absent or bad Expiration gets a bounded lifetime.
+  const expiration =
+    parsed && !Number.isNaN(parsed.getTime()) ? parsed : new Date(now.getTime() + REFRESH_MARGIN_MS + DEFAULT_LIFETIME_MS);
   return {
     accessKeyId,
     secretAccessKey,
     sessionToken: typeof value.Token === "string" && value.Token ? value.Token : undefined,
-    expiration: expiration && !Number.isNaN(expiration.getTime()) ? expiration : undefined,
+    expiration,
   };
 }

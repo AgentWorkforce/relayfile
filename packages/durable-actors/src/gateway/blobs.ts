@@ -57,7 +57,8 @@ export interface S3Options {
   bucket: string;
   /**
    * Credential source; defaults to the AWS default chain: AWS_ACCESS_KEY_ID /
-   * AWS_SECRET_ACCESS_KEY first, then EKS Pod Identity, IRSA, instance metadata.
+   * AWS_SECRET_ACCESS_KEY first, then container credentials (EKS Pod Identity,
+   * ECS), IRSA, instance metadata.
    */
   credentials?: CredentialProvider;
   forcePathStyle: boolean;
