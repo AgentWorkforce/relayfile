@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { defaultCredentialProvider } from "../src/aws/credentials.js";
 import { signV4 } from "../src/aws/sigv4.js";
 import { loadArtifactStoreConfig, uploadImmutable, type ArtifactStoreConfig } from "../src/deploy/artifacts.js";
+import { S3BlobStore } from "../src/gateway/blobs.js";
+import { loadGatewayConfig } from "../src/gateway/config.js";
 
 interface Call {
   url: string;
@@ -239,5 +241,62 @@ describe("SigV4 extra headers", () => {
     expect(headers["if-none-match"]).toBe("*");
     expect(headers["x-amz-meta-da-generation"]).toBe("1");
     expect(headers.authorization).toContain("SignedHeaders=host;if-none-match;x-amz-content-sha256;x-amz-date;x-amz-meta-da-generation,");
+  });
+});
+
+describe("gateway S3 blob store credentials", () => {
+  const podIdentityEnv = {
+    AWS_CONTAINER_CREDENTIALS_FULL_URI: "http://169.254.170.23/v1/credentials",
+    AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE: "/var/run/secrets/pods.eks.amazonaws.com/serviceaccount/eks-pod-identity-token",
+  };
+  const store = (fetchImpl: typeof fetch, env: NodeJS.ProcessEnv) =>
+    new S3BlobStore({
+      endpoint: "https://s3.us-east-1.amazonaws.com",
+      region: "us-east-1",
+      bucket: "blobs",
+      forcePathStyle: false,
+      fetch: fetchImpl,
+      now,
+      credentials: defaultCredentialProvider({ env, fetch: fetchImpl, readFile: async () => "pod-token", now }),
+    });
+
+  it("loads an s3 gateway config without static keys (ambient identity)", () => {
+    const config = loadGatewayConfig({
+      DURABLE_ACTORS_CONTROL_PLANE_URL: "http://cp:7100",
+      RELAYFILE_JWT_SECRET: "s",
+      RELAYFILE_ACTORS_BROKER_URL: "http://b",
+      RELAYFILE_ACTORS_BROKER_TOKEN: "t",
+      RELAYFILE_BLOB_STORE: "s3",
+      RELAYFILE_BLOB_BUCKET: "blobs",
+      RELAYFILE_S3_REGION: "us-east-1",
+    });
+    expect(config.blobStore?.kind).toBe("s3");
+  });
+
+  it("signs with static env keys first, without calling the credential endpoint", async () => {
+    const stub = stubFetch(() => new Response(null, { status: 200 }));
+    await store(stub.fetch, { AWS_ACCESS_KEY_ID: "AKIDSTATIC", AWS_SECRET_ACCESS_KEY: "s", ...podIdentityEnv }).put("k", bytes);
+    expect(stub.calls).toHaveLength(1);
+    expect(stub.calls[0]!.headers.authorization).toContain("Credential=AKIDSTATIC/");
+  });
+
+  it("signs with EKS Pod Identity credentials and shares one refresh across concurrent requests", async () => {
+    const stub = stubFetch(
+      () => Response.json({ AccessKeyId: "ASIAPOD", SecretAccessKey: "s", Token: "pod-session", Expiration: "2026-11-03T06:00:00Z" }),
+      () => new Response(null, { status: 200 }),
+      () => new Response(null, { status: 200 }),
+    );
+    const blobs = store(stub.fetch, podIdentityEnv);
+    await Promise.all([blobs.put("a", bytes), blobs.put("b", bytes)]);
+    expect(stub.calls.map((c) => c.url)).toEqual([
+      "http://169.254.170.23/v1/credentials",
+      "https://blobs.s3.us-east-1.amazonaws.com/a",
+      "https://blobs.s3.us-east-1.amazonaws.com/b",
+    ]);
+    expect(stub.calls[0]!.headers.authorization).toBe("pod-token");
+    for (const call of stub.calls.slice(1)) {
+      expect(call.headers.authorization).toContain("Credential=ASIAPOD/");
+      expect(call.headers["x-amz-security-token"]).toBe("pod-session");
+    }
   });
 });
