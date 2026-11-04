@@ -1,4 +1,8 @@
-import { createHash, createHmac } from "node:crypto";
+import { createHash } from "node:crypto";
+import { defaultCredentialProvider, type CredentialProvider } from "../aws/credentials.js";
+import { s3ObjectUrl, signV4 } from "../aws/sigv4.js";
+
+export { signV4 } from "../aws/sigv4.js";
 
 /**
  * Content-addressed blob storage for file bytes that are too large to keep
@@ -51,9 +55,12 @@ export interface S3Options {
   endpoint: string;
   region: string;
   bucket: string;
-  accessKeyId: string;
-  secretAccessKey: string;
-  sessionToken?: string;
+  /**
+   * Credential source; defaults to the AWS default chain: AWS_ACCESS_KEY_ID /
+   * AWS_SECRET_ACCESS_KEY first, then container credentials (EKS Pod Identity,
+   * ECS), IRSA, instance metadata.
+   */
+  credentials?: CredentialProvider;
   forcePathStyle: boolean;
   fetch?: typeof fetch;
   now?: () => Date;
@@ -63,25 +70,16 @@ export class S3BlobStore implements BlobStore {
   readonly kind = "s3";
   private readonly fetchImpl: typeof fetch;
   private readonly now: () => Date;
+  private readonly credentials: CredentialProvider;
   constructor(private readonly options: S3Options) {
     if (!options.bucket) throw new Error("RELAYFILE_BLOB_BUCKET is required for the s3 blob store");
-    if (!options.accessKeyId || !options.secretAccessKey) {
-      throw new Error("AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are required for the s3 blob store");
-    }
     this.fetchImpl = options.fetch ?? fetch;
     this.now = options.now ?? (() => new Date());
+    this.credentials = options.credentials ?? defaultCredentialProvider({ fetch: this.fetchImpl });
   }
 
   private objectUrl(key: string): URL {
-    const endpoint = new URL(this.options.endpoint);
-    const encodedKey = key.split("/").map(encodeRfc3986).join("/");
-    if (this.options.forcePathStyle) {
-      endpoint.pathname = `${endpoint.pathname.replace(/\/$/, "")}/${this.options.bucket}/${encodedKey}`;
-    } else {
-      endpoint.hostname = `${this.options.bucket}.${endpoint.hostname}`;
-      endpoint.pathname = `${endpoint.pathname.replace(/\/$/, "")}/${encodedKey}`;
-    }
-    return endpoint;
+    return s3ObjectUrl(this.options.endpoint, this.options.bucket, key, this.options.forcePathStyle);
   }
 
   async put(key: string, bytes: Uint8Array): Promise<void> {
@@ -111,16 +109,17 @@ export class S3BlobStore implements BlobStore {
     if (!response.ok) throw new Error(`s3 bucket probe failed: HTTP ${response.status}`);
   }
 
-  private send(method: string, url: URL, body?: Uint8Array): Promise<Response> {
+  private async send(method: string, url: URL, body?: Uint8Array): Promise<Response> {
+    const creds = await this.credentials();
     const headers = signV4({
       method,
       url,
       body: body ?? new Uint8Array(),
       region: this.options.region,
       service: "s3",
-      accessKeyId: this.options.accessKeyId,
-      secretAccessKey: this.options.secretAccessKey,
-      sessionToken: this.options.sessionToken,
+      accessKeyId: creds.accessKeyId,
+      secretAccessKey: creds.secretAccessKey,
+      sessionToken: creds.sessionToken,
       now: this.now(),
     });
     return this.fetchImpl(url, {
@@ -130,68 +129,6 @@ export class S3BlobStore implements BlobStore {
       signal: AbortSignal.timeout(60_000),
     });
   }
-}
-
-function encodeRfc3986(value: string): string {
-  return encodeURIComponent(value).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
-}
-
-interface SignInput {
-  method: string;
-  url: URL;
-  body: Uint8Array;
-  region: string;
-  service: string;
-  accessKeyId: string;
-  secretAccessKey: string;
-  sessionToken?: string;
-  now: Date;
-}
-
-/** AWS Signature Version 4 headers for one request. Exported for tests. */
-export function signV4(input: SignInput): Record<string, string> {
-  const amzDate = input.now.toISOString().replace(/[:-]|\.\d{3}/g, "");
-  const dateStamp = amzDate.slice(0, 8);
-  const payloadHash = createHash("sha256").update(input.body).digest("hex");
-  const headers: Record<string, string> = {
-    host: input.url.host,
-    "x-amz-content-sha256": payloadHash,
-    "x-amz-date": amzDate,
-  };
-  if (input.sessionToken) headers["x-amz-security-token"] = input.sessionToken;
-  const signedHeaderNames = Object.keys(headers).sort();
-  const canonicalHeaders = signedHeaderNames.map((name) => `${name}:${headers[name]!.trim()}\n`).join("");
-  const signedHeaders = signedHeaderNames.join(";");
-  const query = [...input.url.searchParams.entries()]
-    .map(([k, v]) => [encodeRfc3986(k), encodeRfc3986(v)] as const)
-    .sort(([a, av], [b, bv]) => (a === b ? (av < bv ? -1 : 1) : a < b ? -1 : 1))
-    .map(([k, v]) => `${k}=${v}`)
-    .join("&");
-  const canonicalRequest = [
-    input.method,
-    input.url.pathname || "/",
-    query,
-    canonicalHeaders,
-    signedHeaders,
-    payloadHash,
-  ].join("\n");
-  const scope = `${dateStamp}/${input.region}/${input.service}/aws4_request`;
-  const stringToSign = [
-    "AWS4-HMAC-SHA256",
-    amzDate,
-    scope,
-    createHash("sha256").update(canonicalRequest).digest("hex"),
-  ].join("\n");
-  const kDate = createHmac("sha256", `AWS4${input.secretAccessKey}`).update(dateStamp).digest();
-  const kRegion = createHmac("sha256", kDate).update(input.region).digest();
-  const kService = createHmac("sha256", kRegion).update(input.service).digest();
-  const kSigning = createHmac("sha256", kService).update("aws4_request").digest();
-  const signature = createHmac("sha256", kSigning).update(stringToSign).digest("hex");
-  const { host: _host, ...rest } = headers;
-  return {
-    ...rest,
-    authorization: `AWS4-HMAC-SHA256 Credential=${input.accessKeyId}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`,
-  };
 }
 
 // ---------------------------------------------------------------------------

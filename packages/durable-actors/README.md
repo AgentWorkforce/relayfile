@@ -124,7 +124,7 @@ in the API:
 | `RELAYFILE_BLOB_BUCKET`, `RELAYFILE_BLOB_PREFIX` | | object location; keys are `<prefix>blobs/sha256/<aa>/<sha256>` |
 | `RELAYFILE_BLOB_INLINE_MAX_BYTES` | `65536` | with `RELAYFILE_BLOB_STORE=gcs` or `s3`, larger decoded content goes to the blob store; `inline` mode keeps content in actor SQLite up to 10 MiB per file |
 | `STORAGE_EMULATOR_HOST` | | gcs: fake-gcs-server; otherwise credentials come from the metadata server (Workload Identity) |
-| `RELAYFILE_S3_ENDPOINT`, `RELAYFILE_S3_REGION`, `RELAYFILE_S3_FORCE_PATH_STYLE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | | s3: MinIO, AWS, R2, GCS-HMAC. The credentials need `s3:GetObject`, `s3:PutObject` and `s3:ListBucket` (the `/readyz` probe lists one key) |
+| `RELAYFILE_S3_ENDPOINT`, `RELAYFILE_S3_REGION`, `RELAYFILE_S3_FORCE_PATH_STYLE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | | s3: MinIO, AWS, R2, GCS-HMAC. Static `AWS_*` keys win when set; otherwise credentials come from the pod's ambient identity (EKS Pod Identity, IRSA, instance metadata). The credentials need `s3:GetObject`, `s3:PutObject` and `s3:ListBucket` (the `/readyz` probe lists one key) |
 | `RELAYFILE_MAX_BODY_BYTES` | `67108864` | request body cap |
 
 `session-broker`: `PORT` (8090), `DURABLE_ACTORS_CONTROL_PLANE_URL`,
@@ -140,11 +140,27 @@ durable-actors TypeScript runtime.
 - `deploy` (production Job): `DURABLE_ACTORS_CONTROL_PLANE_URL`,
   `DURABLE_ACTORS_SECRET` (admin), `DURABLE_ACTORS_PROJECT_ID`,
   `DURABLE_ACTORS_ORGANIZATION_ID`, `DURABLE_ACTORS_ARTIFACT_BUCKET` (the
-  durable-actors chart's `storage.bucket`; write access via Workload Identity),
+  durable-actors chart's `storage.bucket`; write access via Workload Identity on
+  GKE or Pod Identity on EKS),
   optional `DURABLE_ACTORS_SECRET_REFS`. Compiles `src/actors.ts`, uploads
   `actors.mjs` create-only to
   `durable-actors/v3/artifacts/<uuid-from-sha256>/actors.mjs`, and registers it
   with `PUT /v1/projects/{project}/deployment`. Idempotent.
+  - `DURABLE_ACTORS_ARTIFACT_STORE`: `gcs` (default) or `s3`.
+  - With `s3`: `DURABLE_ACTORS_S3_REGION` (required; falls back to
+    `AWS_REGION`), optional `DURABLE_ACTORS_S3_ENDPOINT` (e.g. MinIO) and
+    `DURABLE_ACTORS_S3_FORCE_PATH_STYLE` (boolean). A plain-http endpoint is
+    accepted only for an in-cluster or private host. Credentials come from the
+    AWS default chain: `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` when set
+    (both, or neither), else container credentials (EKS Pod Identity, ECS),
+    IRSA, instance metadata. No credential settings of its own.
+  - The upload is `PutObject` with `If-None-Match: *`,
+    `x-amz-meta-da-generation: 1` and `content-type: text/javascript`. On 412
+    (the object already exists) the deployer reads its `da-generation` with
+    `HeadObject` and fails if that metadata is missing. A 409 is a concurrent
+    write still in flight and can be transient: the deployer reads the object
+    the same way, and if it is not there yet (404) it backs off and retries the
+    PUT, failing after 5 attempts.
 - `dev` (default; kind/CI only): `durable-actors dev` with
   `DURABLE_ACTORS_SECRET`, `DURABLE_ACTORS_PORT` (7100),
   `DURABLE_ACTORS_PROJECT_ID` (`local`), `DURABLE_ACTORS_DATA_DIR` (`/data/actors`).

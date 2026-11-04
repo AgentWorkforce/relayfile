@@ -1,3 +1,4 @@
+import { defaultCredentialProvider } from "../aws/credentials.js";
 import { GcsBlobStore, S3BlobStore, type BlobStore } from "./blobs.js";
 
 /**
@@ -82,9 +83,9 @@ export function loadGatewayConfig(env: Env = process.env): GatewayConfig {
         bucket,
         endpoint: get(env, "RELAYFILE_S3_ENDPOINT") ?? `https://s3.${get(env, "RELAYFILE_S3_REGION") ?? "us-east-1"}.amazonaws.com`,
         region: get(env, "RELAYFILE_S3_REGION") ?? "us-east-1",
-        accessKeyId: get(env, "AWS_ACCESS_KEY_ID") ?? "",
-        secretAccessKey: get(env, "AWS_SECRET_ACCESS_KEY") ?? "",
-        sessionToken: get(env, "AWS_SESSION_TOKEN") ?? undefined,
+        // Static AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY first, else the pod's
+        // ambient identity (EKS Pod Identity, IRSA, instance metadata).
+        credentials: defaultCredentialProvider({ env }),
         forcePathStyle: bool(env, "RELAYFILE_S3_FORCE_PATH_STYLE"),
       });
       break;

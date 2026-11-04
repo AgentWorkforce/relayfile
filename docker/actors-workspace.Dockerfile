@@ -28,6 +28,7 @@ COPY --from=core /src/packages/core/dist ./node_modules/@relayfile/core/dist
 COPY packages/durable-actors/actor ./actor
 COPY packages/durable-actors/src/runtime ./src/runtime
 COPY packages/durable-actors/src/deploy ./src/deploy
+COPY packages/durable-actors/src/aws ./src/aws
 RUN printf '#!/bin/sh\nset -e\ncase "${1:-dev}" in\n  dev) shift || true; exec /usr/local/bin/durable-actors dev --sdk-host /app/node_modules/durable-actors/dist/host.js "$@" ;;\n  deploy) exec /usr/local/bin/bun /app/actor/deploy.ts ;;\n  *) exec "$@" ;;\nesac\n' > /app/entrypoint.sh && chmod 755 /app/entrypoint.sh
 
 FROM ${DURABLE_ACTORS_TYPESCRIPT_IMAGE}
