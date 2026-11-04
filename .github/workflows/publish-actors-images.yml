@@ -9,9 +9,12 @@ name: Publish Actors Images
 # only from main or from the exact release tag v<package.json version>, never
 # from a PR branch. Tags: sha-<short> always, plus <version> on a release-tag
 # build (SemVer build metadata "+" becomes "-", since OCI tags cannot hold "+").
-# Both images push under sha-<short> first; the <version> tags are added only
-# after both pushes (and the attest steps) finish, so a release never carries
-# one image without the other. Retagging by digest keeps the same digest.
+# Both images push under sha-<short> first; the <version> tags are added by
+# digest only after both images are pushed (and the attest steps finish), so a
+# version tag never points at a release whose other image failed to build.
+# The two tag writes are separate registry calls (OCI has no cross-repository
+# transaction); each is retried, and a run that still fails is safe to
+# re-dispatch on the same tag. Retagging by digest keeps the same digest.
 # Actions are pinned to commit SHAs: this job can write packages.
 #
 # NOTE: a package created by Actions starts PRIVATE even from a public repo.
@@ -141,8 +144,18 @@ jobs:
           WORKSPACE_DIGEST: ${{ steps.workspace.outputs.digest }}
         run: |
           set -euo pipefail
-          docker buildx imagetools create -t "ghcr.io/${OWNER}/relayfile-actors:${RELEASE}" "ghcr.io/${OWNER}/relayfile-actors@${GATEWAY_DIGEST}"
-          docker buildx imagetools create -t "ghcr.io/${OWNER}/relayfile-actors-workspace:${RELEASE}" "ghcr.io/${OWNER}/relayfile-actors-workspace@${WORKSPACE_DIGEST}"
+          # Both source images already exist by digest; retry transient registry errors.
+          promote() {
+            for attempt in 1 2 3 4 5; do
+              if docker buildx imagetools create -t "$1" "$2"; then return 0; fi
+              echo "retagging $1 failed (attempt $attempt)" >&2
+              sleep $((attempt * 5))
+            done
+            echo "::error::could not tag $1; re-dispatch this workflow on ${GITHUB_REF} to finish the release" >&2
+            return 1
+          }
+          promote "ghcr.io/${OWNER}/relayfile-actors:${RELEASE}" "ghcr.io/${OWNER}/relayfile-actors@${GATEWAY_DIGEST}"
+          promote "ghcr.io/${OWNER}/relayfile-actors-workspace:${RELEASE}" "ghcr.io/${OWNER}/relayfile-actors-workspace@${WORKSPACE_DIGEST}"
 
       - name: Report the immutable references
         env:
