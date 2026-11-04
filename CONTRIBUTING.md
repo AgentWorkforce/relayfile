@@ -21,11 +21,14 @@ make test
 
 # TypeScript packages
 npm ci
+npm run build --workspace=packages/core
 npm run typecheck
 npm test
 ```
 
-Run the checks above before you open a pull request; CI runs the same ones.
+Run these checks before you open a pull request. CI (see `.github/workflows/`)
+runs its own set of checks, which can differ slightly from this list; a green
+CI run is required before merge.
 
 ## Pull requests
 
@@ -35,8 +38,9 @@ Run the checks above before you open a pull request; CI runs the same ones.
 - Describe what changed and why, and how you tested it.
 - Never commit secrets, credentials, real customer data or production
   identifiers, including in tests and fixtures. Use obviously fake values.
-- CI from forks runs without repository secrets, so jobs that need them are
-  skipped on fork pull requests; a maintainer runs them before merge.
+- Pull request CI runs without repository secrets, including on forks. Jobs
+  that need a secret, such as the LLM evals, are skipped on fork pull requests;
+  publishing runs only when a maintainer starts it.
 
 A maintainer reviews every pull request. We may ask for changes, or decline a
 change that doesn't fit the project's direction.
