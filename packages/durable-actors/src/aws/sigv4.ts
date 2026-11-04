@@ -11,11 +11,15 @@ export function encodeRfc3986(value: string): string {
   return encodeURIComponent(value).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
-/** Virtual-hosted (default) or path-style URL of one S3 object. */
+/**
+ * Virtual-hosted (default) or path-style URL of one S3 object. A bucket name
+ * with a dot always uses path style over https: as a virtual host it would not
+ * match the endpoint's single-label wildcard TLS certificate.
+ */
 export function s3ObjectUrl(endpoint: string, bucket: string, key: string, forcePathStyle: boolean): URL {
   const url = new URL(endpoint);
   const encodedKey = key.split("/").map(encodeRfc3986).join("/");
-  if (forcePathStyle) {
+  if (forcePathStyle || (bucket.includes(".") && url.protocol === "https:")) {
     url.pathname = `${url.pathname.replace(/\/$/, "")}/${bucket}/${encodedKey}`;
   } else {
     url.hostname = `${bucket}.${url.hostname}`;
@@ -50,7 +54,7 @@ export function signV4(input: SignInput): Record<string, string> {
   headers["x-amz-date"] = amzDate;
   if (input.sessionToken) headers["x-amz-security-token"] = input.sessionToken;
   const signedHeaderNames = Object.keys(headers).sort();
-  const canonicalHeaders = signedHeaderNames.map((name) => `${name}:${headers[name]!.trim()}\n`).join("");
+  const canonicalHeaders = signedHeaderNames.map((name) => `${name}:${headers[name]!.trim().replace(/\s+/g, " ")}\n`).join("");
   const signedHeaders = signedHeaderNames.join(";");
   const query = [...input.url.searchParams.entries()]
     .map(([k, v]) => [encodeRfc3986(k), encodeRfc3986(v)] as const)
