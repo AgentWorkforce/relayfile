@@ -371,15 +371,16 @@ func relayfileCommands() []cliCommandSpec {
 				},
 				{
 					Name:        "set-metadata",
-					Description: "Set provider connection metadata as KEY=VALUE pairs",
+					Description: "Set provider connection metadata from KEY=VALUE pairs or a JSON file",
 					flagSource:  "runIntegrationSetMetadata",
 					Args: []cliArgSpec{
 						{Name: "provider", Description: "provider id", Required: true},
-						{Name: "assignments", Description: "one or more KEY=VALUE metadata assignments", Required: true, Variadic: true},
+						{Name: "assignments", Description: "KEY=VALUE metadata assignments (or use --metadata-file)", Variadic: true},
 					},
 					Options: []cliOptionSpec{
 						workspaceFlagOption,
 						cloudAPIURLOption,
+						{Flags: "--metadata-file <file>", Description: "JSON object file (instead of KEY=VALUE pairs)"},
 						{Flags: "--yes", Description: "skip confirmation", DefaultValue: false},
 					},
 				},

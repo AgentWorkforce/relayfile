@@ -835,7 +835,7 @@ func printIntegrationUsage(w io.Writer, subcommand string) {
 	case "adopt":
 		fmt.Fprintf(w, "Usage: %s integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]\n", programName())
 	case "set-metadata":
-		fmt.Fprintf(w, "Usage: %s integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]\n", programName())
+		fmt.Fprintf(w, "Usage: %s integration set-metadata PROVIDER [KEY=VALUE...] [--metadata-file FILE] [--workspace NAME] [--yes]\n", programName())
 	case "bind":
 		fmt.Fprintf(w, "Usage: %s integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN\n", programName())
 	case "resolve-path":
@@ -850,7 +850,7 @@ func printIntegrationUsage(w io.Writer, subcommand string) {
   %[1]s integration list [--workspace NAME] [--json]
   %[1]s integration disconnect PROVIDER [--workspace NAME] [--yes]
   %[1]s integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]
-  %[1]s integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]
+  %[1]s integration set-metadata PROVIDER [KEY=VALUE...] [--metadata-file FILE] [--workspace NAME] [--yes]
   %[1]s integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN
   %[1]s integration resolve-path PROVIDER RESOURCE [--json]
   %[1]s integration unbind PROVIDER [RESOURCE_OR_PATH_GLOB|--resource RESOURCE_OR_PATH_GLOB]
@@ -938,7 +938,7 @@ Usage:
   %[1]s integration list [--workspace NAME] [--json]
   %[1]s integration disconnect PROVIDER [--workspace NAME] [--yes]
   %[1]s integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]
-  %[1]s integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]
+  %[1]s integration set-metadata PROVIDER [KEY=VALUE...] [--metadata-file FILE] [--workspace NAME] [--yes]
   %[1]s integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN
   %[1]s integration resolve-path PROVIDER RESOURCE [--json]
   %[1]s integration unbind PROVIDER [RESOURCE_OR_PATH_GLOB|--resource RESOURCE_OR_PATH_GLOB]
@@ -4258,110 +4258,6 @@ func runIntegrationAdopt(args []string, stdin io.Reader, stdout io.Writer) error
 	} else {
 		fmt.Fprintf(stdout, "%s adopted into workspace %s (connectionId=%s)\n", provider, record.Name, boundConnectionID)
 	}
-	return nil
-}
-
-// runIntegrationSetMetadata is a general-purpose verb for writing operator-
-// controlled connection metadata. Today the Atlassian post-OAuth picker
-// (`integration connect jira`) uses the same endpoint to set `cloudId` and
-// `baseUrl` automatically. This verb exists for the cases the auto-picker
-// doesn't cover: changing metadata post-connect, setting non-Atlassian
-// connection-level config (e.g. linear `team_id`, a custom API host), or
-// scripting metadata writes from CI.
-//
-// Cloud forwards the payload to `nango.setMetadata` (full replacement, not
-// merge). v1 accepts flat KEY=VALUE pairs only; nested keys are documented
-// as a future enhancement so the prompt and confirmation stay legible.
-func runIntegrationSetMetadata(args []string, stdin io.Reader, stdout io.Writer) error {
-	fs := flag.NewFlagSet("integration set-metadata", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	workspaceName := fs.String("workspace", "", "workspace name or id")
-	cloudAPIURL := fs.String("cloud-api-url", envOrDefault("RELAYFILE_CLOUD_API_URL", defaultCloudAPIURL), "Relayfile Cloud API URL")
-	yes := fs.Bool("yes", false, "skip confirmation")
-	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
-		"workspace":     true,
-		"cloud-api-url": true,
-		"yes":           false,
-	})); err != nil {
-		return err
-	}
-	rest := fs.Args()
-	if len(rest) < 2 {
-		return fmt.Errorf(
-			"usage: %s integration set-metadata PROVIDER KEY=VALUE [KEY=VALUE...] [--workspace NAME] [--yes]\n\n"+
-				"  v1 accepts flat KEY=VALUE pairs only; nested keys are not yet supported.\n"+
-				"  Example: %s integration set-metadata jira cloudId=abc-123 baseUrl=https://foo.atlassian.net",
-			programName(),
-			programName(),
-		)
-	}
-	provider := normalizeProviderID(rest[0])
-	if err := validateLocalProviderID(provider); err != nil {
-		return err
-	}
-	metadata := map[string]any{}
-	for _, raw := range rest[1:] {
-		key, value, ok := strings.Cut(raw, "=")
-		if !ok {
-			return fmt.Errorf("metadata argument %q is not in KEY=VALUE form", raw)
-		}
-		key = strings.TrimSpace(key)
-		value = strings.TrimSpace(value)
-		if key == "" {
-			return fmt.Errorf("metadata argument %q has an empty key", raw)
-		}
-		if strings.ContainsAny(key, ".[]") {
-			return fmt.Errorf("metadata key %q must be flat; nested keys are not supported yet", key)
-		}
-		metadata[key] = value
-	}
-	record, err := resolveWorkspaceRecord(strings.TrimSpace(*workspaceName))
-	if err != nil {
-		return err
-	}
-	if !*yes {
-		fmt.Fprintf(stdout, "About to set %s metadata in workspace %q:\n", provider, record.Name)
-		// Print keys in alphabetical order so the confirmation is stable
-		// across runs and easy to eyeball.
-		keys := make([]string, 0, len(metadata))
-		for k := range metadata {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			fmt.Fprintf(stdout, "  %s = %v\n", k, metadata[k])
-		}
-		answer, err := promptLine(stdin, stdout, "Continue? [y/N]: ")
-		if err != nil {
-			return err
-		}
-		answer = strings.ToLower(strings.TrimSpace(answer))
-		if answer != "y" && answer != "yes" {
-			fmt.Fprintln(stdout, "Aborted")
-			return nil
-		}
-	}
-	cloudCreds, err := ensureCloudCredentials(strings.TrimSpace(*cloudAPIURL), "", 5*time.Minute, false, io.Discard)
-	if err != nil {
-		return err
-	}
-	client, err := newAPIClient(cloudCreds.APIURL, cloudCreds.AccessToken)
-	if err != nil {
-		return err
-	}
-	bodyBytes, err := json.Marshal(map[string]any{"metadata": metadata})
-	if err != nil {
-		return err
-	}
-	if _, _, err := client.do(
-		context.Background(),
-		http.MethodPut,
-		fmt.Sprintf("/api/v1/workspaces/%s/integrations/%s/metadata", url.PathEscape(record.ID), url.PathEscape(provider)),
-		bodyBytes,
-	); err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "%s metadata updated in workspace %s\n", provider, record.Name)
 	return nil
 }
 

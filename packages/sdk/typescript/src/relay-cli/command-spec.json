@@ -514,7 +514,7 @@
       },
       {
         "name": "set-metadata",
-        "description": "Set provider connection metadata as KEY=VALUE pairs",
+        "description": "Set provider connection metadata from KEY=VALUE pairs or a JSON file",
         "args": [
           {
             "name": "provider",
@@ -523,8 +523,8 @@
           },
           {
             "name": "assignments",
-            "description": "one or more KEY=VALUE metadata assignments",
-            "required": true,
+            "description": "KEY=VALUE metadata assignments (or use --metadata-file)",
+            "required": false,
             "variadic": true
           }
         ],
@@ -536,6 +536,10 @@
           {
             "flags": "--cloud-api-url <url>",
             "description": "Relayfile Cloud API URL (default: $RELAYFILE_CLOUD_API_URL or https://agentrelay.com/cloud)"
+          },
+          {
+            "flags": "--metadata-file <file>",
+            "description": "JSON object file (instead of KEY=VALUE pairs)"
           },
           {
             "flags": "--yes",

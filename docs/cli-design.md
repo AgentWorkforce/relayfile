@@ -492,7 +492,40 @@ Manage provider integrations after initial setup.
 relayfile integration connect <provider> [--workspace NAME] [--no-open] [--timeout 5m]
 relayfile integration list      [--workspace NAME] [--json]
 relayfile integration disconnect <provider> [--workspace NAME] [--yes]
+relayfile integration set-metadata <provider> [KEY=VALUE...] [--metadata-file FILE] [--workspace NAME] [--yes]
 ```
+
+`set-metadata` updates the existing connection through Cloud; it does not
+reconnect the provider. `KEY=VALUE` values remain strings. Use
+`--metadata-file` for a JSON object containing arrays, booleans, or nested
+objects, such as GitLab project selection. The preview masks secret/token
+fields, including nested fields. The file and assignments cannot be combined.
+
+For a GitLab bot with Developer access, select its project and use an
+externally managed hook. Generate the matching secret locally:
+
+```bash
+node --input-type=module <<'NODE'
+import { randomBytes } from 'node:crypto';
+import { writeFileSync } from 'node:fs';
+writeFileSync('gitlab-settings.json', JSON.stringify({
+  projectIds: ['12345'], // Replace with the intended GitLab project ID.
+  manageWebhooks: false,
+  webhookSecret: randomBytes(32).toString('hex'),
+}, null, 2), { mode: 0o600, flag: 'wx' });
+NODE
+relayfile integration set-metadata gitlab --workspace demo --metadata-file gitlab-settings.json
+```
+
+The same command is exposed as
+`agent-relay file integration set-metadata gitlab --workspace demo --metadata-file gitlab-settings.json`.
+Both use the normal Cloud login and workspace authorization. In the current
+Cloud GitLab route, saving selection requests the selected-project syncs. A
+project Maintainer must still install the webhook using the same secret and
+the Cloud webhook URL; manual mode does not create a GitLab hook. Keep the
+settings file private. Review existing metadata before changing a configured
+connection: replacement and merge behavior is owned by the provider's Cloud
+route, and an unsuccessful save may have partial effects.
 
 **`connect` behavior:**
 
