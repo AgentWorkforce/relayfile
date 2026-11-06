@@ -529,7 +529,14 @@ not mean the provider's webhooks or path-glob delivery of the listed paths are
 unavailable: path-glob subscriptions to those paths (existing runtime bridges
 that subscribe by path) are a separate mechanism that this status neither
 assesses nor disables, and the human output says so in a trailing `note:`
-line. Durable resource subscriptions are different again: their `resourceRef`
+line. That mechanism is receiver-version dependent, and the note says so too:
+catalog paths with an embedded wildcard (for example
+`/jira/issues/*/comments/*.json`) only match on receivers that carry the
+segment matcher, which shipped with the `?capabilities=eventTypes` probe
+(relayfile-cloud #414); an older receiver matches exact paths and trailing
+`*`/`**` only, so such a path silently never delivers there. The CLI does not
+probe the receiver, so it never represents a catalog path glob as live on a
+given receiver. Durable resource subscriptions are different again: their `resourceRef`
 must be one exact canonical by-id leaf plus `eventTypes`, so a catalog event
 path glob or a candidate handoff `resource` can never be used directly as a
 durable `resourceRef`. Webhook subscriptions take `pathGlobs` selectors; the

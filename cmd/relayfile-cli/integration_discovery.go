@@ -117,7 +117,7 @@ const (
 	// subscriptions are a third, distinct mechanism: resourceRef must be one
 	// exact canonical by-id leaf, so catalog event path globs and candidate
 	// handoff resources are never usable as durable resourceRef values.
-	eventSupportScopeNote  = "support rates exact provider-event (event_types) subscriptions only; known-only/unsupported does not mean the provider's webhooks or path-glob delivery of the listed paths are unavailable"
+	eventSupportScopeNote  = "support rates exact provider-event (event_types) subscriptions only; known-only/unsupported does not mean the provider's webhooks or path-glob delivery of the listed paths are unavailable. Path-glob delivery is receiver-version dependent: paths with an embedded wildcard (e.g. /jira/issues/*/comments/*.json) only match on receivers with the segment matcher (the ones answering the ?capabilities=eventTypes probe); older receivers match exact paths and trailing */** only, so those paths silently never deliver there"
 	runtimeSubscribePath   = "/integrations/subscribe"
 	runtimeSubscribeStatus = "candidate (Relay2087 proposal), not the installed runtime contract"
 	runtimeSubscribeAuth   = "current-session registration; no agent name or other session"
@@ -323,7 +323,7 @@ func webhookSubscriptionFields() []integrationSubscriptionField {
 		},
 		{
 			Name: "pathGlobs", Required: true, Type: "array<string>",
-			Description: "Relayfile path globs to deliver; `*` matches within a segment, `**` across segments.",
+			Description: "Relayfile path globs to deliver. On receivers that answer the `?capabilities=eventTypes` probe, `*` matches within a segment and `**` across segments; older receivers match exact paths and trailing `*`/`**` only, so an embedded wildcard (e.g. `/jira/issues/*/comments/*.json`) never matches there. Probe before relying on embedded wildcards.",
 		},
 		{
 			Name: "eventTypes", Required: false, Type: "array<string>",
