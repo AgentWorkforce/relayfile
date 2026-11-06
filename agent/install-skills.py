@@ -19,7 +19,6 @@ for entry in manifest['files']:
     if hashlib.sha256(body).hexdigest() != entry['sha256']:
         raise SystemExit('Nango skill checksum mismatch: ' + entry['path'])
     downloaded.append((relative, body))
-downloaded.append((Path('trigger-autocomplete-catalog/SKILL.md'), (lane / 'trigger-autocomplete-catalog.md').read_bytes()))
 # Fetch and verify everything before replacing any installed skill file.
 for root in [home / '.claude/skills', home / '.codex/skills']:
     for relative, body in downloaded:

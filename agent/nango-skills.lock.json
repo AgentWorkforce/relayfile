@@ -16,6 +16,11 @@
       "path": "building-nango-functions-locally/references/tools.md",
       "url": "https://raw.githubusercontent.com/NangoHQ/skills/5a1d35c2f78afca62d367578c9c2dcc16eef8863/skills/building-nango-functions-locally/references/tools.md",
       "sha256": "4272ec018eda1877a31c5932843b5e6973ca6aaf1ab9956eeb32140245f3714d"
+    },
+    {
+      "path": "trigger-autocomplete-catalog/SKILL.md",
+      "url": "https://raw.githubusercontent.com/AgentWorkforce/relayfile/f2f2da1d135e70f748b8fa1cb69cdff610b580dc/agent/trigger-autocomplete-catalog.md",
+      "sha256": "c6d9b20507d3746bddef85601165e2bfdbb3693103be6700dda7c25a6c12b983"
     }
   ]
 }

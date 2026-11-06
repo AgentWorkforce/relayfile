@@ -11,7 +11,7 @@ export default defineLayeredAgent({
   instanceType: "m7i.xlarge",
   rootVolumeGiB: 150,
   aptPackages: ["golang-go", "fuse3", "libfuse3-dev", "pkg-config"],
-  laneFiles: ["lead-prompt.md", "setup-lane.sh", "load-secrets-lane.sh", "install-skills.py", "nango-skills.lock.json", "nango-persona.md", "trigger-autocomplete-catalog.md"],
+  laneFiles: ["lead-prompt.md", "setup-lane.sh", "load-secrets-lane.sh", "install-skills.py", "nango-skills.lock.json", "nango-persona.md"],
   repos: ["AgentWorkforce/relayfile", "AgentWorkforce/relayfile-cloud", "AgentWorkforce/cloud", "AgentWorkforce/relayfile-adapters"],
   relayDescription: "RelayFile and RelayFile Cloud layered lead",
   names: { platformPrefix: `/relaycast-agent-host/${stage}` },

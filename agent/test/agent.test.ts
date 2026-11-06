@@ -31,14 +31,15 @@ test("fresh RelayFile host: owned resources, repositories and bounded runtime se
 test("boot includes the persona and skill installer within EC2's user-data budget", () => {
   const encoded = userDataBase64(agent, read);
   console.log(`RelayFile user data: ${encoded.length} bytes base64`);
-  assert.ok(encoded.length + 500 < 23_600, `user data plus 500-byte compression slack exceeds budget: ${encoded.length}`);
+  assert.ok(encoded.length + 500 < 21_800, `user data plus 500-byte compression slack exceeds budget: ${encoded.length}`);
   const boot = gunzipSync(Buffer.from(encoded, "base64")).toString("utf8");
   for (const name of agent.input.laneFiles) assert.ok(boot.includes(`/opt/agent-host/${name}`), name);
   assert.doesNotMatch(boot, /sk-ant-|ghp_|ghs_|gho_|github_pat_|BEGIN [A-Z ]*PRIVATE KEY/);
   const lock = JSON.parse(readFileSync(new URL("../nango-skills.lock.json", import.meta.url), "utf8"));
-  assert.equal(lock.files.length, 3);
+  assert.ok(Buffer.from(encoded, "base64").length <= 16_384, "EC2 raw user-data limit");
+  assert.equal(lock.files.length, 4);
   for (const f of lock.files) {
-    assert.match(f.url, new RegExp(`^https://raw\\.githubusercontent\\.com/NangoHQ/skills/${lock.commit}/skills/`));
+    assert.match(f.url, /^https:\/\/raw\.githubusercontent\.com\/(NangoHQ\/skills|AgentWorkforce\/relayfile)\/[0-9a-f]{40}\//);
     assert.match(f.sha256, /^[0-9a-f]{64}$/);
   }
 });
@@ -80,12 +81,13 @@ with tempfile.TemporaryDirectory() as tmp:
             raise AssertionError('tampered download was accepted')
     assert not home.exists(), 'no partial installation after checksum failure'
     files[1]['sha256'] = hashlib.sha256(body).hexdigest()
+    files.append({'path':'trigger-autocomplete-catalog/SKILL.md','url':'https://example.invalid/trigger','sha256':hashlib.sha256(body).hexdigest()})
     manifest.write_text(json.dumps({'files':files}))
     with patch('urllib.request.urlopen', side_effect=lambda *args, **kwargs: io.BytesIO(body)):
         runpy.run_path(sys.argv[1], run_name='__main__')
     for harness in ['.claude', '.codex']:
         assert (home / harness / 'skills/building-nango-functions-locally/SKILL.md').read_bytes() == body
         assert (home / harness / 'skills/building-nango-functions-locally/references/syncs.md').read_bytes() == body
-        assert (home / harness / 'skills/trigger-autocomplete-catalog/SKILL.md').read_text() == 'local trigger skill'
+        assert (home / harness / 'skills/trigger-autocomplete-catalog/SKILL.md').read_bytes() == body
 `, installer]);
 });
