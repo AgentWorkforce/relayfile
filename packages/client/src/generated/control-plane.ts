@@ -217,6 +217,42 @@ export interface components {
             authMode?: string;
             categories?: string[];
             docs?: string;
+            /** @description Subscribable provider events published by the cloud integration catalog. Absent when the catalog does not publish events; the local fallback catalog never includes them. */
+            events?: components["schemas"]["IntegrationEvent"][];
+            /** @description Provenance of the events list as reported by the cloud catalog. */
+            eventsSource?: string;
+            /** @description Version of the events list as reported by the cloud catalog. */
+            eventsVersion?: string;
+            /** @description Backend (nango or composio) whose metadata produced the events list. */
+            eventsBackend?: string;
+        };
+        IntegrationEvent: {
+            /** @description Normalized semantic event name, e.g. comment.created. */
+            name: string;
+            /** @description Provider-native event names, e.g. comment_created. */
+            native?: string[];
+            object?: string;
+            action?: string | null;
+            /** @description Delivered relayfile path globs. */
+            paths?: string[];
+            /**
+             * @description Whether the backend can register the event for agent delivery; absent means unknown. known-only means the adapter recognizes the event but no backend subscription path exists yet.
+             * @enum {string}
+             */
+            support?: "subscribable" | "known-only" | "unsupported";
+            /** @description Upstream registration mode, e.g. oauth-dynamic-webhook. */
+            mode?: string;
+            /** @description Why the event is not subscribable, when it is not. */
+            reason?: string;
+            /** @description Backend (nango or composio) whose metadata published this event. */
+            backend?: string;
+            schema?: components["schemas"]["IntegrationEventSchema"];
+            description?: string;
+        };
+        /** @description Payload-schema status for an event. status unknown means no typed capture exists; clients must not present an example as the schema. */
+        IntegrationEventSchema: {
+            status?: string;
+            reason?: string;
         };
         ProviderStatusRequest: {
             provider: string;

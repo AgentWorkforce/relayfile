@@ -317,7 +317,7 @@ func relayfileCommands() []cliCommandSpec {
 					Options: []cliOptionSpec{
 						cloudAPIURLOption,
 						{Flags: "--backend <backend>", Description: "filter by backend (nango or composio)"},
-						{Flags: "--search <query>", Description: "search provider id, display name, category, or backend"},
+						{Flags: "--search <query>", Description: "search provider id, display name, category, backend, or event name"},
 						jsonFlagOption,
 						{Flags: "--refresh", Description: "refresh the cached provider catalog", DefaultValue: false},
 					},
@@ -332,6 +332,31 @@ func relayfileCommands() []cliCommandSpec {
 						{Flags: "--backend <backend>", Description: "filter by backend (nango or composio)"},
 						jsonFlagOption,
 						{Flags: "--refresh", Description: "refresh the cached provider catalog", DefaultValue: false},
+					},
+				},
+				{
+					Name:        "events",
+					Description: "List a provider's subscribable events from the cloud integration catalog",
+					flagSource:  "runIntegrationEvents",
+					Args:        []cliArgSpec{{Name: "provider", Description: "provider id, e.g. jira", Required: true}},
+					Options: []cliOptionSpec{
+						cloudAPIURLOption,
+						jsonFlagOption,
+						{Flags: "--refresh", Description: "refresh the cached provider catalog", DefaultValue: false},
+						{Flags: "--subscribable", Description: "only list events the catalog marks subscribable", DefaultValue: false},
+					},
+				},
+				{
+					Name:        "describe",
+					Description: "Describe a provider's events, subscription options, and delivered event envelope",
+					flagSource:  "runIntegrationDescribe",
+					Args:        []cliArgSpec{{Name: "provider", Description: "provider id, e.g. jira", Required: true}},
+					Options: []cliOptionSpec{
+						{Flags: "--event <event>", Description: "describe one event by normalized or native name, e.g. comment.created"},
+						cloudAPIURLOption,
+						jsonFlagOption,
+						{Flags: "--refresh", Description: "refresh the cached provider catalog", DefaultValue: false},
+						{Flags: "--subscribable", Description: "only describe events the catalog marks subscribable", DefaultValue: false},
 					},
 				},
 				{

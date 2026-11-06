@@ -416,6 +416,12 @@ type integrationCatalogEntry struct {
 	AuthMode    string   `json:"authMode,omitempty"`
 	Categories  []string `json:"categories,omitempty"`
 	Docs        string   `json:"docs,omitempty"`
+	// Events is published by the cloud catalog; absent on older catalogs and
+	// on fallbackIntegrationCatalog, which stays metadata-only.
+	Events        []integrationCatalogEvent `json:"events,omitempty"`
+	EventsSource  string                    `json:"eventsSource,omitempty"`
+	EventsVersion string                    `json:"eventsVersion,omitempty"`
+	EventsBackend string                    `json:"eventsBackend,omitempty"`
 }
 
 type cloudIntegrationListEntry struct {
@@ -828,6 +834,10 @@ func printIntegrationUsage(w io.Writer, subcommand string) {
 		fmt.Fprintf(w, "Usage: %s integration available [--search QUERY] [--backend BACKEND] [--json] [--refresh]\n", programName())
 	case "search":
 		fmt.Fprintf(w, "Usage: %s integration search QUERY [--backend BACKEND] [--json] [--refresh]\n", programName())
+	case "events":
+		fmt.Fprintf(w, "Usage: %s integration events PROVIDER [--subscribable] [--json] [--refresh]\n", programName())
+	case "describe":
+		fmt.Fprintf(w, "Usage: %s integration describe PROVIDER [--event EVENT] [--subscribable] [--json] [--refresh]\n", programName())
 	case "list":
 		fmt.Fprintf(w, "Usage: %s integration list [--workspace NAME] [--json]\n", programName())
 	case "disconnect":
@@ -847,6 +857,8 @@ func printIntegrationUsage(w io.Writer, subcommand string) {
   %[1]s integration connect PROVIDER [--backend BACKEND] [--workspace NAME] [--wait-sync]
   %[1]s integration available [--search QUERY] [--backend BACKEND] [--json] [--refresh]
   %[1]s integration search QUERY [--backend BACKEND] [--json] [--refresh]
+  %[1]s integration events PROVIDER [--subscribable] [--json] [--refresh]
+  %[1]s integration describe PROVIDER [--event EVENT] [--subscribable] [--json] [--refresh]
   %[1]s integration list [--workspace NAME] [--json]
   %[1]s integration disconnect PROVIDER [--workspace NAME] [--yes]
   %[1]s integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]
@@ -935,6 +947,8 @@ Usage:
     (for jira/confluence: prompts for the Atlassian site to bind after OAuth completes)
   %[1]s integration available [--search QUERY] [--backend BACKEND] [--json] [--refresh]
   %[1]s integration search QUERY [--backend BACKEND] [--json] [--refresh]
+  %[1]s integration events PROVIDER [--subscribable] [--json] [--refresh]
+  %[1]s integration describe PROVIDER [--event EVENT] [--subscribable] [--json] [--refresh]
   %[1]s integration list [--workspace NAME] [--json]
   %[1]s integration disconnect PROVIDER [--workspace NAME] [--yes]
   %[1]s integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]
@@ -3150,7 +3164,7 @@ func runWorkspace(args []string, stdin io.Reader, stdout io.Writer) error {
 
 func runIntegration(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("integration subcommand is required: connect, available, search, list, disconnect, adopt, set-metadata, bind, or unbind")
+		return errors.New("integration subcommand is required: connect, available, search, events, describe, list, disconnect, adopt, set-metadata, bind, or unbind")
 	}
 	switch args[0] {
 	case "connect":
@@ -3159,6 +3173,10 @@ func runIntegration(args []string, stdin io.Reader, stdout io.Writer) error {
 		return runIntegrationAvailable(args[1:], stdout)
 	case "search":
 		return runIntegrationSearch(args[1:], stdout)
+	case "events":
+		return runIntegrationEvents(args[1:], stdout)
+	case "describe":
+		return runIntegrationDescribe(args[1:], stdout)
 	case "list":
 		return runIntegrationList(args[1:], stdout)
 	case "disconnect":
@@ -3808,7 +3826,7 @@ func runIntegrationAvailable(args []string, stdout io.Writer) error {
 	fs.SetOutput(io.Discard)
 	cloudAPIURL := fs.String("cloud-api-url", envOrDefault("RELAYFILE_CLOUD_API_URL", defaultCloudAPIURL), "Relayfile Cloud API URL")
 	backend := fs.String("backend", "", "filter by backend (nango or composio)")
-	search := fs.String("search", "", "search provider id, display name, category, or backend")
+	search := fs.String("search", "", "search provider id, display name, category, backend, or event name")
 	jsonOutput := fs.Bool("json", false, "emit JSON")
 	refresh := fs.Bool("refresh", false, "refresh the cached provider catalog")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
@@ -3906,6 +3924,10 @@ func catalogEntryMatchesQuery(entry integrationCatalogEntry, query string) bool 
 	values = append(values, entry.Backends...)
 	values = append(values, entry.Sources...)
 	values = append(values, entry.Categories...)
+	for _, event := range entry.Events {
+		values = append(values, event.Name)
+		values = append(values, event.Native...)
+	}
 	for _, value := range values {
 		if strings.Contains(strings.ToLower(value), query) {
 			return true

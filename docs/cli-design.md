@@ -495,6 +495,55 @@ relayfile integration disconnect <provider> [--workspace NAME] [--yes]
 relayfile integration set-metadata <provider> (KEY=VALUE... | --metadata-file FILE) [--workspace NAME] [--yes]
 ```
 
+**Event discovery** (`events`, `describe`):
+
+```
+relayfile integration events   <provider> [--subscribable] [--json] [--refresh] [--cloud-api-url URL]
+relayfile integration describe <provider> [--event EVENT] [--subscribable] [--json] [--refresh] [--cloud-api-url URL]
+```
+
+Both read the provider's `events` list from the cloud integration catalog
+(`GET /api/v1/integrations/catalog?dynamic=true`, cached like
+`integration available`). The CLI ships no per-provider event list: when the
+catalog entry has no `events`, both commands fail with
+`event catalog not published by <cloud-api-url> for <provider>; ...` and exit
+code 3. `integration available --search` also matches event names, so
+`relayfile integration available --search comment.created` finds `jira`.
+
+`events` prints one row per event, sorted by name (values below are
+placeholders, not the published Jira event set):
+
+```
+event            native           object   action   support       mode                   backend  paths
+comment.created  comment_created  comment  created  subscribable  oauth-dynamic-webhook  nango    /jira/issues/*/comments/*.json
+project.created  project_created  project  created  known-only    -                      nango    /jira/projects/*.json
+source: <eventsSource> version: <eventsVersion> backend: <eventsBackend>
+```
+
+(The real output is tab-separated; `support` is `unknown` when the catalog does
+not say.) `support: known-only` means the adapter recognizes the event but the
+backend cannot register it for agent delivery; `reason` says why. Each event's
+`schema` is the catalog's `{status, reason}` object (`status: unknown` means no
+typed payload capture exists, and the CLI never presents its example as the
+schema). `--subscribable` keeps only events with `support: subscribable`.
+
+`describe` adds what a subscriber needs: `--event` accepts the normalized name
+or any native name (`--event comment_created` resolves to `comment.created`).
+Its sections are the provider entry, the events, subscription options (the
+durable-subscription request fields from
+`openapi/relayfile-v1.openapi.yaml#CreateOrRenewDurableResourceSubscriptionRequest`
+and the relayfile-cloud webhook-subscription fields, including the
+`?capabilities=eventTypes` probe), handoff values (one
+`{provider, resource, event_types}` entry per delivered path glob, the exact
+body of the proposed runtime `POST /integrations/subscribe`; the CLI does not
+send it, reports `runtime.subscribe.available: false` until the runtime
+positively establishes the capability, and labels the contract as a
+candidate), the delivered
+`FilesystemEvent` envelope, and an illustrative example event (labelled as
+such; not a captured payload or schema). `--json` emits the same sections as keys
+(`provider`, `events`, `subscription`, `handoff`, `runtime`, `envelope`,
+`example`).
+
 `set-metadata` updates the existing connection through Cloud; it does not
 reconnect the provider. `KEY=VALUE` values remain strings. Use
 `--metadata-file` for a JSON object containing arrays, booleans, or nested
