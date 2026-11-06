@@ -540,7 +540,9 @@ given receiver. Durable resource subscriptions are different again: their `resou
 must be one exact canonical by-id leaf plus `eventTypes`, so a catalog event
 path glob or a candidate handoff `resource` can never be used directly as a
 durable `resourceRef`. Webhook subscriptions take `pathGlobs` selectors; the
-provider-event runtime handoff stays a candidate with `available: false`. Each event's
+provider-event runtime handoff reports `available: false` because its readiness
+is unconfirmed for the session, not because the runtime is unsupported (see
+`describe` below). Each event's
 `schema` is the catalog's `{status, reason}` object (`status: unknown` means no
 typed payload capture exists, and the CLI never presents its example as the
 schema). `--subscribable` keeps only events with `support: subscribable`.
@@ -562,12 +564,36 @@ and the relayfile-cloud webhook-subscription fields, including the
 from events the catalog marks `subscribable`; every other selected event is
 listed under `handoffExcluded` with its support level and reason so a
 known-only event stays describable but never becomes a subscribe request the
-backend cannot register; this is the exact body of the proposed runtime
-`POST /integrations/subscribe`, which the CLI does not send, reporting
-`runtime.subscribe.available: false` until the runtime positively establishes
-the capability and labelling the contract as a candidate), the delivered
+backend cannot register; this is the exact body of the runtime
+`POST /integrations/subscribe` request, which the CLI does not send), the
+runtime readiness contract, the delivered
 `FilesystemEvent` envelope, and an illustrative example event (labelled as
-such; not a captured payload or schema). `--json` emits the same sections as keys
+such; not a captured payload or schema).
+
+`runtime.subscribe.available` is always `false` and its `reason` says why:
+the CLI has no runtime client, so exact provider-event readiness is
+*unconfirmed for this session*, never "the runtime does not support it". The
+`contract` block documents how a subscribing agent establishes readiness.
+There is no version to read: adding an optional parameter changes neither the
+relay `bridge_version` nor `hello.methods`, so the only positive signal is the
+echo. `contract.readiness` spells it out: send `event_types` on the
+current-session socket `POST /integrations/subscribe` (preferred, because it
+rejects unknown request keys, so a runtime without the feature fails the
+request rather than silently dropping the filter) and require the subscribe
+response (and later setup status) to echo the same canonical set. The runtime
+normalizes the list before echoing it (Jira aliases such as `comment_created`
+map to `comment.created`; entries are sorted and deduplicated; at most 32), so
+the comparison is set equality after that normalization, not request order.
+Unconfirmed means `event_types` is absent, the canonical set differs, or the
+request is rejected: the runtime did not honour the filter. An older bridge
+path may have created an *unfiltered* subscription and omitted the echo, so the
+agent fails closed: unsubscribe that resource immediately, never leave a broad
+subscription active, and never fall back to an unfiltered subscription. That
+check is the subscribing agent's, run per session at subscribe time; the CLI
+performs no probe, never sends `event_types`, and keeps no second catalog.
+`contract.source` names the relay runtime change that defines the request and
+echo (relay PR 2087). `--json`
+emits the same sections as keys
 (`provider`, `events`, `subscription`, `handoff`, `handoffExcluded`, `runtime`,
 `envelope`, `example`). `describe --subscribable` on a provider whose published
 events are all known-only returns empty `events`/`handoff` and omits `example`,
