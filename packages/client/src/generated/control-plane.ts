@@ -232,6 +232,7 @@ export interface components {
             /** @description Provider-native event names, e.g. comment_created. */
             native?: string[];
             object?: string;
+            /** @description Semantic action (created, updated, ...); null when the producer publishes a native-only event such as Slack app_mention. */
             action?: string | null;
             /** @description Delivered relayfile path globs. */
             paths?: string[];
@@ -246,6 +247,8 @@ export interface components {
             reason?: string;
             /** @description Backend (nango or composio) whose metadata published this event. */
             backend?: string;
+            /** @description Catalog sources that contributed the event, e.g. adapter_catalog, nango_connection_manifest, provider_contract. */
+            provenance?: string[];
             /** @description Payload-schema status object, or null when the catalog has not assessed the event. Clients must treat null and status unknown alike; neither enables subscribe. */
             schema?: components["schemas"]["IntegrationEventSchema"] | null;
             description?: string;

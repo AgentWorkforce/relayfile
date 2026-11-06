@@ -402,8 +402,8 @@ components:
         object:
           type: string
         action:
-          type: string
-          nullable: true
+          type: [string, "null"]
+          description: Semantic action (created, updated, ...); null when the producer publishes a native-only event such as Slack app_mention.
         paths:
           type: array
           description: Delivered relayfile path globs.
@@ -422,10 +422,15 @@ components:
         backend:
           type: string
           description: Backend (nango or composio) whose metadata published this event.
+        provenance:
+          type: array
+          description: Catalog sources that contributed the event, e.g. adapter_catalog, nango_connection_manifest, provider_contract.
+          items:
+            type: string
         schema:
-          nullable: true
-          allOf:
+          oneOf:
             - $ref: '#/components/schemas/IntegrationEventSchema'
+            - type: "null"
           description: Payload-schema status object, or null when the catalog has not assessed the event. Clients must treat null and status unknown alike; neither enables subscribe.
         description:
           type: string

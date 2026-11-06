@@ -25,7 +25,10 @@ type integrationCatalogEvent struct {
 	Reason  string   `json:"reason,omitempty"`  // why the event is not subscribable, when it is not
 	// Backend is the integration backend (nango or composio) whose metadata
 	// published this event; the catalog's ?backend= selector picks it.
-	Backend     string                  `json:"backend,omitempty"`
+	Backend string `json:"backend,omitempty"`
+	// Provenance names the catalog sources that contributed the event, e.g.
+	// adapter_catalog, nango_connection_manifest, provider_contract.
+	Provenance  []string                `json:"provenance,omitempty"`
 	Schema      *integrationEventSchema `json:"schema,omitempty"`
 	Description string                  `json:"description,omitempty"`
 }

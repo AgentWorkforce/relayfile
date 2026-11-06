@@ -864,3 +864,146 @@ func assertSameSet(t *testing.T, label string, got, want []string) {
 		t.Errorf("%s: CLI describes %v, spec has %v", label, got, want)
 	}
 }
+
+// cloudPR6093CatalogExcerpt is an ACTUAL wire excerpt (public metadata, no
+// credentials) from the catalog producer AgentWorkforce/cloud PR 6093,
+// branch feat/integration-event-catalog, head
+// 5e0337eddb8a792f275596094870ee9cc877ce17 (emission
+// packages/web/app/api/v1/integrations/catalog/route.ts, helper
+// packages/web/lib/integrations/integration-event-catalog.ts), relayed by the
+// catalog owner on 2026-11-06. Unlike discoveryCatalogFixture it is
+// source-derived: this test is the producer/consumer drift check.
+const cloudPR6093CatalogExcerpt = `{"eventCatalogVersion":1,"version":"a8e5c7f561d5","providers":[{"id":"jira","backend":"nango","backends":["nango"],"vfsRoot":"/jira","eventsBackend":"nango","eventsVersion":"1","eventsSource":"adapter_catalog+nango_registration_manifest","events":[{"name":"comment.created","native":[],"object":"comment","action":"created","paths":["/jira/issues/**/comments/**"],"backend":"nango","support":"known-only","mode":"unknown","reason":"Adapter-known event; this native registration manifest does not declare it and the current Jira forward path does not preserve a separate typed record.","provenance":["adapter_catalog"],"schema":{"status":"unknown","reason":"A full provider-native payload schema is not published by these event sources. This is not a provider payload schema or a live delivery check."}}]},{"id":"slack","backend":"nango","backends":["nango"],"vfsRoot":"/slack","eventsBackend":"nango","eventsVersion":"1","eventsSource":"adapter_catalog+nango_connection_manifest+provider_contract","events":[{"name":"app_mention","native":["app_mention"],"object":"app_mention","action":null,"paths":["/slack/channels/**","/slack/users/**/messages/**"],"backend":"nango","support":"known-only","mode":"webhook","reason":"Slack forwarding recognizes message/reaction types, but ordinary Relayfile writes do not preserve trusted providerEventType for exact subscriptions. Connection subscription declarations alone do not establish typed delivery.","provenance":["nango_connection_manifest"],"schema":{"status":"unknown","reason":"A full provider-native payload schema is not published by these event sources. This is not a provider payload schema or a live delivery check."}},{"name":"message.created","native":[],"object":"message","action":"created","paths":["/slack/channels/**/messages/**","/slack/users/**/messages/**"],"backend":"nango","support":"known-only","mode":"unknown","reason":"Slack forwarding recognizes message/reaction types, but ordinary Relayfile writes do not preserve trusted providerEventType for exact subscriptions. Connection subscription declarations alone do not establish typed delivery.","provenance":["adapter_catalog","provider_contract"],"schema":{"status":"unknown","reason":"A full provider-native payload schema is not published by these event sources. This is not a provider payload schema or a live delivery check."}}]}]}`
+
+func newCatalogServer(t *testing.T, body string) *httptest.Server {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/integrations/catalog" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// TestIntegrationDiscoveryDecodesProducerExcerpt decodes the real producer
+// output end to end: every field the producer emits must round-trip (no
+// silent drops of provenance, null action, ** globs, string eventsVersion),
+// every event is known-only so no handoff may be produced, and the CLI must
+// not promote any capability the catalog did not state.
+func TestIntegrationDiscoveryDecodesProducerExcerpt(t *testing.T) {
+	server := newCatalogServer(t, cloudPR6093CatalogExcerpt)
+
+	// Strict decode of the raw excerpt: unknown fields in the parts the CLI
+	// models would mean producer/consumer drift.
+	var strict struct {
+		EventCatalogVersion int    `json:"eventCatalogVersion"`
+		Version             string `json:"version"`
+		Providers           []struct {
+			ID            string                    `json:"id"`
+			Backend       string                    `json:"backend"`
+			Backends      []string                  `json:"backends"`
+			VFSRoot       string                    `json:"vfsRoot"`
+			EventsBackend string                    `json:"eventsBackend"`
+			EventsVersion string                    `json:"eventsVersion"`
+			EventsSource  string                    `json:"eventsSource"`
+			Events        []integrationCatalogEvent `json:"events"`
+		} `json:"providers"`
+	}
+	dec := json.NewDecoder(strings.NewReader(cloudPR6093CatalogExcerpt))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&strict); err != nil {
+		t.Fatalf("producer excerpt has fields the CLI does not model (drift): %v", err)
+	}
+	if strict.EventCatalogVersion != 1 || strict.Version != "a8e5c7f561d5" || len(strict.Providers) != 2 {
+		t.Fatalf("top-level = %+v", strict)
+	}
+
+	var out bytes.Buffer
+	if err := runIntegration([]string{"events", "slack", "--json", "--cloud-api-url", server.URL}, nil, &out); err != nil {
+		t.Fatalf("events slack: %v", err)
+	}
+	var events integrationEventsOutput
+	if err := json.Unmarshal(out.Bytes(), &events); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if events.Source != "adapter_catalog+nango_connection_manifest+provider_contract" || events.Version != "1" || events.Backend != "nango" {
+		t.Fatalf("provenance line = %+v", events)
+	}
+	if len(events.Events) != 2 {
+		t.Fatalf("events = %+v", events.Events)
+	}
+	mention := events.Events[0]
+	if mention.Name != "app_mention" || mention.Action != "" || mention.Mode != "webhook" || mention.Support != "known-only" ||
+		!reflect.DeepEqual(mention.Provenance, []string{"nango_connection_manifest"}) ||
+		!reflect.DeepEqual(mention.Paths, []string{"/slack/channels/**", "/slack/users/**/messages/**"}) ||
+		mention.Schema == nil || mention.Schema.Status != "unknown" || !strings.HasPrefix(mention.Schema.Reason, "A full provider-native payload schema is not published") {
+		t.Fatalf("app_mention = %+v schema=%+v", mention, mention.Schema)
+	}
+	created := events.Events[1]
+	if created.Name != "message.created" || len(created.Native) != 0 || created.Mode != "unknown" ||
+		!reflect.DeepEqual(created.Provenance, []string{"adapter_catalog", "provider_contract"}) {
+		t.Fatalf("message.created = %+v", created)
+	}
+
+	out.Reset()
+	if err := runIntegration([]string{"events", "slack", "--subscribable", "--json", "--cloud-api-url", server.URL}, nil, &out); err != nil {
+		t.Fatalf("events slack --subscribable: %v", err)
+	}
+	if err := json.Unmarshal(out.Bytes(), &events); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(events.Events) != 0 {
+		t.Fatalf("producer marks every Slack event known-only; --subscribable must be empty, got %+v", events.Events)
+	}
+
+	for _, provider := range []string{"jira", "slack"} {
+		out.Reset()
+		if err := runIntegration([]string{"describe", provider, "--json", "--cloud-api-url", server.URL}, nil, &out); err != nil {
+			t.Fatalf("describe %s: %v", provider, err)
+		}
+		var described integrationDescribeOutput
+		if err := json.Unmarshal(out.Bytes(), &described); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(described.Handoff) != 0 {
+			t.Fatalf("%s: known-only events must not yield handoff values: %+v", provider, described.Handoff)
+		}
+		if len(described.HandoffExcluded) != len(described.Events) {
+			t.Fatalf("%s: every event must be listed as excluded: %+v", provider, described.HandoffExcluded)
+		}
+		for _, excluded := range described.HandoffExcluded {
+			if excluded.Support != "known-only" || excluded.Reason == "" {
+				t.Fatalf("%s: exclusion must carry the producer's support and reason: %+v", provider, excluded)
+			}
+		}
+		if described.Runtime.Subscribe.Available {
+			t.Fatalf("%s: runtime.subscribe.available must stay false", provider)
+		}
+		if described.Example == nil || !described.Example.Illustrative {
+			t.Fatalf("%s: example = %+v", provider, described.Example)
+		}
+		if described.Provider.EventsVersion != "1" || described.Provider.Backend != "nango" {
+			t.Fatalf("%s: provider = %+v", provider, described.Provider)
+		}
+	}
+
+	out.Reset()
+	if err := runIntegration([]string{"describe", "jira", "--event", "comment.created", "--cloud-api-url", server.URL}, nil, &out); err != nil {
+		t.Fatalf("describe jira --event comment.created: %v", err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"no handoff: comment.created (support: known-only; Adapter-known event;",
+		"runtime subscribe: not available",
+		"/jira/issues/<id>/comments/<id>",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("human describe missing %q:\n%s", want, text)
+		}
+	}
+}
