@@ -534,15 +534,23 @@ durable-subscription request fields from
 `openapi/relayfile-v1.openapi.yaml#CreateOrRenewDurableResourceSubscriptionRequest`
 and the relayfile-cloud webhook-subscription fields, including the
 `?capabilities=eventTypes` probe), handoff values (one
-`{provider, resource, event_types}` entry per delivered path glob, the exact
-body of the proposed runtime `POST /integrations/subscribe`; the CLI does not
-send it, reports `runtime.subscribe.available: false` until the runtime
-positively establishes the capability, and labels the contract as a
-candidate), the delivered
+`{provider, resource, event_types}` entry per delivered path glob, built only
+from events the catalog marks `subscribable`; every other selected event is
+listed under `handoffExcluded` with its support level and reason so a
+known-only event stays describable but never becomes a subscribe request the
+backend cannot register; this is the exact body of the proposed runtime
+`POST /integrations/subscribe`, which the CLI does not send, reporting
+`runtime.subscribe.available: false` until the runtime positively establishes
+the capability and labelling the contract as a candidate), the delivered
 `FilesystemEvent` envelope, and an illustrative example event (labelled as
 such; not a captured payload or schema). `--json` emits the same sections as keys
-(`provider`, `events`, `subscription`, `handoff`, `runtime`, `envelope`,
-`example`).
+(`provider`, `events`, `subscription`, `handoff`, `handoffExcluded`, `runtime`,
+`envelope`, `example`). `describe --subscribable` on a provider whose published
+events are all known-only returns empty `events`/`handoff` and omits `example`,
+matching `events --subscribable`; exit code 3 is reserved for a provider whose
+catalog publishes no event list. A dynamic catalog cache written by an older
+CLI (before events were decoded) is refetched instead of being trusted for the
+rest of its TTL.
 
 `set-metadata` updates the existing connection through Cloud; it does not
 reconnect the provider. `KEY=VALUE` values remain strings. Use

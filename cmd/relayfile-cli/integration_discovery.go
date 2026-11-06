@@ -226,14 +226,26 @@ type integrationEventsOutput struct {
 	Events   []integrationCatalogEvent `json:"events"`
 }
 
+// integrationHandoffExclusion records a selected event that gets no handoff
+// because the catalog does not mark it subscribable; the catalog's own support
+// level and reason are carried so the gap is explained, not hidden.
+type integrationHandoffExclusion struct {
+	Event   string `json:"event"`
+	Support string `json:"support"`
+	Reason  string `json:"reason,omitempty"`
+}
+
 type integrationDescribeOutput struct {
-	Provider     integrationCatalogEntry            `json:"provider"`
-	Events       []integrationCatalogEvent          `json:"events"`
-	Subscription integrationSubscriptionDescription `json:"subscription"`
-	Handoff      []integrationHandoff               `json:"handoff"`
-	Runtime      integrationRuntimeDescription      `json:"runtime"`
-	Envelope     integrationEnvelopeDescription     `json:"envelope"`
-	Example      integrationEventExample            `json:"example"`
+	Provider        integrationCatalogEntry            `json:"provider"`
+	Events          []integrationCatalogEvent          `json:"events"`
+	Subscription    integrationSubscriptionDescription `json:"subscription"`
+	Handoff         []integrationHandoff               `json:"handoff"`
+	HandoffExcluded []integrationHandoffExclusion      `json:"handoffExcluded"`
+	Runtime         integrationRuntimeDescription      `json:"runtime"`
+	Envelope        integrationEnvelopeDescription     `json:"envelope"`
+	// Example is omitted when the selection is empty (for example
+	// --subscribable on a provider whose published events are all known-only).
+	Example *integrationEventExample `json:"example,omitempty"`
 }
 
 func intPtr(value int) *int { return &value }
@@ -461,9 +473,6 @@ func runIntegrationDescribe(args []string, stdout io.Writer) error {
 		}
 		selected = []integrationCatalogEvent{event}
 	}
-	if len(selected) == 0 {
-		return fmt.Errorf("no subscribable events for %s in the integration catalog", entry.ID)
-	}
 	output := buildIntegrationDescription(entry, selected)
 	if *jsonOutput {
 		return writeJSON(stdout, output)
@@ -579,7 +588,28 @@ func buildIntegrationDescription(entry integrationCatalogEntry, events []integra
 	provider := entry
 	provider.Events = nil
 
-	handoff := buildIntegrationHandoff(entry.ID, events)
+	// Handoff values are only built from events the catalog marks
+	// subscribable, independently of the display filter: a known-only or
+	// unsupported event stays describable but never becomes a subscribe
+	// request the backend cannot register.
+	subscribable := filterSubscribableEvents(events)
+	handoff := buildIntegrationHandoff(entry.ID, subscribable)
+	excluded := make([]integrationHandoffExclusion, 0, len(events)-len(subscribable))
+	for _, event := range events {
+		if isSubscribableEvent(event) {
+			continue
+		}
+		excluded = append(excluded, integrationHandoffExclusion{
+			Event:   event.Name,
+			Support: defaultIfBlank(event.Support, "unknown"),
+			Reason:  strings.TrimSpace(event.Reason),
+		})
+	}
+	var example *integrationEventExample
+	if len(events) > 0 {
+		built := buildIntegrationEventExample(entry, events[0])
+		example = &built
+	}
 
 	return integrationDescribeOutput{
 		Provider: provider,
@@ -601,7 +631,8 @@ func buildIntegrationDescription(entry integrationCatalogEntry, events []integra
 				Fields: webhookSubscriptionFields(),
 			},
 		},
-		Handoff: handoff,
+		Handoff:         handoff,
+		HandoffExcluded: excluded,
 		Runtime: integrationRuntimeDescription{
 			Subscribe: integrationRuntimeSubscribe{
 				Available: false,
@@ -622,7 +653,7 @@ func buildIntegrationDescription(entry integrationCatalogEntry, events []integra
 			ProviderEventType: providerEventTypeNote,
 			Snapshot:          snapshotNote,
 		},
-		Example: buildIntegrationEventExample(entry, events[0]),
+		Example: example,
 	}
 }
 
@@ -755,8 +786,14 @@ func writeIntegrationDescription(stdout io.Writer, output integrationDescribeOut
 	for _, handoff := range output.Handoff {
 		fmt.Fprintf(tw, "  %s\t%s\t%s\n", handoff.Provider, defaultIfBlank(handoff.Resource, "-"), joinOrDash(handoff.EventTypes))
 	}
+	if len(output.Handoff) == 0 {
+		fmt.Fprintln(tw, "  -\t-\t-")
+	}
 	if err := tw.Flush(); err != nil {
 		return err
+	}
+	for _, excluded := range output.HandoffExcluded {
+		fmt.Fprintf(stdout, "  no handoff: %s (support: %s%s)\n", excluded.Event, excluded.Support, reasonSuffix(excluded.Reason))
 	}
 	contract := output.Runtime.Subscribe.Contract
 	fmt.Fprintf(stdout, "  runtime subscribe: not available (%s)\n", output.Runtime.Subscribe.Reason)
@@ -787,6 +824,9 @@ func writeIntegrationDescription(stdout io.Writer, output integrationDescribeOut
 	fmt.Fprintf(stdout, "  snapshot: %s\n", envelope.Snapshot)
 
 	example := output.Example
+	if example == nil {
+		return nil
+	}
 	fmt.Fprintln(stdout)
 	fmt.Fprintln(stdout, "Example (illustrative, not a captured payload)")
 	for _, pair := range [][2]string{

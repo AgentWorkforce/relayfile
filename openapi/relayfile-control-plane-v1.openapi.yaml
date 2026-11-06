@@ -375,7 +375,7 @@ components:
           type: string
         events:
           type: array
-          description: Subscribable provider events published by the cloud integration catalog. Absent when the catalog does not publish events; the local fallback catalog never includes them.
+          description: Catalog-published provider events; inspect each event's support before treating it as subscribable (known-only and unsupported events are listed too). Absent when the catalog does not publish events; the local fallback catalog never includes them. Listing never implies runtime subscribe availability.
           items:
             $ref: '#/components/schemas/IntegrationEvent'
         eventsSource:
@@ -423,7 +423,10 @@ components:
           type: string
           description: Backend (nango or composio) whose metadata published this event.
         schema:
-          $ref: '#/components/schemas/IntegrationEventSchema'
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/IntegrationEventSchema'
+          description: Payload-schema status object, or null when the catalog has not assessed the event. Clients must treat null and status unknown alike; neither enables subscribe.
         description:
           type: string
     IntegrationEventSchema:

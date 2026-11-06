@@ -217,7 +217,7 @@ export interface components {
             authMode?: string;
             categories?: string[];
             docs?: string;
-            /** @description Subscribable provider events published by the cloud integration catalog. Absent when the catalog does not publish events; the local fallback catalog never includes them. */
+            /** @description Catalog-published provider events; inspect each event's support before treating it as subscribable (known-only and unsupported events are listed too). Absent when the catalog does not publish events; the local fallback catalog never includes them. Listing never implies runtime subscribe availability. */
             events?: components["schemas"]["IntegrationEvent"][];
             /** @description Provenance of the events list as reported by the cloud catalog. */
             eventsSource?: string;
@@ -246,7 +246,8 @@ export interface components {
             reason?: string;
             /** @description Backend (nango or composio) whose metadata published this event. */
             backend?: string;
-            schema?: components["schemas"]["IntegrationEventSchema"];
+            /** @description Payload-schema status object, or null when the catalog has not assessed the event. Clients must treat null and status unknown alike; neither enables subscribe. */
+            schema?: components["schemas"]["IntegrationEventSchema"] | null;
             description?: string;
         };
         /** @description Payload-schema status for an event. status unknown means no typed capture exists; clients must not present an example as the schema. */

@@ -1934,7 +1934,15 @@ func normalizeIntegrationBackend(value string) (string, error) {
 // authoritative without revalidation per contract §6 / verdict §A12.
 const integrationCatalogTTL = time.Hour
 
+// integrationCatalogCacheFormat versions the on-disk catalog cache. Older
+// CLIs cached the same dynamic catalog response before provider events were
+// decoded, so a cache written without this marker is treated as stale and
+// refetched instead of making `integration events` report that no event
+// catalog is published.
+const integrationCatalogCacheFormat = 1
+
 type integrationCatalogCacheEntry struct {
+	Format    int                       `json:"format,omitempty"`
 	APIURL    string                    `json:"apiUrl"`
 	FetchedAt string                    `json:"fetchedAt"`
 	Version   string                    `json:"version,omitempty"`
@@ -1964,6 +1972,7 @@ func writeIntegrationCatalogCache(entry integrationCatalogCacheEntry) error {
 	if err := ensureConfigDir(); err != nil {
 		return err
 	}
+	entry.Format = integrationCatalogCacheFormat
 	payload, err := json.MarshalIndent(entry, "", "  ")
 	if err != nil {
 		return err
@@ -1977,7 +1986,7 @@ func invalidateIntegrationCatalogCache() {
 }
 
 func cachedCatalogIsFresh(entry integrationCatalogCacheEntry, apiURL string) bool {
-	if entry.APIURL != apiURL || len(entry.Providers) == 0 {
+	if entry.Format != integrationCatalogCacheFormat || entry.APIURL != apiURL || len(entry.Providers) == 0 {
 		return false
 	}
 	fetched, err := time.Parse(time.RFC3339, entry.FetchedAt)

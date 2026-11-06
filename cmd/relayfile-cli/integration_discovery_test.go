@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // discoveryCatalogFixture is deliberately unsorted so the tests prove the CLI
@@ -22,6 +23,12 @@ import (
 // shape (eventCatalogVersion 1). It is test data, not the published Jira or
 // Slack event set: it deliberately mixes support values so both the
 // subscribable and known-only paths are exercised.
+// discoveryCatalogFixture is SYNTHETIC (not captured from a catalog producer).
+// It follows the G1 flat event shape. Canonical wire forms: schema is an
+// object {status, reason} or null. The bare-string schema on comment.created
+// ("jira/comment") is a parse-only legacy tolerance exercised here so an older
+// schema-id form cannot crash decoding; it is NOT part of the OpenAPI contract
+// and producer conformance must come from a source-derived fixture.
 const discoveryCatalogFixture = `{
   "version": "v_test",
   "eventCatalogVersion": 1,
@@ -389,6 +396,168 @@ func TestIntegrationDescribeSubscribableFilter(t *testing.T) {
 	out.Reset()
 	if err := runIntegration([]string{"describe", "jira", "--event", "project.created", "--json", "--cloud-api-url", server.URL}, nil, &out); err != nil {
 		t.Fatalf("known-only event must still be describable without the filter: %v", err)
+	}
+	var knownOnly integrationDescribeOutput
+	if err := json.Unmarshal(out.Bytes(), &knownOnly); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(knownOnly.Events) != 1 || len(knownOnly.Handoff) != 0 {
+		t.Fatalf("known-only event must be described but get no handoff: events=%d handoff=%+v", len(knownOnly.Events), knownOnly.Handoff)
+	}
+	wantExcluded := []integrationHandoffExclusion{{Event: "project.created", Support: "known-only", Reason: "not in the OAuth dynamic webhook set"}}
+	if !reflect.DeepEqual(knownOnly.HandoffExcluded, wantExcluded) {
+		t.Fatalf("handoffExcluded = %+v, want %+v", knownOnly.HandoffExcluded, wantExcluded)
+	}
+	if knownOnly.Example == nil || knownOnly.Example.ProviderEventType != "project.created" {
+		t.Fatalf("example = %+v", knownOnly.Example)
+	}
+}
+
+// TestIntegrationDescribeHandoffOnlySubscribable: the default (unfiltered)
+// describe still lists every published event, but handoff values are built
+// only from subscribable ones and every excluded event is named with the
+// catalog's support level and reason, in JSON and in the human output.
+func TestIntegrationDescribeHandoffOnlySubscribable(t *testing.T) {
+	server := setupDiscoveryTest(t)
+	var out bytes.Buffer
+	if err := runIntegration([]string{"describe", "jira", "--json", "--cloud-api-url", server.URL}, nil, &out); err != nil {
+		t.Fatalf("integration describe: %v", err)
+	}
+	var payload integrationDescribeOutput
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(payload.Events) != 4 {
+		t.Fatalf("expected all 4 published events, got %d", len(payload.Events))
+	}
+	wantHandoff := []integrationHandoff{
+		{Provider: "jira", Resource: "/jira/issues/*/comments/*.json", EventTypes: []string{"comment.created"}},
+		{Provider: "jira", Resource: "/jira/sprints/*.json", EventTypes: []string{"sprint.started"}},
+	}
+	if !reflect.DeepEqual(payload.Handoff, wantHandoff) {
+		t.Fatalf("handoff = %+v, want %+v", payload.Handoff, wantHandoff)
+	}
+	wantExcluded := []integrationHandoffExclusion{
+		{Event: "issue.updated", Support: "unknown"},
+		{Event: "project.created", Support: "known-only", Reason: "not in the OAuth dynamic webhook set"},
+	}
+	if !reflect.DeepEqual(payload.HandoffExcluded, wantExcluded) {
+		t.Fatalf("handoffExcluded = %+v, want %+v", payload.HandoffExcluded, wantExcluded)
+	}
+	for _, handoff := range payload.Handoff {
+		for _, name := range handoff.EventTypes {
+			if name == "project.created" || name == "issue.updated" {
+				t.Fatalf("non-subscribable event %q leaked into handoff %+v", name, handoff)
+			}
+		}
+	}
+
+	out.Reset()
+	if err := runIntegration([]string{"describe", "jira", "--cloud-api-url", server.URL}, nil, &out); err != nil {
+		t.Fatalf("integration describe (human): %v", err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"no handoff: project.created (support: known-only; not in the OAuth dynamic webhook set)\n",
+		"no handoff: issue.updated (support: unknown)\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("human output missing %q:\n%s", want, text)
+		}
+	}
+}
+
+// TestIntegrationDescribeSubscribableEmptySelection: when every published
+// event is known-only, `describe --subscribable` returns an empty selection
+// (matching `events --subscribable`) instead of failing; exit code 3 stays
+// reserved for a provider whose catalog publishes no event list at all.
+func TestIntegrationDescribeSubscribableEmptySelection(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"eventCatalogVersion":1,"providers":[{"id":"jira","displayName":"Jira","vfsRoot":"/jira","backends":["nango"],"eventsSource":"relayfile-cloud/integrations/jira","eventsVersion":"1","eventsBackend":"nango","events":[{"name":"project.created","native":["project_created"],"object":"project","action":"created","paths":["/jira/projects/*.json"],"support":"known-only","reason":"not in the OAuth dynamic webhook set","backend":"nango","schema":{"status":"unknown","reason":"no schema published"}}]}]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	var out bytes.Buffer
+	if err := runIntegration([]string{"describe", "jira", "--subscribable", "--json", "--cloud-api-url", server.URL}, nil, &out); err != nil {
+		t.Fatalf("describe --subscribable must not fail on an empty selection: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if events := payload["events"].([]any); len(events) != 0 {
+		t.Fatalf("events = %#v, want empty", events)
+	}
+	if handoff := payload["handoff"].([]any); len(handoff) != 0 {
+		t.Fatalf("handoff = %#v, want empty", handoff)
+	}
+	if _, ok := payload["example"]; ok {
+		t.Fatalf("example must be omitted for an empty selection: %#v", payload["example"])
+	}
+	if payload["runtime"].(map[string]any)["subscribe"].(map[string]any)["available"] != false {
+		t.Fatal("runtime.subscribe.available must stay false")
+	}
+
+	out.Reset()
+	if err := runIntegration([]string{"describe", "jira", "--subscribable", "--cloud-api-url", server.URL}, nil, &out); err != nil {
+		t.Fatalf("describe --subscribable (human): %v", err)
+	}
+	text := out.String()
+	if strings.Contains(text, "Example (illustrative") || !strings.Contains(text, "Handoff values") {
+		t.Fatalf("unexpected human output:\n%s", text)
+	}
+
+	out.Reset()
+	err := runIntegration([]string{"events", "jira", "--subscribable", "--json", "--cloud-api-url", server.URL}, nil, &out)
+	if err != nil {
+		t.Fatalf("events --subscribable: %v", err)
+	}
+	var eventsOut integrationEventsOutput
+	if err := json.Unmarshal(out.Bytes(), &eventsOut); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(eventsOut.Events) != 0 {
+		t.Fatalf("events --subscribable = %+v, want empty", eventsOut.Events)
+	}
+}
+
+// TestIntegrationEventsRefetchesPreUpgradeCache: a dynamic catalog cache
+// written by an older CLI (no format marker, no events) must not satisfy
+// discovery for the rest of its TTL; the cloud is asked again and the cache
+// is rewritten with the current format.
+func TestIntegrationEventsRefetchesPreUpgradeCache(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	if err := ensureConfigDir(); err != nil {
+		t.Fatal(err)
+	}
+	server := newDiscoveryCatalogServer(t)
+	cacheKey := dynamicIntegrationCatalogCacheKey(server.URL)
+	legacy := []byte(`{"apiUrl":` + strconv.Quote(cacheKey) + `,"fetchedAt":` + strconv.Quote(time.Now().UTC().Format(time.RFC3339)) + `,"version":"2026-11-01","providers":[{"id":"jira","displayName":"Jira","vfsRoot":"/jira","backends":["nango"]}]}`)
+	if err := os.WriteFile(integrationCatalogCachePath(cacheKey), legacy, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := runIntegration([]string{"events", "jira", "--json", "--cloud-api-url", server.URL}, nil, &out); err != nil {
+		t.Fatalf("events with a pre-upgrade cache must refetch, got %v", err)
+	}
+	var payload integrationEventsOutput
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(payload.Events) != 4 {
+		t.Fatalf("expected 4 events after refetch, got %d", len(payload.Events))
+	}
+	cached, ok := readIntegrationCatalogCache(cacheKey)
+	if !ok || cached.Format != integrationCatalogCacheFormat || !cachedCatalogIsFresh(cached, cacheKey) {
+		t.Fatalf("rewritten cache = %+v ok=%v", cached, ok)
+	}
+	if len(cached.Providers) == 0 || len(cached.Providers[0].Events) == 0 {
+		t.Fatal("rewritten cache must carry provider events")
 	}
 }
 
