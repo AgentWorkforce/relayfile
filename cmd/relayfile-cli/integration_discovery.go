@@ -112,8 +112,11 @@ const (
 	runtimeSubscribeReason       = "this CLI does not create subscriptions, and runtime subscribe capability for exact provider events is not established: the installed runtime does not accept event_types; availability must be confirmed by the runtime, not inferred from the catalog. Path-glob subscriptions to the delivered paths are a separate, existing mechanism that this status neither assesses nor disables"
 	// eventSupportScopeNote scopes the catalog support column: it rates exact
 	// provider-event (event_types) registration only. Path-glob delivery of the
-	// same paths (durable resource subscriptions, existing runtime bridges)
-	// is not what known-only/unsupported describes.
+	// same paths (webhook pathGlobs, existing runtime bridges that subscribe by
+	// path) is not what known-only/unsupported describes. Durable resource
+	// subscriptions are a third, distinct mechanism: resourceRef must be one
+	// exact canonical by-id leaf, so catalog event path globs and candidate
+	// handoff resources are never usable as durable resourceRef values.
 	eventSupportScopeNote  = "support rates exact provider-event (event_types) subscriptions only; known-only/unsupported does not mean the provider's webhooks or path-glob delivery of the listed paths are unavailable"
 	runtimeSubscribePath   = "/integrations/subscribe"
 	runtimeSubscribeStatus = "candidate (Relay2087 proposal), not the installed runtime contract"
@@ -490,16 +493,20 @@ func runIntegrationDescribe(args []string, stdout io.Writer) error {
 }
 
 // loadIntegrationEventCatalog resolves provider in the dynamic catalog and
-// returns its normalized (sorted) events. A provider whose catalog entry has
-// no events is an integrationDiscoveryError: discovery never substitutes a
-// built-in list.
+// returns its normalized (sorted) events. Catalog loading is strict: a
+// request, status or decode failure is returned as a general error (exit 1)
+// and is never replaced by the metadata-only local fallback that
+// `integration available` keeps, so a broken or unauthorized request cannot
+// surface as an unknown provider or as a provider without published events.
+// Exit 3 is reserved for an authoritative provider entry whose catalog lists
+// no events: discovery never substitutes a built-in list.
 func loadIntegrationEventCatalog(cloudAPIURL, provider string, refresh bool) (integrationCatalogEntry, []integrationCatalogEvent, error) {
 	apiURL := strings.TrimRight(strings.TrimSpace(cloudAPIURL), "/")
 	if apiURL == "" {
 		apiURL = defaultCloudAPIURL
 	}
 	provider = strings.TrimSpace(provider)
-	entries, err := loadAvailableIntegrationCatalog(apiURL, refresh)
+	entries, err := loadIntegrationEventDiscoveryCatalog(apiURL, refresh)
 	if err != nil {
 		return integrationCatalogEntry{}, nil, err
 	}
@@ -514,6 +521,20 @@ func loadIntegrationEventCatalog(cloudAPIURL, provider string, refresh bool) (in
 		}
 	}
 	return entry, normalizeIntegrationEvents(entry.Events), nil
+}
+
+// loadIntegrationEventDiscoveryCatalog reads the dynamic catalog for event
+// discovery. It honours the same fresh cache as the availability loader but
+// fetches through fetchIntegrationCatalogStrict, so every request failure is
+// propagated instead of yielding fallbackIntegrationCatalog.
+func loadIntegrationEventDiscoveryCatalog(apiURL string, refresh bool) ([]integrationCatalogEntry, error) {
+	cacheKey := dynamicIntegrationCatalogCacheKey(apiURL)
+	if !refresh {
+		if entry, ok := readIntegrationCatalogCache(cacheKey); ok && cachedCatalogIsFresh(entry, cacheKey) {
+			return entry.Providers, nil
+		}
+	}
+	return fetchIntegrationCatalogStrict(apiURL, "", true, cacheKey)
 }
 
 func reasonSuffix(reason string) string {
@@ -669,7 +690,8 @@ func buildIntegrationDescription(entry integrationCatalogEntry, events []integra
 // buildIntegrationHandoff groups the selected events by delivered path glob,
 // one handoff per resource, in resource order. Events without catalog paths
 // get a handoff with an empty resource so the gap is visible rather than
-// guessed.
+// guessed. The resource is a path glob for the candidate runtime handoff; it
+// is not a durable resourceRef, which must be an exact by-id leaf.
 func buildIntegrationHandoff(provider string, events []integrationCatalogEvent) []integrationHandoff {
 	byResource := map[string][]string{}
 	for _, event := range events {

@@ -526,10 +526,14 @@ not say.) `support` rates one thing: whether the backend can register an
 `support: known-only` means the adapter recognizes the event but no backend
 path registers it as an exact typed subscription; `reason` says why. It does
 not mean the provider's webhooks or path-glob delivery of the listed paths are
-unavailable: path-glob subscriptions to those paths (durable resource
-subscriptions, existing runtime bridges that subscribe by path) are a separate
-mechanism that this status neither assesses nor disables, and the human output
-says so in a trailing `note:` line. Each event's
+unavailable: path-glob subscriptions to those paths (existing runtime bridges
+that subscribe by path) are a separate mechanism that this status neither
+assesses nor disables, and the human output says so in a trailing `note:`
+line. Durable resource subscriptions are different again: their `resourceRef`
+must be one exact canonical by-id leaf plus `eventTypes`, so a catalog event
+path glob or a candidate handoff `resource` can never be used directly as a
+durable `resourceRef`. Webhook subscriptions take `pathGlobs` selectors; the
+provider-event runtime handoff stays a candidate with `available: false`. Each event's
 `schema` is the catalog's `{status, reason}` object (`status: unknown` means no
 typed payload capture exists, and the CLI never presents its example as the
 schema). `--subscribable` keeps only events with `support: subscribable`.
@@ -561,9 +565,14 @@ such; not a captured payload or schema). `--json` emits the same sections as key
 `envelope`, `example`). `describe --subscribable` on a provider whose published
 events are all known-only returns empty `events`/`handoff` and omits `example`,
 matching `events --subscribable`; exit code 3 is reserved for a provider whose
-catalog publishes no event list. A dynamic catalog cache written by an older
-CLI (before events were decoded) is refetched instead of being trusted for the
-rest of its TTL.
+catalog publishes no event list. Catalog loading for `events` and `describe` is
+strict: a transport failure, a non-2xx status (including 401/403/503) or a
+malformed body is a general error (exit 1) with no discovery output, and the
+local metadata-only catalog that `integration available` falls back to is never
+substituted, so a failed request cannot masquerade as an unknown provider or as
+missing event data. A dynamic catalog cache written by an older CLI (before
+events were decoded) is refetched instead of being trusted for the rest of its
+TTL.
 
 `set-metadata` updates the existing connection through Cloud; it does not
 reconnect the provider. `KEY=VALUE` values remain strings. Use
@@ -779,7 +788,7 @@ legacy alternative.
 | 0 | Success |
 | 1 | General error (network, server error, invalid input) |
 | 2 | Authentication failure (no token, token rejected) |
-| 3 | Resource not found (workspace doesn't exist) |
+| 3 | Resource not found (workspace doesn't exist; `integration events`/`describe` provider publishes no event catalog) |
 | 10 | Cloud login failed (OAuth state mismatch or error) |
 | 11 | Cloud login timed out |
 | 20 | Workspace create/join failed |

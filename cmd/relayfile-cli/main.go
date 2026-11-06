@@ -2022,13 +2022,29 @@ func fetchIntegrationCatalog(cloudAPIURL, accessToken string) ([]integrationCata
 }
 
 func fetchIntegrationCatalogPath(cloudAPIURL, accessToken string, dynamic bool, cacheKey string) ([]integrationCatalogEntry, error) {
+	providers, err := fetchIntegrationCatalogStrict(cloudAPIURL, accessToken, dynamic, cacheKey)
+	if err != nil {
+		// Availability and connect flows keep the metadata-only local catalog
+		// as their fallback. Event discovery must not use this wrapper: it
+		// calls fetchIntegrationCatalogStrict so a failed request is reported
+		// as a failure instead of as missing catalog data.
+		return fallbackIntegrationCatalog(), nil
+	}
+	return providers, nil
+}
+
+// fetchIntegrationCatalogStrict fetches the cloud catalog and returns every
+// failure (invalid URL, transport error, non-2xx status, malformed or empty
+// body) as an error; it never substitutes fallbackIntegrationCatalog. A
+// successful response is cached under cacheKey.
+func fetchIntegrationCatalogStrict(cloudAPIURL, accessToken string, dynamic bool, cacheKey string) ([]integrationCatalogEntry, error) {
 	cloudAPIURL = strings.TrimRight(strings.TrimSpace(cloudAPIURL), "/")
 	if cloudAPIURL == "" {
 		cloudAPIURL = defaultCloudAPIURL
 	}
 	catalogURL, err := url.Parse(cloudAPIURL + "/api/v1/integrations/catalog")
 	if err != nil {
-		return fallbackIntegrationCatalog(), nil
+		return nil, fmt.Errorf("integration catalog URL for %s is invalid: %w", cloudAPIURL, err)
 	}
 	if dynamic {
 		query := catalogURL.Query()
@@ -2037,7 +2053,7 @@ func fetchIntegrationCatalogPath(cloudAPIURL, accessToken string, dynamic bool, 
 	}
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, catalogURL.String(), nil)
 	if err != nil {
-		return fallbackIntegrationCatalog(), nil
+		return nil, fmt.Errorf("integration catalog request to %s could not be built: %w", catalogURL, err)
 	}
 	if strings.TrimSpace(accessToken) != "" {
 		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
@@ -2045,21 +2061,21 @@ func fetchIntegrationCatalogPath(cloudAPIURL, accessToken string, dynamic bool, 
 	var payload cloudIntegrationCatalogResponse
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
-		return fallbackIntegrationCatalog(), nil
+		return nil, fmt.Errorf("integration catalog request to %s failed: %w", catalogURL, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fallbackIntegrationCatalog(), nil
+		return nil, fmt.Errorf("integration catalog response from %s could not be read: %w", catalogURL, err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fallbackIntegrationCatalog(), nil
+		return nil, fmt.Errorf("integration catalog request to %s returned HTTP %d", catalogURL, resp.StatusCode)
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return fallbackIntegrationCatalog(), nil
+		return nil, fmt.Errorf("integration catalog response from %s is not valid JSON: %w", catalogURL, err)
 	}
 	if len(payload.Providers) == 0 {
-		return fallbackIntegrationCatalog(), nil
+		return nil, fmt.Errorf("integration catalog response from %s lists no providers", catalogURL)
 	}
 	_ = writeIntegrationCatalogCache(integrationCatalogCacheEntry{
 		APIURL:    cacheKey,

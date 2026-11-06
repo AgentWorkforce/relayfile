@@ -1043,3 +1043,162 @@ func TestIntegrationDiscoveryDecodesProducerExcerpt(t *testing.T) {
 		}
 	}
 }
+
+// TestIntegrationDiscoveryRequestFailuresAreNotFallback covers CLI-001: with
+// a cold or obsolete-format cache, a catalog request that fails (401/403/503,
+// malformed JSON, transport failure) is a plain request error (exit 1) for
+// both commands, human and --json. Discovery must never substitute the
+// metadata-only local fallback, so neither the fallback-based "unknown
+// provider" (jira is absent from the fallback) nor the exit-3 "not
+// published" result (slack is present without events) may appear.
+func TestIntegrationDiscoveryRequestFailuresAreNotFallback(t *testing.T) {
+	statusServer := func(code int) func(t *testing.T) string {
+		return func(t *testing.T) string {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, http.StatusText(code), code)
+			}))
+			t.Cleanup(server.Close)
+			return server.URL
+		}
+	}
+	failures := []struct {
+		name  string
+		serve func(t *testing.T) string
+		want  string
+	}{
+		{"http401", statusServer(http.StatusUnauthorized), "returned HTTP 401"},
+		{"http403", statusServer(http.StatusForbidden), "returned HTTP 403"},
+		{"http503", statusServer(http.StatusServiceUnavailable), "returned HTTP 503"},
+		{"malformed", func(t *testing.T) string {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"providers":[{"id":"slack"`))
+			}))
+			t.Cleanup(server.Close)
+			return server.URL
+		}, "is not valid JSON"},
+		{"transport", func(t *testing.T) string {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+			apiURL := server.URL
+			server.Close()
+			return apiURL
+		}, "failed: "},
+	}
+	caches := []struct {
+		name  string
+		prime func(t *testing.T, apiURL string)
+	}{
+		{"cold", func(t *testing.T, apiURL string) {}},
+		{"obsolete", func(t *testing.T, apiURL string) {
+			// Pre-upgrade cache without the format field: stale, so the
+			// loader must refetch and surface the request failure.
+			cacheKey := dynamicIntegrationCatalogCacheKey(apiURL)
+			legacy := []byte(`{"apiUrl":` + strconv.Quote(cacheKey) + `,"fetchedAt":` + strconv.Quote(time.Now().UTC().Format(time.RFC3339)) + `,"version":"2026-11-01","providers":[{"id":"jira","displayName":"Jira","vfsRoot":"/jira","backends":["nango"]},{"id":"slack","displayName":"Slack","vfsRoot":"/slack","backends":["nango"]}]}`)
+			if err := os.WriteFile(integrationCatalogCachePath(cacheKey), legacy, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, failure := range failures {
+		for _, cache := range caches {
+			for _, provider := range []string{"slack", "jira"} {
+				for _, sub := range []string{"events", "describe"} {
+					for _, jsonOutput := range []bool{false, true} {
+						name := failure.name + "/" + cache.name + "/" + sub + "/" + provider
+						if jsonOutput {
+							name += "/json"
+						}
+						t.Run(name, func(t *testing.T) {
+							t.Setenv("HOME", t.TempDir())
+							clearRelayfileEnv(t)
+							if err := ensureConfigDir(); err != nil {
+								t.Fatal(err)
+							}
+							apiURL := failure.serve(t)
+							cache.prime(t, apiURL)
+							args := []string{sub, provider, "--cloud-api-url", apiURL}
+							if jsonOutput {
+								args = append(args, "--json")
+							}
+							var out bytes.Buffer
+							err := runIntegration(args, nil, &out)
+							if err == nil {
+								t.Fatalf("expected a request failure, got output:\n%s", out.String())
+							}
+							if !strings.Contains(err.Error(), failure.want) {
+								t.Fatalf("error = %q, want it to contain %q", err.Error(), failure.want)
+							}
+							for _, forbidden := range []string{"is not in the integration catalog", "event catalog not published"} {
+								if strings.Contains(err.Error(), forbidden) {
+									t.Fatalf("request failure reported as catalog data: %q", err.Error())
+								}
+							}
+							var coded interface{ ExitCode() int }
+							if errors.As(err, &coded) {
+								t.Fatalf("request failure must be a plain exit-1 error, got exit code %d", coded.ExitCode())
+							}
+							if out.Len() != 0 {
+								t.Fatalf("request failure must produce no discovery output, got:\n%s", out.String())
+							}
+							if _, ok := readIntegrationCatalogCache(dynamicIntegrationCatalogCacheKey(apiURL)); ok && cache.name == "cold" {
+								t.Fatal("a failed request must not write a catalog cache")
+							}
+						})
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestIntegrationDiscoveryFreshCacheThenStrictRefresh shows the strict loader
+// still honours a fresh current-format cache (same behaviour as before) while
+// --refresh goes to the network and reports the failure.
+func TestIntegrationDiscoveryFreshCacheThenStrictRefresh(t *testing.T) {
+	server := setupDiscoveryTest(t)
+	var out bytes.Buffer
+	if err := runIntegration([]string{"events", "jira", "--json", "--cloud-api-url", server.URL}, nil, &out); err != nil {
+		t.Fatalf("priming fetch: %v", err)
+	}
+	server.Close()
+
+	out.Reset()
+	if err := runIntegration([]string{"describe", "jira", "--json", "--cloud-api-url", server.URL}, nil, &out); err != nil {
+		t.Fatalf("fresh cache must serve discovery after the server is gone: %v", err)
+	}
+	var payload integrationDescribeOutput
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload.Provider.ID != "jira" || len(payload.Events) != 4 {
+		t.Fatalf("cached describe = provider %q with %d events", payload.Provider.ID, len(payload.Events))
+	}
+
+	out.Reset()
+	err := runIntegration([]string{"describe", "jira", "--refresh", "--cloud-api-url", server.URL}, nil, &out)
+	if err == nil || !strings.Contains(err.Error(), "integration catalog request to ") || !strings.Contains(err.Error(), " failed: ") {
+		t.Fatalf("--refresh must report the request failure, got err=%v output:\n%s", err, out.String())
+	}
+	if out.Len() != 0 {
+		t.Fatalf("expected no output on refresh failure, got:\n%s", out.String())
+	}
+}
+
+// TestIntegrationAvailableKeepsFallbackOnRequestFailure pins the behaviour
+// CLI-001 must preserve: `integration available` still falls back to the
+// metadata-only local catalog when the request fails.
+func TestIntegrationAvailableKeepsFallbackOnRequestFailure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearRelayfileEnv(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "down", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(server.Close)
+	providers, err := loadAvailableIntegrationCatalog(server.URL, true)
+	if err != nil {
+		t.Fatalf("availability loader must keep its fallback, got %v", err)
+	}
+	if len(providers) == 0 || len(providers) != len(fallbackIntegrationCatalog()) {
+		t.Fatalf("expected the local fallback catalog, got %d providers", len(providers))
+	}
+}
