@@ -13,7 +13,7 @@ import (
 func TestIntegrationMetadataFilePreservesGitLabTypesAndMasksSecrets(t *testing.T) {
 	_, _ = setupAdoptWorkspace(t)
 	const secret = "private-webhook-secret-not-for-terminal-output"
-	input := `{"projectIds":["86233786"],"manageWebhooks":false,"webhookSecret":"` + secret + `","nested":{"accessToken":"also-private"}}`
+	input := `{"projectIds":["86233786"],"manageWebhooks":false,"webhookSecret":"` + secret + `","api_key":"root-private","nested":{"accessToken":"also-private","api_key":"underscore-private","api-key":"hyphen-private"}}`
 	file := filepath.Join(t.TempDir(), "metadata.json")
 	if err := os.WriteFile(file, []byte(input), 0600); err != nil {
 		t.Fatal(err)
@@ -45,8 +45,10 @@ func TestIntegrationMetadataFilePreservesGitLabTypesAndMasksSecrets(t *testing.T
 	if seen["metadata"] != 1 || !strings.Contains(output.String(), "gitlab metadata updated") {
 		t.Fatalf("expected exactly one successful PUT, got %v: %s", seen, output.String())
 	}
-	if strings.Contains(output.String(), secret) || strings.Contains(output.String(), "also-private") {
-		t.Fatal("metadata preview exposed a secret")
+	for _, private := range []string{secret, "also-private", "root-private", "underscore-private", "hyphen-private"} {
+		if strings.Contains(output.String(), private) {
+			t.Fatal("metadata preview exposed a secret")
+		}
 	}
 	if !strings.Contains(output.String(), "86233786") || !strings.Contains(output.String(), "false") {
 		t.Fatalf("preview omitted selected project or boolean: %s", output.String())

@@ -132,12 +132,19 @@ func runIntegrationSetMetadata(args []string, stdin io.Reader, stdout io.Writer)
 }
 
 func readIntegrationMetadataFile(path string) (map[string]any, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("read metadata JSON file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("metadata JSON must be a regular file")
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("read metadata JSON file: %w", err)
 	}
 	defer file.Close()
-	info, err := file.Stat()
+	info, err = file.Stat()
 	if err != nil || !info.Mode().IsRegular() {
 		return nil, errors.New("metadata JSON must be a regular file")
 	}
@@ -159,7 +166,7 @@ func readIntegrationMetadataFile(path string) (map[string]any, error) {
 }
 
 func redactIntegrationMetadataValue(key string, value any) any {
-	lower := strings.ToLower(key)
+	lower := strings.NewReplacer("_", "", "-", "").Replace(strings.ToLower(key))
 	for _, sensitive := range []string{"secret", "token", "password", "credential", "authorization", "apikey", "cookie"} {
 		if strings.Contains(lower, sensitive) {
 			return "[redacted]"
