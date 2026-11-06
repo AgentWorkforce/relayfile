@@ -1,0 +1,21 @@
+{
+  "source": "https://github.com/NangoHQ/skills",
+  "commit": "5a1d35c2f78afca62d367578c9c2dcc16eef8863",
+  "files": [
+    {
+      "path": "building-nango-functions-locally/SKILL.md",
+      "url": "https://raw.githubusercontent.com/NangoHQ/skills/5a1d35c2f78afca62d367578c9c2dcc16eef8863/skills/building-nango-functions-locally/SKILL.md",
+      "sha256": "d9e0983d7d52ad78652f078e24d9daccaba8c993fcf09c9476c7f84385f8e678"
+    },
+    {
+      "path": "building-nango-functions-locally/references/syncs.md",
+      "url": "https://raw.githubusercontent.com/NangoHQ/skills/5a1d35c2f78afca62d367578c9c2dcc16eef8863/skills/building-nango-functions-locally/references/syncs.md",
+      "sha256": "9685558a5cbc182f90bbae3b88bb6cdebab6085b55eb689657b79b1eb2e0896c"
+    },
+    {
+      "path": "building-nango-functions-locally/references/tools.md",
+      "url": "https://raw.githubusercontent.com/NangoHQ/skills/5a1d35c2f78afca62d367578c9c2dcc16eef8863/skills/building-nango-functions-locally/references/tools.md",
+      "sha256": "4272ec018eda1877a31c5932843b5e6973ca6aaf1ab9956eeb32140245f3714d"
+    }
+  ]
+}

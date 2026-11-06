@@ -1,0 +1,57 @@
+# Checks the layered agent's own stack (agent/): the names it shares with
+# layered-agents infra, the user-data size, the deploy workflow's shape and
+# the first-deploy decision, against the published
+# @agentworkforce/layered-agent kit, which this job installs from GitHub
+# Packages with its own token. Separate from ci, which runs bun over the
+# service and never installs that package.
+name: Agent CI
+
+# Runs on every push to main, not only under agent/: Agent Deploy follows a green run of main's current head, and a main push without its own run would never deploy (the kit itself makes a deploy of unchanged agent/ a no-op).
+on:
+  pull_request:
+    paths: ["agent/**", ".github/workflows/agent-*.yml"]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  agent:
+    name: Agent stack checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          registry-url: https://npm.pkg.github.com
+          scope: '@agentworkforce'
+
+      # No package-lock.json is committed yet (GitHub Packages refuses local
+      # installs); this run uploads the one it resolved, for committing.
+      - name: Install, typecheck and test
+        working-directory: agent
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund --ignore-scripts; fi
+          npm run typecheck
+          npm test
+
+      - name: Upload the lockfile for committing
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: agent-package-lock
+          path: agent/package-lock.json
+          if-no-files-found: error
