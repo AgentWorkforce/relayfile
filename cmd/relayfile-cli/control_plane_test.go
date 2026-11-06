@@ -255,10 +255,15 @@ func TestControlPlaneCloudIntegrationConformance(t *testing.T) {
 			}
 			_, _ = w.Write([]byte(`{"connectLink":"https://connect.test/github","connectionId":"conn_123"}`))
 		case "/api/v1/workspaces/ws_123/integrations/github/status":
-			if r.URL.Query().Get("connectionId") != "conn_123" {
-				t.Fatalf("unexpected connectionId: %q", r.URL.Query().Get("connectionId"))
+			switch got := r.URL.Query().Get("connectionId"); got {
+			case "":
+				// Pre-mint baseline poll: nothing is connected yet.
+				_, _ = w.Write([]byte(`{"ready":false,"provider":"github","state":"not_connected","connectionMatched":false}`))
+			case "conn_123":
+				_, _ = w.Write([]byte(`{"ready":true,"provider":"github","connectionId":"conn_123","state":"ready","connectionMatched":true,"currentConnectionId":"conn_123"}`))
+			default:
+				t.Fatalf("unexpected connectionId: %q", got)
 			}
-			_, _ = w.Write([]byte(`{"ready":true,"provider":"github","connectionId":"conn_123","state":"ready"}`))
 		case "/v1/workspaces/ws_123/integrations/relay/writeback-secret":
 			if r.URL.Query().Get("channel") != "#events" {
 				t.Fatalf("unexpected writeback-secret channel: %q", r.URL.Query().Get("channel"))

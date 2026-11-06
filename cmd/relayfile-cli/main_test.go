@@ -1584,10 +1584,15 @@ func TestSetupCreatesWorkspaceConnectsIntegrationAndSkipsMount(t *testing.T) {
 			if got := r.Header.Get("Authorization"); got != "Bearer cld_test" {
 				t.Fatalf("unexpected status Authorization: %q", got)
 			}
-			if got := r.URL.Query().Get("connectionId"); got != "conn_123" {
+			switch got := r.URL.Query().Get("connectionId"); got {
+			case "":
+				// Pre-mint baseline poll: nothing is connected yet.
+				_, _ = w.Write([]byte(`{"ready":false,"state":"not_connected","connectionMatched":false}`))
+			case "conn_123":
+				_, _ = w.Write([]byte(`{"ready":true,"connectionMatched":true,"currentConnectionId":"conn_123"}`))
+			default:
 				t.Fatalf("unexpected connectionId: %q", got)
 			}
-			_, _ = w.Write([]byte(`{"ready":true}`))
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -1957,7 +1962,7 @@ func TestSetupJiraRunsSitePickerAfterFreshConnect(t *testing.T) {
 			_, _ = w.Write([]byte(`{"connectionId":"conn_jira","connectLink":"","backend":"nango"}`))
 		case "/api/v1/workspaces/ws_123/integrations/jira/status":
 			seen["status"] = true
-			_, _ = w.Write([]byte(`{"ready":true,"state":"ready","provider":"jira","backend":"nango"}`))
+			_, _ = w.Write([]byte(`{"ready":true,"state":"ready","provider":"jira","backend":"nango","connectionMatched":true,"currentConnectionId":"conn_jira"}`))
 		case "/api/v1/workspaces/ws_123/integrations/jira/accessible-resources":
 			seen["accessible-resources"] = true
 			_, _ = w.Write([]byte(`{"ok":true,"resources":[{"id":"cloud-1","url":"https://foo.atlassian.net","name":"Foo"}]}`))
@@ -2050,10 +2055,15 @@ func TestIntegrationConnectRefreshesCloudAccessTokenAndReusesWorkspace(t *testin
 			if got := r.Header.Get("Authorization"); got != "Bearer cld_new" {
 				t.Fatalf("unexpected status Authorization: %q", got)
 			}
-			if got := r.URL.Query().Get("connectionId"); got != "conn_789" {
+			switch got := r.URL.Query().Get("connectionId"); got {
+			case "":
+				// Pre-mint baseline poll: nothing is connected yet.
+				_, _ = w.Write([]byte(`{"ready":false,"state":"pending","connectionMatched":false}`))
+			case "conn_789":
+				_, _ = w.Write([]byte(`{"ready":true,"connectionMatched":true,"currentConnectionId":"conn_789"}`))
+			default:
 				t.Fatalf("unexpected connectionId: %q", got)
 			}
-			_, _ = w.Write([]byte(`{"ready":true}`))
 		case "/v1/workspaces/ws_123/sync/status":
 			seen["sync"] = true
 			t.Fatalf("integration connect should not poll sync status unless --wait-sync is set")
@@ -2132,7 +2142,7 @@ func TestIntegrationConnectWaitSyncPreservesInitialSyncGate(t *testing.T) {
 			_, _ = w.Write([]byte(`{"connectLink":"https://connect.test/notion","connectionId":"conn_789","backend":"composio"}`))
 		case "/api/v1/workspaces/ws_123/integrations/notion/status":
 			seen["status"] = true
-			_, _ = w.Write([]byte(`{"ready":true}`))
+			_, _ = w.Write([]byte(`{"ready":true,"connectionMatched":true,"currentConnectionId":"conn_789"}`))
 		case "/v1/workspaces/ws_123/sync/status":
 			seen["sync"] = true
 			if got := r.Header.Get("Authorization"); got != "Bearer rf_join" {
@@ -2176,6 +2186,7 @@ func TestConnectCloudIntegrationAcceptsWorkspaceScopedGitHubStatus(t *testing.T)
 	localDir := t.TempDir()
 	var seenConnectionScopedStatus atomic.Bool
 	var seenWorkspaceStatus atomic.Bool
+	var minted atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
@@ -2183,6 +2194,7 @@ func TestConnectCloudIntegrationAcceptsWorkspaceScopedGitHubStatus(t *testing.T)
 			if r.Method != http.MethodPost {
 				t.Fatalf("expected connect POST, got %s", r.Method)
 			}
+			minted.Store(true)
 			_, _ = w.Write([]byte(`{"connectLink":"https://connect.test/github","connectionId":"conn_session","backend":"nango"}`))
 		case "/api/v1/workspaces/ws_123/integrations/github/status":
 			switch r.URL.Query().Get("connectionId") {
@@ -2190,6 +2202,11 @@ func TestConnectCloudIntegrationAcceptsWorkspaceScopedGitHubStatus(t *testing.T)
 				seenConnectionScopedStatus.Store(true)
 				_, _ = w.Write([]byte(`{"ready":false,"state":"not_connected","connectionId":"conn_session"}`))
 			case "":
+				if !minted.Load() {
+					// Pre-mint baseline: the workspace-scoped row does not exist yet.
+					_, _ = w.Write([]byte(`{"ready":false,"state":"not_connected","provider":"github"}`))
+					return
+				}
 				seenWorkspaceStatus.Store(true)
 				_, _ = w.Write([]byte(`{"ready":false,"state":"oauth_connected","provider":"github","connectionId":"conn_actual"}`))
 			default:
@@ -9513,7 +9530,7 @@ func newConnectJiraTestServer(t *testing.T, sites []accessibleResourceEntry, cho
 			if got := r.Header.Get("Authorization"); got != "Bearer cld_new" {
 				t.Fatalf("unexpected status Authorization: %q", got)
 			}
-			_, _ = w.Write([]byte(`{"ready":true,"state":"ready","provider":"jira","backend":"nango"}`))
+			_, _ = w.Write([]byte(`{"ready":true,"state":"ready","provider":"jira","backend":"nango","connectionMatched":true,"currentConnectionId":"conn_jira"}`))
 		case r.URL.Path == "/api/v1/workspaces/ws_123/integrations/jira/accessible-resources":
 			seen["accessible-resources"]++
 			if got := r.Header.Get("Authorization"); got != "Bearer cld_new" {
@@ -9779,7 +9796,7 @@ func TestIntegrationConnectNonAtlassianSkipsPicker(t *testing.T) {
 			if got := r.Header.Get("Authorization"); got != "Bearer cld_new" {
 				t.Fatalf("unexpected status Authorization: %q", got)
 			}
-			_, _ = w.Write([]byte(`{"ready":true,"state":"ready","provider":"github","backend":"nango"}`))
+			_, _ = w.Write([]byte(`{"ready":true,"state":"ready","provider":"github","backend":"nango","connectionMatched":true,"currentConnectionId":"conn_github"}`))
 		case r.URL.Path == "/v1/workspaces/ws_123/sync/status":
 			if got := r.Header.Get("Authorization"); got != "Bearer rf_join" {
 				t.Fatalf("unexpected sync Authorization: %q", got)
@@ -9835,7 +9852,7 @@ func TestIntegrationConnectKeepsSelectedWorkspaceAndUsesJoinedRelayWorkspaceForS
 			if got := r.Header.Get("Authorization"); got != "Bearer cld_new" {
 				t.Fatalf("unexpected status Authorization: %q", got)
 			}
-			_, _ = w.Write([]byte(`{"ready":true,"state":"ready","provider":"slack","backend":"nango"}`))
+			_, _ = w.Write([]byte(`{"ready":true,"state":"ready","provider":"slack","backend":"nango","connectionMatched":true,"currentConnectionId":"conn_slack"}`))
 		case "/v1/workspaces/rw_7ccfea89/sync/status":
 			if got := r.Header.Get("Authorization"); got != "Bearer rf_join" {
 				t.Fatalf("unexpected sync Authorization: %q", got)
