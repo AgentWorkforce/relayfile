@@ -521,8 +521,15 @@ source: <eventsSource> version: <eventsVersion> backend: <eventsBackend>
 ```
 
 (The real output is tab-separated; `support` is `unknown` when the catalog does
-not say.) `support: known-only` means the adapter recognizes the event but the
-backend cannot register it for agent delivery; `reason` says why. Each event's
+not say.) `support` rates one thing: whether the backend can register an
+**exact provider-event** (`event_types`) subscription for that event.
+`support: known-only` means the adapter recognizes the event but no backend
+path registers it as an exact typed subscription; `reason` says why. It does
+not mean the provider's webhooks or path-glob delivery of the listed paths are
+unavailable: path-glob subscriptions to those paths (durable resource
+subscriptions, existing runtime bridges that subscribe by path) are a separate
+mechanism that this status neither assesses nor disables, and the human output
+says so in a trailing `note:` line. Each event's
 `schema` is the catalog's `{status, reason}` object (`status: unknown` means no
 typed payload capture exists, and the CLI never presents its example as the
 schema). `--subscribable` keeps only events with `support: subscribable`.

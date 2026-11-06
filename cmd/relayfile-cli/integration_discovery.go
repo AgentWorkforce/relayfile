@@ -109,12 +109,17 @@ const (
 	filesystemEventSource       = "openapi/relayfile-v1.openapi.yaml#FilesystemEvent"
 
 	integrationEventSubscribable = "subscribable"
-	runtimeSubscribeReason       = "this CLI does not create subscriptions, and runtime subscribe capability is not established: the installed runtime does not accept event_types; availability must be confirmed by the runtime, not inferred from the catalog"
-	runtimeSubscribePath         = "/integrations/subscribe"
-	runtimeSubscribeStatus       = "candidate (Relay2087 proposal), not the installed runtime contract"
-	runtimeSubscribeAuth         = "current-session registration; no agent name or other session"
-	providerEventTypeNote        = "exact normalized provider event (e.g. comment.created) carried by verified ingress; distinct from the filesystem mutation type (file.created). Durable subscriptions and webhook eventTypes match on it."
-	snapshotNote                 = "optional {path, contentType, encoding, content, truncated}; content is adapter-rendered file contents at `path` (provider snapshot), distinct from the event envelope (read it with `relayfile cat <path>`)"
+	runtimeSubscribeReason       = "this CLI does not create subscriptions, and runtime subscribe capability for exact provider events is not established: the installed runtime does not accept event_types; availability must be confirmed by the runtime, not inferred from the catalog. Path-glob subscriptions to the delivered paths are a separate, existing mechanism that this status neither assesses nor disables"
+	// eventSupportScopeNote scopes the catalog support column: it rates exact
+	// provider-event (event_types) registration only. Path-glob delivery of the
+	// same paths (durable resource subscriptions, existing runtime bridges)
+	// is not what known-only/unsupported describes.
+	eventSupportScopeNote  = "support rates exact provider-event (event_types) subscriptions only; known-only/unsupported does not mean the provider's webhooks or path-glob delivery of the listed paths are unavailable"
+	runtimeSubscribePath   = "/integrations/subscribe"
+	runtimeSubscribeStatus = "candidate (Relay2087 proposal), not the installed runtime contract"
+	runtimeSubscribeAuth   = "current-session registration; no agent name or other session"
+	providerEventTypeNote  = "exact normalized provider event (e.g. comment.created) carried by verified ingress; distinct from the filesystem mutation type (file.created). Durable subscriptions and webhook eventTypes match on it."
+	snapshotNote           = "optional {path, contentType, encoding, content, truncated}; content is adapter-rendered file contents at `path` (provider snapshot), distinct from the event envelope (read it with `relayfile cat <path>`)"
 )
 
 type integrationFieldConstraints struct {
@@ -367,7 +372,7 @@ func runIntegrationEvents(args []string, stdout io.Writer) error {
 	cloudAPIURL := fs.String("cloud-api-url", envOrDefault("RELAYFILE_CLOUD_API_URL", defaultCloudAPIURL), "Relayfile Cloud API URL")
 	jsonOutput := fs.Bool("json", false, "emit JSON")
 	refresh := fs.Bool("refresh", false, "refresh the cached provider catalog")
-	subscribable := fs.Bool("subscribable", false, "only list events the catalog marks subscribable")
+	subscribable := fs.Bool("subscribable", false, "only list events the catalog marks subscribable for exact provider-event subscriptions")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
 		"cloud-api-url": true,
 		"json":          false,
@@ -403,6 +408,7 @@ func runIntegrationEvents(args []string, stdout io.Writer) error {
 	if line := formatEventsProvenance(entry); line != "" {
 		fmt.Fprintln(stdout, line)
 	}
+	fmt.Fprintln(stdout, "note: "+eventSupportScopeNote)
 	return nil
 }
 
@@ -441,7 +447,7 @@ func runIntegrationDescribe(args []string, stdout io.Writer) error {
 	eventName := fs.String("event", "", "describe one event by normalized or native name")
 	jsonOutput := fs.Bool("json", false, "emit JSON")
 	refresh := fs.Bool("refresh", false, "refresh the cached provider catalog")
-	subscribable := fs.Bool("subscribable", false, "only describe events the catalog marks subscribable")
+	subscribable := fs.Bool("subscribable", false, "only describe events the catalog marks subscribable for exact provider-event subscriptions")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
 		"cloud-api-url": true,
 		"event":         true,
@@ -784,7 +790,7 @@ func writeIntegrationDescription(stdout io.Writer, output integrationDescribeOut
 	}
 
 	fmt.Fprintln(stdout)
-	fmt.Fprintln(stdout, "Handoff values (one native subscribe request per resource)")
+	fmt.Fprintln(stdout, "Handoff values (one native subscribe request per resource; exact provider-event subscriptions only)")
 	fmt.Fprintln(tw, "  provider\tresource\tevent_types")
 	for _, handoff := range output.Handoff {
 		fmt.Fprintf(tw, "  %s\t%s\t%s\n", handoff.Provider, defaultIfBlank(handoff.Resource, "-"), joinOrDash(handoff.EventTypes))
@@ -797,6 +803,9 @@ func writeIntegrationDescription(stdout io.Writer, output integrationDescribeOut
 	}
 	for _, excluded := range output.HandoffExcluded {
 		fmt.Fprintf(stdout, "  no handoff: %s (support: %s%s)\n", excluded.Event, excluded.Support, reasonSuffix(excluded.Reason))
+	}
+	if len(output.HandoffExcluded) > 0 {
+		fmt.Fprintf(stdout, "  note: %s\n", eventSupportScopeNote)
 	}
 	contract := output.Runtime.Subscribe.Contract
 	fmt.Fprintf(stdout, "  runtime subscribe: not available (%s)\n", output.Runtime.Subscribe.Reason)

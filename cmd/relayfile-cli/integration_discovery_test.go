@@ -108,6 +108,7 @@ func TestIntegrationEventsHumanTable(t *testing.T) {
 				"project.created\tproject_created\tproject\tcreated\tknown-only\t-\tnango\t/jira/projects/*.json",
 				"sprint.started\tsprint_started\tsprint\tstarted\tsubscribable\toauth-dynamic-webhook\tnango\t/jira/sprints/*.json",
 				"source: relayfile-cloud/integrations/jira version: 2026-11-01 backend: nango",
+				"note: " + eventSupportScopeNote,
 				"",
 			}, "\n"),
 		},
@@ -119,6 +120,7 @@ func TestIntegrationEventsHumanTable(t *testing.T) {
 				"comment.created\tcomment_created\tcomment\tcreated\tsubscribable\toauth-dynamic-webhook\tnango\t/jira/issues/*/comments/*.json",
 				"sprint.started\tsprint_started\tsprint\tstarted\tsubscribable\toauth-dynamic-webhook\tnango\t/jira/sprints/*.json",
 				"source: relayfile-cloud/integrations/jira version: 2026-11-01 backend: nango",
+				"note: " + eventSupportScopeNote,
 				"",
 			}, "\n"),
 		},
@@ -192,6 +194,7 @@ func TestIntegrationSlackDiscovery(t *testing.T) {
 		"message.created\tmessage\tmessage\tcreated\tsubscribable\tevents-api\tnango\t/slack/channels/*/messages/*.json",
 		"reaction.added\treaction_added\treaction\t-\tknown-only\t-\tnango\t/slack/channels/*/messages/*.json",
 		"source: relayfile-cloud/integrations/slack version: 1 backend: nango",
+		"note: " + eventSupportScopeNote,
 		"",
 	}, "\n")
 	if out.String() != want {
@@ -349,7 +352,7 @@ func TestIntegrationDescribeHumanOutput(t *testing.T) {
 	text := out.String()
 	t.Logf("describe output:\n%s", text)
 	for _, want := range []string{
-		"Provider\n", "Events\n", "Subscription options\n", "Handoff values (one native subscribe request per resource)\n", "Delivered envelope\n",
+		"Provider\n", "Events\n", "Subscription options\n", "Handoff values (one native subscribe request per resource; exact provider-event subscriptions only)\n", "Delivered envelope\n",
 		"Example (illustrative, not a captured payload)\n",
 		"POST /v1/workspaces/{workspaceId}/subscriptions",
 		"POST /v1/workspaces/{workspaceId}/webhooks",
@@ -890,16 +893,21 @@ func newCatalogServer(t *testing.T, body string) *httptest.Server {
 	return server
 }
 
-// TestIntegrationDiscoveryDecodesProducerExcerpt decodes the real producer
-// output end to end: every field the producer emits must round-trip (no
-// silent drops of provenance, null action, ** globs, string eventsVersion),
-// every event is known-only so no handoff may be produced, and the CLI must
-// not promote any capability the catalog did not state.
+// TestIntegrationDiscoveryDecodesProducerExcerpt decodes the producer excerpt
+// end to end. Scope, stated precisely: the excerpt is a selected-field
+// projection relayed by the catalog owner (the producer also emits a
+// per-provider eventsRegistration list, which the CLI intentionally does not
+// model and must ignore; see below), not a fresh emission, and this is not an
+// OpenAPI schema validation. Within that projection every field must decode
+// without loss (provenance, null action, ** globs, string eventsVersion);
+// a null action normalizes to an omitted output field rather than a byte
+// round-trip. Every event is known-only, so no handoff may be produced and
+// the CLI must not promote any capability the catalog did not state.
 func TestIntegrationDiscoveryDecodesProducerExcerpt(t *testing.T) {
 	server := newCatalogServer(t, cloudPR6093CatalogExcerpt)
 
-	// Strict decode of the raw excerpt: unknown fields in the parts the CLI
-	// models would mean producer/consumer drift.
+	// Strict decode of the raw excerpt: an unknown field in the parts the CLI
+	// models would mean producer/consumer drift within the projection.
 	var strict struct {
 		EventCatalogVersion int    `json:"eventCatalogVersion"`
 		Version             string `json:"version"`
@@ -921,6 +929,25 @@ func TestIntegrationDiscoveryDecodesProducerExcerpt(t *testing.T) {
 	}
 	if strict.EventCatalogVersion != 1 || strict.Version != "a8e5c7f561d5" || len(strict.Providers) != 2 {
 		t.Fatalf("top-level = %+v", strict)
+	}
+
+	// The producer helper also emits eventsRegistration per provider (shape
+	// per packages/web/lib/integrations/integration-event-catalog.ts; the
+	// value below is an illustrative SYNTHETIC element, not relayed bytes).
+	// The CLI must ignore it rather than fail or surface it as an event.
+	withRegistration := strings.Replace(cloudPR6093CatalogExcerpt, `"eventsSource":"adapter_catalog+nango_connection_manifest+provider_contract",`,
+		`"eventsSource":"adapter_catalog+nango_connection_manifest+provider_contract","eventsRegistration":[{"name":"app_mention","backend":"nango","mode":"webhook","provenance":["nango_connection_manifest"],"verification":"unknown"}],`, 1)
+	if withRegistration == cloudPR6093CatalogExcerpt {
+		t.Fatal("eventsRegistration injection did not apply")
+	}
+	var lenient struct {
+		Providers []integrationCatalogEntry `json:"providers"`
+	}
+	if err := json.Unmarshal([]byte(withRegistration), &lenient); err != nil {
+		t.Fatalf("decode with eventsRegistration: %v", err)
+	}
+	if len(lenient.Providers) != 2 || len(lenient.Providers[1].Events) != 2 {
+		t.Fatalf("eventsRegistration must be ignored, not change events: %+v", lenient.Providers)
 	}
 
 	var out bytes.Buffer
