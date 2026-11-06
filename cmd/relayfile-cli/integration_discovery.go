@@ -130,9 +130,9 @@ const (
 	// Readiness is a response contract, not a version check: adding an
 	// optional parameter does not change the relay bridge_version or
 	// hello.methods, so the only positive signal is the echo.
-	runtimeReadinessCheck       = "send event_types and require the subscribe response (and later setup status) to echo the same exact list"
-	runtimeReadinessConfirmed   = "the response carries event_types equal to the requested exact list"
-	runtimeReadinessUnconfirmed = "event_types is absent from the response, differs from the request, or the request is rejected: the runtime did not honour the filter, so treat exact provider-event subscription as unsupported there and do not rely on it"
+	runtimeReadinessCheck       = "send event_types on the current-session socket POST /integrations/subscribe (preferred: it rejects unknown request keys, so a runtime without the feature fails the request instead of silently dropping the filter) and require the subscribe response (and later setup status) to echo the same canonical set"
+	runtimeReadinessConfirmed   = "the response carries event_types whose canonical set equals the request after the runtime's normalization (Jira aliases such as comment_created map to comment.created; entries are sorted and deduplicated; at most 32); compare as a set, not in request order"
+	runtimeReadinessUnconfirmed = "event_types is absent from the response, the canonical set differs, or the request is rejected: the runtime did not honour the filter. An older bridge path may have created an unfiltered subscription and omitted the echo, so fail closed: unsubscribe that resource immediately, never leave a broad subscription active, and do not fall back to an unfiltered subscription"
 	runtimeReadinessCheckedBy   = "the subscribing agent at subscribe time, per session; this CLI performs no probe and never sends event_types"
 	providerEventTypeNote       = "exact normalized provider event (e.g. comment.created) carried by verified ingress; distinct from the filesystem mutation type (file.created). Durable subscriptions and webhook eventTypes match on it."
 	snapshotNote                = "optional {path, contentType, encoding, content, truncated}; content is adapter-rendered file contents at `path` (provider snapshot), distinct from the event envelope (read it with `relayfile cat <path>`)"

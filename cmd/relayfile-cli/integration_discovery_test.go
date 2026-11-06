@@ -313,9 +313,13 @@ func TestIntegrationDescribeEventByNativeName(t *testing.T) {
 		t.Fatalf("runtime.subscribe.contract = %#v", contract)
 	}
 	readiness := contract["readiness"].(map[string]any)
-	if !strings.Contains(readiness["check"].(string), "echo the same exact list") ||
-		!strings.Contains(readiness["confirmed"].(string), "event_types equal to the requested exact list") ||
+	if !strings.Contains(readiness["check"].(string), "current-session socket POST /integrations/subscribe") ||
+		!strings.Contains(readiness["check"].(string), "echo the same canonical set") ||
+		!strings.Contains(readiness["confirmed"].(string), "canonical set equals the request after the runtime's normalization") ||
+		!strings.Contains(readiness["confirmed"].(string), "compare as a set, not in request order") ||
 		!strings.Contains(readiness["unconfirmed"].(string), "event_types is absent from the response") ||
+		!strings.Contains(readiness["unconfirmed"].(string), "fail closed: unsubscribe that resource immediately") ||
+		!strings.Contains(readiness["unconfirmed"].(string), "do not fall back to an unfiltered subscription") ||
 		!strings.Contains(readiness["checkedBy"].(string), "never sends event_types") {
 		t.Fatalf("runtime.subscribe.contract.readiness = %#v", readiness)
 	}
@@ -372,7 +376,9 @@ func TestIntegrationDescribeHumanOutput(t *testing.T) {
 		"POST /v1/workspaces/{workspaceId}/webhooks",
 		"runtime subscribe: not available, unconfirmed for this session (",
 		"runtime contract [runtime contract, not asserted by this CLI: readiness is confirmed per session by the exact event_types echo, not by version]: POST /integrations/subscribe body {provider, resource, event_types}",
-		"runtime readiness: send event_types and require the subscribe response (and later setup status) to echo the same exact list; confirmed when ",
+		"runtime readiness: send event_types on the current-session socket POST /integrations/subscribe (preferred: ",
+		"to echo the same canonical set; confirmed when ",
+		"fail closed: unsubscribe that resource immediately",
 		"providerEventType: exact normalized provider event",
 		"type               file.created",
 	} {

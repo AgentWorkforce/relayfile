@@ -576,15 +576,23 @@ the CLI has no runtime client, so exact provider-event readiness is
 `contract` block documents how a subscribing agent establishes readiness.
 There is no version to read: adding an optional parameter changes neither the
 relay `bridge_version` nor `hello.methods`, so the only positive signal is the
-echo. `contract.readiness` spells it out: send `event_types`, require the
-subscribe response (and later setup status) to echo the same exact list;
-confirmed when the echoed list equals the request; unconfirmed when
-`event_types` is absent, differs, or the request is rejected, in which case the
-runtime did not honour the filter and exact provider-event subscription must be
-treated as unsupported there. That check is the subscribing agent's, run per
-session at subscribe time; the CLI performs no probe, never sends
-`event_types`, and keeps no second catalog. `contract.source` names the relay
-runtime change that defines the request and echo (relay PR 2087). `--json`
+echo. `contract.readiness` spells it out: send `event_types` on the
+current-session socket `POST /integrations/subscribe` (preferred, because it
+rejects unknown request keys, so a runtime without the feature fails the
+request rather than silently dropping the filter) and require the subscribe
+response (and later setup status) to echo the same canonical set. The runtime
+normalizes the list before echoing it (Jira aliases such as `comment_created`
+map to `comment.created`; entries are sorted and deduplicated; at most 32), so
+the comparison is set equality after that normalization, not request order.
+Unconfirmed means `event_types` is absent, the canonical set differs, or the
+request is rejected: the runtime did not honour the filter. An older bridge
+path may have created an *unfiltered* subscription and omitted the echo, so the
+agent fails closed: unsubscribe that resource immediately, never leave a broad
+subscription active, and never fall back to an unfiltered subscription. That
+check is the subscribing agent's, run per session at subscribe time; the CLI
+performs no probe, never sends `event_types`, and keeps no second catalog.
+`contract.source` names the relay runtime change that defines the request and
+echo (relay PR 2087). `--json`
 emits the same sections as keys
 (`provider`, `events`, `subscription`, `handoff`, `handoffExcluded`, `runtime`,
 `envelope`, `example`). `describe --subscribable` on a provider whose published
