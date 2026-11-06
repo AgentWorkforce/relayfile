@@ -1,0 +1,46 @@
+{
+  "id": "traj_yunr481piv5y",
+  "version": 1,
+  "task": {
+    "title": "CLI runtime.subscribe readiness wording: replace permanent runtime negative with event_types echo readiness contract (root 244519629559103488)"
+  },
+  "status": "active",
+  "startedAt": "2026-11-06T17:54:03.396Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-11-06T17:56:16.168Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_bfdens0da4pw",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-11-06T17:56:16.168Z",
+      "events": [
+        {
+          "ts": 1793987776169,
+          "type": "decision",
+          "content": "Readiness documented as a response-echo contract (new contract.readiness + contract.source JSON fields), not a version/capability probe: Readiness documented as a response-echo contract (new contract.readiness + contract.source JSON fields), not a version/capability probe",
+          "raw": {
+            "question": "Readiness documented as a response-echo contract (new contract.readiness + contract.source JSON fields), not a version/capability probe",
+            "chosen": "Readiness documented as a response-echo contract (new contract.readiness + contract.source JSON fields), not a version/capability probe",
+            "alternatives": [],
+            "reasoning": "Relay bridge_version and hello.methods do not change for an optional parameter; the only positive signal 2087 provides is the echoed event_types list. The CLI has no runtime client, so it documents the check for the subscribing agent and keeps available:false as unconfirmed session readiness."
+          },
+          "significance": "high"
+        }
+      ]
+    }
+  ],
+  "commits": [],
+  "filesChanged": [],
+  "projectId": "AgentWorkforce/relayfile",
+  "tags": [],
+  "_trace": {
+    "startRef": "cf9d40dd3ea14ed5f3d7d0a813ebeb66cfe5df95",
+    "endRef": "cf9d40dd3ea14ed5f3d7d0a813ebeb66cfe5df95"
+  }
+}

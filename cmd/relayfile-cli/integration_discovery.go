@@ -109,7 +109,12 @@ const (
 	filesystemEventSource       = "openapi/relayfile-v1.openapi.yaml#FilesystemEvent"
 
 	integrationEventSubscribable = "subscribable"
-	runtimeSubscribeReason       = "this CLI does not create subscriptions, and runtime subscribe capability for exact provider events is not established: the installed runtime does not accept event_types; availability must be confirmed by the runtime, not inferred from the catalog. Path-glob subscriptions to the delivered paths are a separate, existing mechanism that this status neither assesses nor disables"
+	// runtimeSubscribeReason explains available:false as unconfirmed
+	// per-session readiness, never as an absolute statement about the runtime:
+	// this CLI has no runtime client and cannot observe the echo that
+	// confirms exact provider-event support, so it reports the readiness
+	// contract instead of a verdict.
+	runtimeSubscribeReason = "this CLI does not create subscriptions and does not talk to the runtime, so exact provider-event (event_types) readiness is unconfirmed for this session rather than unsupported: it is confirmed only when the installed runtime echoes the exact event_types list in its subscribe response, and that check belongs to the subscribing agent against the runtime it is registered with; availability is never inferred from the catalog or from the runtime version. Path-glob subscriptions to the delivered paths are a separate, existing mechanism that this status neither assesses nor disables"
 	// eventSupportScopeNote scopes the catalog support column: it rates exact
 	// provider-event (event_types) registration only. Path-glob delivery of the
 	// same paths (webhook pathGlobs, existing runtime bridges that subscribe by
@@ -119,10 +124,18 @@ const (
 	// handoff resources are never usable as durable resourceRef values.
 	eventSupportScopeNote  = "support rates exact provider-event (event_types) subscriptions only; known-only/unsupported does not mean the provider's webhooks or path-glob delivery of the listed paths are unavailable. Path-glob delivery is receiver-version dependent: paths with an embedded wildcard (e.g. /jira/issues/*/comments/*.json) only match on receivers with the segment matcher (the ones answering the ?capabilities=eventTypes probe); older receivers match exact paths and trailing */** only, so those paths silently never deliver there"
 	runtimeSubscribePath   = "/integrations/subscribe"
-	runtimeSubscribeStatus = "candidate (Relay2087 proposal), not the installed runtime contract"
+	runtimeSubscribeSource = "relay crates/relay-node session socket POST /integrations/subscribe and bridge agents.integrations.subscribe (relay PR 2087)"
+	runtimeSubscribeStatus = "runtime contract, not asserted by this CLI: readiness is confirmed per session by the exact event_types echo, not by version"
 	runtimeSubscribeAuth   = "current-session registration; no agent name or other session"
-	providerEventTypeNote  = "exact normalized provider event (e.g. comment.created) carried by verified ingress; distinct from the filesystem mutation type (file.created). Durable subscriptions and webhook eventTypes match on it."
-	snapshotNote           = "optional {path, contentType, encoding, content, truncated}; content is adapter-rendered file contents at `path` (provider snapshot), distinct from the event envelope (read it with `relayfile cat <path>`)"
+	// Readiness is a response contract, not a version check: adding an
+	// optional parameter does not change the relay bridge_version or
+	// hello.methods, so the only positive signal is the echo.
+	runtimeReadinessCheck       = "send event_types and require the subscribe response (and later setup status) to echo the same exact list"
+	runtimeReadinessConfirmed   = "the response carries event_types equal to the requested exact list"
+	runtimeReadinessUnconfirmed = "event_types is absent from the response, differs from the request, or the request is rejected: the runtime did not honour the filter, so treat exact provider-event subscription as unsupported there and do not rely on it"
+	runtimeReadinessCheckedBy   = "the subscribing agent at subscribe time, per session; this CLI performs no probe and never sends event_types"
+	providerEventTypeNote       = "exact normalized provider event (e.g. comment.created) carried by verified ingress; distinct from the filesystem mutation type (file.created). Durable subscriptions and webhook eventTypes match on it."
+	snapshotNote                = "optional {path, contentType, encoding, content, truncated}; content is adapter-rendered file contents at `path` (provider snapshot), distinct from the event envelope (read it with `relayfile cat <path>`)"
 )
 
 type integrationFieldConstraints struct {
@@ -175,11 +188,23 @@ type integrationHandoff struct {
 // integrationRuntimeContract documents the runtime's native subscribe call so
 // an agent in a supported session can perform it with the handoff values.
 type integrationRuntimeContract struct {
-	Status string   `json:"status"`
-	Method string   `json:"method"`
-	Path   string   `json:"path"`
-	Body   []string `json:"body"`
-	Auth   string   `json:"auth"`
+	Status    string                      `json:"status"`
+	Source    string                      `json:"source"`
+	Method    string                      `json:"method"`
+	Path      string                      `json:"path"`
+	Body      []string                    `json:"body"`
+	Auth      string                      `json:"auth"`
+	Readiness integrationRuntimeReadiness `json:"readiness"`
+}
+
+// integrationRuntimeReadiness documents how exact provider-event support is
+// established on a given runtime. It is a response-echo contract: there is no
+// version or capability flag to read, and the CLI never runs the check.
+type integrationRuntimeReadiness struct {
+	Check       string `json:"check"`
+	Confirmed   string `json:"confirmed"`
+	Unconfirmed string `json:"unconfirmed"`
+	CheckedBy   string `json:"checkedBy"`
 }
 
 type integrationSubscriptionDescription struct {
@@ -669,10 +694,17 @@ func buildIntegrationDescription(entry integrationCatalogEntry, events []integra
 				Reason:    runtimeSubscribeReason,
 				Contract: integrationRuntimeContract{
 					Status: runtimeSubscribeStatus,
+					Source: runtimeSubscribeSource,
 					Method: "POST",
 					Path:   runtimeSubscribePath,
 					Body:   []string{"provider", "resource", "event_types"},
 					Auth:   runtimeSubscribeAuth,
+					Readiness: integrationRuntimeReadiness{
+						Check:       runtimeReadinessCheck,
+						Confirmed:   runtimeReadinessConfirmed,
+						Unconfirmed: runtimeReadinessUnconfirmed,
+						CheckedBy:   runtimeReadinessCheckedBy,
+					},
 				},
 			},
 		},
@@ -830,8 +862,9 @@ func writeIntegrationDescription(stdout io.Writer, output integrationDescribeOut
 		fmt.Fprintf(stdout, "  note: %s\n", eventSupportScopeNote)
 	}
 	contract := output.Runtime.Subscribe.Contract
-	fmt.Fprintf(stdout, "  runtime subscribe: not available (%s)\n", output.Runtime.Subscribe.Reason)
-	fmt.Fprintf(stdout, "  runtime contract [%s]: %s %s body {%s}; auth: %s\n", contract.Status, contract.Method, contract.Path, strings.Join(contract.Body, ", "), contract.Auth)
+	fmt.Fprintf(stdout, "  runtime subscribe: not available, unconfirmed for this session (%s)\n", output.Runtime.Subscribe.Reason)
+	fmt.Fprintf(stdout, "  runtime contract [%s]: %s %s body {%s}; auth: %s; source: %s\n", contract.Status, contract.Method, contract.Path, strings.Join(contract.Body, ", "), contract.Auth, contract.Source)
+	fmt.Fprintf(stdout, "  runtime readiness: %s; confirmed when %s; unconfirmed when %s; checked by %s\n", contract.Readiness.Check, contract.Readiness.Confirmed, contract.Readiness.Unconfirmed, contract.Readiness.CheckedBy)
 
 	envelope := output.Envelope
 	fmt.Fprintln(stdout)

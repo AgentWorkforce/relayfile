@@ -297,13 +297,27 @@ func TestIntegrationDescribeEventByNativeName(t *testing.T) {
 		}
 	}
 	runtime := payload["runtime"].(map[string]any)["subscribe"].(map[string]any)
-	if runtime["available"] != false || !strings.Contains(runtime["reason"].(string), "not established") {
+	reason := runtime["reason"].(string)
+	if runtime["available"] != false || !strings.Contains(reason, "unconfirmed for this session rather than unsupported") || !strings.Contains(reason, "echoes the exact event_types list") {
 		t.Fatalf("runtime.subscribe = %#v", runtime)
 	}
+	for _, absolute := range []string{"does not accept event_types", "not established", "candidate", "proposal"} {
+		if strings.Contains(reason, absolute) {
+			t.Fatalf("runtime.subscribe.reason must describe unconfirmed session readiness, not an absolute runtime verdict; found %q in %q", absolute, reason)
+		}
+	}
 	contract := runtime["contract"].(map[string]any)
-	if !strings.Contains(contract["status"].(string), "candidate") || contract["method"] != "POST" || contract["path"] != "/integrations/subscribe" ||
-		!reflect.DeepEqual(contract["body"], []any{"provider", "resource", "event_types"}) {
+	if !strings.Contains(contract["status"].(string), "confirmed per session by the exact event_types echo") || contract["method"] != "POST" || contract["path"] != "/integrations/subscribe" ||
+		!reflect.DeepEqual(contract["body"], []any{"provider", "resource", "event_types"}) ||
+		!strings.Contains(contract["source"].(string), "relay PR 2087") {
 		t.Fatalf("runtime.subscribe.contract = %#v", contract)
+	}
+	readiness := contract["readiness"].(map[string]any)
+	if !strings.Contains(readiness["check"].(string), "echo the same exact list") ||
+		!strings.Contains(readiness["confirmed"].(string), "event_types equal to the requested exact list") ||
+		!strings.Contains(readiness["unconfirmed"].(string), "event_types is absent from the response") ||
+		!strings.Contains(readiness["checkedBy"].(string), "never sends event_types") {
+		t.Fatalf("runtime.subscribe.contract.readiness = %#v", readiness)
 	}
 	subscription := payload["subscription"].(map[string]any)
 	if _, ok := subscription["owner"]; ok {
@@ -356,8 +370,9 @@ func TestIntegrationDescribeHumanOutput(t *testing.T) {
 		"Example (illustrative, not a captured payload)\n",
 		"POST /v1/workspaces/{workspaceId}/subscriptions",
 		"POST /v1/workspaces/{workspaceId}/webhooks",
-		"runtime subscribe: not available (",
-		"runtime contract [candidate (Relay2087 proposal), not the installed runtime contract]: POST /integrations/subscribe body {provider, resource, event_types}",
+		"runtime subscribe: not available, unconfirmed for this session (",
+		"runtime contract [runtime contract, not asserted by this CLI: readiness is confirmed per session by the exact event_types echo, not by version]: POST /integrations/subscribe body {provider, resource, event_types}",
+		"runtime readiness: send event_types and require the subscribe response (and later setup status) to echo the same exact list; confirmed when ",
 		"providerEventType: exact normalized provider event",
 		"type               file.created",
 	} {
@@ -1035,7 +1050,8 @@ func TestIntegrationDiscoveryDecodesProducerExcerpt(t *testing.T) {
 	text := out.String()
 	for _, want := range []string{
 		"no handoff: comment.created (support: known-only; Adapter-known event;",
-		"runtime subscribe: not available",
+		"runtime subscribe: not available, unconfirmed for this session",
+		"runtime readiness: ",
 		"/jira/issues/<id>/comments/<id>",
 	} {
 		if !strings.Contains(text, want) {
