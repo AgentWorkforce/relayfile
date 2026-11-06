@@ -871,7 +871,8 @@ func assertSameSet(t *testing.T, label string, got, want []string) {
 // cloudPR6093CatalogExcerpt is an ACTUAL wire excerpt (public metadata, no
 // credentials) from the catalog producer AgentWorkforce/cloud PR 6093,
 // branch feat/integration-event-catalog, head
-// 5e0337eddb8a792f275596094870ee9cc877ce17 (emission
+// 5e0337eddb8a792f275596094870ee9cc877ce17, merged to trunk as
+// f75efc55fe9fae0911397e9d0c1e118fd8e07193 (emission
 // packages/web/app/api/v1/integrations/catalog/route.ts, helper
 // packages/web/lib/integrations/integration-event-catalog.ts), relayed by the
 // catalog owner on 2026-11-06. Unlike discoveryCatalogFixture it is

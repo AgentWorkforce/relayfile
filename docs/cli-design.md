@@ -534,6 +534,12 @@ says so in a trailing `note:` line. Each event's
 typed payload capture exists, and the CLI never presents its example as the
 schema). `--subscribable` keeps only events with `support: subscribable`.
 
+Coverage is whatever the cloud catalog publishes: today that is the providers
+with connection metadata (a subset of the adapters in relayfile-adapters, whose
+own trigger catalog is far larger). A provider absent from the cloud catalog
+is not discoverable here, and the CLI carries no hardcoded fallback list of
+providers or events.
+
 `describe` adds what a subscriber needs: `--event` accepts the normalized name
 or any native name (`--event comment_created` resolves to `comment.created`).
 Its sections are the provider entry, the events, subscription options (the
