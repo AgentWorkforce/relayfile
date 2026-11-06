@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -43,7 +42,7 @@ func runIntegrationSetMetadata(args []string, stdin io.Reader, stdout io.Writer)
 	rest := fs.Args()
 	if len(rest) < 1 || (len(rest) < 2 && *metadataFile == "") {
 		return fmt.Errorf(
-			"usage: %s integration set-metadata PROVIDER [KEY=VALUE...] [--metadata-file FILE] [--workspace NAME] [--yes]\n\n"+
+			"usage: %s integration set-metadata PROVIDER (KEY=VALUE... | --metadata-file FILE) [--workspace NAME] [--yes]\n\n"+
 				"  Use --metadata-file for a JSON object with arrays, booleans, or nested values.\n"+
 				"  Example: %s integration set-metadata jira cloudId=abc-123 baseUrl=https://foo.atlassian.net",
 			programName(),
@@ -95,7 +94,7 @@ func runIntegrationSetMetadata(args []string, stdin io.Reader, stdout io.Writer)
 		sort.Strings(keys)
 		for _, k := range keys {
 			value, _ := json.Marshal(redactIntegrationMetadataValue(k, metadata[k]))
-			fmt.Fprintf(stdout, "  %s = %s\n", k, value)
+			fmt.Fprintf(stdout, "  %q = %s\n", k, value)
 		}
 		answer, err := promptLine(stdin, stdout, "Continue? [y/N]: ")
 		if err != nil {
@@ -111,6 +110,16 @@ func runIntegrationSetMetadata(args []string, stdin io.Reader, stdout io.Writer)
 	if err != nil {
 		return err
 	}
+	// Older catalogs can store a Relayfile rw_ ID. Cloud metadata authorization
+	// requires its Cloud workspace ID, resolved through the normal access check.
+	workspaceID := record.ID
+	if strings.HasPrefix(workspaceID, "rw_") {
+		resolved, err := resolveCloudWorkspaceForRelayfile(cloudCreds, workspaceID)
+		if err != nil {
+			return err
+		}
+		workspaceID = resolved.CloudWorkspaceID
+	}
 	client, err := newAPIClient(cloudCreds.APIURL, cloudCreds.AccessToken)
 	if err != nil {
 		return err
@@ -122,7 +131,7 @@ func runIntegrationSetMetadata(args []string, stdin io.Reader, stdout io.Writer)
 	if _, _, err := client.do(
 		context.Background(),
 		http.MethodPut,
-		fmt.Sprintf("/api/v1/workspaces/%s/integrations/%s/metadata", url.PathEscape(record.ID), url.PathEscape(provider)),
+		fmt.Sprintf("/api/v1/workspaces/%s/integrations/%s/metadata", url.PathEscape(workspaceID), url.PathEscape(provider)),
 		bodyBytes,
 	); err != nil {
 		return err
@@ -132,22 +141,11 @@ func runIntegrationSetMetadata(args []string, stdin io.Reader, stdout io.Writer)
 }
 
 func readIntegrationMetadataFile(path string) (map[string]any, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, fmt.Errorf("read metadata JSON file: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		return nil, errors.New("metadata JSON must be a regular file")
-	}
-	file, err := os.Open(path)
+	file, err := openIntegrationMetadataFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read metadata JSON file: %w", err)
 	}
 	defer file.Close()
-	info, err = file.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		return nil, errors.New("metadata JSON must be a regular file")
-	}
 	const maxBytes = 1024 * 1024
 	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
 	if err != nil || len(data) > maxBytes {

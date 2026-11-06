@@ -492,14 +492,17 @@ Manage provider integrations after initial setup.
 relayfile integration connect <provider> [--workspace NAME] [--no-open] [--timeout 5m]
 relayfile integration list      [--workspace NAME] [--json]
 relayfile integration disconnect <provider> [--workspace NAME] [--yes]
-relayfile integration set-metadata <provider> [KEY=VALUE...] [--metadata-file FILE] [--workspace NAME] [--yes]
+relayfile integration set-metadata <provider> (KEY=VALUE... | --metadata-file FILE) [--workspace NAME] [--yes]
 ```
 
 `set-metadata` updates the existing connection through Cloud; it does not
 reconnect the provider. `KEY=VALUE` values remain strings. Use
 `--metadata-file` for a JSON object containing arrays, booleans, or nested
 objects, such as GitLab project selection. The preview masks secret/token
-fields, including nested fields. The file and assignments cannot be combined.
+fields, including nested fields. Exactly one input form is required. JSON files
+must be regular files with no group or other permissions (`chmod 600`). The
+file form currently requires Unix; Windows is refused until private ACLs can
+be validated.
 
 For a GitLab bot with Developer access, select its project and use an
 externally managed hook. Generate the matching secret locally:

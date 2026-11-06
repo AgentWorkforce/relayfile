@@ -835,7 +835,7 @@ func printIntegrationUsage(w io.Writer, subcommand string) {
 	case "adopt":
 		fmt.Fprintf(w, "Usage: %s integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]\n", programName())
 	case "set-metadata":
-		fmt.Fprintf(w, "Usage: %s integration set-metadata PROVIDER [KEY=VALUE...] [--metadata-file FILE] [--workspace NAME] [--yes]\n", programName())
+		fmt.Fprintf(w, "Usage: %s integration set-metadata PROVIDER (KEY=VALUE... | --metadata-file FILE) [--workspace NAME] [--yes]\n", programName())
 	case "bind":
 		fmt.Fprintf(w, "Usage: %s integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN\n", programName())
 	case "resolve-path":
@@ -850,7 +850,7 @@ func printIntegrationUsage(w io.Writer, subcommand string) {
   %[1]s integration list [--workspace NAME] [--json]
   %[1]s integration disconnect PROVIDER [--workspace NAME] [--yes]
   %[1]s integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]
-  %[1]s integration set-metadata PROVIDER [KEY=VALUE...] [--metadata-file FILE] [--workspace NAME] [--yes]
+  %[1]s integration set-metadata PROVIDER (KEY=VALUE... | --metadata-file FILE) [--workspace NAME] [--yes]
   %[1]s integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN
   %[1]s integration resolve-path PROVIDER RESOURCE [--json]
   %[1]s integration unbind PROVIDER [RESOURCE_OR_PATH_GLOB|--resource RESOURCE_OR_PATH_GLOB]
@@ -938,7 +938,7 @@ Usage:
   %[1]s integration list [--workspace NAME] [--json]
   %[1]s integration disconnect PROVIDER [--workspace NAME] [--yes]
   %[1]s integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]
-  %[1]s integration set-metadata PROVIDER [KEY=VALUE...] [--metadata-file FILE] [--workspace NAME] [--yes]
+  %[1]s integration set-metadata PROVIDER (KEY=VALUE... | --metadata-file FILE) [--workspace NAME] [--yes]
   %[1]s integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN
   %[1]s integration resolve-path PROVIDER RESOURCE [--json]
   %[1]s integration unbind PROVIDER [RESOURCE_OR_PATH_GLOB|--resource RESOURCE_OR_PATH_GLOB]
