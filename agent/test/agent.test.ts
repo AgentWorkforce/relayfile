@@ -31,7 +31,7 @@ test("fresh RelayFile host: owned resources, repositories and bounded runtime se
 test("boot includes the persona and skill installer within EC2's user-data budget", () => {
   const encoded = userDataBase64(agent, read);
   console.log(`RelayFile user data: ${encoded.length} bytes base64`);
-  assert.ok(encoded.length < 23_600, `user data too large: ${encoded.length}`);
+  assert.ok(encoded.length + 500 < 23_600, `user data plus 500-byte compression slack exceeds budget: ${encoded.length}`);
   const boot = gunzipSync(Buffer.from(encoded, "base64")).toString("utf8");
   for (const name of agent.input.laneFiles) assert.ok(boot.includes(`/opt/agent-host/${name}`), name);
   assert.doesNotMatch(boot, /sk-ant-|ghp_|ghs_|gho_|github_pat_|BEGIN [A-Z ]*PRIVATE KEY/);
