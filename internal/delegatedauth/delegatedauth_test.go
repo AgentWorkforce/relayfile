@@ -265,3 +265,13 @@ func assertRejectedRefreshPreservedFile(t *testing.T, path string, before []byte
 		t.Fatalf("credentials changed after rejected refresh\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 }
+
+func TestBearerExpiresAtAcceptsAccessOnlyShape(t *testing.T) {
+	var bundle Bundle
+	if err := json.Unmarshal([]byte(`{"token":"t","expiresAt":"2026-10-17T00:15:00Z"}`), &bundle); err != nil {
+		t.Fatal(err)
+	}
+	if got := bundle.BearerExpiresAt(); got != "2026-10-17T00:15:00Z" {
+		t.Fatalf("expected expiresAt to be honored, got %q", got)
+	}
+}

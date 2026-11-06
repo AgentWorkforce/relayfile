@@ -39,8 +39,11 @@ type Bundle struct {
 	RefreshToken          string `json:"refreshToken,omitempty"`
 	RelayfileRefreshToken string `json:"relayfileRefreshToken,omitempty"`
 
-	AccessTokenExpiresAt        string `json:"accessTokenExpiresAt,omitempty"`
-	RelayfileTokenExpiresAt     string `json:"relayfileTokenExpiresAt,omitempty"`
+	AccessTokenExpiresAt    string `json:"accessTokenExpiresAt,omitempty"`
+	RelayfileTokenExpiresAt string `json:"relayfileTokenExpiresAt,omitempty"`
+	// ExpiresAt is the access-only shape Cloud's system-held refresh worker
+	// writes: {"token": "...", "expiresAt": "..."}.
+	ExpiresAt                   string `json:"expiresAt,omitempty"`
 	RefreshTokenExpiresAt       string `json:"refreshTokenExpiresAt,omitempty"`
 	RelayfileRefreshTokenExpiry string `json:"relayfileRefreshTokenExpiresAt,omitempty"`
 	DelegationNotAfter          string `json:"delegationNotAfter,omitempty"`
@@ -76,7 +79,7 @@ func (b Bundle) BearerToken() string {
 }
 
 func (b Bundle) BearerExpiresAt() string {
-	return firstNonEmpty(b.AccessTokenExpiresAt, b.RelayfileTokenExpiresAt)
+	return firstNonEmpty(b.AccessTokenExpiresAt, b.RelayfileTokenExpiresAt, b.ExpiresAt)
 }
 
 func (b Bundle) RotationToken() string {
