@@ -72,6 +72,15 @@ require_pattern "$PY_TYPES_FILE" "created_at:" "python operation created_at"
 require_pattern "$PY_TYPES_FILE" "updated_at:" "python operation updated_at"
 require_pattern "$PY_TYPES_FILE" "completed_at:" "python operation completed_at"
 
+# ── Integration event discovery: catalog entries carry an optional events list ──
+CONTROL_PLANE_OPENAPI_FILE="openapi/relayfile-control-plane-v1.openapi.yaml"
+CLI_MAIN_FILE="cmd/relayfile-cli/main.go"
+CLI_DISCOVERY_FILE="cmd/relayfile-cli/integration_discovery.go"
+require_pattern "$CONTROL_PLANE_OPENAPI_FILE" "    IntegrationEvent:" "control-plane IntegrationEvent schema"
+require_pattern "$CONTROL_PLANE_OPENAPI_FILE" "\$ref: '#/components/schemas/IntegrationEvent'" "control-plane Provider events field"
+require_pattern "$CLI_MAIN_FILE" 'json:"events,omitempty"' "cli catalog entry events field"
+require_pattern "$CLI_DISCOVERY_FILE" "type integrationCatalogEvent struct" "cli integration catalog event type"
+
 node scripts/check-sdk-parity.mjs
 
 echo "contract check passed"

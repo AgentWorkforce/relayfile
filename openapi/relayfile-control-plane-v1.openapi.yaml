@@ -373,6 +373,75 @@ components:
             type: string
         docs:
           type: string
+        events:
+          type: array
+          description: Catalog-published provider events; inspect each event's support before treating it as subscribable (known-only and unsupported events are listed too). Absent when the catalog does not publish events; the local fallback catalog never includes them. Listing never implies runtime subscribe availability.
+          items:
+            $ref: '#/components/schemas/IntegrationEvent'
+        eventsSource:
+          type: string
+          description: Provenance of the events list as reported by the cloud catalog.
+        eventsVersion:
+          type: string
+          description: Version of the events list as reported by the cloud catalog.
+        eventsBackend:
+          type: string
+          description: Backend (nango or composio) whose metadata produced the events list.
+    IntegrationEvent:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: Normalized semantic event name, e.g. comment.created.
+        native:
+          type: array
+          description: Provider-native event names, e.g. comment_created.
+          items:
+            type: string
+        object:
+          type: string
+        action:
+          type: [string, "null"]
+          description: Semantic action (created, updated, ...); null when the producer publishes a native-only event such as Slack app_mention.
+        paths:
+          type: array
+          description: Delivered relayfile path globs.
+          items:
+            type: string
+        support:
+          type: string
+          enum: [subscribable, known-only, unsupported]
+          description: Whether the backend can register the event for agent delivery; absent means unknown. known-only means the adapter recognizes the event but no backend subscription path exists yet.
+        mode:
+          type: string
+          description: Upstream registration mode, e.g. oauth-dynamic-webhook.
+        reason:
+          type: string
+          description: Why the event is not subscribable, when it is not.
+        backend:
+          type: string
+          description: Backend (nango or composio) whose metadata published this event.
+        provenance:
+          type: array
+          description: Catalog sources that contributed the event, e.g. adapter_catalog, nango_connection_manifest, provider_contract.
+          items:
+            type: string
+        schema:
+          oneOf:
+            - $ref: '#/components/schemas/IntegrationEventSchema'
+            - type: "null"
+          description: Payload-schema status object, or null when the catalog has not assessed the event. Clients must treat null and status unknown alike; neither enables subscribe.
+        description:
+          type: string
+    IntegrationEventSchema:
+      type: object
+      description: Payload-schema status for an event. status unknown means no typed capture exists; clients must not present an example as the schema.
+      properties:
+        status:
+          type: string
+        reason:
+          type: string
     ProviderStatusRequest:
       type: object
       required: [provider]

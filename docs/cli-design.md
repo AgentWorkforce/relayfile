@@ -495,6 +495,92 @@ relayfile integration disconnect <provider> [--workspace NAME] [--yes]
 relayfile integration set-metadata <provider> (KEY=VALUE... | --metadata-file FILE) [--workspace NAME] [--yes]
 ```
 
+**Event discovery** (`events`, `describe`):
+
+```
+relayfile integration events   <provider> [--subscribable] [--json] [--refresh] [--cloud-api-url URL]
+relayfile integration describe <provider> [--event EVENT] [--subscribable] [--json] [--refresh] [--cloud-api-url URL]
+```
+
+Both read the provider's `events` list from the cloud integration catalog
+(`GET /api/v1/integrations/catalog?dynamic=true`, cached like
+`integration available`). The CLI ships no per-provider event list: when the
+catalog entry has no `events`, both commands fail with
+`event catalog not published by <cloud-api-url> for <provider>; ...` and exit
+code 3. `integration available --search` also matches event names, so
+`relayfile integration available --search comment.created` finds `jira`.
+
+`events` prints one row per event, sorted by name (values below are
+placeholders, not the published Jira event set):
+
+```
+event            native           object   action   support       mode                   backend  paths
+comment.created  comment_created  comment  created  subscribable  oauth-dynamic-webhook  nango    /jira/issues/*/comments/*.json
+project.created  project_created  project  created  known-only    -                      nango    /jira/projects/*.json
+source: <eventsSource> version: <eventsVersion> backend: <eventsBackend>
+```
+
+(The real output is tab-separated; `support` is `unknown` when the catalog does
+not say.) `support` rates one thing: whether the backend can register an
+**exact provider-event** (`event_types`) subscription for that event.
+`support: known-only` means the adapter recognizes the event but no backend
+path registers it as an exact typed subscription; `reason` says why. It does
+not mean the provider's webhooks or path-glob delivery of the listed paths are
+unavailable: path-glob subscriptions to those paths (existing runtime bridges
+that subscribe by path) are a separate mechanism that this status neither
+assesses nor disables, and the human output says so in a trailing `note:`
+line. That mechanism is receiver-version dependent, and the note says so too:
+catalog paths with an embedded wildcard (for example
+`/jira/issues/*/comments/*.json`) only match on receivers that carry the
+segment matcher, which shipped with the `?capabilities=eventTypes` probe
+(relayfile-cloud #414); an older receiver matches exact paths and trailing
+`*`/`**` only, so such a path silently never delivers there. The CLI does not
+probe the receiver, so it never represents a catalog path glob as live on a
+given receiver. Durable resource subscriptions are different again: their `resourceRef`
+must be one exact canonical by-id leaf plus `eventTypes`, so a catalog event
+path glob or a candidate handoff `resource` can never be used directly as a
+durable `resourceRef`. Webhook subscriptions take `pathGlobs` selectors; the
+provider-event runtime handoff stays a candidate with `available: false`. Each event's
+`schema` is the catalog's `{status, reason}` object (`status: unknown` means no
+typed payload capture exists, and the CLI never presents its example as the
+schema). `--subscribable` keeps only events with `support: subscribable`.
+
+Coverage is whatever the cloud catalog publishes: today that is the providers
+with connection metadata (a subset of the adapters in relayfile-adapters, whose
+own trigger catalog is far larger). A provider absent from the cloud catalog
+is not discoverable here, and the CLI carries no hardcoded fallback list of
+providers or events.
+
+`describe` adds what a subscriber needs: `--event` accepts the normalized name
+or any native name (`--event comment_created` resolves to `comment.created`).
+Its sections are the provider entry, the events, subscription options (the
+durable-subscription request fields from
+`openapi/relayfile-v1.openapi.yaml#CreateOrRenewDurableResourceSubscriptionRequest`
+and the relayfile-cloud webhook-subscription fields, including the
+`?capabilities=eventTypes` probe), handoff values (one
+`{provider, resource, event_types}` entry per delivered path glob, built only
+from events the catalog marks `subscribable`; every other selected event is
+listed under `handoffExcluded` with its support level and reason so a
+known-only event stays describable but never becomes a subscribe request the
+backend cannot register; this is the exact body of the proposed runtime
+`POST /integrations/subscribe`, which the CLI does not send, reporting
+`runtime.subscribe.available: false` until the runtime positively establishes
+the capability and labelling the contract as a candidate), the delivered
+`FilesystemEvent` envelope, and an illustrative example event (labelled as
+such; not a captured payload or schema). `--json` emits the same sections as keys
+(`provider`, `events`, `subscription`, `handoff`, `handoffExcluded`, `runtime`,
+`envelope`, `example`). `describe --subscribable` on a provider whose published
+events are all known-only returns empty `events`/`handoff` and omits `example`,
+matching `events --subscribable`; exit code 3 is reserved for a provider whose
+catalog publishes no event list. Catalog loading for `events` and `describe` is
+strict: a transport failure, a non-2xx status (including 401/403/503) or a
+malformed body is a general error (exit 1) with no discovery output, and the
+local metadata-only catalog that `integration available` falls back to is never
+substituted, so a failed request cannot masquerade as an unknown provider or as
+missing event data. A dynamic catalog cache written by an older CLI (before
+events were decoded) is refetched instead of being trusted for the rest of its
+TTL.
+
 `set-metadata` updates the existing connection through Cloud; it does not
 reconnect the provider. `KEY=VALUE` values remain strings. Use
 `--metadata-file` for a JSON object containing arrays, booleans, or nested
@@ -709,7 +795,7 @@ legacy alternative.
 | 0 | Success |
 | 1 | General error (network, server error, invalid input) |
 | 2 | Authentication failure (no token, token rejected) |
-| 3 | Resource not found (workspace doesn't exist) |
+| 3 | Resource not found (workspace doesn't exist; `integration events`/`describe` provider publishes no event catalog) |
 | 10 | Cloud login failed (OAuth state mismatch or error) |
 | 11 | Cloud login timed out |
 | 20 | Workspace create/join failed |

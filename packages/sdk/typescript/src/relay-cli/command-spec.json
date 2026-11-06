@@ -384,7 +384,7 @@
           },
           {
             "flags": "--search <query>",
-            "description": "search provider id, display name, category, or backend"
+            "description": "search provider id, display name, category, backend, or event name"
           },
           {
             "flags": "--json",
@@ -425,6 +425,74 @@
           {
             "flags": "--refresh",
             "description": "refresh the cached provider catalog",
+            "defaultValue": false
+          }
+        ]
+      },
+      {
+        "name": "events",
+        "description": "List a provider's subscribable events from the cloud integration catalog",
+        "args": [
+          {
+            "name": "provider",
+            "description": "provider id, e.g. jira",
+            "required": true
+          }
+        ],
+        "options": [
+          {
+            "flags": "--cloud-api-url <url>",
+            "description": "Relayfile Cloud API URL (default: $RELAYFILE_CLOUD_API_URL or https://agentrelay.com/cloud)"
+          },
+          {
+            "flags": "--json",
+            "description": "emit JSON",
+            "defaultValue": false
+          },
+          {
+            "flags": "--refresh",
+            "description": "refresh the cached provider catalog",
+            "defaultValue": false
+          },
+          {
+            "flags": "--subscribable",
+            "description": "only list events the catalog marks subscribable",
+            "defaultValue": false
+          }
+        ]
+      },
+      {
+        "name": "describe",
+        "description": "Describe a provider's events, subscription options, and delivered event envelope",
+        "args": [
+          {
+            "name": "provider",
+            "description": "provider id, e.g. jira",
+            "required": true
+          }
+        ],
+        "options": [
+          {
+            "flags": "--event <event>",
+            "description": "describe one event by normalized or native name, e.g. comment.created"
+          },
+          {
+            "flags": "--cloud-api-url <url>",
+            "description": "Relayfile Cloud API URL (default: $RELAYFILE_CLOUD_API_URL or https://agentrelay.com/cloud)"
+          },
+          {
+            "flags": "--json",
+            "description": "emit JSON",
+            "defaultValue": false
+          },
+          {
+            "flags": "--refresh",
+            "description": "refresh the cached provider catalog",
+            "defaultValue": false
+          },
+          {
+            "flags": "--subscribable",
+            "description": "only describe events the catalog marks subscribable",
             "defaultValue": false
           }
         ]

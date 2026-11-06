@@ -416,6 +416,12 @@ type integrationCatalogEntry struct {
 	AuthMode    string   `json:"authMode,omitempty"`
 	Categories  []string `json:"categories,omitempty"`
 	Docs        string   `json:"docs,omitempty"`
+	// Events is published by the cloud catalog; absent on older catalogs and
+	// on fallbackIntegrationCatalog, which stays metadata-only.
+	Events        []integrationCatalogEvent `json:"events,omitempty"`
+	EventsSource  string                    `json:"eventsSource,omitempty"`
+	EventsVersion string                    `json:"eventsVersion,omitempty"`
+	EventsBackend string                    `json:"eventsBackend,omitempty"`
 }
 
 type cloudIntegrationListEntry struct {
@@ -828,6 +834,10 @@ func printIntegrationUsage(w io.Writer, subcommand string) {
 		fmt.Fprintf(w, "Usage: %s integration available [--search QUERY] [--backend BACKEND] [--json] [--refresh]\n", programName())
 	case "search":
 		fmt.Fprintf(w, "Usage: %s integration search QUERY [--backend BACKEND] [--json] [--refresh]\n", programName())
+	case "events":
+		fmt.Fprintf(w, "Usage: %s integration events PROVIDER [--subscribable] [--json] [--refresh]\n", programName())
+	case "describe":
+		fmt.Fprintf(w, "Usage: %s integration describe PROVIDER [--event EVENT] [--subscribable] [--json] [--refresh]\n", programName())
 	case "list":
 		fmt.Fprintf(w, "Usage: %s integration list [--workspace NAME] [--json]\n", programName())
 	case "disconnect":
@@ -847,6 +857,8 @@ func printIntegrationUsage(w io.Writer, subcommand string) {
   %[1]s integration connect PROVIDER [--backend BACKEND] [--workspace NAME] [--wait-sync]
   %[1]s integration available [--search QUERY] [--backend BACKEND] [--json] [--refresh]
   %[1]s integration search QUERY [--backend BACKEND] [--json] [--refresh]
+  %[1]s integration events PROVIDER [--subscribable] [--json] [--refresh]
+  %[1]s integration describe PROVIDER [--event EVENT] [--subscribable] [--json] [--refresh]
   %[1]s integration list [--workspace NAME] [--json]
   %[1]s integration disconnect PROVIDER [--workspace NAME] [--yes]
   %[1]s integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]
@@ -935,6 +947,8 @@ Usage:
     (for jira/confluence: prompts for the Atlassian site to bind after OAuth completes)
   %[1]s integration available [--search QUERY] [--backend BACKEND] [--json] [--refresh]
   %[1]s integration search QUERY [--backend BACKEND] [--json] [--refresh]
+  %[1]s integration events PROVIDER [--subscribable] [--json] [--refresh]
+  %[1]s integration describe PROVIDER [--event EVENT] [--subscribable] [--json] [--refresh]
   %[1]s integration list [--workspace NAME] [--json]
   %[1]s integration disconnect PROVIDER [--workspace NAME] [--yes]
   %[1]s integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]
@@ -1920,7 +1934,15 @@ func normalizeIntegrationBackend(value string) (string, error) {
 // authoritative without revalidation per contract §6 / verdict §A12.
 const integrationCatalogTTL = time.Hour
 
+// integrationCatalogCacheFormat versions the on-disk catalog cache. Older
+// CLIs cached the same dynamic catalog response before provider events were
+// decoded, so a cache written without this marker is treated as stale and
+// refetched instead of making `integration events` report that no event
+// catalog is published.
+const integrationCatalogCacheFormat = 1
+
 type integrationCatalogCacheEntry struct {
+	Format    int                       `json:"format,omitempty"`
 	APIURL    string                    `json:"apiUrl"`
 	FetchedAt string                    `json:"fetchedAt"`
 	Version   string                    `json:"version,omitempty"`
@@ -1950,6 +1972,7 @@ func writeIntegrationCatalogCache(entry integrationCatalogCacheEntry) error {
 	if err := ensureConfigDir(); err != nil {
 		return err
 	}
+	entry.Format = integrationCatalogCacheFormat
 	payload, err := json.MarshalIndent(entry, "", "  ")
 	if err != nil {
 		return err
@@ -1963,7 +1986,7 @@ func invalidateIntegrationCatalogCache() {
 }
 
 func cachedCatalogIsFresh(entry integrationCatalogCacheEntry, apiURL string) bool {
-	if entry.APIURL != apiURL || len(entry.Providers) == 0 {
+	if entry.Format != integrationCatalogCacheFormat || entry.APIURL != apiURL || len(entry.Providers) == 0 {
 		return false
 	}
 	fetched, err := time.Parse(time.RFC3339, entry.FetchedAt)
@@ -1999,13 +2022,29 @@ func fetchIntegrationCatalog(cloudAPIURL, accessToken string) ([]integrationCata
 }
 
 func fetchIntegrationCatalogPath(cloudAPIURL, accessToken string, dynamic bool, cacheKey string) ([]integrationCatalogEntry, error) {
+	providers, err := fetchIntegrationCatalogStrict(cloudAPIURL, accessToken, dynamic, cacheKey)
+	if err != nil {
+		// Availability and connect flows keep the metadata-only local catalog
+		// as their fallback. Event discovery must not use this wrapper: it
+		// calls fetchIntegrationCatalogStrict so a failed request is reported
+		// as a failure instead of as missing catalog data.
+		return fallbackIntegrationCatalog(), nil
+	}
+	return providers, nil
+}
+
+// fetchIntegrationCatalogStrict fetches the cloud catalog and returns every
+// failure (invalid URL, transport error, non-2xx status, malformed or empty
+// body) as an error; it never substitutes fallbackIntegrationCatalog. A
+// successful response is cached under cacheKey.
+func fetchIntegrationCatalogStrict(cloudAPIURL, accessToken string, dynamic bool, cacheKey string) ([]integrationCatalogEntry, error) {
 	cloudAPIURL = strings.TrimRight(strings.TrimSpace(cloudAPIURL), "/")
 	if cloudAPIURL == "" {
 		cloudAPIURL = defaultCloudAPIURL
 	}
 	catalogURL, err := url.Parse(cloudAPIURL + "/api/v1/integrations/catalog")
 	if err != nil {
-		return fallbackIntegrationCatalog(), nil
+		return nil, fmt.Errorf("integration catalog URL for %s is invalid: %w", cloudAPIURL, err)
 	}
 	if dynamic {
 		query := catalogURL.Query()
@@ -2014,7 +2053,7 @@ func fetchIntegrationCatalogPath(cloudAPIURL, accessToken string, dynamic bool, 
 	}
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, catalogURL.String(), nil)
 	if err != nil {
-		return fallbackIntegrationCatalog(), nil
+		return nil, fmt.Errorf("integration catalog request to %s could not be built: %w", catalogURL, err)
 	}
 	if strings.TrimSpace(accessToken) != "" {
 		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
@@ -2022,21 +2061,21 @@ func fetchIntegrationCatalogPath(cloudAPIURL, accessToken string, dynamic bool, 
 	var payload cloudIntegrationCatalogResponse
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
-		return fallbackIntegrationCatalog(), nil
+		return nil, fmt.Errorf("integration catalog request to %s failed: %w", catalogURL, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fallbackIntegrationCatalog(), nil
+		return nil, fmt.Errorf("integration catalog response from %s could not be read: %w", catalogURL, err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fallbackIntegrationCatalog(), nil
+		return nil, fmt.Errorf("integration catalog request to %s returned HTTP %d", catalogURL, resp.StatusCode)
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return fallbackIntegrationCatalog(), nil
+		return nil, fmt.Errorf("integration catalog response from %s is not valid JSON: %w", catalogURL, err)
 	}
 	if len(payload.Providers) == 0 {
-		return fallbackIntegrationCatalog(), nil
+		return nil, fmt.Errorf("integration catalog response from %s lists no providers", catalogURL)
 	}
 	_ = writeIntegrationCatalogCache(integrationCatalogCacheEntry{
 		APIURL:    cacheKey,
@@ -3150,7 +3189,7 @@ func runWorkspace(args []string, stdin io.Reader, stdout io.Writer) error {
 
 func runIntegration(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("integration subcommand is required: connect, available, search, list, disconnect, adopt, set-metadata, bind, or unbind")
+		return errors.New("integration subcommand is required: connect, available, search, events, describe, list, disconnect, adopt, set-metadata, bind, or unbind")
 	}
 	switch args[0] {
 	case "connect":
@@ -3159,6 +3198,10 @@ func runIntegration(args []string, stdin io.Reader, stdout io.Writer) error {
 		return runIntegrationAvailable(args[1:], stdout)
 	case "search":
 		return runIntegrationSearch(args[1:], stdout)
+	case "events":
+		return runIntegrationEvents(args[1:], stdout)
+	case "describe":
+		return runIntegrationDescribe(args[1:], stdout)
 	case "list":
 		return runIntegrationList(args[1:], stdout)
 	case "disconnect":
@@ -3808,7 +3851,7 @@ func runIntegrationAvailable(args []string, stdout io.Writer) error {
 	fs.SetOutput(io.Discard)
 	cloudAPIURL := fs.String("cloud-api-url", envOrDefault("RELAYFILE_CLOUD_API_URL", defaultCloudAPIURL), "Relayfile Cloud API URL")
 	backend := fs.String("backend", "", "filter by backend (nango or composio)")
-	search := fs.String("search", "", "search provider id, display name, category, or backend")
+	search := fs.String("search", "", "search provider id, display name, category, backend, or event name")
 	jsonOutput := fs.Bool("json", false, "emit JSON")
 	refresh := fs.Bool("refresh", false, "refresh the cached provider catalog")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
@@ -3906,6 +3949,10 @@ func catalogEntryMatchesQuery(entry integrationCatalogEntry, query string) bool 
 	values = append(values, entry.Backends...)
 	values = append(values, entry.Sources...)
 	values = append(values, entry.Categories...)
+	for _, event := range entry.Events {
+		values = append(values, event.Name)
+		values = append(values, event.Native...)
+	}
 	for _, value := range values {
 		if strings.Contains(strings.ToLower(value), query) {
 			return true
