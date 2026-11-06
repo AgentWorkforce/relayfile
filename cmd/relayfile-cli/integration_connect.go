@@ -112,13 +112,22 @@ func (b connectIdentityBaseline) evidencesNewConnection(status cloudIntegrationR
 // from "stored row id == requested id" only when the request carried a real
 // id; a workspace-keyed poll matches any row, so an empty minted id never
 // binds. When Cloud also reports the current id it must agree with the mint.
-func connectStatusBindsMintedIdentity(status cloudIntegrationReadyResponse, mintedConnectionID string) bool {
+//
+// polledWithMintedID says whether the status came from a poll keyed by the
+// minted id. Only then may a missing current id be read as "matched means the
+// minted row": a workspace-keyed poll (the "" fallback) reports
+// connectionMatched:true for whatever row exists, so there the current id must
+// be present and equal to the mint.
+func connectStatusBindsMintedIdentity(status cloudIntegrationReadyResponse, mintedConnectionID string, polledWithMintedID bool) bool {
 	minted := strings.TrimSpace(mintedConnectionID)
 	if minted == "" || status.ConnectionMatched == nil || !*status.ConnectionMatched {
 		return false
 	}
 	current := strings.TrimSpace(firstNonEmpty(status.CurrentConnectionID, status.ConnectionID))
-	return current == "" || current == minted
+	if current == "" {
+		return polledWithMintedID
+	}
+	return current == minted
 }
 
 func connectStatusAuthTimes(status cloudIntegrationReadyResponse) (connectedAt, lastAuthAt string) {

@@ -288,24 +288,65 @@ func TestConnectFailsClosedWithoutBaseline(t *testing.T) {
 
 // Cloud's connectionMatched only binds when the request carried the minted
 // id; a matched workspace-keyed poll says nothing about which row answered.
+// A workspace-keyed fallback poll reports connectionMatched:true for whatever
+// row exists. Without a current id or auth timestamps that row carries no new
+// fact, so it must not complete a connect whose minted id is still pending.
+func TestConnectFallbackDoesNotAcceptWorkspaceMatchedRowWithoutIdentity(t *testing.T) {
+	anonymousReady := map[string]any{
+		"ready": true, "state": "ready", "provider": "jira", "configKey": "jira-relay",
+		"connectionMatched": true,
+		"oauth":             map[string]any{"connected": true},
+	}
+	script := &connectStatusScript{
+		t:      t,
+		before: anonymousReady,
+		mint:   map[string]any{"connectLink": "https://connect.example/jira", "connectionId": "conn-new", "backend": "nango", "backendIntegrationId": "jira-relay"},
+		after:  map[string][]map[string]any{"conn-new": {pendingJira("conn-new", false)}, "": {anonymousReady}},
+	}
+	output, err, savedID := runJiraConnect(t, script, 150*time.Millisecond)
+	if err == nil || strings.Contains(output, "jira connected") {
+		t.Fatalf("workspace-matched row without identity completed the connect: err=%v output=%s", err, output)
+	}
+	if !strings.Contains(err.Error(), "existed before this attempt") {
+		t.Fatalf("timeout error does not name the pre-existing row: %v", err)
+	}
+	// The mint records the minted id before polling (pre-existing behaviour);
+	// the point is that nothing from the anonymous workspace row replaced it.
+	if savedID != "conn-new" {
+		t.Fatalf("saved connection id = %q, want the minted id recorded at mint time", savedID)
+	}
+	var fallbackPolls int
+	for _, requested := range script.statusCalls[1:] {
+		if requested == "" {
+			fallbackPolls++
+		}
+	}
+	if fallbackPolls == 0 {
+		t.Fatalf("fallback poll never consulted: %v", script.statusCalls)
+	}
+}
+
 func TestConnectStatusBindsMintedIdentity(t *testing.T) {
 	matched := true
 	unmatched := false
 	cases := []struct {
-		name   string
-		status cloudIntegrationReadyResponse
-		minted string
-		want   bool
+		name    string
+		status  cloudIntegrationReadyResponse
+		minted  string
+		primary bool
+		want    bool
 	}{
-		{"matched minted id", cloudIntegrationReadyResponse{ConnectionMatched: &matched, CurrentConnectionID: "conn-new"}, "conn-new", true},
-		{"matched without current id", cloudIntegrationReadyResponse{ConnectionMatched: &matched}, "conn-new", true},
-		{"matched but different current id", cloudIntegrationReadyResponse{ConnectionMatched: &matched, CurrentConnectionID: "older"}, "conn-new", false},
-		{"no minted id", cloudIntegrationReadyResponse{ConnectionMatched: &matched, CurrentConnectionID: "older"}, "", false},
-		{"older Cloud without connectionMatched", cloudIntegrationReadyResponse{CurrentConnectionID: "conn-new"}, "conn-new", false},
-		{"explicitly unmatched", cloudIntegrationReadyResponse{ConnectionMatched: &unmatched, CurrentConnectionID: "conn-new"}, "conn-new", false},
+		{"matched minted id on primary poll", cloudIntegrationReadyResponse{ConnectionMatched: &matched, CurrentConnectionID: "conn-new"}, "conn-new", true, true},
+		{"matched minted id on fallback poll", cloudIntegrationReadyResponse{ConnectionMatched: &matched, CurrentConnectionID: "conn-new"}, "conn-new", false, true},
+		{"matched without current id on primary poll", cloudIntegrationReadyResponse{ConnectionMatched: &matched}, "conn-new", true, true},
+		{"matched without current id on fallback poll", cloudIntegrationReadyResponse{ConnectionMatched: &matched}, "conn-new", false, false},
+		{"matched but different current id", cloudIntegrationReadyResponse{ConnectionMatched: &matched, CurrentConnectionID: "older"}, "conn-new", true, false},
+		{"no minted id", cloudIntegrationReadyResponse{ConnectionMatched: &matched, CurrentConnectionID: "older"}, "", true, false},
+		{"older Cloud without connectionMatched", cloudIntegrationReadyResponse{CurrentConnectionID: "conn-new"}, "conn-new", true, false},
+		{"explicitly unmatched", cloudIntegrationReadyResponse{ConnectionMatched: &unmatched, CurrentConnectionID: "conn-new"}, "conn-new", true, false},
 	}
 	for _, tc := range cases {
-		if got := connectStatusBindsMintedIdentity(tc.status, tc.minted); got != tc.want {
+		if got := connectStatusBindsMintedIdentity(tc.status, tc.minted, tc.primary); got != tc.want {
 			t.Errorf("%s: got %v want %v", tc.name, got, tc.want)
 		}
 	}

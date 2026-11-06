@@ -2865,11 +2865,14 @@ func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider,
 	deadline := time.Now().Add(timeout)
 	var statusErr error
 	var stale *cloudIntegrationReadyResponse
-	accept := func(status cloudIntegrationReadyResponse) bool {
+	// polledWithMintedID is true for the primary poll when the mint returned
+	// an id; the workspace-keyed fallback below passes false so that Cloud's
+	// "matched" on an arbitrary workspace row is not read as the minted one.
+	accept := func(status cloudIntegrationReadyResponse, polledWithMintedID bool) bool {
 		if !cloudIntegrationConnectedForConfig(status, expectedGitLabConfig) {
 			return false
 		}
-		if connectStatusBindsMintedIdentity(status, mintedConnectionID) || baseline.evidencesNewConnection(status) {
+		if connectStatusBindsMintedIdentity(status, mintedConnectionID, polledWithMintedID) || baseline.evidencesNewConnection(status) {
 			return true
 		}
 		// Connected, but only the row that existed before this attempt.
@@ -2884,7 +2887,7 @@ func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider,
 			statusErr = integrationConnectError(err)
 			return pollResult{err: err, httpStatus: httpStatusFromErr(err), retryAfter: retryAfterFromErr(err), done: true}
 		}
-		accepted := accept(status)
+		accepted := accept(status, mintedConnectionID != "")
 		if !accepted && mintedConnectionID != "" {
 			// Some backends (GitLab token connects) bind the finished
 			// connection under an id that differs from the minted one, so a
@@ -2892,7 +2895,7 @@ func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider,
 			// standard: it must evidence a connection created or re-authed
 			// after the mint, not merely any ready row for the provider.
 			fallbackStatus, fallbackErr := cloudIntegrationStatus(cloudAPIURL, workspaceID, workspaceToken, provider, "")
-			if fallbackErr == nil && accept(fallbackStatus) {
+			if fallbackErr == nil && accept(fallbackStatus, false) {
 				status = fallbackStatus
 				accepted = true
 			}
