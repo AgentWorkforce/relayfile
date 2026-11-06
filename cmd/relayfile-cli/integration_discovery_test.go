@@ -871,8 +871,9 @@ func assertSameSet(t *testing.T, label string, got, want []string) {
 // cloudPR6093CatalogExcerpt is an ACTUAL wire excerpt (public metadata, no
 // credentials) from the catalog producer AgentWorkforce/cloud PR 6093,
 // branch feat/integration-event-catalog, head
-// 5e0337eddb8a792f275596094870ee9cc877ce17, merged to trunk as
-// f75efc55fe9fae0911397e9d0c1e118fd8e07193 (emission
+// 5e0337eddb8a792f275596094870ee9cc877ce17 (the excerpt ref; the branch
+// merged to trunk as f75efc55fe9fae0911397e9d0c1e118fd8e07193, which also
+// tightens alias resolution and is not a refreshed capture) (emission
 // packages/web/app/api/v1/integrations/catalog/route.ts, helper
 // packages/web/lib/integrations/integration-event-catalog.ts), relayed by the
 // catalog owner on 2026-11-06. Unlike discoveryCatalogFixture it is
@@ -932,12 +933,14 @@ func TestIntegrationDiscoveryDecodesProducerExcerpt(t *testing.T) {
 		t.Fatalf("top-level = %+v", strict)
 	}
 
-	// The producer helper also emits eventsRegistration per provider (shape
-	// per packages/web/lib/integrations/integration-event-catalog.ts; the
-	// value below is an illustrative SYNTHETIC element, not relayed bytes).
-	// The CLI must ignore it rather than fail or surface it as an event.
+	// The producer helper also emits an eventsRegistration OBJECT for Slack
+	// ({backend, source, topics, verification}; type in
+	// packages/web/lib/integrations/integration-event-catalog.ts at both
+	// 5e0337ed and f75efc55). The value below is a labelled SYNTHETIC object
+	// of that shape, not relayed bytes. The CLI does not model the field and
+	// must ignore it rather than fail or surface its topics as events.
 	withRegistration := strings.Replace(cloudPR6093CatalogExcerpt, `"eventsSource":"adapter_catalog+nango_connection_manifest+provider_contract",`,
-		`"eventsSource":"adapter_catalog+nango_connection_manifest+provider_contract","eventsRegistration":[{"name":"app_mention","backend":"nango","mode":"webhook","provenance":["nango_connection_manifest"],"verification":"unknown"}],`, 1)
+		`"eventsSource":"adapter_catalog+nango_connection_manifest+provider_contract","eventsRegistration":{"backend":"nango","source":"nango_connection_manifest","topics":["message","message.channels"],"verification":"unknown"},`, 1)
 	if withRegistration == cloudPR6093CatalogExcerpt {
 		t.Fatal("eventsRegistration injection did not apply")
 	}
@@ -949,6 +952,11 @@ func TestIntegrationDiscoveryDecodesProducerExcerpt(t *testing.T) {
 	}
 	if len(lenient.Providers) != 2 || len(lenient.Providers[1].Events) != 2 {
 		t.Fatalf("eventsRegistration must be ignored, not change events: %+v", lenient.Providers)
+	}
+	for _, event := range lenient.Providers[1].Events {
+		if event.Name == "message" || event.Name == "message.channels" {
+			t.Fatalf("registration topics must not surface as events: %+v", lenient.Providers[1].Events)
+		}
 	}
 
 	var out bytes.Buffer
