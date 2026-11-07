@@ -2865,6 +2865,10 @@ func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider,
 	deadline := time.Now().Add(timeout)
 	var statusErr error
 	var stale *cloudIntegrationReadyResponse
+	// connected records that the poll accepted a row. The status request
+	// itself is not bound to ctx, so it can finish (connected) after the
+	// deadline has passed; that is a success, not a timeout.
+	var connected bool
 	// polledWithMintedID is true for the primary poll when the mint returned
 	// an id; the workspace-keyed fallback below passes false so that Cloud's
 	// "matched" on an arbitrary workspace row is not read as the minted one.
@@ -2913,12 +2917,16 @@ func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider,
 				})
 			}
 			fmt.Fprintf(stdout, "%s connected. Files will appear under %s/%s as Relayfile syncs in the background.\n", provider, localDir, providerRootDir(provider))
+			connected = true
 			return pollResult{done: true}
 		}
 		return pollResult{}
 	}, integrationConnectPollOpts)
 	if statusErr != nil {
 		return statusErr
+	}
+	if connected {
+		return nil
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) || time.Now().After(deadline) {
 		if stale != nil {

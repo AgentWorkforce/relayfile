@@ -45,6 +45,9 @@ type connectStatusScript struct {
 	mint        map[string]any
 	mintCalls   int
 	statusCalls []string
+	// afterDelay stalls every post-mint status answer, to model a status
+	// request that completes only after the CLI's --timeout has elapsed.
+	afterDelay time.Duration
 }
 
 func (s *connectStatusScript) handler() http.Handler {
@@ -72,6 +75,9 @@ func (s *connectStatusScript) handler() http.Handler {
 		queue := s.after[requested]
 		if len(queue) == 0 {
 			s.t.Fatalf("no scripted status for connectionId=%q after mint", requested)
+		}
+		if s.afterDelay > 0 {
+			time.Sleep(s.afterDelay)
 		}
 		body := queue[0]
 		if len(queue) > 1 {
@@ -436,5 +442,34 @@ func TestConnectIdentityBaselineEvidence(t *testing.T) {
 	unknown := newConnectIdentityBaseline(cloudIntegrationReadyResponse{}, context.DeadlineExceeded)
 	if unknown.evidencesNewConnection(cloudIntegrationReadyResponse{CurrentConnectionID: "new"}) {
 		t.Fatalf("an unreadable baseline must fail closed")
+	}
+}
+
+// A status request is not bound to the poll context, so Cloud can answer
+// "connected" after --timeout has already elapsed. That is a completed
+// connect: the CLI must return success, not a timeout error, after it has
+// already printed and saved the connection.
+func TestConnectAcceptedAfterDeadlineIsSuccessNotTimeout(t *testing.T) {
+	ready := map[string]any{
+		"ready": true, "state": "ready", "provider": "jira", "configKey": "jira-relay",
+		"requestedConnectionId": "conn-new", "currentConnectionId": "conn-new", "connectionMatched": true,
+		"oauth": map[string]any{"connected": true, "connectedAt": "2026-11-07T00:00:00.000Z", "lastAuthAt": "2026-11-07T00:00:00.000Z"},
+	}
+	script := &connectStatusScript{
+		t:          t,
+		before:     pendingJira("", false),
+		mint:       map[string]any{"connectLink": "https://connect.example/jira", "connectionId": "conn-new", "backend": "nango", "backendIntegrationId": "jira-relay"},
+		after:      map[string][]map[string]any{"conn-new": {ready}},
+		afterDelay: 300 * time.Millisecond,
+	}
+	output, err, savedID := runJiraConnect(t, script, 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("connect that completed after the deadline must not fail: %v\noutput: %s", err, output)
+	}
+	if !strings.Contains(output, "jira connected") {
+		t.Fatalf("missing success line:\n%s", output)
+	}
+	if savedID != "conn-new" {
+		t.Fatalf("saved connection id = %q, want the minted id", savedID)
 	}
 }
