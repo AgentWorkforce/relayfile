@@ -308,6 +308,21 @@ go run ./cmd/relayfile-cli tree "$RELAYFILE_WORKSPACE" /
 go run ./cmd/relayfile-cli mount "$RELAYFILE_WORKSPACE" ./relayfile-mount --once
 ```
 
+### Auth configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `RELAYAUTH_JWKS_URL` | `https://api.relayauth.dev/.well-known/jwks.json` (jwks mode only) | JWKS used to verify RS256 bearer JWTs. Required explicitly in `dual` mode. |
+| `RELAYFILE_AUTH_MODE` | derived | `jwks`, `introspection` or `dual`. Unset: `introspection` if only `RELAYCONTROL_INTERNAL_URL` is set, `dual` if it and `RELAYAUTH_JWKS_URL` are set, else `jwks`. |
+| `RELAYCONTROL_INTERNAL_URL` | unset | relaycontrol in-cluster base URL; `/internal/v1/auth/introspect` is appended. |
+| `RELAYCONTROL_INTROSPECT_SECRET` / `RELAYCONTROL_INTROSPECT_SECRET_FILE` | unset | Introspection service credential (set exactly one). |
+| `RELAYFILE_PUBLIC_ORIGIN` | unset | relayfile's public origin, sent as the introspection `aud`. |
+| `RELAYFILE_INTROSPECTION_TIMEOUT` | `3s` | Per-call introspection timeout. |
+| `RELAYFILE_INTROSPECTION_CACHE_TTL` | `60s` | Positive-verdict cache (capped at 60s; `0` disables). |
+
+Self-host clusters without RelayAuth: see
+[Auth without RelayAuth](docs/integrations/SELF-HOST.md#auth-without-relayauth-relaycontrol-introspection).
+
 ## Ecosystem
 
 This repo is the file server and local mount layer. The wider Agent Relay file ecosystem also includes:

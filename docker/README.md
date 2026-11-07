@@ -45,6 +45,24 @@ curl -X POST http://localhost:9091/sign \
 
 Copy `.env.example` to `.env` to override defaults. The in-memory backend means data resets on restart — perfect for development.
 
+The default stack verifies tokens with the bundled `relayauth` dev issuer via
+`RELAYAUTH_JWKS_URL`. To run relayfile against relaycontrol token
+introspection instead (no RelayAuth), set these on the `relayfile` service; a
+commented-out block is in `docker-compose.yml`:
+
+| Variable | Purpose |
+|---|---|
+| `RELAYFILE_AUTH_MODE` | `jwks` (default), `introspection` or `dual` (`dual` requires `RELAYAUTH_JWKS_URL`). |
+| `RELAYCONTROL_INTERNAL_URL` | relaycontrol base URL; `/internal/v1/auth/introspect` is appended. |
+| `RELAYCONTROL_INTROSPECT_SECRET` or `RELAYCONTROL_INTROSPECT_SECRET_FILE` | Introspection service credential (exactly one). |
+| `RELAYFILE_PUBLIC_ORIGIN` | relayfile's public origin, sent as `aud`. |
+| `RELAYFILE_INTROSPECTION_TIMEOUT` | Per-call timeout (default `3s`). |
+| `RELAYFILE_INTROSPECTION_CACHE_TTL` | Positive cache TTL (default and cap `60s`; `0` disables). |
+
+relaycontrol v1 desktop-user tokens carry no `fs:*` scopes, so relayfile
+answers them with 403 until the relayfile-scoped token class exists. Details:
+[`docs/integrations/SELF-HOST.md`](../docs/integrations/SELF-HOST.md#auth-without-relayauth-relaycontrol-introspection).
+
 ## Teardown
 
 ```bash

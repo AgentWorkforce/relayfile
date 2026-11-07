@@ -10,6 +10,15 @@ services:
       RELAYFILE_BACKEND_PROFILE: memory
       RELAYAUTH_JWKS_URL: http://relayauth:9091/.well-known/jwks.json
       RELAYFILE_INTERNAL_HMAC_SECRET: ${RELAYFILE_INTERNAL_HMAC_SECRET:-dev-internal-secret}
+      # Alternative: verify tokens via relaycontrol introspection instead of
+      # RelayAuth JWKS. In introspection mode RELAYAUTH_JWKS_URL above is
+      # ignored; use RELAYFILE_AUTH_MODE: dual to accept both token kinds.
+      # RELAYFILE_AUTH_MODE: introspection
+      # RELAYCONTROL_INTERNAL_URL: http://relaycontrol:8080
+      # RELAYCONTROL_INTROSPECT_SECRET_FILE: /run/secrets/relaycontrol_introspect_secret
+      # RELAYFILE_PUBLIC_ORIGIN: http://localhost:9090
+      # RELAYFILE_INTROSPECTION_TIMEOUT: 3s
+      # RELAYFILE_INTROSPECTION_CACHE_TTL: 60s
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
       interval: 3s
