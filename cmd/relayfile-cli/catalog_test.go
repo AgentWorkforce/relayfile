@@ -39,6 +39,9 @@ func TestA12CatalogRevalidatedAfterCloudConflict(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case "/api/v1/workspaces/ws_demo/integrations/deprecated-provider/status":
+			// Pre-mint baseline poll; the provider is not connected.
+			_, _ = w.Write([]byte(`{"ready":false,"state":"not_connected"}`))
 		case "/api/v1/workspaces/ws_demo/integrations/connect-session":
 			atomic.AddInt32(&connectCalls, 1)
 			w.WriteHeader(http.StatusConflict)

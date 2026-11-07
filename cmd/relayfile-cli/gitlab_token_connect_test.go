@@ -123,10 +123,18 @@ func TestGitLabConnectReadsCloudStatusBinding(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearRelayfileEnv(t)
 	localDir := t.TempDir()
+	// Nothing is bound before the mint; the token connect completes under a
+	// Cloud-assigned id that differs from the minted session id.
+	minted := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.HasSuffix(r.URL.Path, "/connect-session") {
+			minted = true
 			_, _ = w.Write([]byte(`{"connectionId":"session-id","backend":"nango","backendIntegrationId":"gitlab-pat"}`))
+			return
+		}
+		if !minted {
+			_ = json.NewEncoder(w).Encode(map[string]any{"ready": false, "state": "pending", "configKey": "gitlab-pat", "connectionMatched": false})
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{

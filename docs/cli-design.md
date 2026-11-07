@@ -647,6 +647,18 @@ route, and an unsuccessful save may have partial effects.
 1. Call `POST /api/v1/workspaces/{id}/integrations/connect-session` with the provider.
 2. Print the `connectLink`; open browser unless `--no-open`.
 3. Poll `GET /api/v1/workspaces/{id}/integrations/{provider}/status` every 2 s.
+   Before step 1 the CLI records a baseline from the same status endpoint so a
+   ready row that already existed (for example a stale earlier connection) is
+   not mistaken for this attempt. A connected status is accepted only when
+   Cloud binds it to the minted `connectionId` (`connectionMatched: true` with
+   a matching `currentConnectionId`), or when it evidences a connection newer
+   than the baseline (a different `currentConnectionId`, or an
+   `oauth.lastAuthAt` / `oauth.connectedAt` strictly later than the baseline's
+   own parseable value for that field; a timestamp the baseline lacked is not
+   comparable and proves nothing). When the baseline cannot be read,
+   only a Cloud-bound status is accepted. The CLI never silently falls back to
+   a pre-existing connection id. The mint response carries no attempt id, so
+   this is post-baseline evidence, not attempt correlation.
 4. On ready: `<provider> connected. Files will appear under <local-dir>/<provider> within ~30s.`
 5. On timeout (default 5 m): print progress hint and exit 0 (sync continues in background).
 6. Persist Nango connection ID to `.relay/integrations/<provider>.json`.

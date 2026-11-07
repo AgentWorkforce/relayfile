@@ -395,7 +395,9 @@ type cloudIntegrationReadyResponse struct {
 	CurrentConnectionID string `json:"currentConnectionId,omitempty"`
 	ConnectionMatched   *bool  `json:"connectionMatched,omitempty"`
 	OAuth               *struct {
-		Connected bool `json:"connected"`
+		Connected   bool   `json:"connected"`
+		ConnectedAt string `json:"connectedAt,omitempty"`
+		LastAuthAt  string `json:"lastAuthAt,omitempty"`
 	} `json:"oauth,omitempty"`
 }
 
@@ -2800,6 +2802,12 @@ func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider,
 	if err != nil {
 		return err
 	}
+	// Snapshot the workspace-keyed status BEFORE minting. Cloud answers a
+	// workspace-keyed status poll from whatever row already exists for the
+	// provider, so a stale ready row would otherwise satisfy this connect the
+	// moment polling starts. The baseline is what a later ready status must
+	// differ from before it can count as the result of this attempt.
+	baseline := newConnectIdentityBaseline(cloudIntegrationStatus(cloudAPIURL, workspaceID, workspaceToken, provider, ""))
 	var session cloudConnectSessionResponse
 	if err := client.postJSON(context.Background(), fmt.Sprintf("/api/v1/workspaces/%s/integrations/connect-session", url.PathEscape(workspaceID)), cloudConnectSessionRequest{
 		AllowedIntegrations: []string{requestedProvider},
@@ -2812,7 +2820,12 @@ func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider,
 		return fmt.Errorf("create %s connect session: %w", requestedProvider, integrationConnectError(err))
 	}
 
-	connectionID := strings.TrimSpace(session.ConnectionID)
+	// Nango connect sessions carry no connection id until OAuth completes, so
+	// the mint usually returns none; polling then uses the workspace key and
+	// Cloud matches any row for the provider. mintedConnectionID keeps the
+	// real identity (or "") so the poll below knows which case it is in.
+	mintedConnectionID := strings.TrimSpace(session.ConnectionID)
+	connectionID := mintedConnectionID
 	if connectionID == "" {
 		connectionID = workspaceID
 	}
@@ -2851,19 +2864,47 @@ func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider,
 	defer cancel()
 	deadline := time.Now().Add(timeout)
 	var statusErr error
+	var stale *cloudIntegrationReadyResponse
+	// connected records that the poll accepted a row. The status request
+	// itself is not bound to ctx, so it can finish (connected) after the
+	// deadline has passed; that is a success, not a timeout.
+	var connected bool
+	// polledWithMintedID is true for the primary poll when the mint returned
+	// an id; the workspace-keyed fallback below passes false so that Cloud's
+	// "matched" on an arbitrary workspace row is not read as the minted one.
+	accept := func(status cloudIntegrationReadyResponse, polledWithMintedID bool) bool {
+		if !cloudIntegrationConnectedForConfig(status, expectedGitLabConfig) {
+			return false
+		}
+		if connectStatusBindsMintedIdentity(status, mintedConnectionID, polledWithMintedID) || baseline.evidencesNewConnection(status) {
+			return true
+		}
+		// Connected, but only the row that existed before this attempt.
+		// Remember it for the timeout message; never adopt it.
+		copied := status
+		stale = &copied
+		return false
+	}
 	pollErr := politePoll(ctx, func(pollCtx context.Context) pollResult {
 		status, err := cloudIntegrationStatus(cloudAPIURL, workspaceID, workspaceToken, provider, connectionID)
 		if err != nil {
 			statusErr = integrationConnectError(err)
 			return pollResult{err: err, httpStatus: httpStatusFromErr(err), retryAfter: retryAfterFromErr(err), done: true}
 		}
-		if !cloudIntegrationConnectedForConfig(status, expectedGitLabConfig) && connectionID != "" {
+		accepted := accept(status, mintedConnectionID != "")
+		if !accepted && mintedConnectionID != "" {
+			// Some backends (GitLab token connects) bind the finished
+			// connection under an id that differs from the minted one, so a
+			// workspace-keyed status is consulted too. It is held to the same
+			// standard: it must evidence a connection created or re-authed
+			// after the mint, not merely any ready row for the provider.
 			fallbackStatus, fallbackErr := cloudIntegrationStatus(cloudAPIURL, workspaceID, workspaceToken, provider, "")
-			if fallbackErr == nil && cloudIntegrationConnectedForConfig(fallbackStatus, expectedGitLabConfig) {
+			if fallbackErr == nil && accept(fallbackStatus, false) {
 				status = fallbackStatus
+				accepted = true
 			}
 		}
-		if cloudIntegrationConnectedForConfig(status, expectedGitLabConfig) {
+		if accepted {
 			if resolvedConnectionID := strings.TrimSpace(firstNonEmpty(status.CurrentConnectionID, status.ConnectionID)); resolvedConnectionID != "" && resolvedConnectionID != connectionID {
 				connectionID = resolvedConnectionID
 				_ = saveIntegrationConnection(localDir, integrationConnectionState{
@@ -2876,18 +2917,25 @@ func connectCloudIntegration(cloudAPIURL, workspaceID, workspaceToken, provider,
 				})
 			}
 			fmt.Fprintf(stdout, "%s connected. Files will appear under %s/%s as Relayfile syncs in the background.\n", provider, localDir, providerRootDir(provider))
+			connected = true
 			return pollResult{done: true}
 		}
 		return pollResult{}
-	}, politeOpts{})
+	}, integrationConnectPollOpts)
 	if statusErr != nil {
 		return statusErr
 	}
-	if pollErr != nil {
-		return pollErr
+	if connected {
+		return nil
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) || time.Now().After(deadline) {
+		if stale != nil {
+			return fmt.Errorf("timed out waiting for %s connection after %s: Cloud only reports the %s connection that existed before this attempt%s; finish the connect in the browser and run the command again", provider, timeout, provider, describeStaleConnectStatus(*stale))
+		}
 		return fmt.Errorf("timed out waiting for %s connection after %s", provider, timeout)
+	}
+	if pollErr != nil {
+		return pollErr
 	}
 	return nil
 }

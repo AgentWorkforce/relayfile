@@ -782,7 +782,22 @@ func (m *productizedCloudMock) serveIntegrationStatus(w http.ResponseWriter, r *
 	if got := bearerToken(r); got != m.initialAccessToken && got != m.refreshedToken {
 		m.t.Fatalf("unexpected integration status auth token: %q", got)
 	}
-	writeMockJSON(w, http.StatusOK, cloudIntegrationReadyResponse{Ready: true})
+	// Mirror the Cloud status contract: before a connect session is minted
+	// for the provider nothing is connected; afterwards the row is bound to
+	// the minted connection id.
+	provider := ""
+	if parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/"); len(parts) >= 2 {
+		provider = parts[len(parts)-2]
+	}
+	m.mu.Lock()
+	connectionID := m.providers[provider]
+	m.mu.Unlock()
+	if connectionID == "" {
+		writeMockJSON(w, http.StatusOK, cloudIntegrationReadyResponse{Ready: false, State: "not_connected"})
+		return
+	}
+	matched := true
+	writeMockJSON(w, http.StatusOK, cloudIntegrationReadyResponse{Ready: true, State: "ready", ConnectionMatched: &matched, CurrentConnectionID: connectionID})
 }
 
 func (m *productizedCloudMock) serveIntegrationList(w http.ResponseWriter, r *http.Request) {
