@@ -120,7 +120,7 @@ the introspection endpoint host are logged at startup; the secret never is.
 | `RELAYCONTROL_INTERNAL_URL` | relaycontrol's in-cluster base URL, e.g. `http://relaycontrol.relay.svc.cluster.local:8080`. `/internal/v1/auth/introspect` is appended unless already present. Must be `http`/`https`, without userinfo, query or fragment. |
 | `RELAYCONTROL_INTROSPECT_SECRET` | Service credential, sent as `Authorization: Bearer <secret>`. Must equal relaycontrol's `RELAYCONTROL_INTROSPECT_SECRET`. |
 | `RELAYCONTROL_INTROSPECT_SECRET_FILE` | Alternative to the above: path to a file holding the secret (contents trimmed). Setting both refuses to start. |
-| `RELAYFILE_PUBLIC_ORIGIN` | relayfile's public origin (for example `https://files.example.com`), sent as `aud`. relaycontrol must list it in its introspection audiences. Normalized to `scheme://host[:port]`, lowercase, default port dropped. |
+| `RELAYFILE_PUBLIC_ORIGIN` | relayfile's public origin (for example `https://files.example.com`), sent as `aud`. relaycontrol must list it in its introspection audiences (`SELFHOST_INTROSPECT_AUDIENCES`); relaycontrol's `GET /readyz` reports the accepted origins under `introspection.audiences` so a mismatch can be checked before traffic (relay-control PR 20 @ 4075a08). Normalized to `scheme://host[:port]`, lowercase, default port dropped. |
 | `RELAYFILE_INTROSPECTION_TIMEOUT` | Per-call timeout, Go duration (default `3s`). |
 | `RELAYFILE_INTROSPECTION_CACHE_TTL` | Positive-verdict cache TTL, Go duration (default `60s`, capped at `60s`; `0` disables the cache). |
 
