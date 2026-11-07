@@ -207,3 +207,37 @@ func TestCoveringCacheUsesExistingForcedRefreshOnOriginalPath(t *testing.T) {
 		t.Fatal("forced refresh copied credentials to the read shard")
 	}
 }
+
+func TestCoveringCacheRejectsUnsafeRefreshBeforeDataPlane(t *testing.T) {
+	var reads, refreshes atomic.Int32
+	dataPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reads.Add(1); w.WriteHeader(401) }))
+	defer dataPlane.Close()
+	otherOrigin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { refreshes.Add(1); w.WriteHeader(500) }))
+	defer otherOrigin.Close()
+	bundle, path, _ := setupCoveringCacheTest(t, dataPlane.URL, defaultJoinScopes)
+	bundle.RefreshURL = otherOrigin.URL + "/auth/v1/tokens/refresh"
+	if err := delegatedauth.SaveAtomic(path, bundle); err != nil {
+		t.Fatal(err)
+	}
+	var out, notices bytes.Buffer
+	if err := runRead([]string{"Default", "/slack/test.json"}, &out, &notices); err == nil {
+		t.Fatal("unsafe refresh origin was selected")
+	}
+	if reads.Load() != 0 || refreshes.Load() != 0 {
+		t.Fatalf("untrusted candidate reached network: reads=%d refreshes=%d", reads.Load(), refreshes.Load())
+	}
+}
+
+func TestCoveringCacheDoesNotRescueMissingExplicitFile(t *testing.T) {
+	_, _, marker := setupCoveringCacheTest(t, "https://relayfile.test", defaultJoinScopes)
+	explicit := filepath.Join(t.TempDir(), "missing-explicit.json")
+	t.Setenv("RELAYFILE_DELEGATED_CREDENTIALS_FILE", explicit)
+	var output, notices bytes.Buffer
+	err := runRead([]string{"Default", "/slack/test.json"}, &output, &notices)
+	if err == nil || !strings.Contains(err.Error(), "missing-explicit.json") {
+		t.Fatalf("missing explicit credential file fell back to a covering grant: %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("missing explicit credential file triggered bootstrap")
+	}
+}

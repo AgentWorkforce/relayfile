@@ -36,6 +36,31 @@ hosted session overrides the self-hosted file, and the self-hosted file remains
 the fallback when no hosted session exists. A configured but malformed hosted
 session is an error rather than an implicit switch to another server.
 
+### Cached delegated workspace grants
+
+One-shot workspace commands try the exact requested scope cache first. If it is
+missing, the CLI may reuse one unexpired covering grant from the uniquely bound
+workspace's catalog-recorded scopes or the existing default join scopes. It does
+not scan cache directories, copy credentials into another scope shard, mint a
+broader grant, or require the legacy Agent Relay active workspace when a suitable
+cached grant exists. Multiple suitable files are an error; callers can select an
+existing file explicitly with `RELAYFILE_DELEGATED_CREDENTIALS_FILE`.
+
+Automatic reuse checks the JWT's workspace, expiry and actual scope claims using
+the existing scope policy; bundle scope aliases cannot add rights. This decodes
+claims, without adding signature verification: the server still authorizes the
+token. The local catalog binds the Relayfile server, and the existing local
+bundle's `relayauthUrl` remains its refresh trust anchor. URLs must use HTTPS
+(except loopback development), and `refreshUrl` must be that base's exact
+`v1/tokens/refresh` endpoint without credentials, queries or fragments.
+
+Expired grants are not selected. A valid selected grant retains the existing
+refresh behavior, including a forced refresh after a 401, on its original file;
+normal local credential-file ownership and rotation remain the trust model.
+Malformed, mismatched or ambiguous covering credentials fail closed. If no
+covering grant exists, the existing bootstrap path remains available. Explicit
+credential-file and exact-cache behavior are unchanged.
+
 ### Auth flow: Cloud-hosted
 
 ```
