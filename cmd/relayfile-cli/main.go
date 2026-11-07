@@ -2738,6 +2738,11 @@ func loadOrBootstrapDelegatedCredentials(workspaceValue string, scopes []string)
 	if !errors.Is(err, delegatedauth.ErrMissingCredentials) {
 		return delegatedauth.Bundle{}, path, err
 	}
+	if covering, coveringPath, found, coveringErr := loadCatalogCoveringCredentials(workspaceValue, scopes); coveringErr != nil {
+		return delegatedauth.Bundle{}, path, coveringErr
+	} else if found {
+		return covering, coveringPath, nil
+	}
 	if _, bootstrappedPath, bootstrapErr := bootstrapDelegatedCredentialsFromAgentRelay(workspaceValue, scopes); bootstrapErr != nil {
 		return delegatedauth.Bundle{}, path, bootstrapErr
 	} else if strings.TrimSpace(bootstrappedPath) != "" {
