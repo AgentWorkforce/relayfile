@@ -571,6 +571,11 @@ type Store struct {
 	stateBackend            StateBackend
 	writebackQueue          WritebackQueue
 	envelopeQueue           EnvelopeQueue
+	// generatedIDNanos is the nanosecond source for minted envelope and
+	// delivery IDs. nil means time.Now().UnixNano(); tests pin it to force
+	// the same-nanosecond collision two concurrent ingests can hit on a real
+	// clock.
+	generatedIDNanos        func() int64
 	queuedWritebacks        map[string]struct{}
 	queuedEnvelopes         map[string]struct{}
 	ingressByWS             map[string]ingressCounter
@@ -3610,20 +3615,26 @@ func (s *Store) IngestEnvelope(req WebhookEnvelopeRequest) (QueuedResponse, erro
 	if req.WorkspaceID == "" || req.Provider == "" {
 		return QueuedResponse{}, ErrInvalidInput
 	}
-	// DeliveryID is optional; generate one if not provided (for deduplication)
-	if req.DeliveryID == "" {
-		req.DeliveryID = fmt.Sprintf("dlv_%d", time.Now().UnixNano())
-	}
 	if req.ReceivedAt == "" {
 		req.ReceivedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	}
-	envelopeID := req.EnvelopeID
-	if envelopeID == "" {
-		envelopeID = fmt.Sprintf("env_%d", time.Now().UnixNano())
-		req.EnvelopeID = envelopeID
-	}
 
 	s.mu.Lock()
+	// Generated IDs are minted under the lock and checked against the live
+	// indexes. Minting them from the wall clock outside the lock let two
+	// concurrent deliveries share one env_<nanos> ID: the second
+	// envelopesByID write overwrote the first, the queue carried the same ID
+	// twice, and the first delivery was silently lost behind a 202
+	// (conformance RF-ING-003, CI run 42336690516).
+	// DeliveryID is optional; generate one if not provided (for deduplication)
+	if req.DeliveryID == "" {
+		req.DeliveryID = s.uniqueGeneratedDeliveryIDLocked(req.WorkspaceID, req.Provider)
+	}
+	envelopeID := req.EnvelopeID
+	if envelopeID == "" {
+		envelopeID = s.uniqueGeneratedEnvelopeIDLocked()
+		req.EnvelopeID = envelopeID
+	}
 	key := deliveryKey(req.WorkspaceID, req.Provider, req.DeliveryID)
 	if existingID, exists := s.deliveryIndex[key]; exists {
 		s.adjustIngressCountsLocked(req.WorkspaceID, req.Provider, 0, 0, 1, 0, 0, 0)
@@ -5722,6 +5733,52 @@ func eventProvider(event Event) string {
 
 func deliveryKey(workspaceID, provider, deliveryID string) string {
 	return workspaceID + "|" + provider + "|" + deliveryID
+}
+
+func (s *Store) generatedIDNanosNow() int64 {
+	if s.generatedIDNanos != nil {
+		return s.generatedIDNanos()
+	}
+	return time.Now().UnixNano()
+}
+
+// uniqueGeneratedEnvelopeIDLocked mints an envelope ID that no stored,
+// processed or dead-lettered envelope already uses. Same-nanosecond mints get
+// an ordinal suffix instead of overwriting the earlier envelope.
+func (s *Store) uniqueGeneratedEnvelopeIDLocked() string {
+	base := fmt.Sprintf("env_%d", s.generatedIDNanosNow())
+	envelopeID := base
+	for suffix := 1; s.envelopeIDTakenLocked(envelopeID); suffix++ {
+		envelopeID = fmt.Sprintf("%s_%d", base, suffix)
+	}
+	return envelopeID
+}
+
+func (s *Store) envelopeIDTakenLocked(envelopeID string) bool {
+	if _, ok := s.envelopesByID[envelopeID]; ok {
+		return true
+	}
+	if _, ok := s.processedEnvs[envelopeID]; ok {
+		return true
+	}
+	if _, ok := s.deadLetters[envelopeID]; ok {
+		return true
+	}
+	return false
+}
+
+// uniqueGeneratedDeliveryIDLocked mints a delivery ID that is not already in
+// the dedup index for the workspace/provider, so two deliveries without a
+// provider delivery ID in the same nanosecond are not collapsed into one.
+func (s *Store) uniqueGeneratedDeliveryIDLocked(workspaceID, provider string) string {
+	base := fmt.Sprintf("dlv_%d", s.generatedIDNanosNow())
+	deliveryID := base
+	for suffix := 1; ; suffix++ {
+		if _, taken := s.deliveryIndex[deliveryKey(workspaceID, provider, deliveryID)]; !taken {
+			return deliveryID
+		}
+		deliveryID = fmt.Sprintf("%s_%d", base, suffix)
+	}
 }
 
 func coalesceObjectKey(req WebhookEnvelopeRequest) string {
