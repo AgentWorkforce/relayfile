@@ -26,8 +26,10 @@ type disconnectTestCloud struct {
 	deleteBody   string
 	// statusAfterDelete is returned by GET .../status; a nil body means 404.
 	statusAfterDelete *string
-	listBody          string
-	listStatus        int
+	// statusAfterDeleteCode overrides the GET .../status code (default 200).
+	statusAfterDeleteCode int
+	listBody              string
+	listStatus            int
 }
 
 func newDisconnectTestCloud(t *testing.T) (*disconnectTestCloud, *httptest.Server) {
@@ -57,6 +59,9 @@ func newDisconnectTestCloud(t *testing.T) (*disconnectTestCloud, *httptest.Serve
 				w.WriteHeader(http.StatusNotFound)
 				_, _ = w.Write([]byte(`{"code":"not_found","message":"integration not found"}`))
 				return
+			}
+			if cloud.statusAfterDeleteCode != 0 {
+				w.WriteHeader(cloud.statusAfterDeleteCode)
 			}
 			_, _ = w.Write([]byte(*cloud.statusAfterDelete))
 		case r.URL.Path == "/api/v1/workspaces/ws_123/integrations" && r.Method == http.MethodGet:
@@ -382,5 +387,128 @@ func TestCloudIntegrationListEntryDecodesName(t *testing.T) {
 	}
 	if entries[0].Name != "slot-a" || entries[1].Name != "" {
 		t.Fatalf("unexpected decode: %+v", entries)
+	}
+}
+
+// pinnedCloudAbsentStatus is the shape the pinned Cloud status route returns
+// for a provider whose workspace_integrations row is gone: ready:false,
+// state:"pending", no current connection, oauth not connected.
+const pinnedCloudAbsentStatus = `{"ready":false,"state":"pending","provider":"jira","displayName":"Jira","configKey":"jira","vfsRoot":"/jira","requestedConnectionId":null,"currentConnectionId":null,"connectionMatched":true,"webhookHealthy":null,"ingressHealthy":null,"eventIngressReady":null,"configuration":null,"oauth":{"connected":false,"connectedAt":null,"lastAuthAt":null},"initialSync":{"state":"unknown"}}`
+
+func TestIntegrationDisconnectAcceptsPinnedCloudAbsentStatus(t *testing.T) {
+	_, localDir := setupAdoptWorkspace(t)
+	cloud, server := newDisconnectTestCloud(t)
+	pointAdoptCloudCredentials(t, server.URL)
+	providerRoot, connectionFile, marker := seedDisconnectLocalState(t, localDir)
+	cloud.statusAfterDelete = strPtr(pinnedCloudAbsentStatus)
+
+	out, err := runDisconnect(t, "jira", "--workspace", "demo", "--yes", "--cloud-api-url", server.URL)
+	if err != nil {
+		t.Fatalf("disconnect failed: %v\n%s", err, out)
+	}
+	if fileExists(t, providerRoot) || fileExists(t, connectionFile) || !fileExists(t, marker) {
+		t.Fatalf("verified absent status must clean local state")
+	}
+	if !strings.Contains(out, "jira disconnected from workspace demo") {
+		t.Fatalf("missing confirmation in output:\n%s", out)
+	}
+}
+
+// RF566-001: after the DELETE, only a recognized affirmative "row is gone"
+// status (or a scoped 404) may authorize local cleanup. Empty, null, empty
+// object, unrelated, unknown-state and contradictory responses must error
+// and leave the mirror, saved connection and marker untouched.
+func TestIntegrationDisconnectRefusesInconclusiveOrPresentStatus(t *testing.T) {
+	cases := []struct {
+		name       string
+		code       int
+		body       string
+		wantInErr  string
+		namedSlot  bool
+		wantAbsent bool
+	}{
+		{name: "empty 200 body", body: "", wantInErr: "empty"},
+		{name: "empty 204 body", code: http.StatusNoContent, body: "", wantInErr: "empty"},
+		{name: "json null", body: "null", wantInErr: "not a status object"},
+		{name: "empty object", body: "{}", wantInErr: "missing"},
+		{name: "unrelated json", body: `{"ok":true,"items":[]}`, wantInErr: "missing"},
+		{name: "json array", body: `[]`, wantInErr: "not a status object"},
+		{name: "unknown state", body: `{"ready":false,"state":"zombie","provider":"jira","currentConnectionId":null,"connectionMatched":true,"oauth":{"connected":false}}`, wantInErr: `unrecognized state "zombie"`},
+		{name: "state missing", body: `{"ready":false,"provider":"jira","currentConnectionId":null,"connectionMatched":true,"oauth":{"connected":false}}`, wantInErr: "missing"},
+		{name: "ready missing", body: `{"state":"pending","provider":"jira","currentConnectionId":null,"connectionMatched":true,"oauth":{"connected":false}}`, wantInErr: "missing"},
+		{name: "different provider", body: `{"ready":false,"state":"pending","provider":"github","currentConnectionId":null,"connectionMatched":true,"oauth":{"connected":false}}`, wantInErr: `provider "github"`},
+		{name: "legacy connectionId", body: `{"ready":false,"state":"pending","provider":"jira","connectionId":"conn_legacy","connectionMatched":false,"oauth":{"connected":false}}`, wantInErr: "still reports connection conn_legacy"},
+		{name: "connectionMatched false hides ready", body: `{"ready":true,"state":"ready","provider":"jira","currentConnectionId":null,"connectionMatched":false,"oauth":{"connected":false}}`, wantInErr: "still reports connection"},
+		{name: "connectionMatched false hides oauth", body: `{"ready":false,"state":"pending","provider":"jira","currentConnectionId":null,"connectionMatched":false,"oauth":{"connected":true}}`, wantInErr: "still reports connection"},
+		{name: "connectionMatched false hides currentConnectionId", body: `{"ready":false,"state":"pending","provider":"jira","currentConnectionId":"conn_default","connectionMatched":false,"oauth":{"connected":false}}`, wantInErr: "still reports connection conn_default"},
+		{name: "row present in error state", body: `{"ready":false,"state":"error","provider":"jira","currentConnectionId":null,"connectionMatched":true,"oauth":{"connected":false}}`, wantInErr: "still reports connection"},
+		{name: "named slot empty body", body: "", wantInErr: "empty", namedSlot: true},
+		{name: "named slot connectionMatched false hides oauth", body: `{"ready":false,"state":"pending","provider":"jira","currentConnectionId":null,"connectionMatched":false,"oauth":{"connected":true}}`, wantInErr: "still reports connection", namedSlot: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, localDir := setupAdoptWorkspace(t)
+			cloud, server := newDisconnectTestCloud(t)
+			pointAdoptCloudCredentials(t, server.URL)
+			providerRoot, connectionFile, marker := seedDisconnectLocalState(t, localDir)
+			cloud.statusAfterDelete = strPtr(tc.body)
+			cloud.statusAfterDeleteCode = tc.code
+
+			args := []string{"jira", "--workspace", "demo", "--yes", "--cloud-api-url", server.URL}
+			if tc.namedSlot {
+				args = append(args, "--name", "relay-jira-recovery-20261106")
+			}
+			out, err := runDisconnect(t, args...)
+			if err == nil {
+				t.Fatalf("expected an error, got success:\n%s", out)
+			}
+			if !strings.Contains(err.Error(), tc.wantInErr) {
+				t.Fatalf("error %q should mention %q", err.Error(), tc.wantInErr)
+			}
+			if !strings.Contains(err.Error(), "local mirror left untouched") {
+				t.Fatalf("error %q should say the mirror was left untouched", err.Error())
+			}
+			if strings.Contains(out, "disconnected from workspace") {
+				t.Fatalf("must not print a success line:\n%s", out)
+			}
+			if !fileExists(t, providerRoot) || !fileExists(t, connectionFile) {
+				t.Fatalf("provider root and saved connection must survive an inconclusive status")
+			}
+			if fileExists(t, marker) {
+				t.Fatalf("disconnect marker %s must not be written", marker)
+			}
+			if got := cloud.recorded(); len(got) != 2 || !strings.HasPrefix(got[0], "DELETE ") || !strings.HasPrefix(got[1], "GET ") {
+				t.Fatalf("CLI must stop after the status read, got %v", got)
+			}
+		})
+	}
+}
+
+// RF566-002: an explicitly supplied empty --name is a usage error, not the
+// default connection. It must fail before credentials, Cloud or local state
+// are touched, even under --yes.
+func TestIntegrationDisconnectRejectsExplicitEmptyNameBeforeAnyRequest(t *testing.T) {
+	for _, nameArgs := range [][]string{{"--name", ""}, {"--name="}, {"--name", "   "}} {
+		t.Run(strings.Join(nameArgs, "_"), func(t *testing.T) {
+			_, localDir := setupAdoptWorkspace(t)
+			cloud, server := newDisconnectTestCloud(t)
+			pointAdoptCloudCredentials(t, server.URL)
+			providerRoot, connectionFile, marker := seedDisconnectLocalState(t, localDir)
+
+			args := append([]string{"jira", "--workspace", "demo", "--yes", "--cloud-api-url", server.URL}, nameArgs...)
+			out, err := runDisconnect(t, args...)
+			if err == nil || !strings.Contains(err.Error(), "--name requires a non-empty") {
+				t.Fatalf("expected blank-name usage error, got err=%v out=%s", err, out)
+			}
+			if strings.Contains(out, "disconnected from workspace") {
+				t.Fatalf("must not print a success line:\n%s", out)
+			}
+			if got := cloud.recorded(); len(got) != 0 {
+				t.Fatalf("empty --name must not reach Cloud, got %v", got)
+			}
+			if !fileExists(t, providerRoot) || !fileExists(t, connectionFile) || fileExists(t, marker) {
+				t.Fatalf("empty --name must leave local state unchanged")
+			}
+		})
 	}
 }

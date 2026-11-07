@@ -95,7 +95,7 @@ func disconnectCloudIntegration(ctx context.Context, client *apiClient, workspac
 
 	present, err := cloudIntegrationStillPresent(ctx, client, workspaceID, provider, slot)
 	if err != nil {
-		return outcome, fmt.Errorf("verify %s disconnect: %w", target, err)
+		return outcome, fmt.Errorf("verify %s disconnect: %w; local mirror left untouched", target, err)
 	}
 	if present != "" {
 		return outcome, fmt.Errorf("disconnect %s: cloud still reports connection %s after the disconnect; local mirror left untouched", target, present)
@@ -112,14 +112,30 @@ func disconnectCloudIntegration(ctx context.Context, client *apiClient, workspac
 	return outcome, nil
 }
 
+// cloudIntegrationDisconnectStatus is the subset of the Cloud status route
+// the disconnect verification reads. Every field is a pointer so a missing
+// key is distinguishable from a zero value: an empty or unrelated body must
+// never decode to "nothing connected".
+type cloudIntegrationDisconnectStatus struct {
+	Ready               *bool   `json:"ready"`
+	Provider            *string `json:"provider"`
+	State               *string `json:"state"`
+	ConnectionID        *string `json:"connectionId"`
+	CurrentConnectionID *string `json:"currentConnectionId"`
+	OAuth               *struct {
+		Connected *bool `json:"connected"`
+	} `json:"oauth"`
+}
+
 // cloudIntegrationStillPresent re-reads the status for the same scope that
 // was just disconnected. It returns the connection id (or "connected" when
 // the status reports a connection without an id) while Cloud still holds a
-// row, and "" once the row is gone. A 404 means Cloud no longer knows the
-// row at all and counts as absent.
+// row, and "" only when Cloud affirmatively reports the row gone. A 404 means
+// Cloud no longer knows the row at all and counts as absent. Anything else
+// (empty body, null, {}, unrelated JSON, unknown state) is inconclusive and
+// is returned as an error so the caller never cleans local state on it.
 func cloudIntegrationStillPresent(ctx context.Context, client *apiClient, workspaceID, provider, slot string) (string, error) {
-	var status cloudIntegrationReadyResponse
-	err := client.getJSON(ctx, integrationDisconnectStatusPath(workspaceID, provider, slot), &status)
+	body, _, err := client.do(ctx, http.MethodGet, integrationDisconnectStatusPath(workspaceID, provider, slot), nil)
 	if err != nil {
 		var apiErr *apiError
 		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
@@ -127,13 +143,69 @@ func cloudIntegrationStillPresent(ctx context.Context, client *apiClient, worksp
 		}
 		return "", err
 	}
-	if id := strings.TrimSpace(status.CurrentConnectionID); id != "" {
-		return id, nil
+	return decodeDisconnectStatus(body, provider)
+}
+
+// decodeDisconnectStatus classifies a 2xx status body after a disconnect.
+// It returns a non-empty presence detail while any connection signal is
+// still reported, "" when the body is a recognized affirmative absent status,
+// and an error for anything inconclusive. A positive signal (current or
+// legacy connection id, oauth.connected, ready, or a live state) always
+// counts as present; connectionMatched:false does not erase it.
+func decodeDisconnectStatus(body []byte, provider string) (string, error) {
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" {
+		return "", errors.New("cloud returned an empty status response")
 	}
-	if cloudIntegrationConnected(status) {
+	if !strings.HasPrefix(trimmed, "{") {
+		return "", errors.New("cloud status response is not a status object")
+	}
+	var status cloudIntegrationDisconnectStatus
+	if err := json.Unmarshal([]byte(trimmed), &status); err != nil {
+		return "", fmt.Errorf("unexpected cloud status response: %w", err)
+	}
+	var missing []string
+	if status.Ready == nil {
+		missing = append(missing, "ready")
+	}
+	if status.State == nil {
+		missing = append(missing, "state")
+	}
+	if len(missing) > 0 {
+		return "", fmt.Errorf("cloud status response is missing %s", strings.Join(missing, ", "))
+	}
+	if status.Provider != nil && strings.TrimSpace(*status.Provider) != "" && normalizeProviderID(*status.Provider) != provider {
+		return "", fmt.Errorf("cloud status response is for provider %q, not %q", *status.Provider, provider)
+	}
+	if status.CurrentConnectionID != nil {
+		if id := strings.TrimSpace(*status.CurrentConnectionID); id != "" {
+			return id, nil
+		}
+	}
+	if status.ConnectionID != nil {
+		if id := strings.TrimSpace(*status.ConnectionID); id != "" {
+			return id, nil
+		}
+	}
+	if status.OAuth != nil && status.OAuth.Connected != nil && *status.OAuth.Connected {
 		return "connected", nil
 	}
-	return "", nil
+	if *status.Ready {
+		return "connected", nil
+	}
+	switch state := strings.TrimSpace(strings.ToLower(*status.State)); state {
+	case "pending", "disconnected":
+		// The pinned Cloud route reports a missing row as ready:false,
+		// state:"pending" with no connection; older deployments say
+		// "disconnected". Both are affirmative absence once no id, oauth or
+		// ready signal was reported above.
+		return "", nil
+	case "connected", "oauth_connected", "sync_queued", "syncing", "ready", "cataloging", "error", "degraded":
+		// These states only exist while a row is still held.
+		return "connected", nil
+	default:
+		return "", fmt.Errorf("cloud status response has unrecognized state %q", *status.State)
+	}
 }
 
 // cloudIntegrationNamedRows returns the named (service-account) rows Cloud

@@ -4152,8 +4152,19 @@ func runIntegrationDisconnect(args []string, stdin io.Reader, stdout io.Writer) 
 		return fmt.Errorf("usage: %s integration disconnect PROVIDER [--workspace NAME] [--name SLOT] [--yes]", programName())
 	}
 	provider := normalizeProviderID(fs.Arg(0))
+	// Only an omitted --name selects the default connection. An explicitly
+	// supplied empty value (--name "" or --name=, e.g. an unset variable in
+	// automation) is a usage error and must fail before credentials, Cloud
+	// or local state are touched; otherwise --yes would silently send an
+	// unscoped DELETE for the default row.
+	nameProvided := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "name" {
+			nameProvided = true
+		}
+	})
 	slot := strings.TrimSpace(*slotName)
-	if *slotName != "" && slot == "" {
+	if nameProvided && slot == "" {
 		return errors.New("--name requires a non-empty connection slot name")
 	}
 	record, err := resolveWorkspaceRecord(strings.TrimSpace(*workspaceName))

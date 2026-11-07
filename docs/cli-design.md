@@ -673,11 +673,22 @@ linear       error     —       401 invalid_grant (3 min ago)
    proof: Cloud answers success for an already-absent row, and a
    `localDeleted: false` body means the row the caller meant survived. The
    CLI fails with `local mirror left untouched` when Cloud reports
-   `localDeleted: false` or when a follow-up `GET .../status` for the same
-   scope still reports a connection.
+   `localDeleted: false`. Otherwise it re-reads `GET .../status` for the same
+   scope and proceeds only on an affirmative absent answer: a scoped 404, or a
+   status object with `ready: false`, no `currentConnectionId` (or legacy
+   `connectionId`), `oauth.connected: false` and state `pending` (the Cloud
+   shape for a missing row) or `disconnected`. An empty body, `null`, `{}`,
+   unrelated JSON, a missing `ready`/`state`, an unrecognized state, another
+   provider, or any surviving connection signal is an error, not a success;
+   `connectionMatched: false` never hides those signals. Against a Cloud that
+   predates the scoped route, this check reports the surviving named row but
+   cannot undo an unscoped deletion that already happened.
 4. Default connection only: remove `<local-dir>/<provider>/` from the mirror
    and write the `.relay/disconnected/<provider>.json` marker. A `--name`
-   disconnect leaves the mirror unchanged.
+   disconnect leaves the mirror unchanged. Only an omitted `--name` selects
+   the default connection; an explicitly empty value (`--name ""`, `--name=`)
+   is a usage error raised before any credential lookup, Cloud request or
+   local change, even with `--yes`.
 5. Default connection only: list the provider's named rows that remain and
    print them with the `--name` command needed for each. Named rows are not
    removed by an unscoped disconnect.
