@@ -491,7 +491,7 @@ Manage provider integrations after initial setup.
 ```
 relayfile integration connect <provider> [--workspace NAME] [--no-open] [--timeout 5m]
 relayfile integration list      [--workspace NAME] [--json]
-relayfile integration disconnect <provider> [--workspace NAME] [--yes]
+relayfile integration disconnect <provider> [--workspace NAME] [--name SLOT] [--yes]
 relayfile integration set-metadata <provider> (KEY=VALUE... | --metadata-file FILE) [--workspace NAME] [--yes]
 ```
 
@@ -664,9 +664,23 @@ linear       error     —       401 invalid_grant (3 min ago)
 **`disconnect` behavior:**
 
 1. Prompt for confirmation unless `--yes`.
-2. `DELETE /api/v1/workspaces/{id}/integrations/{provider}/status`.
-3. Remove `<local-dir>/<provider>/` from the mirror.
-4. Write `.relay/disconnected/<provider>.json` marker.
+2. `DELETE /api/v1/workspaces/{id}/integrations/{provider}/status`. With
+   `--name SLOT` the request carries
+   `?scopeKind=workspace_service_account&scopeName=SLOT` and removes only
+   that named service-account row; without it only the default (unnamed)
+   connection is removed. Cloud never deletes named rows implicitly.
+3. Verify the disconnect before touching local state. A 2xx alone is not
+   proof: Cloud answers success for an already-absent row, and a
+   `localDeleted: false` body means the row the caller meant survived. The
+   CLI fails with `local mirror left untouched` when Cloud reports
+   `localDeleted: false` or when a follow-up `GET .../status` for the same
+   scope still reports a connection.
+4. Default connection only: remove `<local-dir>/<provider>/` from the mirror
+   and write the `.relay/disconnected/<provider>.json` marker. A `--name`
+   disconnect leaves the mirror unchanged.
+5. Default connection only: list the provider's named rows that remain and
+   print them with the `--name` command needed for each. Named rows are not
+   removed by an unscoped disconnect.
 
 ---
 
