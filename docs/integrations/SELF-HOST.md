@@ -130,7 +130,8 @@ origin are all set and valid.
 ### Contract
 
 Pinned to AgentWorkforce/relay-control PR #20 at `28e9d957` (introspection
-contract v1.2):
+contract v1.2) plus the `relayfile-agent` token class from relay-control
+PR #22 at `bf529f8` (v1.3):
 
 - Request: `POST {RELAYCONTROL_INTERNAL_URL}/internal/v1/auth/introspect` with
   `Content-Type: application/json` and body `{"token": "<bearer>", "aud":
@@ -169,10 +170,28 @@ relaycontrol v1 user access tokens (`sh_at_`, `principal_type:
 `rth:read` and `rth:sync`, never `fs:*` or `sync:*`. relayfile introspects them
 successfully but refuses them with 403 (`missing required scope: fs:read`, or
 `no scopes granted` when the list is empty) on every filesystem and sync
-route: `cli:auth` alone is not filesystem authority. These tokens become
-usable only once relaycontrol issues the relayfile-scoped token class, which
-will carry `agent_name` and `fs:*` scopes. Workspace binding and path-scoped
-grant checks are identical for both verifiers.
+route: `cli:auth` alone is not filesystem authority. Workspace binding and
+path-scoped grant checks are identical for both verifiers.
+
+### Agent tokens (`relayfile-agent` workspace API tokens)
+
+Filesystem authority for self-host agents comes from a relaycontrol
+workspace API token (`sh_wk_`) minted with purpose `relayfile-agent`
+(relay-control PR #22 @ `bf529f8`): `POST
+/api/v1/workspaces/{workspace}/deployment-api-tokens` with `purpose:
+"relayfile-agent"`, a `label`, an `agent_name` (unique per workspace while a
+live token exists; relaycontrol answers 409 `agent_name_conflict`) and `aud`
+set to `RELAYFILE_PUBLIC_ORIGIN`. relaycontrol introspects it as
+`principal_type: "agent"` with `sub` = `token_id`, `agent_name` as the
+relayfile principal, and the fixed scope list `fs:read fs:write sync:read
+sync:trigger`. Agent tokens never carry `admin:*`; admin routes stay 403.
+
+`exp` is the token's `expires_at` (default 90 days). A token minted with
+`neverExpires: true` answers `exp = now + 3600` recomputed on every call, so
+relayfile's positive cache (capped at `exp` and at most 60s) re-introspects
+well inside that window. Revocation, expiry, or removing relayfile's origin
+from `SELFHOST_INTROSPECT_AUDIENCES` turn the token inactive (`revoked`,
+`expired`, `audience`) within the cache TTL.
 
 ### Out of scope
 

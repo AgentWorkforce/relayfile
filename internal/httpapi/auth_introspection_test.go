@@ -991,3 +991,138 @@ func mapKeys(m map[string]any) []string {
 	}
 	return keys
 }
+
+// Pinned to relay-control selfhost/relayfile-agent-tokens @ bf529f8 (draft
+// PR #22, v1.3): a `sh_wk_` workspace API token minted with purpose
+// `relayfile-agent` introspects as principal_type "agent" with sub =
+// token_id, email/machine_id null, agent_name set, the published scope list
+// fs:read fs:write sync:read sync:trigger, and a numeric exp (expires_at, or
+// now+3600 recomputed per call for neverExpires tokens).
+func TestIntrospectionRelayfileAgentTokenClass(t *testing.T) {
+	t.Parallel()
+
+	const agentToken = "sh_wk_0123456789abcdefghijklmnopqrstuv"
+	now := time.Now().UTC()
+	agentResponse := func(overrides map[string]any) map[string]any {
+		base := map[string]any{
+			"sub":            "wkt_0123456789abcdef",
+			"email":          nil,
+			"principal_type": "agent",
+			"agent_name":     "nabis-worker-1",
+			"machine_id":     nil,
+			"scopes":         []string{"fs:read", "fs:write", "sync:read", "sync:trigger"},
+			"token_id":       "wkt_0123456789abcdef",
+		}
+		for key, value := range overrides {
+			base[key] = value
+		}
+		return activeIntrospection(now, base)
+	}
+
+	t.Run("claims map to the agent principal", func(t *testing.T) {
+		t.Parallel()
+		fake := newFakeRelaycontrol(t, respondJSON(agentResponse(nil)))
+		verifier := mustIntrospectionBearerVerifier(t, introspectionTestConfig(fake.endpoint()))
+
+		claims, authErr := parseBearer("Bearer "+agentToken, verifier, now)
+		if authErr != nil {
+			t.Fatalf("unexpected auth error: %+v", authErr)
+		}
+		if claims.WorkspaceID != "ws_a" || claims.AgentName != "nabis-worker-1" {
+			t.Fatalf("unexpected claims: workspace=%q agent=%q", claims.WorkspaceID, claims.AgentName)
+		}
+		if claims.TokenID != "wkt_0123456789abcdef" || claims.PrincipalType != "agent" {
+			t.Fatalf("unexpected token metadata: token_id=%q principal_type=%q", claims.TokenID, claims.PrincipalType)
+		}
+		for _, scope := range []string{"fs:read", "fs:write", "sync:read", "sync:trigger"} {
+			if _, ok := claims.Scopes[scope]; !ok {
+				t.Fatalf("expected scope %q, got %v", scope, claims.Scopes)
+			}
+		}
+		if got := fake.lastRequest(); got.body["token"] != agentToken {
+			t.Fatalf("introspection body token = %v, want the sh_wk_ token", got.body["token"])
+		}
+	})
+
+	t.Run("rolling exp window is honored as the cache cap", func(t *testing.T) {
+		t.Parallel()
+		// neverExpires tokens answer exp = now + 3600 on every call.
+		fake := newFakeRelaycontrol(t, respondJSON(agentResponse(map[string]any{"exp": now.Add(3600 * time.Second).Unix()})))
+		cfg := introspectionTestConfig(fake.endpoint())
+		cfg.IntrospectionCacheTTL = 30 * time.Second
+		verifier := mustIntrospectionBearerVerifier(t, cfg)
+
+		if _, authErr := parseBearer("Bearer "+agentToken, verifier, now); authErr != nil {
+			t.Fatalf("unexpected auth error: %+v", authErr)
+		}
+		if _, authErr := parseBearer("Bearer "+agentToken, verifier, now.Add(29*time.Second)); authErr != nil {
+			t.Fatalf("unexpected auth error on cached call: %+v", authErr)
+		}
+		if got := fake.calls.Load(); got != 1 {
+			t.Fatalf("expected one upstream call within the cache TTL, got %d", got)
+		}
+		if _, authErr := parseBearer("Bearer "+agentToken, verifier, now.Add(31*time.Second)); authErr != nil {
+			t.Fatalf("unexpected auth error after TTL: %+v", authErr)
+		}
+		if got := fake.calls.Load(); got != 2 {
+			t.Fatalf("expected a re-introspection after the cache TTL, got %d calls", got)
+		}
+	})
+
+	t.Run("expired and audience answers are inactive", func(t *testing.T) {
+		t.Parallel()
+		for _, reason := range []string{"expired", "audience", "revoked", "wrong-kind"} {
+			reason := reason
+			t.Run(reason, func(t *testing.T) {
+				t.Parallel()
+				fake := newFakeRelaycontrol(t, respondJSON(map[string]any{"active": false, "reason": reason}))
+				verifier := mustIntrospectionBearerVerifier(t, introspectionTestConfig(fake.endpoint()))
+				_, authErr := parseBearer("Bearer "+agentToken, verifier, now)
+				if authErr == nil || authErr.status != http.StatusUnauthorized || authErr.message != "token inactive" {
+					t.Fatalf("expected 401 token inactive for %s, got %+v", reason, authErr)
+				}
+			})
+		}
+	})
+
+	t.Run("server routes", func(t *testing.T) {
+		t.Parallel()
+		tests := []struct {
+			name       string
+			method     string
+			path       string
+			wantStatus int
+			wantMsg    string
+		}{
+			{name: "fs:read on own workspace", method: http.MethodGet, path: "/v1/workspaces/ws_a/fs/tree?path=/", wantStatus: http.StatusOK},
+			{name: "sync:read on own workspace", method: http.MethodGet, path: "/v1/workspaces/ws_a/sync/status", wantStatus: http.StatusOK},
+			// 412 comes from the handler itself (If-Match is required), so the
+			// fs:write scope check has already passed.
+			{name: "fs:write reaches the handler", method: http.MethodDelete, path: "/v1/workspaces/ws_a/fs/file?path=/missing.md", wantStatus: http.StatusPreconditionFailed, wantMsg: "missing If-Match header"},
+			{name: "cross-tenant workspace is refused", method: http.MethodGet, path: "/v1/workspaces/ws_b/fs/tree?path=/", wantStatus: http.StatusForbidden, wantMsg: "workspace mismatch"},
+			{name: "admin routes are not agent authority", method: http.MethodGet, path: "/v1/admin/backends", wantStatus: http.StatusForbidden, wantMsg: "missing required scope: admin:read"},
+		}
+		for _, tt := range tests {
+			tt := tt
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+				fake := newFakeRelaycontrol(t, respondJSON(agentResponse(nil)))
+				server, err := NewServerWithConfig(relayfile.NewStore(), introspectionTestConfig(fake.endpoint()))
+				if err != nil {
+					t.Fatalf("NewServerWithConfig: %v", err)
+				}
+				rec := serveWithBearer(server, tt.method, tt.path, agentToken)
+				if rec.Code != tt.wantStatus {
+					t.Fatalf("expected %d, got %d: %s", tt.wantStatus, rec.Code, rec.Body.String())
+				}
+				if tt.wantMsg != "" {
+					var body map[string]any
+					_ = json.Unmarshal(rec.Body.Bytes(), &body)
+					if body["message"] != tt.wantMsg {
+						t.Fatalf("expected message %q, got %v", tt.wantMsg, body["message"])
+					}
+				}
+			})
+		}
+	})
+}
