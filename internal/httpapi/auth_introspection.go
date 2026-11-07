@@ -53,10 +53,13 @@ const (
 // relaycontrolTokenPrefixes are the token-class prefixes minted by
 // relaycontrol that relayfile routes to introspection in dual mode.
 // Pinned to AgentWorkforce/relay-control 28e9d95 (PR #20, contract v1.2):
-// `sh_at_` is the user access token prefix. Introspection itself answers
-// `wrong-kind` for every other relaycontrol token class.
+// `sh_at_` is the user access token prefix and `sh_wk_` the workspace API
+// token prefix (the proposed `relayfile-agent` purpose). Introspection itself
+// answers `wrong-kind` for every relaycontrol token it does not accept, so
+// listing a prefix here never widens authority.
 var relaycontrolTokenPrefixes = []string{
 	"sh_at_",
+	"sh_wk_",
 }
 
 // knownInactiveReasons are the `reason` values of contract v1.2. Anything

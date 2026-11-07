@@ -728,6 +728,7 @@ func TestDualModeRouting(t *testing.T) {
 		{name: "JWT goes to JWKS only", token: jwt, wantWorkspace: "ws_jwt", wantJWKSHits: 1},
 		{name: "relay_pa_ wrapped JWT goes to JWKS only", token: "relay_pa_" + jwt, wantWorkspace: "ws_jwt", wantJWKSHits: 1},
 		{name: "sh_at_ goes to introspection only", token: testUserAccessToken, wantWorkspace: "ws_a", wantIntrospection: 1},
+		{name: "sh_wk_ goes to introspection only", token: "sh_wk_0123456789abcdefghijklmnopqrstuv", wantWorkspace: "ws_a", wantIntrospection: 1},
 		{name: "garbage is rejected without calls", token: "not-a-token", wantStatus: 401, wantMessage: "invalid token"},
 		{name: "two-part token is rejected without calls", token: "abc.def", wantStatus: 401, wantMessage: "invalid token"},
 		{name: "relayauth prefix on non-JWT is rejected without calls", token: "relay_ws_opaque", wantStatus: 401, wantMessage: "invalid token"},

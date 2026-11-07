@@ -104,7 +104,7 @@ no egress to `api.relayauth.dev`) is needed.
 |---|---|
 | `jwks` (default) | Unchanged hosted behaviour: RS256 JWTs verified against JWKS. |
 | `introspection` | Every bearer is sent, exactly as presented, to relaycontrol. JWKS is never fetched and `RELAYAUTH_JWKS_URL` is ignored. |
-| `dual` | Tokens starting with a relaycontrol prefix (`sh_at_`) go to introspection only; JWT-shaped tokens (three dot-separated parts after an optional `relay_*_` prefix) go to JWKS only; anything else is 401. There is no cross-fallback. Requires an explicit `RELAYAUTH_JWKS_URL` (no default), so an air-gapped cluster never dials `api.relayauth.dev`. |
+| `dual` | Tokens starting with a relaycontrol prefix (`sh_at_` user access tokens, `sh_wk_` workspace API tokens) go to introspection only; JWT-shaped tokens (three dot-separated parts after an optional `relay_*_` prefix) go to JWKS only; anything else is 401. There is no cross-fallback. Requires an explicit `RELAYAUTH_JWKS_URL` (no default), so an air-gapped cluster never dials `api.relayauth.dev`. |
 
 When `RELAYFILE_AUTH_MODE` is unset the mode is derived: only
 `RELAYCONTROL_INTERNAL_URL` set means `introspection`; both it and

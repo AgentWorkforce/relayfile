@@ -62,7 +62,7 @@ type ServerConfig struct {
 
 	// AuthMode selects bearer verification: "jwks" (default when empty),
 	// "introspection" (relaycontrol token introspection only, JWKS never
-	// fetched) or "dual" (sh_at_ tokens via introspection, JWTs via JWKS;
+	// fetched) or "dual" (sh_at_/sh_wk_ tokens via introspection, JWTs via JWKS;
 	// requires an explicit JWKSURL). See auth_introspection.go.
 	AuthMode string
 	// IntrospectionURL is the full relaycontrol introspection endpoint URL
