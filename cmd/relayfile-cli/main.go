@@ -2733,19 +2733,30 @@ func delegatedWorkspaceCatalogScopes(cloudWorkspaceID string, workspace agentRel
 }
 
 func loadOrBootstrapDelegatedCredentials(workspaceValue string, scopes []string) (delegatedauth.Bundle, string, error) {
+	bundle, path, _, err := loadOrBootstrapDelegatedCredentialsWithCovering(workspaceValue, scopes)
+	return bundle, path, err
+}
+
+func loadOrBootstrapDelegatedCredentialsWithCovering(workspaceValue string, scopes []string) (delegatedauth.Bundle, string, bool, error) {
 	bundle, path, err := loadDelegatedCredentialsForRequest("", workspaceValue, scopes)
 	if err == nil {
-		return bundle, path, nil
+		return bundle, path, false, nil
 	}
 	if !errors.Is(err, delegatedauth.ErrMissingCredentials) {
-		return delegatedauth.Bundle{}, path, err
+		return delegatedauth.Bundle{}, path, false, err
+	}
+	if covering, coveringPath, found, coveringErr := loadCatalogCoveringCredentials(workspaceValue, scopes); coveringErr != nil {
+		return delegatedauth.Bundle{}, path, true, coveringErr
+	} else if found {
+		return covering, coveringPath, true, nil
 	}
 	if _, bootstrappedPath, bootstrapErr := bootstrapDelegatedCredentialsFromAgentRelay(workspaceValue, scopes); bootstrapErr != nil {
-		return delegatedauth.Bundle{}, path, bootstrapErr
+		return delegatedauth.Bundle{}, path, false, bootstrapErr
 	} else if strings.TrimSpace(bootstrappedPath) != "" {
 		path = bootstrappedPath
 	}
-	return loadDelegatedCredentials(path)
+	bundle, path, err = loadDelegatedCredentials(path)
+	return bundle, path, false, err
 }
 
 func persistDelegatedWorkspace(record workspaceRecord, bundle delegatedauth.Bundle, localDir string, setDefault bool) (workspaceRecord, error) {
@@ -8190,12 +8201,13 @@ docs/guides/vfs-cloud-setup.md#known-limitations for details.
 }
 
 type workspaceCommandClient struct {
-	workspaceID string
-	record      workspaceRecord
-	client      *apiClient
-	scopes      []string
-	directToken bool
-	credsFile   string
+	workspaceID         string
+	record              workspaceRecord
+	client              *apiClient
+	scopes              []string
+	directToken         bool
+	credsFile           string
+	coveringCredentials *coveringCredentialBinding
 	// retryBusy opts one-shot GETs (read, tree, status) into a bounded retry
 	// on 429/503. Polling commands leave it off because politePoll already
 	// owns their backoff.
@@ -8284,16 +8296,18 @@ func prepareWorkspaceCommandClient(workspaceValue, serverFlag, tokenFlag string,
 	directToken := tokenValue != ""
 	credsFile := ""
 	_, delegatedCredsExplicit := explicitDelegatedCredentialsPath("")
+	coveringCredentials := false
+	var coveringBinding *coveringCredentialBinding
 	var bundle delegatedauth.Bundle
 	var err error
 	if !directToken && strings.TrimSpace(tokenValue) == "" {
 		if delegatedCredsExplicit {
 			bundle, credsFile, err = loadDelegatedCredentialsForRequest("", workspaceValue, requestedScopes)
 		} else {
-			bundle, credsFile, err = loadOrBootstrapDelegatedCredentials(workspaceValue, requestedScopes)
+			bundle, credsFile, coveringCredentials, err = loadOrBootstrapDelegatedCredentialsWithCovering(workspaceValue, requestedScopes)
 		}
 		if err != nil {
-			if delegatedCredsExplicit {
+			if delegatedCredsExplicit || coveringCredentials {
 				return nil, fmt.Errorf("resolve delegated relayfile credentials: %w", err)
 			}
 			tokenValue = strings.TrimSpace(creds.Token)
@@ -8303,9 +8317,15 @@ func prepareWorkspaceCommandClient(workspaceValue, serverFlag, tokenFlag string,
 			directToken = true
 			credsFile = ""
 		} else {
-			bundle, err = refreshDelegatedCredentials(credsFile, bundle, false)
+			if coveringCredentials {
+				coveringBinding, err = bindCatalogCoveringCredentials(workspaceValue, requestedScopes)
+				if err != nil {
+					return nil, fmt.Errorf("bind covering relayfile credentials to catalog: %w", err)
+				}
+			}
+			bundle, err = refreshDelegatedCredentialsWithCovering(credsFile, bundle, false, coveringBinding)
 			if err != nil {
-				if delegatedCredsExplicit {
+				if delegatedCredsExplicit || coveringCredentials {
 					return nil, fmt.Errorf("refresh delegated relayfile credentials: %w", err)
 				}
 				tokenValue = strings.TrimSpace(creds.Token)
@@ -8351,11 +8371,12 @@ func prepareWorkspaceCommandClient(workspaceValue, serverFlag, tokenFlag string,
 	}
 	scopes := effectiveCommandScopes(record, requestedScopes)
 	commandClient := &workspaceCommandClient{
-		workspaceID: workspaceID,
-		record:      record,
-		scopes:      scopes,
-		directToken: directToken,
-		credsFile:   credsFile,
+		workspaceID:         workspaceID,
+		record:              record,
+		scopes:              scopes,
+		directToken:         directToken,
+		credsFile:           credsFile,
+		coveringCredentials: coveringBinding,
 	}
 	if credsFile != "" {
 		persisted, err := upsertWorkspaceDetails(record)
@@ -8437,7 +8458,7 @@ func (c *workspaceCommandClient) refreshFromDelegated() error {
 	if bundle.Workspace() != "" && bundle.Workspace() != c.workspaceID {
 		return fmt.Errorf("delegated relayfile credentials are for workspace %s, expected %s", bundle.Workspace(), c.workspaceID)
 	}
-	renewed, err := refreshDelegatedCredentials(c.credsFile, bundle, true)
+	renewed, err := refreshDelegatedCredentialsWithCovering(c.credsFile, bundle, true, c.coveringCredentials)
 	if err != nil {
 		return err
 	}
@@ -11440,7 +11461,20 @@ func scopeAllows(grant, requested string) bool {
 }
 
 func refreshDelegatedCredentials(path string, bundle delegatedauth.Bundle, force bool) (delegatedauth.Bundle, error) {
+	return refreshDelegatedCredentialsWithCovering(path, bundle, force, nil)
+}
+
+func refreshDelegatedCredentialsWithCovering(path string, bundle delegatedauth.Bundle, force bool, covering *coveringCredentialBinding) (delegatedauth.Bundle, error) {
 	resolvedPath := resolveDelegatedCredentialsPath(path)
+	if covering != nil {
+		usable, err := covering.usable(bundle)
+		if err != nil {
+			return bundle, err
+		}
+		if !usable {
+			return bundle, errors.New("covering credential grant is no longer usable")
+		}
+	}
 	if !force && !relayfileTokenNeedsRefresh(bundle.BearerToken()) {
 		return bundle, nil
 	}
@@ -11453,6 +11487,17 @@ func refreshDelegatedCredentials(path string, bundle delegatedauth.Bundle, force
 		} else if !errors.Is(loadErr, os.ErrNotExist) {
 			return loadErr
 		}
+		var refreshClient *http.Client
+		if covering != nil {
+			usable, validationErr := covering.usable(bundle)
+			if validationErr != nil {
+				return validationErr
+			}
+			if !usable {
+				return errors.New("covering credential grant is no longer usable")
+			}
+			refreshClient = coveringCredentialRefreshClient()
+		}
 		latestToken := strings.TrimSpace(bundle.BearerToken())
 		if latestToken != "" && latestToken != attemptedToken && !relayfileTokenNeedsRefresh(latestToken) {
 			renewed = bundle
@@ -11462,9 +11507,10 @@ func refreshDelegatedCredentials(path string, bundle delegatedauth.Bundle, force
 			renewed = bundle
 			return nil
 		}
-		refreshed, changed, err := delegatedauth.RenewFile(context.Background(), nil, resolvedPath, delegatedauth.DefaultRefreshTimeout)
+
+		refreshed, changed, err := delegatedauth.RenewFile(context.Background(), refreshClient, resolvedPath, delegatedauth.DefaultRefreshTimeout)
 		if err != nil {
-			reminted, remintErr := remintDelegatedCredentialsFromCloud(resolvedPath, bundle)
+			reminted, remintErr := remintDelegatedCredentialsFromCloudWithCovering(resolvedPath, bundle, covering)
 			if remintErr == nil {
 				renewed = reminted
 				return nil
@@ -11508,7 +11554,16 @@ func withDelegatedCredentialsLock(path string, fn func() error) error {
 }
 
 func remintDelegatedCredentialsFromCloud(path string, bundle delegatedauth.Bundle) (delegatedauth.Bundle, error) {
-	workspaceID := cloudWorkspaceIDForDelegatedBundle(bundle)
+	return remintDelegatedCredentialsFromCloudWithCovering(path, bundle, nil)
+}
+
+func remintDelegatedCredentialsFromCloudWithCovering(path string, bundle delegatedauth.Bundle, covering *coveringCredentialBinding) (delegatedauth.Bundle, error) {
+	var workspaceID string
+	if covering != nil {
+		workspaceID = strings.TrimSpace(covering.record.ID)
+	} else {
+		workspaceID = cloudWorkspaceIDForDelegatedBundle(bundle)
+	}
 	if workspaceID == "" {
 		return delegatedauth.Bundle{}, errors.New("delegated relayfile credentials missing workspace id")
 	}
@@ -11521,6 +11576,16 @@ func remintDelegatedCredentialsFromCloud(path string, bundle delegatedauth.Bundl
 	if err != nil {
 		return delegatedauth.Bundle{}, err
 	}
+	if covering != nil {
+		usable, err := covering.usable(renewed)
+		if err != nil {
+			return delegatedauth.Bundle{}, err
+		}
+		if !usable {
+			return delegatedauth.Bundle{}, errors.New("re-minted covering credentials do not cover the request")
+		}
+	}
+
 	if err := delegatedauth.SaveAtomic(path, renewed); err != nil {
 		return delegatedauth.Bundle{}, fmt.Errorf("persist re-minted delegated relayfile credentials: %w", err)
 	}

@@ -36,6 +36,40 @@ hosted session overrides the self-hosted file, and the self-hosted file remains
 the fallback when no hosted session exists. A configured but malformed hosted
 session is an error rather than an implicit switch to another server.
 
+### Cached delegated workspace grants
+
+One-shot workspace commands try the exact requested scope cache first. If it is
+missing, the CLI may reuse one covering grant from the uniquely bound
+workspace's catalog-recorded scopes or the existing default join scopes. It does
+not scan cache directories, copy credentials into another scope shard, mint a
+broader grant, or require the legacy Agent Relay active workspace when a suitable
+cached grant exists. Multiple suitable files are an error; callers can select an
+existing file explicitly with `RELAYFILE_DELEGATED_CREDENTIALS_FILE`.
+
+Automatic reuse checks the JWT's workspace, expiry and actual scope claims using
+the existing scope policy; bundle scope aliases cannot add rights. This decodes
+claims, without adding signature verification: the server still authorizes the
+token. The requested catalog workspace, server and scopes remain bound across
+initial renewal and 401-triggered credential-file reloads. A replacement file
+cannot supply its own expected server. Optional Cloud `workspaceId` metadata
+must match the catalog's Cloud ID; covering re-mint uses that captured Cloud ID
+and validates the returned grant before replacing the original file. The existing local
+bundle's `relayauthUrl` remains its refresh trust anchor. URLs must use HTTPS
+(except loopback development), and `refreshUrl` must be that base's exact
+`v1/tokens/refresh` endpoint without credentials, queries or fragments.
+
+When the existing SDK policy requires renewal (including expired access), the
+cached refresh token must be present with a parseable future expiry, and any
+delegation deadline must still be valid. Renewal uses the existing SDK on the
+original file; it does not create a new scope shard. A warm access grant needs no
+refresh-expiry metadata until renewal. Invalid renewal candidates fail before
+bootstrap or network access; a forced refresh after a 401 retains the existing
+behavior. Automatic covering refresh does not follow redirects. Existing
+local credential-file ownership and rotation remain the trust model.
+Malformed, mismatched or ambiguous covering credentials fail closed. If no
+covering grant exists, the existing bootstrap path remains available. Explicit
+credential-file and exact-cache behavior are unchanged.
+
 ### Auth flow: Cloud-hosted
 
 ```
