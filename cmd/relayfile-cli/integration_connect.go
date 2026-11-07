@@ -92,9 +92,12 @@ func newConnectIdentityBaseline(status cloudIntegrationReadyResponse, err error)
 
 // evidencesNewConnection reports whether status describes a connection that
 // did not exist, or had not been authenticated, when the baseline was taken:
-// a different connection id, or an OAuth timestamp later than the baseline's.
-// Server timestamps are compared only with each other, so CLI clock skew does
-// not matter. A status identical to the baseline is the stale-row case.
+// a different connection id, or an OAuth timestamp strictly later than the
+// baseline's own timestamp for the same field. Server timestamps are compared
+// only with each other, so CLI clock skew does not matter. Same-id evidence
+// needs a comparable pair: when the baseline carried no parseable timestamp
+// the row's age is unknown, and a timestamp that merely shows up later proves
+// nothing. A status identical to the baseline is the stale-row case.
 func (b connectIdentityBaseline) evidencesNewConnection(status cloudIntegrationReadyResponse) bool {
 	if !b.known {
 		return false
@@ -137,9 +140,11 @@ func connectStatusAuthTimes(status cloudIntegrationReadyResponse) (connectedAt, 
 	return strings.TrimSpace(status.OAuth.ConnectedAt), strings.TrimSpace(status.OAuth.LastAuthAt)
 }
 
-// rfc3339After reports whether candidate is a parseable timestamp strictly
-// later than reference. An empty or unparseable reference counts as "never",
-// so any parseable candidate is later than it; an empty candidate never is.
+// rfc3339After reports whether candidate and reference are both parseable
+// timestamps and candidate is strictly later. A missing or malformed value on
+// either side makes the pair incomparable, which is not evidence: a baseline
+// that omitted its timestamp must not let an old timestamp revealed later
+// count as a new authentication.
 func rfc3339After(candidate, reference string) bool {
 	candidateAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(candidate))
 	if err != nil {
@@ -147,7 +152,7 @@ func rfc3339After(candidate, reference string) bool {
 	}
 	referenceAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(reference))
 	if err != nil {
-		return true
+		return false
 	}
 	return candidateAt.After(referenceAt)
 }

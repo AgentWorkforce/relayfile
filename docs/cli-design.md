@@ -652,8 +652,10 @@ route, and an unsuccessful save may have partial effects.
    not mistaken for this attempt. A connected status is accepted only when
    Cloud binds it to the minted `connectionId` (`connectionMatched: true` with
    a matching `currentConnectionId`), or when it evidences a connection newer
-   than the baseline (a different `currentConnectionId`, or a later
-   `oauth.lastAuthAt` / `oauth.connectedAt`). When the baseline cannot be read,
+   than the baseline (a different `currentConnectionId`, or an
+   `oauth.lastAuthAt` / `oauth.connectedAt` strictly later than the baseline's
+   own parseable value for that field; a timestamp the baseline lacked is not
+   comparable and proves nothing). When the baseline cannot be read,
    only a Cloud-bound status is accepted. The CLI never silently falls back to
    a pre-existing connection id. The mint response carries no attempt id, so
    this is post-baseline evidence, not attempt correlation.

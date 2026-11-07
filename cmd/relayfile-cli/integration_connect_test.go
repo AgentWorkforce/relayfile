@@ -209,6 +209,29 @@ func TestConnectWithoutMintedIDAcceptsReauthOfSameConnection(t *testing.T) {
 	}
 }
 
+// Regression: the baseline row exists but carries no OAuth timestamps; a
+// later poll reports the same row with an old, valid timestamp. Nothing new
+// happened, so the connect must time out and name the stale row.
+func TestConnectDoesNotAcceptOldTimestampRevealedAfterUntimedBaseline(t *testing.T) {
+	untimed := staleJiraReady("048e4b44-same", "")
+	delete(untimed["oauth"].(map[string]any), "connectedAt")
+	delete(untimed["oauth"].(map[string]any), "lastAuthAt")
+	revealed := staleJiraReady("048e4b44-same", "2026-11-06T19:29:09.050Z")
+	script := &connectStatusScript{
+		t:      t,
+		before: untimed,
+		mint:   map[string]any{"connectLink": "https://connect.example/jira", "backend": "nango", "backendIntegrationId": "jira-relay"},
+		after:  map[string][]map[string]any{"ws_demo": {revealed}},
+	}
+	output, err, savedID := runJiraConnect(t, script, 150*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "existed before this attempt") || !strings.Contains(err.Error(), "048e4b44-same") {
+		t.Fatalf("old timestamp revealed after an untimed baseline was accepted: err=%v output=%s", err, output)
+	}
+	if savedID == "048e4b44-same" {
+		t.Fatalf("stale connection id was adopted: %s", savedID)
+	}
+}
+
 // First connect ever: no baseline row, so the first ready row is this attempt.
 func TestConnectWithoutBaselineRowAcceptsFirstReadyRow(t *testing.T) {
 	fresh := staleJiraReady("first-conn", "2026-11-06T23:05:00Z")
@@ -379,6 +402,27 @@ func TestConnectIdentityBaselineEvidence(t *testing.T) {
 	}
 	for _, tc := range cases {
 		if got := baseline.evidencesNewConnection(tc.status); got != tc.want {
+			t.Errorf("%s: got %v want %v", tc.name, got, tc.want)
+		}
+	}
+	// Same id, but the baseline had no comparable timestamp: a valid timestamp
+	// that only shows up on a later poll is not evidence of a new auth.
+	untimed := newConnectIdentityBaseline(cloudIntegrationReadyResponse{CurrentConnectionID: "old", OAuth: oauth("", "")}, nil)
+	malformed := newConnectIdentityBaseline(cloudIntegrationReadyResponse{CurrentConnectionID: "old", OAuth: oauth("yesterday", "not-a-time")}, nil)
+	partial := newConnectIdentityBaseline(cloudIntegrationReadyResponse{CurrentConnectionID: "old", OAuth: oauth("", "2026-11-06T19:29:09.050Z")}, nil)
+	for _, tc := range []struct {
+		name     string
+		baseline connectIdentityBaseline
+		status   cloudIntegrationReadyResponse
+		want     bool
+	}{
+		{"untimed baseline, old timestamp revealed", untimed, cloudIntegrationReadyResponse{CurrentConnectionID: "old", OAuth: oauth("2026-11-06T19:29:09.050Z", "2026-11-06T19:29:09.050Z")}, false},
+		{"malformed baseline, old timestamp revealed", malformed, cloudIntegrationReadyResponse{CurrentConnectionID: "old", OAuth: oauth("2026-11-06T19:29:09.050Z", "2026-11-06T19:29:09.050Z")}, false},
+		{"partial baseline, only the missing field revealed", partial, cloudIntegrationReadyResponse{CurrentConnectionID: "old", OAuth: oauth("2026-11-06T19:29:09.050Z", "2026-11-06T19:29:09.050Z")}, false},
+		{"partial baseline, comparable field advanced", partial, cloudIntegrationReadyResponse{CurrentConnectionID: "old", OAuth: oauth("", "2026-11-06T23:05:00Z")}, true},
+		{"untimed baseline, different id", untimed, cloudIntegrationReadyResponse{CurrentConnectionID: "new"}, true},
+	} {
+		if got := tc.baseline.evidencesNewConnection(tc.status); got != tc.want {
 			t.Errorf("%s: got %v want %v", tc.name, got, tc.want)
 		}
 	}
