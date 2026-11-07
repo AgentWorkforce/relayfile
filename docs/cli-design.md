@@ -39,7 +39,7 @@ session is an error rather than an implicit switch to another server.
 ### Cached delegated workspace grants
 
 One-shot workspace commands try the exact requested scope cache first. If it is
-missing, the CLI may reuse one unexpired covering grant from the uniquely bound
+missing, the CLI may reuse one covering grant from the uniquely bound
 workspace's catalog-recorded scopes or the existing default join scopes. It does
 not scan cache directories, copy credentials into another scope shard, mint a
 broader grant, or require the legacy Agent Relay active workspace when a suitable
@@ -54,9 +54,14 @@ bundle's `relayauthUrl` remains its refresh trust anchor. URLs must use HTTPS
 (except loopback development), and `refreshUrl` must be that base's exact
 `v1/tokens/refresh` endpoint without credentials, queries or fragments.
 
-Expired grants are not selected. A valid selected grant retains the existing
-refresh behavior, including a forced refresh after a 401, on its original file;
-normal local credential-file ownership and rotation remain the trust model.
+When the existing SDK policy requires renewal (including expired access), the
+cached refresh token must be present with a parseable future expiry, and any
+delegation deadline must still be valid. Renewal uses the existing SDK on the
+original file; it does not create a new scope shard. A warm access grant needs no
+refresh-expiry metadata until renewal. Invalid renewal candidates fail before
+bootstrap or network access; a forced refresh after a 401 retains the existing
+behavior. Automatic covering refresh does not follow redirects. Existing
+local credential-file ownership and rotation remain the trust model.
 Malformed, mismatched or ambiguous covering credentials fail closed. If no
 covering grant exists, the existing bootstrap path remains available. Explicit
 credential-file and exact-cache behavior are unchanged.

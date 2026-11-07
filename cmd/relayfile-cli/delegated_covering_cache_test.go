@@ -40,7 +40,7 @@ func setupCoveringCacheTest(t *testing.T, server string, catalogScopes []string)
 		RelayfileURL: server, RelayfileWorkspaceID: "rw_cover",
 		RelayfileToken:          coveringCacheTestToken("rw_cover", grants, time.Now().Add(time.Hour)),
 		RelayfileTokenExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
-		RelayfileRefreshToken:   "refresh_fixture", RelayauthURL: server + "/auth",
+		RelayfileRefreshToken:   "refresh_fixture", RelayfileRefreshTokenExpiry: time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339), RelayauthURL: server + "/auth",
 		RefreshURL: server + "/auth/v1/tokens/refresh",
 		Scopes:     append([]string(nil), defaultJoinScopes...), RelayfileScopes: grants,
 	}
@@ -63,7 +63,12 @@ func TestReadUsesCatalogCoveringCacheWithoutLegacyBootstrap(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"content": "cached read succeeded", "encoding": "utf-8"})
 	}))
 	defer server.Close()
-	_, path, marker := setupCoveringCacheTest(t, server.URL, defaultJoinScopes)
+	bundle, path, marker := setupCoveringCacheTest(t, server.URL, defaultJoinScopes)
+	// A warm usable grant needs no refresh expiry metadata until renewal.
+	bundle.RelayfileRefreshTokenExpiry = ""
+	if err := delegatedauth.SaveAtomic(path, bundle); err != nil {
+		t.Fatal(err)
+	}
 	before, _ := os.ReadFile(path)
 	requestedPath := delegatedCredentialsPathForRequest("Default", defaultInspectScopes)
 	var output, notices bytes.Buffer
@@ -100,6 +105,7 @@ func TestCoveringCacheRejectsUnprovenGrants(t *testing.T) {
 				bundle.Scopes = append(bundle.Scopes, "admin:all")
 			case "expired JWT":
 				bundle.RelayfileToken = coveringCacheTestToken("rw_cover", bundle.RelayfileScopes, time.Now().Add(-time.Hour))
+				bundle.RelayfileRefreshTokenExpiry = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
 			case "missing JWT expiry":
 				bundle.RelayfileToken = testJWTWithWorkspaceAndScopes("rw_cover", "cached-test", bundle.RelayfileScopes)
 			case "malformed JWT":
@@ -239,5 +245,191 @@ func TestCoveringCacheDoesNotRescueMissingExplicitFile(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatal("missing explicit credential file triggered bootstrap")
+	}
+}
+
+func TestReadRenewsExpiredCatalogCoveringCacheWithoutBootstrap(t *testing.T) {
+	var reads, refreshes atomic.Int32
+	var rotated string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/auth/v1/tokens/refresh":
+			if r.Method != "POST" {
+				t.Error("SDK refresh must POST")
+			}
+			var body map[string]string
+			if json.NewDecoder(r.Body).Decode(&body) != nil || len(body) != 1 || body["refreshToken"] != "refresh_fixture" {
+				t.Error("refresh changed its existing grant request")
+			}
+			refreshes.Add(1)
+			_ = json.NewEncoder(w).Encode(delegatedauth.TokenPair{AccessToken: rotated, RefreshToken: "cold_rotated", AccessTokenExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339), RefreshTokenExpiresAt: time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)})
+		case "/v1/workspaces/rw_cover/fs/file":
+			reads.Add(1)
+			if refreshes.Load() != 1 || r.Header.Get("Authorization") != "Bearer "+rotated {
+				t.Error("read did not wait for SDK rotation")
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"content": "cold cached read succeeded", "encoding": "utf-8"})
+		default:
+			t.Errorf("unexpected network endpoint %s", r.URL.Path)
+			w.WriteHeader(500)
+		}
+	}))
+	defer server.Close()
+	bundle, path, marker := setupCoveringCacheTest(t, server.URL, defaultJoinScopes)
+	bundle.RelayfileToken = coveringCacheTestToken("rw_cover", bundle.RelayfileScopes, time.Now().Add(-time.Hour))
+	bundle.RelayfileTokenExpiresAt = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	rotated = coveringCacheTestToken("rw_cover", bundle.RelayfileScopes, time.Now().Add(time.Hour))
+	if err := delegatedauth.SaveAtomic(path, bundle); err != nil {
+		t.Fatal(err)
+	}
+	var output, notices bytes.Buffer
+	if err := runRead([]string{"Default", "/slack/test.json"}, &output, &notices); err != nil {
+		t.Fatalf("refreshable expired grant must avoid legacy bootstrap: %v", err)
+	}
+	if reads.Load() != 1 || refreshes.Load() != 1 || !strings.Contains(output.String(), "cold cached read succeeded") {
+		t.Fatalf("cold refresh/read counts: refresh=%d read=%d", refreshes.Load(), reads.Load())
+	}
+	loaded, err := delegatedauth.Load(path)
+	if err != nil || loaded.BearerToken() != rotated || loaded.RotationToken() != "cold_rotated" {
+		t.Fatal("SDK did not rotate the original grant file")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("cold read invoked unavailable legacy workspace")
+	}
+	if _, err := os.Stat(delegatedCredentialsPathForRequest("Default", defaultInspectScopes)); !os.IsNotExist(err) {
+		t.Fatal("cold read copied credentials into a new scope shard")
+	}
+}
+
+func TestReadRejectsUnusableRenewalCoveringGrantBeforeAnyFallback(t *testing.T) {
+	for _, name := range []string{"missing refresh", "missing refresh expiry", "expired refresh", "malformed refresh expiry", "expired delegation", "malformed delegation", "wrong workspace", "insufficient JWT", "unsafe origin", "near expiry without refresh proof"} {
+		t.Run(name, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests.Add(1); w.WriteHeader(500) }))
+			defer server.Close()
+			bundle, path, marker := setupCoveringCacheTest(t, server.URL, defaultJoinScopes)
+			bundle.RelayfileToken = coveringCacheTestToken("rw_cover", bundle.RelayfileScopes, time.Now().Add(-time.Hour))
+			bundle.RelayfileTokenExpiresAt = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+			switch name {
+			case "missing refresh":
+				bundle.RelayfileRefreshToken = ""
+			case "missing refresh expiry":
+				bundle.RelayfileRefreshTokenExpiry = ""
+			case "expired refresh":
+				bundle.RelayfileRefreshTokenExpiry = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
+			case "malformed refresh expiry":
+				bundle.RelayfileRefreshTokenExpiry = "not-a-date"
+			case "expired delegation":
+				bundle.DelegationNotAfter = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
+			case "malformed delegation":
+				bundle.DelegationNotAfter = "not-a-date"
+			case "wrong workspace":
+				bundle.RelayfileToken = coveringCacheTestToken("rw_other", bundle.RelayfileScopes, time.Now().Add(-time.Hour))
+			case "insufficient JWT":
+				bundle.RelayfileToken = coveringCacheTestToken("rw_cover", []string{"relayfile:fs:write:*"}, time.Now().Add(-time.Hour))
+			case "unsafe origin":
+				bundle.RefreshURL = "https://other.example/v1/tokens/refresh"
+			case "near expiry without refresh proof":
+				bundle.RelayfileToken = coveringCacheTestToken("rw_cover", bundle.RelayfileScopes, time.Now().Add(time.Minute))
+				bundle.RelayfileTokenExpiresAt = time.Now().Add(time.Minute).UTC().Format(time.RFC3339)
+				bundle.RelayfileRefreshTokenExpiry = ""
+			}
+			if err := delegatedauth.SaveAtomic(path, bundle); err != nil {
+				t.Fatal(err)
+			}
+			// A saved direct token must not hide covering-cache validation errors.
+			if err := saveCredentials(credentials{Server: server.URL, Token: coveringCacheTestToken("rw_cover", defaultInspectScopes, time.Now().Add(time.Hour))}); err != nil {
+				t.Fatal(err)
+			}
+			before, _ := os.ReadFile(path)
+			var output, notices bytes.Buffer
+			if err := runRead([]string{"Default", "/slack/test.json"}, &output, &notices); err == nil {
+				t.Fatal("invalid renewal candidate was accepted")
+			}
+			if requests.Load() != 0 {
+				t.Fatalf("network request before rejection: %d", requests.Load())
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatal("legacy bootstrap ran for invalid renewal grant")
+			}
+			after, _ := os.ReadFile(path)
+			if !bytes.Equal(before, after) {
+				t.Fatal("invalid original grant changed")
+			}
+		})
+	}
+}
+
+func TestReadRejectsUnsafeCoveringRefreshWithoutLoginFallback(t *testing.T) {
+	for _, name := range []string{"trailing slash", "empty metadata remint escalation", "future not-before"} {
+		t.Run(name, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests.Add(1); w.WriteHeader(500) }))
+			defer server.Close()
+			bundle, path, marker := setupCoveringCacheTest(t, server.URL, defaultJoinScopes)
+			switch name {
+			case "trailing slash":
+				bundle.RefreshURL += "/"
+			case "empty metadata remint escalation":
+				bundle.Scopes = nil
+				bundle.RelayfileScopes = nil
+				bundle.RelayfileToken = coveringCacheTestToken("rw_cover", defaultInspectScopes, time.Now().Add(time.Hour))
+			case "future not-before":
+				claims, _ := parseJWTClaims(bundle.BearerToken())
+				claims["nbf"] = time.Now().Add(time.Hour).Unix()
+				data, _ := json.Marshal(claims)
+				parts := strings.Split(bundle.RelayfileToken, ".")
+				parts[1] = base64.RawURLEncoding.EncodeToString(data)
+				bundle.RelayfileToken = strings.Join(parts, ".")
+			}
+			if err := delegatedauth.SaveAtomic(path, bundle); err != nil {
+				t.Fatal(err)
+			}
+			if err := saveCredentials(credentials{Server: server.URL, Token: coveringCacheTestToken("rw_cover", defaultInspectScopes, time.Now().Add(time.Hour))}); err != nil {
+				t.Fatal(err)
+			}
+			var output, notices bytes.Buffer
+			if err := runRead([]string{"Default", "/slack/test.json"}, &output, &notices); err == nil {
+				t.Fatal("unsafe covering cache was accepted")
+			}
+			if requests.Load() != 0 {
+				t.Fatalf("network requests despite validation failure: %d", requests.Load())
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatal("legacy bootstrap ran")
+			}
+		})
+	}
+}
+
+func TestReadCoveringRefreshDoesNotForwardTokenAcrossRedirect(t *testing.T) {
+	var leaked, refreshes atomic.Int32
+	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { leaked.Add(1); w.WriteHeader(500) }))
+	defer sink.Close()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/auth/v1/tokens/refresh" {
+			refreshes.Add(1)
+			http.Redirect(w, r, sink.URL+"/stolen", http.StatusTemporaryRedirect)
+			return
+		}
+		w.WriteHeader(500)
+	}))
+	defer server.Close()
+	bundle, path, _ := setupCoveringCacheTest(t, server.URL, defaultJoinScopes)
+	bundle.RelayfileToken = coveringCacheTestToken("rw_cover", bundle.RelayfileScopes, time.Now().Add(time.Minute))
+	bundle.RelayfileTokenExpiresAt = time.Now().Add(time.Minute).UTC().Format(time.RFC3339)
+	if err := delegatedauth.SaveAtomic(path, bundle); err != nil {
+		t.Fatal(err)
+	}
+	var output, notices bytes.Buffer
+	if err := runRead([]string{"Default", "/slack/test.json"}, &output, &notices); err == nil {
+		t.Fatal("redirected refresh unexpectedly succeeded")
+	}
+	if refreshes.Load() != 1 || leaked.Load() != 0 {
+		t.Fatalf("refresh=%d leaked=%d", refreshes.Load(), leaked.Load())
+	}
+	after, err := delegatedauth.Load(path)
+	if err != nil || after.RotationToken() != bundle.RotationToken() {
+		t.Fatal("failed refresh changed original grant")
 	}
 }

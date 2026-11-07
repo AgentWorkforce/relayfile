@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -81,21 +82,34 @@ func coveringCredentialUsable(bundle delegatedauth.Bundle, runtimeID, expectedSe
 	if !parsed || !hasExpiry || math.IsNaN(exp) || math.IsInf(exp, 0) || math.Trunc(exp) != exp || exp <= 0 || exp >= float64(math.MaxInt64) {
 		return false, errors.New("JWT has no usable expiry")
 	}
-	if !time.Now().Before(time.Unix(int64(exp), 0)) {
-		// Expired covering grants do not introduce another refresh path. The
-		// caller retains its existing bootstrap behavior when no grant covers.
-		return false, nil
-	}
-	for _, bound := range []string{bundle.BearerExpiresAt(), bundle.DelegationNotAfter} {
-		if strings.TrimSpace(bound) == "" {
-			continue
+	needsRenew := relayfileTokenNeedsRefresh(token)
+	if nbf, present := claims["nbf"]; present {
+		notBefore, ok := nbf.(float64)
+		if !ok || math.IsNaN(notBefore) || math.IsInf(notBefore, 0) || math.Trunc(notBefore) != notBefore || notBefore < 0 || notBefore >= float64(math.MaxInt64) || time.Now().Before(time.Unix(int64(notBefore), 0)) {
+			return false, errors.New("JWT is not yet valid or has malformed not-before claim")
 		}
-		expires, err := time.Parse(time.RFC3339Nano, bound)
-		if err != nil {
+	}
+	if bound := strings.TrimSpace(bundle.BearerExpiresAt()); bound != "" {
+		expires, ok := parseRFC3339(bound)
+		if !ok {
 			return false, errors.New("credential expiry metadata is malformed")
 		}
-		if !time.Now().Before(expires) {
-			return false, nil
+		if !time.Now().Before(expires) && !needsRenew {
+			return false, errors.New("credential access expiry disagrees with JWT")
+		}
+	}
+	if bound := strings.TrimSpace(bundle.DelegationNotAfter); bound != "" {
+		expires, ok := parseRFC3339(bound)
+		if !ok || !time.Now().Before(expires) {
+			return false, errors.New("credential delegation has expired or has malformed expiry")
+		}
+	}
+	// Only the SDK's existing renewal window requires refresh-expiry proof.
+	// Warm grants retain their existing forced-401 behavior.
+	if needsRenew {
+		expires, ok := parseRFC3339(bundle.RotationExpiresAt())
+		if bundle.RotationToken() == "" || !ok || !time.Now().Before(expires) {
+			return false, errors.New("covering credential needs renewal but has no provably unexpired refresh grant")
 		}
 	}
 	// Supply no metadata aliases: this existing authority can see only the
@@ -103,14 +117,20 @@ func coveringCredentialUsable(bundle delegatedauth.Bundle, runtimeID, expectedSe
 	// existing refresh/re-mint flow could later request from the cached file.
 	claimsOnly := delegatedauth.Bundle{AccessToken: token}
 	if !delegatedBundleSatisfiesRequestedScopes(claimsOnly, requested) {
+		if needsRenew {
+			return false, errors.New("renewal candidate does not cover requested scopes")
+		}
 		return false, nil
 	}
 	if !delegatedBundleSatisfiesRequestedScopes(claimsOnly, append(append([]string(nil), bundle.Scopes...), bundle.RelayfileScopes...)) {
 		return false, errors.New("credential scope metadata exceeds the JWT grant")
 	}
+	if !delegatedBundleSatisfiesRequestedScopes(claimsOnly, delegatedBundleMintScopes(bundle)) {
+		return false, errors.New("credential re-mint scopes exceed the JWT grant")
+	}
 	server, validServer := coveringCredentialURL(bundle.ServerURL())
 	expected, validExpected := coveringCredentialURL(expectedServer)
-	if !validServer || !validExpected || server.String() != expected.String() {
+	if !validServer || !validExpected || strings.TrimRight(server.String(), "/") != strings.TrimRight(expected.String(), "/") {
 		return false, errors.New("credential server does not match the catalog")
 	}
 	// The cached bundle's RelayAuth URL remains the local trust anchor, as in
@@ -123,7 +143,7 @@ func coveringCredentialUsable(bundle delegatedauth.Bundle, runtimeID, expectedSe
 	if !validAuth || endpointErr != nil || !validRefresh {
 		return false, errors.New("credential refresh endpoint is not a secure canonical URL")
 	}
-	auth.Path += "/v1/tokens/refresh"
+	auth.Path = strings.TrimRight(auth.Path, "/") + "/v1/tokens/refresh"
 	if refresh.String() != auth.String() {
 		return false, errors.New("credential refresh endpoint does not match its RelayAuth URL")
 	}
@@ -154,6 +174,13 @@ func coveringCredentialURL(raw string) (*url.URL, bool) {
 		}
 	}
 	parsed.Host = strings.ToLower(parsed.Host)
-	parsed.Path = strings.TrimRight(parsed.Path, "/")
 	return parsed, true
+}
+
+// coveringCredentialRefreshClient prevents refresh-token bodies from following
+// redirects away from the exact endpoint already validated in the local bundle.
+func coveringCredentialRefreshClient() *http.Client {
+	client := *http.DefaultClient
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	return &client
 }
