@@ -433,3 +433,47 @@ func TestReadCoveringRefreshDoesNotForwardTokenAcrossRedirect(t *testing.T) {
 		t.Fatal("failed refresh changed original grant")
 	}
 }
+
+func TestReadCovering401ReloadRemainsBoundToCatalogServer(t *testing.T) {
+	var redirectedRequests, originalReads atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirectedRequests.Add(1)
+		if r.URL.Path == "/auth/v1/tokens/refresh" {
+			_ = json.NewEncoder(w).Encode(delegatedauth.TokenPair{
+				AccessToken:  coveringCacheTestToken("rw_cover", []string{"relayfile:fs:read:*", "relayfile:fs:write:*", "relayfile:ops:read:*", "relayfile:sync:trigger:*"}, time.Now().Add(time.Hour)),
+				RefreshToken: "wrong_server_rotation", AccessTokenExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"content": "wrong server accepted", "encoding": "utf-8"})
+	}))
+	defer other.Close()
+	var bundle delegatedauth.Bundle
+	var path string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originalReads.Add(1)
+		// Simulate another local credential writer replacing the cached file
+		// between its initial selection and the normal 401-triggered reload.
+		replaced := bundle
+		replaced.RelayfileURL = other.URL
+		replaced.RelayauthURL = other.URL + "/auth"
+		replaced.RefreshURL = other.URL + "/auth/v1/tokens/refresh"
+		if err := delegatedauth.SaveAtomic(path, replaced); err != nil {
+			t.Error(err)
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+	bundle, path, _ = setupCoveringCacheTest(t, server.URL, defaultJoinScopes)
+	var output, notices bytes.Buffer
+	if err := runRead([]string{"Default", "/slack/test.json"}, &output, &notices); err == nil {
+		t.Error("401 reload switched a covering grant away from the catalog server")
+	}
+	if originalReads.Load() != 1 || redirectedRequests.Load() != 0 {
+		t.Fatalf("original requests=%d other-server requests=%d; expected one 401 and no refresh/retry to another server", originalReads.Load(), redirectedRequests.Load())
+	}
+	record, ok := workspaceRecordByName("Default")
+	if !ok || record.Server != server.URL {
+		t.Fatal("401 reload changed the catalog server")
+	}
+}

@@ -13,32 +13,56 @@ import (
 	"github.com/agentworkforce/relayfile/internal/delegatedauth"
 )
 
+// coveringCredentialBinding retains the requested catalog authority across
+// credential-file reloads; a replacement file cannot provide its own binding.
+type coveringCredentialBinding struct {
+	canonical string
+	record    workspaceRecord
+	runtimeID string
+	scopes    []string
+}
+
+func bindCatalogCoveringCredentials(workspaceValue string, requested []string) (*coveringCredentialBinding, error) {
+	canonical, known := canonicalWorkspaceShardValueStatus(workspaceValue)
+	if !known {
+		return nil, delegatedauth.ErrMissingCredentials
+	}
+	record, known := workspaceRecordForShardValue(canonical)
+	if !known || strings.TrimSpace(record.Server) == "" {
+		return nil, delegatedauth.ErrMissingCredentials
+	}
+	runtimeID := strings.TrimSpace(firstNonEmpty(record.RelayWorkspaceID, record.ID))
+	if runtimeCanonical, unique := canonicalWorkspaceShardValueStatus(runtimeID); !unique || runtimeCanonical != canonical {
+		return nil, errors.New("covering credential workspace is not uniquely bound in the catalog")
+	}
+	return &coveringCredentialBinding{canonical: canonical, record: record, runtimeID: runtimeID, scopes: append([]string(nil), requested...)}, nil
+}
+
+func (binding *coveringCredentialBinding) usable(bundle delegatedauth.Bundle) (bool, error) {
+	return coveringCredentialUsable(bundle, binding.runtimeID, binding.record.Server, binding.scopes)
+}
+
 // loadCatalogCoveringCredentials considers only the catalog's recorded grant
 // and the existing default join grant, never a directory scan. Scope coverage
 // comes from the JWT claims through the existing CLI scope policy, not from
 // the filename or bundle's scope aliases. Decoding is not signature verification:
 // this retains the trusted local credential-file model; the server authorizes.
 func loadCatalogCoveringCredentials(workspaceValue string, requested []string) (delegatedauth.Bundle, string, bool, error) {
-	canonical, known := canonicalWorkspaceShardValueStatus(workspaceValue)
-	if !known {
+	binding, err := bindCatalogCoveringCredentials(workspaceValue, requested)
+	if errors.Is(err, delegatedauth.ErrMissingCredentials) {
 		return delegatedauth.Bundle{}, "", false, nil
 	}
-	record, known := workspaceRecordForShardValue(canonical)
-	if !known || strings.TrimSpace(record.Server) == "" {
-		return delegatedauth.Bundle{}, "", false, nil
-	}
-	runtimeID := strings.TrimSpace(firstNonEmpty(record.RelayWorkspaceID, record.ID))
-	if runtimeCanonical, unique := canonicalWorkspaceShardValueStatus(runtimeID); !unique || runtimeCanonical != canonical {
-		return delegatedauth.Bundle{}, "", false, errors.New("covering credential workspace is not uniquely bound in the catalog")
+	if err != nil {
+		return delegatedauth.Bundle{}, "", false, err
 	}
 	paths := map[string]bool{}
 	var selected delegatedauth.Bundle
 	selectedPath := ""
-	for _, scopes := range [][]string{record.Scopes, defaultJoinScopes} {
+	for _, scopes := range [][]string{binding.record.Scopes, defaultJoinScopes} {
 		if len(scopes) == 0 {
 			continue
 		}
-		path := delegatedCredentialsRawPathForRequest(canonical, scopes)
+		path := delegatedCredentialsRawPathForRequest(binding.canonical, scopes)
 		if paths[path] {
 			continue
 		}
@@ -54,7 +78,7 @@ func loadCatalogCoveringCredentials(workspaceValue string, requested []string) (
 		if err != nil {
 			return delegatedauth.Bundle{}, "", false, errors.New("catalog-owned covering credential file is malformed")
 		}
-		usable, err := coveringCredentialUsable(bundle, runtimeID, record.Server, requested)
+		usable, err := binding.usable(bundle)
 		if err != nil {
 			return delegatedauth.Bundle{}, "", false, fmt.Errorf("catalog-owned covering credentials: %w", err)
 		}

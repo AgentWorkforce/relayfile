@@ -49,7 +49,9 @@ existing file explicitly with `RELAYFILE_DELEGATED_CREDENTIALS_FILE`.
 Automatic reuse checks the JWT's workspace, expiry and actual scope claims using
 the existing scope policy; bundle scope aliases cannot add rights. This decodes
 claims, without adding signature verification: the server still authorizes the
-token. The local catalog binds the Relayfile server, and the existing local
+token. The requested catalog workspace, server and scopes remain bound across
+initial renewal and 401-triggered credential-file reloads. A replacement file
+cannot supply its own expected server. The existing local
 bundle's `relayauthUrl` remains its refresh trust anchor. URLs must use HTTPS
 (except loopback development), and `refreshUrl` must be that base's exact
 `v1/tokens/refresh` endpoint without credentials, queries or fragments.
