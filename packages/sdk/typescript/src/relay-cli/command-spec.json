@@ -540,6 +540,10 @@
             "description": "Relayfile Cloud API URL (default: $RELAYFILE_CLOUD_API_URL or https://agentrelay.com/cloud)"
           },
           {
+            "flags": "--name <slot>",
+            "description": "named service-account connection slot to disconnect (default: the provider's default connection)"
+          },
+          {
             "flags": "--yes",
             "description": "skip confirmation",
             "defaultValue": false
