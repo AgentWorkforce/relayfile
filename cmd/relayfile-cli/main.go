@@ -11462,7 +11462,7 @@ func refreshDelegatedCredentialsWithCovering(path string, bundle delegatedauth.B
 
 		refreshed, changed, err := delegatedauth.RenewFile(context.Background(), refreshClient, resolvedPath, delegatedauth.DefaultRefreshTimeout)
 		if err != nil {
-			reminted, remintErr := remintDelegatedCredentialsFromCloud(resolvedPath, bundle)
+			reminted, remintErr := remintDelegatedCredentialsFromCloudWithCovering(resolvedPath, bundle, covering)
 			if remintErr == nil {
 				renewed = reminted
 				return nil
@@ -11506,7 +11506,16 @@ func withDelegatedCredentialsLock(path string, fn func() error) error {
 }
 
 func remintDelegatedCredentialsFromCloud(path string, bundle delegatedauth.Bundle) (delegatedauth.Bundle, error) {
-	workspaceID := cloudWorkspaceIDForDelegatedBundle(bundle)
+	return remintDelegatedCredentialsFromCloudWithCovering(path, bundle, nil)
+}
+
+func remintDelegatedCredentialsFromCloudWithCovering(path string, bundle delegatedauth.Bundle, covering *coveringCredentialBinding) (delegatedauth.Bundle, error) {
+	var workspaceID string
+	if covering != nil {
+		workspaceID = strings.TrimSpace(covering.record.ID)
+	} else {
+		workspaceID = cloudWorkspaceIDForDelegatedBundle(bundle)
+	}
 	if workspaceID == "" {
 		return delegatedauth.Bundle{}, errors.New("delegated relayfile credentials missing workspace id")
 	}
@@ -11519,6 +11528,16 @@ func remintDelegatedCredentialsFromCloud(path string, bundle delegatedauth.Bundl
 	if err != nil {
 		return delegatedauth.Bundle{}, err
 	}
+	if covering != nil {
+		usable, err := covering.usable(renewed)
+		if err != nil {
+			return delegatedauth.Bundle{}, err
+		}
+		if !usable {
+			return delegatedauth.Bundle{}, errors.New("re-minted covering credentials do not cover the request")
+		}
+	}
+
 	if err := delegatedauth.SaveAtomic(path, renewed); err != nil {
 		return delegatedauth.Bundle{}, fmt.Errorf("persist re-minted delegated relayfile credentials: %w", err)
 	}

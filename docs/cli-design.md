@@ -51,7 +51,9 @@ the existing scope policy; bundle scope aliases cannot add rights. This decodes
 claims, without adding signature verification: the server still authorizes the
 token. The requested catalog workspace, server and scopes remain bound across
 initial renewal and 401-triggered credential-file reloads. A replacement file
-cannot supply its own expected server. The existing local
+cannot supply its own expected server. Optional Cloud `workspaceId` metadata
+must match the catalog's Cloud ID; covering re-mint uses that captured Cloud ID
+and validates the returned grant before replacing the original file. The existing local
 bundle's `relayauthUrl` remains its refresh trust anchor. URLs must use HTTPS
 (except loopback development), and `refreshUrl` must be that base's exact
 `v1/tokens/refresh` endpoint without credentials, queries or fragments.

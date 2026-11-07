@@ -477,3 +477,158 @@ func TestReadCovering401ReloadRemainsBoundToCatalogServer(t *testing.T) {
 		t.Fatal("401 reload changed the catalog server")
 	}
 }
+
+func TestReadCoveringRejectsForeignCloudWorkspaceBeforeRemint(t *testing.T) {
+	for _, stage := range []string{"selection", "401 reload"} {
+		t.Run(stage, func(t *testing.T) {
+			var reads, refreshes, remints atomic.Int32
+			var path string
+			var original, replaced delegatedauth.Bundle
+			var server *httptest.Server
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/auth/v1/tokens/refresh":
+					refreshes.Add(1)
+					w.WriteHeader(http.StatusUnauthorized)
+				case strings.HasPrefix(r.URL.Path, "/api/v1/workspaces/"):
+					remints.Add(1)
+					if r.URL.Path != "/api/v1/workspaces/cloud_other/relayfile/delegated-token" {
+						t.Errorf("unexpected re-mint target: %s", r.URL.Path)
+					}
+					wrong := original
+					wrong.WorkspaceID, wrong.RelayfileWorkspaceID = "cloud_other", "rw_other"
+					wrong.RelayfileToken = coveringCacheTestToken("rw_other", wrong.RelayfileScopes, time.Now().Add(time.Hour))
+					_ = json.NewEncoder(w).Encode(wrong)
+				default:
+					if reads.Add(1) == 1 {
+						if stage == "401 reload" {
+							replaced = original
+							replaced.WorkspaceID = "cloud_other"
+							if err := delegatedauth.SaveAtomic(path, replaced); err != nil {
+								t.Error(err)
+							}
+						}
+						w.WriteHeader(http.StatusUnauthorized)
+						return
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"content": "wrong workspace adopted", "encoding": "utf-8"})
+				}
+			}))
+			defer server.Close()
+			original, path, _ = setupCoveringCacheTest(t, server.URL, defaultJoinScopes)
+			if stage == "selection" {
+				original.WorkspaceID = "cloud_other"
+			}
+			if err := delegatedauth.SaveAtomic(path, original); err != nil {
+				t.Fatal(err)
+			}
+			var output, notices bytes.Buffer
+			if err := runRead([]string{"Default", "/slack/test.json"}, &output, &notices); err == nil {
+				t.Error("foreign Cloud workspace was re-minted and adopted")
+			}
+			wantReads := int32(0)
+			if stage == "401 reload" {
+				wantReads = 1
+			}
+			if reads.Load() != wantReads || refreshes.Load() != 0 || remints.Load() != 0 {
+				t.Errorf("reads=%d refreshes=%d remints=%d; expected reads=%d and zero renewal requests", reads.Load(), refreshes.Load(), remints.Load(), wantReads)
+			}
+			persisted, err := delegatedauth.Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if persisted.BearerToken() != original.BearerToken() || persisted.Workspace() != "rw_cover" {
+				t.Error("foreign re-mint overwrote the original grant")
+			}
+			record, ok := workspaceRecordByName("Default")
+			if !ok || record.RelayWorkspaceID != "rw_cover" {
+				t.Error("foreign re-mint changed the catalog runtime workspace")
+			}
+		})
+	}
+}
+
+func TestReadCoveringRemintsOnlyTheCatalogCloudWorkspace(t *testing.T) {
+	for _, test := range []struct {
+		name, cloudID string
+		wrongResponse bool
+	}{
+		{name: "omitted metadata"},
+		{name: "matching metadata", cloudID: "cloud_cover"},
+		{name: "wrong workspace response", wrongResponse: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var reads, refreshes, remints atomic.Int32
+			var bundle delegatedauth.Bundle
+			var server *httptest.Server
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/auth/v1/tokens/refresh":
+					refreshes.Add(1)
+					w.WriteHeader(http.StatusUnauthorized)
+				case "/api/v1/workspaces/cloud_cover/relayfile/delegated-token":
+					remints.Add(1)
+					var body cloudRelayfileDelegatedTokenRequest
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Error(err)
+					}
+					if strings.Join(body.Scopes, ",") != strings.Join(defaultJoinScopes, ",") {
+						t.Errorf("re-mint changed scopes: %v", body.Scopes)
+					}
+					renewed := bundle
+					renewed.RelayfileToken = coveringCacheTestToken("rw_cover", bundle.RelayfileScopes, time.Now().Add(2*time.Hour))
+					renewed.RelayfileRefreshToken = "catalog_reminted"
+					if test.wrongResponse {
+						renewed.WorkspaceID, renewed.RelayfileWorkspaceID = "cloud_other", "rw_other"
+						renewed.RelayfileToken = coveringCacheTestToken("rw_other", bundle.RelayfileScopes, time.Now().Add(time.Hour))
+					}
+					_ = json.NewEncoder(w).Encode(renewed)
+				case "/v1/workspaces/rw_cover/fs/file":
+					if reads.Add(1) == 1 {
+						w.WriteHeader(http.StatusUnauthorized)
+						return
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"content": "catalog re-mint succeeded", "encoding": "utf-8"})
+				default:
+					t.Errorf("unexpected path: %s", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+			var path, marker string
+			bundle, path, marker = setupCoveringCacheTest(t, server.URL, defaultJoinScopes)
+			bundle.WorkspaceID = test.cloudID
+			if err := delegatedauth.SaveAtomic(path, bundle); err != nil {
+				t.Fatal(err)
+			}
+			var output, notices bytes.Buffer
+			readErr := runRead([]string{"Default", "/slack/test.json"}, &output, &notices)
+			if test.wrongResponse {
+				if readErr == nil {
+					t.Fatal("wrong-workspace re-mint response was adopted")
+				}
+				if reads.Load() != 1 || refreshes.Load() != 1 || remints.Load() != 1 {
+					t.Fatalf("unexpected request accounting: reads=%d refreshes=%d remints=%d", reads.Load(), refreshes.Load(), remints.Load())
+				}
+				persisted, err := delegatedauth.Load(path)
+				if err != nil || persisted.BearerToken() != bundle.BearerToken() || persisted.RotationToken() != bundle.RotationToken() {
+					t.Fatal("rejected re-mint response overwrote original grant")
+				}
+				return
+			}
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if reads.Load() != 2 || refreshes.Load() != 1 || remints.Load() != 1 || !strings.Contains(output.String(), "catalog re-mint succeeded") {
+				t.Fatalf("reads=%d refreshes=%d remints=%d output=%q", reads.Load(), refreshes.Load(), remints.Load(), output.String())
+			}
+			persisted, err := delegatedauth.Load(path)
+			if err != nil || persisted.Workspace() != "rw_cover" || persisted.RotationToken() != "catalog_reminted" {
+				t.Fatal("catalog-bound grant did not replace original path")
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatal("legacy bootstrap ran")
+			}
+		})
+	}
+}

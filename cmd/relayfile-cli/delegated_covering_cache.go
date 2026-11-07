@@ -39,6 +39,9 @@ func bindCatalogCoveringCredentials(workspaceValue string, requested []string) (
 }
 
 func (binding *coveringCredentialBinding) usable(bundle delegatedauth.Bundle) (bool, error) {
+	if cloudID := strings.TrimSpace(bundle.WorkspaceID); cloudID != "" && cloudID != strings.TrimSpace(binding.record.ID) {
+		return false, errors.New("credential Cloud workspace does not match the catalog")
+	}
 	return coveringCredentialUsable(bundle, binding.runtimeID, binding.record.Server, binding.scopes)
 }
 
