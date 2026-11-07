@@ -42,12 +42,20 @@ type tokenClaims struct {
 	AgentName   string
 	Scopes      map[string]struct{}
 	Exp         int64
+	// TokenID and PrincipalType are only populated by relaycontrol
+	// introspection (token_id, principal_type); JWKS tokens leave them empty.
+	TokenID       string
+	PrincipalType string
 }
 
 type bearerVerifier struct {
+	// mode is one of AuthModeJWKS (or empty), AuthModeIntrospection or
+	// AuthModeDual; see auth_introspection.go.
+	mode             string
 	jwksURL          string
 	jwksFetchTimeout time.Duration
 	jwksCache        *jwksCache
+	introspection    *introspectionVerifier
 }
 
 type jwksCache struct {
@@ -73,14 +81,21 @@ type jwkKey struct {
 	E   string `json:"e"`
 }
 
+// newBearerVerifier expects cfg to have been through normalizeAuthConfig
+// when AuthMode is introspection or dual.
 func newBearerVerifier(cfg ServerConfig) *bearerVerifier {
-	return &bearerVerifier{
+	verifier := &bearerVerifier{
+		mode:             cfg.AuthMode,
 		jwksURL:          cfg.JWKSURL,
 		jwksFetchTimeout: cfg.JWKSFetchTimeout,
 		jwksCache: &jwksCache{
 			entries: map[string]cachedJWKS{},
 		},
 	}
+	if cfg.AuthMode == AuthModeIntrospection || cfg.AuthMode == AuthModeDual {
+		verifier.introspection = newIntrospectionVerifier(cfg)
+	}
+	return verifier
 }
 
 func authorizeBearer(authHeader string, verifier *bearerVerifier, workspaceID, requiredScope, requiredPath string, now time.Time) (tokenClaims, *authError) {
@@ -165,6 +180,34 @@ func parseBearer(authHeader string, verifier *bearerVerifier, now time.Time) (to
 		}
 	}
 	raw := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+	switch verifier.mode {
+	case AuthModeIntrospection:
+		// Every bearer goes to relaycontrol as presented: no relay_ prefix
+		// stripping, and JWKS is never consulted.
+		return verifier.introspect(raw, now)
+	case AuthModeDual:
+		// No cross-fallback: a relaycontrol token never triggers a JWKS
+		// fetch and a JWT is never sent to introspection.
+		if hasRelaycontrolTokenPrefix(raw) {
+			return verifier.introspect(raw, now)
+		}
+		if len(strings.Split(stripRelayauthTokenPrefix(raw), ".")) != 3 {
+			return tokenClaims{}, &authError{status: 401, code: "unauthorized", message: "invalid token"}
+		}
+	}
+	return parseJWTBearer(raw, verifier, now)
+}
+
+func (v *bearerVerifier) introspect(raw string, now time.Time) (tokenClaims, *authError) {
+	if v.introspection == nil {
+		return tokenClaims{}, introspectionUnavailable("introspection unreachable")
+	}
+	return v.introspection.verify(raw, now)
+}
+
+// parseJWTBearer verifies raw (the bearer without the "Bearer " prefix) as
+// an RS256 JWT against the configured JWKS.
+func parseJWTBearer(raw string, verifier *bearerVerifier, now time.Time) (tokenClaims, *authError) {
 	raw = stripRelayauthTokenPrefix(raw)
 	parts := strings.Split(raw, ".")
 	if len(parts) != 3 {

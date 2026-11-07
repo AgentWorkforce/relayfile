@@ -59,6 +59,26 @@ type ServerConfig struct {
 	// MaxExportTarBodyBytes bounds the uncompressed tar body, including tar
 	// headers and end blocks. Gzip compression does not bypass this ceiling.
 	MaxExportTarBodyBytes int64
+
+	// AuthMode selects bearer verification: "jwks" (default when empty),
+	// "introspection" (relaycontrol token introspection only, JWKS never
+	// fetched) or "dual" (sh_at_ tokens via introspection, JWTs via JWKS;
+	// requires an explicit JWKSURL). See auth_introspection.go.
+	AuthMode string
+	// IntrospectionURL is the full relaycontrol introspection endpoint URL
+	// (http or https, no userinfo, query or fragment).
+	IntrospectionURL string
+	// IntrospectionSecret is sent as the plain bearer service credential.
+	IntrospectionSecret string
+	// IntrospectionAudience is relayfile's public origin, sent as `aud` and
+	// compared (normalized) with the `aud` of active responses.
+	IntrospectionAudience string
+	// IntrospectionTimeout bounds each introspection call. Defaults to 3s.
+	IntrospectionTimeout time.Duration
+	// IntrospectionCacheTTL bounds the positive verdict cache: 0 means the
+	// 60s default, negative disables the cache, values above 60s are capped.
+	// A revocation can take up to this TTL to be observed.
+	IntrospectionCacheTTL time.Duration
 }
 
 type Server struct {
@@ -94,8 +114,8 @@ func NewServer(store *relayfile.Store) *Server {
 }
 
 func NewServerWithConfig(store *relayfile.Store, cfg ServerConfig) (*Server, error) {
-	if cfg.JWKSURL == "" {
-		cfg.JWKSURL = defaultRelayAuthJWKSURL
+	if err := normalizeAuthConfig(&cfg); err != nil {
+		return nil, err
 	}
 	if cfg.JWKSFetchTimeout <= 0 {
 		cfg.JWKSFetchTimeout = defaultJWKSFetchTimeout
