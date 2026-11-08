@@ -535,7 +535,11 @@ type AckResponse struct {
 }
 
 type WebhookEnvelopeRequest struct {
-	EnvelopeID    string            `json:"envelopeId"`
+	EnvelopeID string `json:"envelopeId"`
+	// Kind distinguishes provider_write envelopes (POST
+	// /v1/internal/provider-writes) from webhook envelopes. It is empty for
+	// webhook envelopes and is never accepted from the webhook-envelope body.
+	Kind          string            `json:"kind,omitempty"`
 	WorkspaceID   string            `json:"workspaceId"`
 	Provider      string            `json:"provider"`
 	DeliveryID    string            `json:"deliveryId"`
@@ -4209,7 +4213,10 @@ func (s *Store) processEnvelope(envelopeID string) {
 	// Parse envelope using provider-specific adapter, or generic pass-through
 	var actions []ApplyAction
 	var parseErr error
-	if ok {
+	if req.Kind == EnvelopeKindProviderWrite {
+		// Provider writes carry already-canonical paths validated at ingest.
+		actions, parseErr = ParseProviderWriteEnvelope(req)
+	} else if ok {
 		// Provider-specific adapter available
 		actions, parseErr = adapter.ParseEnvelope(req)
 	} else {
@@ -4268,8 +4275,17 @@ func (s *Store) processEnvelope(envelopeID string) {
 		return
 	}
 	for _, action := range actions {
-		action = canonicalizeProviderActionLocked(ws, req.Provider, action)
-		if s.isStaleProviderActionLocked(ws, req.Provider, action, req.ReceivedAt) {
+		actionProvider := req.Provider
+		if req.Kind == EnvelopeKindProviderWrite {
+			// Paths were validated against the single provider root at ingest
+			// and are authoritative; provider-root canonicalization and Slack
+			// alias rewriting must not move /LAYOUT.md or /discovery/* files.
+			action.Path = normalizePath(action.Path)
+			actionProvider = providerWriteActionProvider(req.Provider, action.Path)
+		} else {
+			action = canonicalizeProviderActionLocked(ws, req.Provider, action)
+		}
+		if s.isStaleProviderActionLocked(ws, actionProvider, action, req.ReceivedAt) {
 			s.appendWorkspaceEventLocked(req.WorkspaceID, ws, Event{
 				EventID:       s.nextEventIDLocked(),
 				Type:          "sync.stale",
@@ -4285,9 +4301,9 @@ func (s *Store) processEnvelope(envelopeID string) {
 		}
 		switch action.Type {
 		case ActionFileUpsert:
-			s.applyProviderUpsertLocked(ws, req.Provider, action, req.CorrelationID)
+			s.applyProviderUpsertLocked(ws, actionProvider, action, req.CorrelationID)
 		case ActionFileDelete:
-			s.applyProviderDeleteLocked(ws, req.Provider, action, req.CorrelationID)
+			s.applyProviderDeleteLocked(ws, actionProvider, action, req.CorrelationID)
 		default:
 			s.appendWorkspaceEventLocked(req.WorkspaceID, ws, Event{
 				EventID:       s.nextEventIDLocked(),
@@ -4550,13 +4566,14 @@ func (s *Store) applyProviderUpsertLocked(ws *workspaceState, provider string, a
 	if exists && isZeroSemantics(semantics) {
 		semantics = normalizeSemantics(existing.Semantics)
 	}
+	encoding, _ := normalizeEncoding(action.Encoding)
 	file := File{
 		Path:             path,
 		Revision:         revision,
-		ContentHash:      contentHashForEncodedContent(content, ""),
+		ContentHash:      contentHashForEncodedContent(content, encoding),
 		ContentType:      contentType,
 		Content:          content,
-		Encoding:         "",
+		Encoding:         encoding,
 		Provider:         provider,
 		ProviderObjectID: objectID,
 		LastEditedAt:     now,
