@@ -229,6 +229,8 @@ func verifyContractDB(ctx context.Context, db *sql.DB, c PostgresContract) error
 
 // NewVerifiedPostgresBackends admits one fully specified runtime identity for
 // all three backends before returning any of them. None can enter lazy DDL.
+// The state backend owns the shared pool; queue Close does not close that pool.
+// Cancel and finish workers before closing the state backend.
 func NewVerifiedPostgresBackends(ctx context.Context, dsn string, c PostgresContract, envelopeCapacity, writebackCapacity int) (StateBackend, EnvelopeQueue, WritebackQueue, error) {
 	db, err := openContractDB(ctx, dsn, c, false)
 	if err != nil {

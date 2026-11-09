@@ -63,9 +63,14 @@ A missing state row is accepted for a fresh database. An existing row must
 contain the required counters and maps written by the server serializer;
 `null`, partial objects and null required maps are refused before startup.
 Optional fork and checkpoint fields remain optional.
+Workspace file and operation maps must be present. Duplicate or case-variant
+snapshot field names and stale generated operation counters are refused rather
+than interpreted as an empty or reusable operation identity.
 
 Queued work must agree with its loaded state: envelopes must have stored
 envelope records, and writebacks must identify a stored workspace and operation.
+Nonempty queued writeback paths and revisions must match that operation;
+omitted replay fields retain their existing backfill behavior.
 Startup refuses orphan work rather than consuming it. Admission also refuses a
 standby or read-only default, runtime CREATE privileges in another application
 schema, and queue sequences that would collide with existing rows or are
@@ -90,20 +95,23 @@ The changed server and storage packages pass `go test ./cmd/relayfile
 race tests cover credential admission, read-only refusal paths, queue snapshot
 errors, checked startup and shared-pool shutdown ordering. The final static
 Linux arm64 server was also exercised in an isolated PostgreSQL17.11 fixture
-with a real private CA and SCRAM passwords. Its 21 categories covered official
+with a real private CA and SCRAM passwords. Its 22 categories covered official
 bootstrap/repeat, runtime verification, wrong CA/hostname/password refusals,
 runtime privilege restrictions, file persistence through a server restart,
-and real webhook processing. Startup controls refused 33 damaged or partial
-snapshots, five malformed queue payloads, five incoherent state/queue cases,
+and real webhook processing. Startup controls refused 50 damaged, ambiguous or
+partial snapshots, five malformed queue payloads, seven incoherent state/queue cases,
 and four unsafe sequence positions, plus read-only defaults, CREATE in another
 schema, damaged grants and foreign ownership. Refused startups left complete
 state and queue rows, sequence positions and active pending work unchanged.
+Positive controls accepted the actual HTTP-created pending operation with
+omitted replay fields or exactly matching path/revision metadata.
 
 That fixture used its own synthetic introspection responder. It establishes
 the database and startup behavior, including the file HTTP roundtrip; it does
 not establish Control integration, production Go queue FIFO behavior, native
 concurrent Store.Close behavior or a qualified final container image. The
-worker shutdown ordering is covered by the separate controlled race test.
+worker shutdown ordering and a queue that unblocks receives only on Close are
+covered by separate controlled race tests.
 
 The full local repository suite also encounters three unchanged baseline
 failures: `TestMountDaemonCommandMatchesAliasesAndLocalDirBoundaries`,

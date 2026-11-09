@@ -1236,7 +1236,8 @@ func (s *Store) seedQueuedIndexesChecked() error {
 		if !s.startupStateLoaded || strings.TrimSpace(task.WorkspaceID) == "" || strings.TrimSpace(task.OpID) == "" || workspace == nil {
 			return errors.New("persistent_queue_state_mismatch")
 		}
-		if _, present := workspace.Ops[task.OpID]; !present {
+		operation, present := workspace.Ops[task.OpID]
+		if !present || (task.Path != "" && task.Path != operation.Path) || (task.Revision != "" && task.Revision != operation.Revision) {
 			return errors.New("persistent_queue_state_mismatch")
 		}
 		s.queuedWritebacks[task.OpID] = struct{}{}
@@ -1259,16 +1260,16 @@ func (s *Store) Close() {
 		if s.queueCancel != nil {
 			s.queueCancel()
 		}
-		// Verified backends share their connection pool. A worker finishing
-		// after cancellation must still be able to persist its result.
-		if s.closeBackendsAfterWorkers {
-			s.wg.Wait()
-		}
+		// Close receives before waiting, including supplied queues which only
+		// unblock Dequeue on Close. Verified queues do not own the shared pool.
 		if s.envelopeQueue != nil {
 			_ = s.envelopeQueue.Close()
 		}
 		if s.writebackQueue != nil {
 			_ = s.writebackQueue.Close()
+		}
+		if s.closeBackendsAfterWorkers {
+			s.wg.Wait()
 		}
 		if closer, ok := s.stateBackend.(stateBackendCloser); ok && closer != nil {
 			_ = closer.Close()

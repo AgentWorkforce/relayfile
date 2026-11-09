@@ -1,6 +1,7 @@
 package relayfile
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -16,7 +17,7 @@ func startupFixtureState(t *testing.T) *persistedState {
 	if err := json.Unmarshal(serializedEmptyStore(t), &state); err != nil {
 		t.Fatal(err)
 	}
-	state.Workspaces["workspace"] = &workspaceState{Files: map[string]File{}, Ops: map[string]OperationStatus{"operation": {Status: "pending"}}}
+	state.Workspaces["workspace"] = &workspaceState{Files: map[string]File{}, Ops: map[string]OperationStatus{"operation": {Status: "pending", Path: "/fixture", Revision: "rev_1"}}}
 	state.EnvelopesByID["envelope"] = WebhookEnvelopeRequest{WorkspaceID: "workspace"}
 	return &state
 }
@@ -32,6 +33,9 @@ func TestCheckedStoreQueueStateCoherenceWithoutConsumption(t *testing.T) {
 		{name: "empty-fresh", pass: true},
 		{name: "valid-envelope", hasState: true, envelope: "envelope", pass: true},
 		{name: "valid-writeback", hasState: true, task: &WritebackQueueItem{WorkspaceID: "workspace", OpID: "operation"}, pass: true},
+		{name: "matching-writeback", hasState: true, task: &WritebackQueueItem{WorkspaceID: "workspace", OpID: "operation", Path: "/fixture", Revision: "rev_1"}, pass: true},
+		{name: "mismatched-path", hasState: true, task: &WritebackQueueItem{WorkspaceID: "workspace", OpID: "operation", Path: "/other"}},
+		{name: "mismatched-revision", hasState: true, task: &WritebackQueueItem{WorkspaceID: "workspace", OpID: "operation", Revision: "rev_2"}},
 		{name: "missing-state-envelope", envelope: "envelope"},
 		{name: "missing-state-writeback", task: &WritebackQueueItem{WorkspaceID: "workspace", OpID: "operation"}},
 		{name: "orphan-envelope", hasState: true, envelope: "unknown"},
@@ -143,7 +147,8 @@ type sharedPoolEnvelopeQueue struct {
 	backend *closingPoolBackend
 }
 
-func (q *sharedPoolEnvelopeQueue) Close() error { q.EnvelopeQueue.Close(); return q.backend.Close() }
+// Like the verified factory, the queue owns receives and the state owns the pool.
+func (q *sharedPoolEnvelopeQueue) Close() error { return q.EnvelopeQueue.Close() }
 
 func TestCheckedStoreClosesSharedPoolAfterWorkerPersistence(t *testing.T) {
 	backend := &closingPoolBackend{InMemoryStateBackend: NewInMemoryStateBackend(), closeCalled: make(chan struct{})}
@@ -193,5 +198,70 @@ func TestCheckedStoreClosesSharedPoolAfterWorkerPersistence(t *testing.T) {
 	}
 	if !backend.savedAfterCancel.Load() || !backend.closed.Load() {
 		t.Fatal("worker persistence or final cleanup missing")
+	}
+}
+
+type closeOnlyEnvelopeQueue struct {
+	EnvelopeQueue
+	entered   chan struct{}
+	closed    chan struct{}
+	enterOnce sync.Once
+	closeOnce sync.Once
+}
+
+func (q *closeOnlyEnvelopeQueue) Dequeue(context.Context) (string, bool) {
+	q.enterOnce.Do(func() { close(q.entered) })
+	<-q.closed
+	return "", false
+}
+func (q *closeOnlyEnvelopeQueue) Close() error {
+	q.closeOnce.Do(func() { close(q.closed) })
+	return q.EnvelopeQueue.Close()
+}
+
+func TestCheckedStoreClosesReceivesBeforeWaitingForWorkers(t *testing.T) {
+	queue := &closeOnlyEnvelopeQueue{EnvelopeQueue: NewInMemoryEnvelopeQueue(1), entered: make(chan struct{}), closed: make(chan struct{})}
+	defer queue.Close()
+	store, err := NewStoreWithOptionsChecked(StoreOptions{EnvelopeQueue: queue})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-queue.entered:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not enter queue receive")
+	}
+	done := make(chan struct{})
+	go func() { store.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		queue.Close()
+		<-done
+		t.Fatal("checked shutdown waited before unblocking queue receive")
+	}
+}
+
+func TestVerifiedQueueCloseLeavesStateOwnedPoolOpen(t *testing.T) {
+	for _, qualified := range []bool{true, false} {
+		db := contractFixtureDB(t, &contractFixture{})
+		queue := &PostgresEnvelopeQueue{core: &postgresQueueCore{db: db, qualified: qualified}}
+		if err := queue.Close(); err != nil {
+			t.Fatal(err)
+		}
+		err := db.PingContext(context.Background())
+		if qualified && err != nil {
+			t.Fatal("verified queue closed state-owned pool")
+		}
+		if !qualified && err == nil {
+			t.Fatal("legacy queue no longer closes its own pool")
+		}
+		state := &PostgresStateBackend{db: db}
+		if err := state.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if db.PingContext(context.Background()) == nil {
+			t.Fatal("state owner failed to close pool")
+		}
 	}
 }

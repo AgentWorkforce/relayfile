@@ -404,6 +404,11 @@ func (q *postgresQueueCore) close() error {
 	if q == nil || q.db == nil {
 		return nil
 	}
+	// The verified factory gives the state backend ownership of its shared
+	// pool. Queue cancellation/Close must not prevent in-flight persistence.
+	if q.qualified {
+		return nil
+	}
 	return q.db.Close()
 }
 
