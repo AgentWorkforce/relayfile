@@ -57,7 +57,7 @@ func (s *Server) handleFileEventsWebSocket(w http.ResponseWriter, r *http.Reques
 	if len(options.Paths) > 0 {
 		scopePath = options.Paths[0]
 	}
-	claims, authErr := authorizeBearer("Bearer "+strings.TrimSpace(r.URL.Query().Get("token")), s.bearerVerifier, workspaceID, "fs:read", scopePath, time.Now().UTC())
+	claims, authErr := authorizeBearer(r.Context(), "Bearer "+strings.TrimSpace(r.URL.Query().Get("token")), s.bearerVerifier, workspaceID, "fs:read", scopePath, time.Now().UTC())
 	if authErr != nil {
 		writeError(w, authErr.status, authErr.code, authErr.message, "")
 		return

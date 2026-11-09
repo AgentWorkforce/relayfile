@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -63,22 +64,143 @@ func main() {
 		BackendProfile:         strings.TrimSpace(os.Getenv("RELAYFILE_BACKEND_PROFILE")),
 		ExternalWritebackMode:  boolEnv("RELAYFILE_EXTERNAL_WRITEBACK", true),
 	})
+	auth, err := authSettingsFromEnv()
+	if err != nil {
+		log.Fatalf("invalid relayfile auth config: %v", err)
+	}
 	server, err := httpapi.NewServerWithConfig(store, httpapi.ServerConfig{
-		JWKSURL:            strings.TrimSpace(os.Getenv("RELAYAUTH_JWKS_URL")),
-		InternalHMACSecret: internalSecret,
-		InternalMaxSkew:    durationEnv("RELAYFILE_INTERNAL_MAX_SKEW", 5*time.Minute),
-		RateLimitMax:       intEnv("RELAYFILE_RATE_LIMIT_MAX", 0),
-		RateLimitWindow:    durationEnv("RELAYFILE_RATE_LIMIT_WINDOW", time.Minute),
-		MaxBodyBytes:       int64Env("RELAYFILE_MAX_BODY_BYTES", 0),
+		JWKSURL:               strings.TrimSpace(os.Getenv("RELAYAUTH_JWKS_URL")),
+		InternalHMACSecret:    internalSecret,
+		InternalMaxSkew:       durationEnv("RELAYFILE_INTERNAL_MAX_SKEW", 5*time.Minute),
+		RateLimitMax:          intEnv("RELAYFILE_RATE_LIMIT_MAX", 0),
+		RateLimitWindow:       durationEnv("RELAYFILE_RATE_LIMIT_WINDOW", time.Minute),
+		MaxBodyBytes:          int64Env("RELAYFILE_MAX_BODY_BYTES", 0),
+		AuthMode:              auth.mode,
+		IntrospectionURL:      auth.introspectionURL,
+		IntrospectionSecret:   auth.introspectionSecret,
+		IntrospectionAudience: auth.audience,
+		IntrospectionTimeout:  auth.timeout,
+		IntrospectionCacheTTL: auth.cacheTTL,
 	})
 	if err != nil {
 		log.Fatalf("invalid relayfile server config: %v", err)
 	}
+	logAuthMode(auth)
 
 	log.Printf("relayfile listening on %s", addr)
 	if err := http.ListenAndServe(addr, server); err != nil {
 		log.Fatalf("server failed: %v", err)
 	}
+}
+
+// authSettings is the bearer-auth configuration read from the environment.
+// introspectionSecret must never be logged.
+type authSettings struct {
+	mode                string
+	introspectionURL    string
+	introspectionSecret string
+	audience            string
+	timeout             time.Duration
+	cacheTTL            time.Duration
+}
+
+// deriveAuthMode picks the bearer auth mode. An explicit RELAYFILE_AUTH_MODE
+// wins (validated by the server); otherwise RELAYCONTROL_INTERNAL_URL alone
+// selects introspection, both it and RELAYAUTH_JWKS_URL select dual, and
+// anything else keeps the historical JWKS behaviour.
+func deriveAuthMode(explicitMode, relaycontrolURL, jwksURL string) string {
+	if mode := strings.ToLower(strings.TrimSpace(explicitMode)); mode != "" {
+		return mode
+	}
+	hasRelaycontrol := strings.TrimSpace(relaycontrolURL) != ""
+	hasJWKS := strings.TrimSpace(jwksURL) != ""
+	switch {
+	case hasRelaycontrol && !hasJWKS:
+		return httpapi.AuthModeIntrospection
+	case hasRelaycontrol && hasJWKS:
+		return httpapi.AuthModeDual
+	default:
+		return httpapi.AuthModeJWKS
+	}
+}
+
+// introspectionEndpoint appends relaycontrol's introspection path to the
+// RELAYCONTROL_INTERNAL_URL base unless it is already there.
+func introspectionEndpoint(base string) string {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		return ""
+	}
+	trimmed := strings.TrimRight(base, "/")
+	if strings.HasSuffix(trimmed, httpapi.IntrospectionPath) {
+		return trimmed
+	}
+	return trimmed + httpapi.IntrospectionPath
+}
+
+// introspectionSecretFromEnv reads RELAYCONTROL_INTROSPECT_SECRET or the file
+// named by RELAYCONTROL_INTROSPECT_SECRET_FILE (contents trimmed). Setting
+// both is an error. The secret value is never included in errors.
+func introspectionSecretFromEnv() (string, error) {
+	direct := os.Getenv("RELAYCONTROL_INTROSPECT_SECRET")
+	file := strings.TrimSpace(os.Getenv("RELAYCONTROL_INTROSPECT_SECRET_FILE"))
+	if direct != "" && file != "" {
+		return "", fmt.Errorf("set only one of RELAYCONTROL_INTROSPECT_SECRET and RELAYCONTROL_INTROSPECT_SECRET_FILE")
+	}
+	if file == "" {
+		return strings.TrimSpace(direct), nil
+	}
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		return "", fmt.Errorf("read RELAYCONTROL_INTROSPECT_SECRET_FILE: %w", err)
+	}
+	secret := strings.TrimSpace(string(raw))
+	if secret == "" {
+		return "", fmt.Errorf("RELAYCONTROL_INTROSPECT_SECRET_FILE %s is empty", file)
+	}
+	return secret, nil
+}
+
+func authSettingsFromEnv() (authSettings, error) {
+	relaycontrolURL := os.Getenv("RELAYCONTROL_INTERNAL_URL")
+	mode := deriveAuthMode(os.Getenv("RELAYFILE_AUTH_MODE"), relaycontrolURL, os.Getenv("RELAYAUTH_JWKS_URL"))
+	// The introspection secret only matters when introspection can run; a
+	// jwks-only deployment must not fail to start over a stale or missing
+	// RELAYCONTROL_INTROSPECT_SECRET_FILE.
+	secret := ""
+	if mode == httpapi.AuthModeIntrospection || mode == httpapi.AuthModeDual {
+		var err error
+		secret, err = introspectionSecretFromEnv()
+		if err != nil {
+			return authSettings{}, err
+		}
+	}
+	cacheTTL := durationEnv("RELAYFILE_INTROSPECTION_CACHE_TTL", 0)
+	if strings.TrimSpace(os.Getenv("RELAYFILE_INTROSPECTION_CACHE_TTL")) != "" && cacheTTL <= 0 {
+		// An explicit 0 disables the positive cache; the server treats a
+		// zero value as "use the 60s default" and a negative one as off.
+		cacheTTL = -1
+	}
+	return authSettings{
+		mode:                mode,
+		introspectionURL:    introspectionEndpoint(relaycontrolURL),
+		introspectionSecret: secret,
+		audience:            strings.TrimSpace(os.Getenv("RELAYFILE_PUBLIC_ORIGIN")),
+		timeout:             durationEnv("RELAYFILE_INTROSPECTION_TIMEOUT", 0),
+		cacheTTL:            cacheTTL,
+	}, nil
+}
+
+func logAuthMode(auth authSettings) {
+	if auth.mode == httpapi.AuthModeIntrospection || auth.mode == httpapi.AuthModeDual {
+		host := "invalid-url"
+		if parsed, err := url.Parse(auth.introspectionURL); err == nil {
+			host = parsed.Host
+		}
+		log.Printf("relayfile auth mode: %s (relaycontrol introspection at %s)", auth.mode, host)
+		return
+	}
+	log.Printf("relayfile auth mode: %s", auth.mode)
 }
 
 func intEnv(name string, fallback int) int {

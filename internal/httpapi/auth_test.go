@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
@@ -308,7 +309,7 @@ func TestAuthorizeBearerEnforcesPathScopedMountGrants(t *testing.T) {
 				"aud":    "relayfile",
 			})
 
-			_, authErr := authorizeBearer("Bearer "+token, verifier, "ws-mount", tt.required, tt.path, now)
+			_, authErr := authorizeBearer(context.Background(), "Bearer "+token, verifier, "ws-mount", tt.required, tt.path, now)
 			if tt.wantStatus == 0 {
 				if authErr != nil {
 					t.Fatalf("authorizeBearer returned auth error: %+v", authErr)
@@ -348,7 +349,7 @@ func TestParseBearerRS256HappyPath(t *testing.T) {
 		"aud":    "relayfile",
 	})
 
-	claims, authErr := parseBearer("Bearer "+token, newBearerVerifier(ServerConfig{
+	claims, authErr := parseBearer(context.Background(), "Bearer "+token, newBearerVerifier(ServerConfig{
 		JWKSURL:          jwksServer.URL,
 		JWKSFetchTimeout: time.Second,
 	}), now)
@@ -404,7 +405,7 @@ func TestParseBearerStripsRelayauthTokenPrefixes(t *testing.T) {
 	for _, prefix := range prefixes {
 		prefix := prefix // capture
 		t.Run(strings.TrimSuffix(prefix, "_"), func(t *testing.T) {
-			claims, authErr := parseBearer("Bearer "+prefix+rawJWT, newBearerVerifier(ServerConfig{
+			claims, authErr := parseBearer(context.Background(), "Bearer "+prefix+rawJWT, newBearerVerifier(ServerConfig{
 				JWKSURL:          jwksServer.URL,
 				JWKSFetchTimeout: time.Second,
 			}), now)
@@ -422,7 +423,7 @@ func TestParseBearerStripsRelayauthTokenPrefixes(t *testing.T) {
 
 	// Sanity: a bare JWT (no prefix) still parses correctly so we didn't
 	// break the direct `/v1/tokens` mint path that doesn't wrap.
-	claims, authErr := parseBearer("Bearer "+rawJWT, newBearerVerifier(ServerConfig{
+	claims, authErr := parseBearer(context.Background(), "Bearer "+rawJWT, newBearerVerifier(ServerConfig{
 		JWKSURL:          jwksServer.URL,
 		JWKSFetchTimeout: time.Second,
 	}), now)
@@ -435,7 +436,7 @@ func TestParseBearerStripsRelayauthTokenPrefixes(t *testing.T) {
 
 	// And: garbage that happens to start with `relay_pa_` but isn't a JWT
 	// still rejects cleanly (header decode fails AFTER the strip).
-	_, authErr = parseBearer("Bearer relay_pa_not.a.jwt", newBearerVerifier(ServerConfig{
+	_, authErr = parseBearer(context.Background(), "Bearer relay_pa_not.a.jwt", newBearerVerifier(ServerConfig{
 		JWKSURL:          jwksServer.URL,
 		JWKSFetchTimeout: time.Second,
 	}), now)
@@ -466,7 +467,7 @@ func TestParseBearerRS256WrongKidReturnsUnauthorized(t *testing.T) {
 		"aud":    "relayfile",
 	})
 
-	_, authErr := parseBearer("Bearer "+token, newBearerVerifier(ServerConfig{
+	_, authErr := parseBearer(context.Background(), "Bearer "+token, newBearerVerifier(ServerConfig{
 		JWKSURL:          jwksServer.URL,
 		JWKSFetchTimeout: time.Second,
 	}), now)
@@ -499,7 +500,7 @@ func TestParseBearerRS256ExpiredToken(t *testing.T) {
 		"aud":    "relayfile",
 	})
 
-	_, authErr := parseBearer("Bearer "+token, newBearerVerifier(ServerConfig{
+	_, authErr := parseBearer(context.Background(), "Bearer "+token, newBearerVerifier(ServerConfig{
 		JWKSURL:          jwksServer.URL,
 		JWKSFetchTimeout: time.Second,
 	}), now)
@@ -578,7 +579,7 @@ func TestParseBearerClaimNormalization(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			token := mustTestRS256JWT(t, privateKey, "kid-1", tt.payload)
-			claims, authErr := parseBearer("Bearer "+token, verifier, now)
+			claims, authErr := parseBearer(context.Background(), "Bearer "+token, verifier, now)
 			if authErr != nil {
 				t.Fatalf("parseBearer returned auth error: %+v", authErr)
 			}
@@ -620,7 +621,7 @@ func TestJWKSCacheHitDoesNotRefetchWithinTTL(t *testing.T) {
 	})
 
 	for i := 0; i < 2; i++ {
-		if _, authErr := parseBearer("Bearer "+token, verifier, now.Add(time.Duration(i)*time.Second)); authErr != nil {
+		if _, authErr := parseBearer(context.Background(), "Bearer "+token, verifier, now.Add(time.Duration(i)*time.Second)); authErr != nil {
 			t.Fatalf("parseBearer returned auth error on pass %d: %+v", i+1, authErr)
 		}
 	}
@@ -666,7 +667,7 @@ func TestJWKSKidMissForcesRefetch(t *testing.T) {
 		"exp":    now.Add(time.Hour).Unix(),
 		"aud":    "relayfile",
 	})
-	if _, authErr := parseBearer("Bearer "+tokenOne, verifier, now); authErr != nil {
+	if _, authErr := parseBearer(context.Background(), "Bearer "+tokenOne, verifier, now); authErr != nil {
 		t.Fatalf("first parseBearer returned auth error: %+v", authErr)
 	}
 
@@ -681,7 +682,7 @@ func TestJWKSKidMissForcesRefetch(t *testing.T) {
 		"exp":    now.Add(time.Hour).Unix(),
 		"aud":    "relayfile",
 	})
-	if _, authErr := parseBearer("Bearer "+tokenTwo, verifier, now.Add(time.Second)); authErr != nil {
+	if _, authErr := parseBearer(context.Background(), "Bearer "+tokenTwo, verifier, now.Add(time.Second)); authErr != nil {
 		t.Fatalf("second parseBearer returned auth error: %+v", authErr)
 	}
 

@@ -80,7 +80,7 @@ A provider only **backfills** into the VFS if a sync definition ships for it. An
 | Layer | Current OSS surface | Hosted Agent Relay | Self-host responsibility |
 |---|---|---|---|
 | VFS API, revisions, ACL checks | yes | managed | run Relayfile |
-| Scoped token issuing | relayauth-compatible | managed | run relayauth or equivalent |
+| Scoped token issuing | relayauth-compatible, or relaycontrol introspection | managed | run relayauth or equivalent, or [relaycontrol introspection](#auth-without-relayauth-relaycontrol-introspection) |
 | Agent framework tools | `@relayfile/agents` | same package | same package |
 | Connect orchestration | `SelfHostConnect` (`@relayfile/sdk`) | managed connect flow | provide a `ConnectCapableProvider` + frontend widget |
 | Provider OAuth + connection binding | provider-side (`connectionId`) | managed | run Nango/Pipedream; tag connection |
@@ -88,6 +88,115 @@ A provider only **backfills** into the VFS if a sync definition ships for it. An
 | Data-ready gate | `waitForData` / `/sync/status` | managed per provider | call before reads |
 | Sync definitions | not shipped as generic defaults | managed by Agent Relay | scoped engagement |
 | Writeback queue and op status | yes | managed | run provider workers |
+
+## Auth without RelayAuth (relaycontrol introspection)
+
+By default relayfile verifies every bearer token as an RS256 JWT against
+RelayAuth's JWKS (`RELAYAUTH_JWKS_URL`, falling back to
+`https://api.relayauth.dev/.well-known/jwks.json`). A self-host cluster that
+runs relaycontrol can instead have relayfile ask relaycontrol about each token
+through its in-cluster introspection endpoint, so no RelayAuth deployment (and
+no egress to `api.relayauth.dev`) is needed.
+
+### Modes
+
+| `RELAYFILE_AUTH_MODE` | Behaviour |
+|---|---|
+| `jwks` (default) | Unchanged hosted behaviour: RS256 JWTs verified against JWKS. |
+| `introspection` | Every bearer is sent, exactly as presented, to relaycontrol. JWKS is never fetched and `RELAYAUTH_JWKS_URL` is ignored. |
+| `dual` | Tokens starting with a relaycontrol prefix (`sh_at_` user access tokens, `sh_wk_` workspace API tokens) go to introspection only; JWT-shaped tokens (three dot-separated parts after an optional `relay_*_` prefix) go to JWKS only; anything else is 401. There is no cross-fallback. Requires an explicit `RELAYAUTH_JWKS_URL` (no default), so an air-gapped cluster never dials `api.relayauth.dev`. |
+
+When `RELAYFILE_AUTH_MODE` is unset the mode is derived: only
+`RELAYCONTROL_INTERNAL_URL` set means `introspection`; both it and
+`RELAYAUTH_JWKS_URL` set means `dual`; otherwise `jwks`. With none of the new
+variables set, behaviour is identical to earlier releases. The chosen mode and
+the introspection endpoint host are logged at startup; the secret never is.
+
+### Environment
+
+| Variable | Purpose |
+|---|---|
+| `RELAYFILE_AUTH_MODE` | `jwks`, `introspection` or `dual` (see above). An unknown value refuses to start. |
+| `RELAYCONTROL_INTERNAL_URL` | relaycontrol's in-cluster base URL, e.g. `http://relaycontrol.relay.svc.cluster.local:8080`. `/internal/v1/auth/introspect` is appended unless already present. Must be `http`/`https`, without userinfo, query or fragment. |
+| `RELAYCONTROL_INTROSPECT_SECRET` | Service credential, sent as `Authorization: Bearer <secret>`. Must equal relaycontrol's `RELAYCONTROL_INTROSPECT_SECRET`. |
+| `RELAYCONTROL_INTROSPECT_SECRET_FILE` | Alternative to the above: path to a file holding the secret (contents trimmed). Setting both refuses to start. |
+| `RELAYFILE_PUBLIC_ORIGIN` | relayfile's public origin (for example `https://files.example.com`), sent as `aud`. relaycontrol must list it in its introspection audiences (`SELFHOST_INTROSPECT_AUDIENCES`); relaycontrol's `GET /readyz` reports the accepted origins under `introspection.audiences` so a mismatch can be checked before traffic (see relay-control `docs/identity.md`). Normalized to `scheme://host[:port]`, lowercase, default port dropped. |
+| `RELAYFILE_INTROSPECTION_TIMEOUT` | Per-call timeout, Go duration (default `3s`). |
+| `RELAYFILE_INTROSPECTION_CACHE_TTL` | Positive-verdict cache TTL, Go duration (default `60s`, capped at `60s`; `0` disables the cache). |
+
+`introspection` and `dual` refuse to start unless the URL, secret and public
+origin are all set and valid.
+
+### Contract
+
+Matches AgentWorkforce/relay-control `main` (`src/auth/introspect.ts` and
+`docs/identity.md`, verified against v0.5.6 at `901c9cd`), including the
+`relayfile-agent` token class:
+
+- Request: `POST {RELAYCONTROL_INTERNAL_URL}/internal/v1/auth/introspect` with
+  `Content-Type: application/json` and body `{"token": "<bearer>", "aud":
+  "<RELAYFILE_PUBLIC_ORIGIN>"}`. relayfile does not send `workspace` or
+  `machine`; the response `workspace` is authoritative and is what the token is
+  bound to. Tokens over 8 KiB or containing whitespace/control characters are
+  rejected with 401 without calling relaycontrol.
+- `200 {"active": true, ...}`: `workspace` becomes the token's workspace,
+  `agent_name` (when non-null) or else `sub` becomes the principal, `scopes`
+  are used as-is, `aud` must match `RELAYFILE_PUBLIC_ORIGIN`, and `exp` must be
+  in the future. Scopes are never widened or mapped.
+- `200 {"active": false, "reason": ...}`: 401 `token inactive`. Only the
+  reason is logged.
+
+### Fail-closed behaviour
+
+Only a well-formed `active: true` answer authenticates a request. A 401 from
+relaycontrol (wrong or rotated service secret) becomes 503 with a WARNING log;
+a 404 (endpoint disabled), 400, any 5xx, a timeout, a transport error, a
+redirect, a response over 64 KiB, or a body that is not a JSON object with a
+boolean `active` all become 503. Tokens, the secret and request/response
+bodies are never logged.
+
+### Caching and revocation lag
+
+Active verdicts are cached in memory, keyed by a SHA-256 of the token and
+audience, for at most `RELAYFILE_INTROSPECTION_CACHE_TTL` (60s cap) and never
+past the token's `exp`. Inactive verdicts and errors are never cached. A token
+revoked in relaycontrol can therefore keep working against relayfile for up to
+60 seconds. The cache holds at most 10,000 entries.
+
+### Desktop-user tokens are not filesystem authority (yet)
+
+relaycontrol v1 user access tokens (`sh_at_`, `principal_type:
+"desktop-user"`) carry only relaycontrol scopes such as `cli:auth`,
+`rth:read` and `rth:sync`, never `fs:*` or `sync:*`. relayfile introspects them
+successfully but refuses them with 403 (`missing required scope: fs:read`, or
+`no scopes granted` when the list is empty) on every filesystem and sync
+route: `cli:auth` alone is not filesystem authority. Workspace binding and
+path-scoped grant checks are identical for both verifiers.
+
+### Agent tokens (`relayfile-agent` workspace API tokens)
+
+Filesystem authority for self-host agents comes from a relaycontrol
+workspace API token (`sh_wk_`) minted with purpose `relayfile-agent`
+(relay-control `docs/identity.md`): `POST
+/api/v1/workspaces/{workspace}/deployment-api-tokens` with `purpose:
+"relayfile-agent"`, a `label`, an `agent_name` (unique per workspace while a
+live token exists; relaycontrol answers 409 `agent_name_conflict`) and `aud`
+set to `RELAYFILE_PUBLIC_ORIGIN`. relaycontrol introspects it as
+`principal_type: "agent"` with `sub` = `token_id`, `agent_name` as the
+relayfile principal, and the fixed scope list `fs:read fs:write sync:read
+sync:trigger`. Agent tokens never carry `admin:*`; admin routes stay 403.
+
+`exp` is the token's `expires_at` (default 90 days). A token minted with
+`neverExpires: true` answers `exp = now + 3600` recomputed on every call, so
+relayfile's positive cache (capped at `exp` and at most 60s) re-introspects
+well inside that window. Revocation, expiry, or removing relayfile's origin
+from `SELFHOST_INTROSPECT_AUDIENCES` turn the token inactive (`revoked`,
+`expired`, `audience`) within the cache TTL.
+
+### Out of scope
+
+`packages/durable-actors` has its own JWT verification and does not use this
+mode; it still needs a JWKS or its own configuration.
 
 ## Paid sync-definition boundary
 
