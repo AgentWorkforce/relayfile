@@ -11,6 +11,7 @@ import (
 	"database/sql/driver"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/lib/pq"
 )
@@ -135,14 +137,42 @@ func validatePostgresDSN(dsn string, c PostgresContract, bootstrap bool, lookup 
 }
 
 func openContractDB(ctx context.Context, dsn string, c PostgresContract, bootstrap bool) (*sql.DB, error) {
-	validated, err := ValidatePostgresDSN(dsn, c, bootstrap)
+	var caPEM []byte
+	validated, err := validatePostgresDSN(dsn, c, bootstrap, os.LookupEnv, func(path string) ([]byte, error) {
+		data, err := readPostgresCA(path)
+		if err == nil {
+			caPEM = append([]byte(nil), data...)
+		}
+		return data, err
+	})
 	if err != nil {
 		return nil, err
 	}
-	connector, err := pq.NewConnector(validated)
+	target, err := url.Parse(validated)
+	if err != nil {
+		return nil, postgresRefuse("invalid_dsn")
+	}
+	query := target.Query()
+	seconds, err := strconv.Atoi(query.Get("connect_timeout"))
+	if err != nil {
+		return nil, postgresRefuse("invalid_timeout")
+	}
+	dialer, err := newVerifiedPostgresDialer(caPEM, target.Hostname(), time.Duration(seconds)*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	// Public admission requires verify-full. Only pq's duplicate TLS upgrade
+	// is disabled here: this private connector receives an already verified
+	// TLS connection from our dialer before it can send any startup/auth data.
+	// pq must not reopen the mutable public CA path after its bytes were bound.
+	query.Set("sslmode", "disable")
+	query.Del("sslrootcert")
+	target.RawQuery = query.Encode()
+	connector, err := pq.NewConnector(target.String())
 	if err != nil {
 		return nil, postgresRefuse("connection_failed")
 	}
+	connector.Dialer(dialer)
 	// pq's connector freezes parsed connection settings, instead of parsing
 	// ambient defaults again whenever database/sql opens another connection.
 	// Recheck the bound public CA and override guard on each pool connection.
@@ -227,16 +257,20 @@ func verifyPostgresIdentity(ctx context.Context, tx *sql.Tx, c PostgresContract,
 		wantUser = c.OperatorRole
 	}
 	var database, user string
-	var ssl, ownerBound, ownerRestricted, runtimeRestricted, runtimeLogin, noMembership bool
+	var ssl, ownerBound, ownerRestricted, runtimeRestricted, runtimeLogin, noMembership, writable bool
 	err := tx.QueryRowContext(ctx, `SELECT current_database(), current_user,
  COALESCE((SELECT ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid()),false),
  (SELECT d.datdba=o.oid FROM pg_database d,pg_roles o WHERE d.datname=current_database() AND o.rolname=$1),
  (SELECT NOT (rolcanlogin OR rolinherit OR rolsuper OR rolbypassrls OR rolcreaterole OR rolcreatedb OR rolreplication) FROM pg_roles WHERE rolname=$1),
  (SELECT NOT (rolinherit OR rolsuper OR rolbypassrls OR rolcreaterole OR rolcreatedb OR rolreplication) FROM pg_roles WHERE rolname=$2),
  (SELECT rolcanlogin FROM pg_roles WHERE rolname=$2),
- NOT EXISTS(SELECT 1 FROM pg_roles r WHERE r.rolname<>$2 AND pg_has_role($2,r.oid,'MEMBER'))`, c.OwnerRole, c.RuntimeRole).Scan(&database, &user, &ssl, &ownerBound, &ownerRestricted, &runtimeRestricted, &runtimeLogin, &noMembership)
+ NOT EXISTS(SELECT 1 FROM pg_roles r WHERE r.rolname<>$2 AND pg_has_role($2,r.oid,'MEMBER')),
+ NOT pg_is_in_recovery() AND current_setting('default_transaction_read_only')='off'`, c.OwnerRole, c.RuntimeRole).Scan(&database, &user, &ssl, &ownerBound, &ownerRestricted, &runtimeRestricted, &runtimeLogin, &noMembership, &writable)
 	if err != nil || database != c.Database || user != wantUser || !ssl || !ownerBound || !ownerRestricted || !runtimeRestricted || !noMembership || (!bootstrap && !runtimeLogin) {
 		return postgresRefuse("identity_refused")
+	}
+	if !writable {
+		return postgresRefuse("writable_target_required")
 	}
 	return nil
 }
@@ -315,7 +349,7 @@ type postgresColumn struct {
 
 func verifyPostgresObjects(ctx context.Context, tx *sql.Tx, c PostgresContract) error {
 	var safe bool
-	if err := tx.QueryRowContext(ctx, `SELECT has_database_privilege($1,current_database(),'CONNECT') AND NOT has_database_privilege($1,current_database(),'CREATE') AND NOT has_database_privilege($1,current_database(),'TEMP') AND has_schema_privilege($1,'public','USAGE') AND NOT has_schema_privilege($1,'public','CREATE') AND (SELECT nspowner IN ((SELECT oid FROM pg_roles WHERE rolname=$2),(SELECT oid FROM pg_roles WHERE rolname='pg_database_owner')) FROM pg_namespace WHERE nspname='public')`, c.RuntimeRole, c.OwnerRole).Scan(&safe); err != nil || !safe {
+	if err := tx.QueryRowContext(ctx, `SELECT has_database_privilege($1,current_database(),'CONNECT') AND NOT has_database_privilege($1,current_database(),'CREATE') AND NOT has_database_privilege($1,current_database(),'TEMP') AND has_schema_privilege($1,'public','USAGE') AND NOT EXISTS(SELECT 1 FROM pg_namespace n WHERE n.nspname NOT IN ('pg_catalog','information_schema','pg_toast') AND n.nspname !~ '^pg_(toast_)?temp_[0-9]+$' AND has_schema_privilege($1,n.oid,'CREATE')) AND (SELECT nspowner IN ((SELECT oid FROM pg_roles WHERE rolname=$2),(SELECT oid FROM pg_roles WHERE rolname='pg_database_owner')) FROM pg_namespace WHERE nspname='public')`, c.RuntimeRole, c.OwnerRole).Scan(&safe); err != nil || !safe {
 		return postgresRefuse("runtime_privileges_refused")
 	}
 	for _, name := range []string{postgresStateTableName, postgresEnvelopeQueueTableName, postgresWritebackQueueTableName} {
@@ -407,7 +441,7 @@ func verifyPostgresTableGrants(ctx context.Context, tx *sql.Tx, ref string, stat
 
 func verifyPostgresSequence(ctx context.Context, tx *sql.Tx, name string, c PostgresContract) error {
 	var safe bool
-	err := tx.QueryRowContext(ctx, `SELECT pg_get_serial_sequence($1,'id')=$2 AND s.seqtypid='bigint'::regtype AND s.seqstart=1 AND s.seqincrement=1 AND s.seqmin=1 AND s.seqmax=9223372036854775807 AND s.seqcache=1 AND NOT s.seqcycle AND c.relowner=(SELECT oid FROM pg_roles WHERE rolname=$3) AND has_sequence_privilege($4,c.oid,'USAGE') AND NOT has_sequence_privilege($4,c.oid,'SELECT') AND NOT has_sequence_privilege($4,c.oid,'UPDATE') AND EXISTS(SELECT 1 FROM pg_depend d WHERE d.classid='pg_class'::regclass AND d.objid=c.oid AND d.refobjid=to_regclass($1) AND d.refobjsubid=1 AND d.deptype='a') AND NOT EXISTS(SELECT 1 FROM aclexplode(COALESCE(c.relacl,acldefault('s',c.relowner))) a WHERE a.grantee NOT IN ((SELECT oid FROM pg_roles WHERE rolname=$3),(SELECT oid FROM pg_roles WHERE rolname=$4)) OR (a.grantee=(SELECT oid FROM pg_roles WHERE rolname=$4) AND a.is_grantable)) FROM pg_class c JOIN pg_sequence s ON s.seqrelid=c.oid WHERE c.oid=to_regclass($2)`, "public."+name, "public."+name+"_id_seq", c.OwnerRole, c.RuntimeRole).Scan(&safe)
+	err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT pg_get_serial_sequence($1,'id')=$2 AND s.seqtypid='bigint'::regtype AND s.seqstart=1 AND s.seqincrement=1 AND s.seqmin=1 AND s.seqmax=9223372036854775807 AND s.seqcache=1 AND NOT s.seqcycle AND c.relowner=(SELECT oid FROM pg_roles WHERE rolname=$3) AND (v.last_value IS NULL OR v.last_value<s.seqmax) AND (SELECT count(*)=0 OR COALESCE(max(id)<=v.last_value,false) FROM %s) AND has_sequence_privilege($4,c.oid,'USAGE') AND NOT has_sequence_privilege($4,c.oid,'SELECT') AND NOT has_sequence_privilege($4,c.oid,'UPDATE') AND EXISTS(SELECT 1 FROM pg_depend d WHERE d.classid='pg_class'::regclass AND d.objid=c.oid AND d.refobjid=to_regclass($1) AND d.refobjsubid=1 AND d.deptype='a') AND NOT EXISTS(SELECT 1 FROM aclexplode(COALESCE(c.relacl,acldefault('s',c.relowner))) a WHERE a.grantee NOT IN ((SELECT oid FROM pg_roles WHERE rolname=$3),(SELECT oid FROM pg_roles WHERE rolname=$4)) OR (a.grantee=(SELECT oid FROM pg_roles WHERE rolname=$4) AND a.is_grantable)) FROM pg_class c JOIN pg_sequence s ON s.seqrelid=c.oid LEFT JOIN pg_sequences v ON v.schemaname='public' AND v.sequencename=c.relname WHERE c.oid=to_regclass($2)`, tableRef(name)), "public."+name, "public."+name+"_id_seq", c.OwnerRole, c.RuntimeRole).Scan(&safe)
 	if err != nil || !safe {
 		return postgresRefuse("sequence_refused")
 	}

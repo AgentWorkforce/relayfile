@@ -150,6 +150,7 @@ type contractFixture struct {
 	readOnly   bool
 	rolledBack bool
 	payloads   []driver.Value
+	snapshot   *string
 }
 type contractTestDriver struct{ fixture *contractFixture }
 type contractTestConn struct{ fixture *contractFixture }
@@ -202,6 +203,12 @@ func fixtureRows(data ...[]driver.Value) driver.Rows {
 }
 func (c *contractTestConn) QueryContext(_ context.Context, q string, args []driver.NamedValue) (driver.Rows, error) {
 	f := c.fixture
+	if strings.HasPrefix(q, "SELECT snapshot FROM") {
+		if f.snapshot == nil {
+			return fixtureRows(), nil
+		}
+		return fixtureRows([]driver.Value{*f.snapshot}), nil
+	}
 	if strings.HasPrefix(q, "SELECT payload FROM") {
 		if f.fail == "payload-query" {
 			return nil, errors.New("planted raw driver detail")
@@ -213,10 +220,10 @@ func (c *contractTestConn) QueryContext(_ context.Context, q string, args []driv
 		return fixtureRows(data...), nil
 	}
 	if strings.HasPrefix(q, "SELECT current_database()") {
-		return fixtureRows([]driver.Value{"relayfile", "relayfile_runtime", f.fail != "tls", true, true, true, true, f.fail != "membership"}), nil
+		return fixtureRows([]driver.Value{"relayfile", "relayfile_runtime", f.fail != "tls", true, true, true, true, f.fail != "membership", f.fail != "readonly"}), nil
 	}
 	if strings.Contains(q, "has_database_privilege") {
-		return fixtureRows([]driver.Value{f.fail != "ddl"}), nil
+		return fixtureRows([]driver.Value{f.fail != "ddl" && f.fail != "other-schema-create"}), nil
 	}
 	if strings.Contains(q, "c.relkind='r'") {
 		return fixtureRows([]driver.Value{f.fail != "owner"}), nil
@@ -259,7 +266,7 @@ func (c *contractTestConn) QueryContext(_ context.Context, q string, args []driv
 		return fixtureRows([]driver.Value{"id", f.fail != "queue-lock", true}, []driver.Value{"queue_key", false, true}, []driver.Value{"payload", false, true}, []driver.Value{"created_at", false, true}), nil
 	}
 	if strings.Contains(q, "pg_get_serial_sequence") {
-		return fixtureRows([]driver.Value{f.fail != "sequence"}), nil
+		return fixtureRows([]driver.Value{f.fail != "sequence" && f.fail != "sequence-position"}), nil
 	}
 	return nil, errors.New("query_unexpected")
 }
@@ -279,7 +286,7 @@ func contractFixtureDB(t *testing.T, f *contractFixture) *sql.DB {
 }
 
 func TestPostgresVerifierReadOnlyRefusals(t *testing.T) {
-	for _, failure := range []string{"", "tls", "membership", "ddl", "owner", "column", "constraint", "index", "acl", "queue-lock", "sequence", "maintain"} {
+	for _, failure := range []string{"", "tls", "membership", "ddl", "owner", "column", "constraint", "index", "acl", "queue-lock", "sequence", "maintain", "readonly", "other-schema-create", "sequence-position"} {
 		t.Run(failure, func(t *testing.T) {
 			fixture := &contractFixture{fail: failure}
 			db := contractFixtureDB(t, fixture)
@@ -367,6 +374,9 @@ func TestCheckedPostgresQueueSnapshots(t *testing.T) {
 		{name: "empty"},
 		{name: "query-refusal", fail: "payload-query", want: "postgres_queue_unavailable"},
 		{name: "corrupt-payload", payloads: []driver.Value{"planted contents"}, want: "postgres_queue_payload_invalid"},
+		{name: "null-payload", payloads: []driver.Value{"null"}, want: "postgres_queue_payload_invalid"},
+		{name: "empty-object-payload", payloads: []driver.Value{"{}"}, want: "postgres_queue_payload_invalid"},
+		{name: "minimal-enqueue-payload", payloads: []driver.Value{`{"opId":"operation"}`}},
 		{name: "valid-payload", payloads: []driver.Value{`{"WorkspaceID":"workspace","OpID":"operation"}`}},
 	} {
 		t.Run(test.name, func(t *testing.T) {

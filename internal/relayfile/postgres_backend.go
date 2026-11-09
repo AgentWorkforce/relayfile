@@ -70,6 +70,9 @@ func (b *PostgresStateBackend) Load() (*persistedState, error) {
 	if err != nil {
 		return nil, err
 	}
+	if b.qualified {
+		return decodeVerifiedPostgresSnapshot([]byte(payload))
+	}
 	var snapshot persistedState
 	if err := json.Unmarshal([]byte(payload), &snapshot); err != nil {
 		return nil, err
