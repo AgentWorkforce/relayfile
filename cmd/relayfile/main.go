@@ -64,6 +64,16 @@ func main() {
 		BackendProfile:         strings.TrimSpace(os.Getenv("RELAYFILE_BACKEND_PROFILE")),
 		ExternalWritebackMode:  boolEnv("RELAYFILE_EXTERNAL_WRITEBACK", true),
 	})
+	// #569: NewStoreWithOptions keeps running on empty in-memory state when
+	// the state backend (for example Postgres) cannot load. Refuse to start
+	// instead of serving that as healthy, unless dev mode explicitly opts in.
+	if loadErr := store.LoadErr(); loadErr != nil {
+		fatal, msg := stateBackendLoadDecision(loadErr, boolEnv("RELAYFILE_DEV_MODE", false), stateBackendSecretsFromEnv()...)
+		if fatal {
+			log.Fatal(msg)
+		}
+		log.Println(msg)
+	}
 	auth, err := authSettingsFromEnv()
 	if err != nil {
 		log.Fatalf("invalid relayfile auth config: %v", err)
@@ -240,6 +250,35 @@ func durationEnv(name string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return value
+}
+
+// stateBackendLoadDecision decides whether a state backend load failure is
+// fatal at startup and returns the message to log. It is fatal unless dev mode
+// is enabled. Any non-empty secret (DSN) value is redacted from the error text.
+func stateBackendLoadDecision(loadErr error, devMode bool, secrets ...string) (fatal bool, msg string) {
+	if loadErr == nil {
+		return false, ""
+	}
+	detail := loadErr.Error()
+	for _, secret := range secrets {
+		if secret = strings.TrimSpace(secret); secret != "" {
+			detail = strings.ReplaceAll(detail, secret, "<redacted>")
+		}
+	}
+	if devMode {
+		return false, fmt.Sprintf("WARNING: relayfile: state backend failed to load: %s — continuing on EMPTY in-memory state because RELAYFILE_DEV_MODE is enabled; /health reports 503 degraded; local development only, do not use in production", detail)
+	}
+	return true, fmt.Sprintf("relayfile: state backend failed to load: %s (set RELAYFILE_DEV_MODE=1 to start anyway for local development)", detail)
+}
+
+// stateBackendSecretsFromEnv lists the env values that may carry state backend
+// credentials so they can be redacted from startup log lines.
+func stateBackendSecretsFromEnv() []string {
+	return []string{
+		os.Getenv("RELAYFILE_STATE_BACKEND_DSN"),
+		os.Getenv("RELAYFILE_PRODUCTION_DSN"),
+		os.Getenv("RELAYFILE_POSTGRES_DSN"),
+	}
 }
 
 func boolEnv(name string, fallback bool) bool {

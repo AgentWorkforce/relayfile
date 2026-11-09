@@ -552,6 +552,10 @@ type eventSubscriber struct {
 }
 
 type Store struct {
+	// loadErr records the state backend Load error observed at construction
+	// (#569). It is written once in NewStoreWithOptions before the Store is
+	// shared and is read-only afterwards.
+	loadErr                 error
 	mu                      sync.RWMutex
 	queueMu                 sync.Mutex
 	subscriberMu            sync.RWMutex
@@ -899,6 +903,16 @@ func (b *JSONFileStateBackend) Save(state *persistedState) error {
 	return os.Rename(tmp, b.Path)
 }
 
+// LoadErr returns the error, if any, returned by the state backend when the
+// Store loaded its persisted state during construction. A non-nil value means
+// the Store is running on empty in-memory state rather than durable state.
+func (s *Store) LoadErr() error {
+	if s == nil {
+		return nil
+	}
+	return s.loadErr
+}
+
 func NewStore() *Store {
 	return NewStoreWithOptions(StoreOptions{})
 }
@@ -1032,7 +1046,10 @@ func NewStoreWithOptions(opts StoreOptions) *Store {
 		queueCancel:             queueCancel,
 	}
 	s.seedQueuedIndexesFromQueues()
-	_ = s.loadFromDisk()
+	// #569: keep the constructor signature, but retain the load error so the
+	// caller (cmd/relayfile) can refuse to start and /health can report the
+	// store as degraded instead of serving an empty in-memory store as ready.
+	s.loadErr = s.loadFromDisk()
 	// #249: quarantine rehydrated delete storms BEFORE the boot re-enqueue
 	// scan below — a deploy is a restart, and the scan would otherwise hand
 	// a pending file_delete burst to the new executor.
