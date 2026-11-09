@@ -1,0 +1,37 @@
+{
+  "id": "compact_px06q5zjlohc",
+  "version": 1,
+  "type": "compacted",
+  "compactedAt": "2026-11-09T15:59:11.407Z",
+  "sourceTrajectories": [
+    "traj_b1b8o103pu44"
+  ],
+  "dateRange": {
+    "start": "2026-11-09T15:06:47.507Z",
+    "end": "2026-11-09T15:59:10.996Z"
+  },
+  "summary": {
+    "totalDecisions": 1,
+    "totalEvents": 2,
+    "uniqueAgents": [
+      "default"
+    ]
+  },
+  "decisionGroups": [
+    {
+      "category": "api",
+      "decisions": [
+        {
+          "question": "Separate explicit owner bootstrap from verify-only runtime initialization",
+          "chosen": "Separate explicit owner bootstrap from verify-only runtime initialization",
+          "reasoning": "The existing PostgreSQL backends lazily perform DDL and the store ignores state-load failures. A separate restricted runtime identity must never depend on owner DDL or silently start with missing persisted state.",
+          "fromTrajectory": "traj_b1b8o103pu44"
+        }
+      ]
+    }
+  ],
+  "keyLearnings": [],
+  "keyFindings": [],
+  "filesAffected": [],
+  "commits": []
+}

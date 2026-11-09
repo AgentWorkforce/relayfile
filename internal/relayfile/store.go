@@ -904,6 +904,18 @@ func NewStore() *Store {
 }
 
 func NewStoreWithOptions(opts StoreOptions) *Store {
+	store, _ := newStoreWithOptions(opts, false)
+	return store
+}
+
+// NewStoreWithOptionsChecked refuses a failed persisted-state load before boot
+// maintenance, timers or queue workers can start. The caller owns backend
+// cleanup on failure. Existing callers retain the historical constructor.
+func NewStoreWithOptionsChecked(opts StoreOptions) (*Store, error) {
+	return newStoreWithOptions(opts, true)
+}
+
+func newStoreWithOptions(opts StoreOptions, checked bool) (*Store, error) {
 	maxAttempts := opts.MaxWritebackAttempts
 	if maxAttempts <= 0 {
 		maxAttempts = 3
@@ -1031,8 +1043,23 @@ func NewStoreWithOptions(opts StoreOptions) *Store {
 		queueCtx:                queueCtx,
 		queueCancel:             queueCancel,
 	}
-	s.seedQueuedIndexesFromQueues()
-	_ = s.loadFromDisk()
+	// In checked startup load before even reading queue snapshots; otherwise a
+	// broken persistence connection could look like an empty new workspace.
+	if checked {
+		if err := s.loadFromDisk(); err != nil {
+			queueCancel()
+			return nil, errors.New("persistent_state_load_failed")
+		}
+	}
+	if checked {
+		if err := s.seedQueuedIndexesChecked(); err != nil {
+			queueCancel()
+			return nil, errors.New("persistent_queue_load_failed")
+		}
+	} else {
+		s.seedQueuedIndexesFromQueues()
+		_ = s.loadFromDisk()
+	}
 	// #249: quarantine rehydrated delete storms BEFORE the boot re-enqueue
 	// scan below — a deploy is a restart, and the scan would otherwise hand
 	// a pending file_delete burst to the new executor.
@@ -1138,7 +1165,7 @@ func NewStoreWithOptions(opts StoreOptions) *Store {
 			})
 		}
 	}
-	return s
+	return s, nil
 }
 
 func (s *Store) seedQueuedIndexesFromQueues() {
@@ -1162,6 +1189,42 @@ func (s *Store) seedQueuedIndexesFromQueues() {
 			}
 		}
 	}
+}
+
+func (s *Store) seedQueuedIndexesChecked() error {
+	if snapshotter, ok := s.envelopeQueue.(interface{ SnapshotEnvelopeIDsChecked() ([]string, error) }); ok {
+		ids, err := snapshotter.SnapshotEnvelopeIDsChecked()
+		if err != nil {
+			return err
+		}
+		for _, id := range ids {
+			s.queuedEnvelopes[id] = struct{}{}
+		}
+	} else if snapshotter, ok := s.envelopeQueue.(envelopeQueueSnapshotter); ok {
+		for _, id := range snapshotter.SnapshotEnvelopeIDs() {
+			if strings.TrimSpace(id) != "" {
+				s.queuedEnvelopes[id] = struct{}{}
+			}
+		}
+	}
+	if snapshotter, ok := s.writebackQueue.(interface {
+		SnapshotWritebacksChecked() ([]WritebackQueueItem, error)
+	}); ok {
+		tasks, err := snapshotter.SnapshotWritebacksChecked()
+		if err != nil {
+			return err
+		}
+		for _, task := range tasks {
+			s.queuedWritebacks[task.OpID] = struct{}{}
+		}
+	} else if snapshotter, ok := s.writebackQueue.(writebackQueueSnapshotter); ok {
+		for _, task := range snapshotter.SnapshotWritebacks() {
+			if strings.TrimSpace(task.OpID) != "" {
+				s.queuedWritebacks[task.OpID] = struct{}{}
+			}
+		}
+	}
+	return nil
 }
 
 func (s *Store) Close() {

@@ -32,9 +32,10 @@ type PostgresStateBackend struct {
 	stateKey  string
 	openDB    sqlOpenFunc
 
-	initOnce sync.Once
-	initErr  error
-	db       *sql.DB
+	initOnce  sync.Once
+	initErr   error
+	db        *sql.DB
+	qualified bool
 }
 
 func NewPostgresStateBackend(dsn string) (StateBackend, error) {
@@ -60,7 +61,7 @@ func (b *PostgresStateBackend) Load() (*persistedState, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresOperationTimeout)
 	defer cancel()
 
-	query := fmt.Sprintf("SELECT snapshot FROM %s WHERE state_key = $1", postgresQuoteIdentifier(b.tableName))
+	query := fmt.Sprintf("SELECT snapshot FROM %s WHERE state_key = $1", b.tableReference())
 	var payload string
 	err := b.db.QueryRowContext(ctx, query, b.stateKey).Scan(&payload)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -95,7 +96,7 @@ func (b *PostgresStateBackend) Save(state *persistedState) error {
 		INSERT INTO %s (state_key, snapshot, updated_at)
 		VALUES ($1, $2, NOW())
 		ON CONFLICT (state_key)
-		DO UPDATE SET snapshot = EXCLUDED.snapshot, updated_at = NOW()`, postgresQuoteIdentifier(b.tableName))
+		DO UPDATE SET snapshot = EXCLUDED.snapshot, updated_at = NOW()`, b.tableReference())
 	_, err = b.db.ExecContext(ctx, query, b.stateKey, string(payload))
 	return err
 }
@@ -125,7 +126,7 @@ func (b *PostgresStateBackend) ensureReady() error {
 				state_key TEXT PRIMARY KEY,
 				snapshot TEXT NOT NULL,
 				updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-			)`, postgresQuoteIdentifier(b.tableName))
+			)`, b.tableReference())
 		if _, err := db.ExecContext(ctx, query); err != nil {
 			_ = db.Close()
 			b.initErr = err
@@ -144,9 +145,10 @@ type postgresQueueCore struct {
 	pollInterval time.Duration
 	openDB       sqlOpenFunc
 
-	initOnce sync.Once
-	initErr  error
-	db       *sql.DB
+	initOnce  sync.Once
+	initErr   error
+	db        *sql.DB
+	qualified bool
 }
 
 func newPostgresQueueCore(dsn, tableName, queueKey string, capacity int) (*postgresQueueCore, error) {
@@ -192,7 +194,7 @@ func (q *postgresQueueCore) ensureReady() error {
 				queue_key TEXT NOT NULL,
 				payload TEXT NOT NULL,
 				created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-			)`, postgresQuoteIdentifier(q.tableName))
+			)`, q.tableReference())
 		if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
 			_ = db.Close()
 			q.initErr = err
@@ -202,7 +204,7 @@ func (q *postgresQueueCore) ensureReady() error {
 		createIndexQuery := fmt.Sprintf(
 			"CREATE INDEX IF NOT EXISTS %s ON %s (queue_key, id)",
 			postgresQuoteIdentifier(indexName),
-			postgresQuoteIdentifier(q.tableName),
+			q.tableReference(),
 		)
 		if _, err := db.ExecContext(ctx, createIndexQuery); err != nil {
 			_ = db.Close()
@@ -235,7 +237,7 @@ func (q *postgresQueueCore) tryEnqueuePayload(payload string) bool {
 		}
 	}()
 
-	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE queue_key = $1", postgresQuoteIdentifier(q.tableName))
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE queue_key = $1", q.tableReference())
 	lockKey := postgresQueueLockKey(q.tableName, q.queueKey)
 	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock($1)", lockKey); err != nil {
 		return false
@@ -247,7 +249,7 @@ func (q *postgresQueueCore) tryEnqueuePayload(payload string) bool {
 	if depth >= q.capacity {
 		return false
 	}
-	insertQuery := fmt.Sprintf("INSERT INTO %s (queue_key, payload, created_at) VALUES ($1, $2, NOW())", postgresQuoteIdentifier(q.tableName))
+	insertQuery := fmt.Sprintf("INSERT INTO %s (queue_key, payload, created_at) VALUES ($1, $2, NOW())", q.tableReference())
 	if _, err := tx.ExecContext(ctx, insertQuery, q.queueKey, payload); err != nil {
 		return false
 	}
@@ -306,7 +308,7 @@ func (q *postgresQueueCore) tryDequeuePayload(ctx context.Context) (string, bool
 		WHERE queue_key = $1
 		ORDER BY id ASC
 		LIMIT 1
-		FOR UPDATE SKIP LOCKED`, postgresQuoteIdentifier(q.tableName))
+		FOR UPDATE SKIP LOCKED`, q.tableReference())
 	var id int64
 	var payload string
 	err = tx.QueryRowContext(ctx, query, q.queueKey).Scan(&id, &payload)
@@ -316,7 +318,7 @@ func (q *postgresQueueCore) tryDequeuePayload(ctx context.Context) (string, bool
 	if err != nil {
 		return "", false
 	}
-	deleteQuery := fmt.Sprintf("DELETE FROM %s WHERE id = $1", postgresQuoteIdentifier(q.tableName))
+	deleteQuery := fmt.Sprintf("DELETE FROM %s WHERE id = $1", q.tableReference())
 	if _, err := tx.ExecContext(ctx, deleteQuery, id); err != nil {
 		return "", false
 	}
@@ -334,7 +336,7 @@ func (q *postgresQueueCore) depth() int {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresOperationTimeout)
 	defer cancel()
 
-	query := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE queue_key = $1", postgresQuoteIdentifier(q.tableName))
+	query := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE queue_key = $1", q.tableReference())
 	var depth int
 	if err := q.db.QueryRowContext(ctx, query, q.queueKey).Scan(&depth); err != nil {
 		return 0
@@ -349,7 +351,7 @@ func (q *postgresQueueCore) snapshotPayloads() []string {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresOperationTimeout)
 	defer cancel()
 
-	query := fmt.Sprintf("SELECT payload FROM %s WHERE queue_key = $1 ORDER BY id ASC", postgresQuoteIdentifier(q.tableName))
+	query := fmt.Sprintf("SELECT payload FROM %s WHERE queue_key = $1 ORDER BY id ASC", q.tableReference())
 	rows, err := q.db.QueryContext(ctx, query, q.queueKey)
 	if err != nil {
 		return nil
@@ -365,6 +367,34 @@ func (q *postgresQueueCore) snapshotPayloads() []string {
 		items = append(items, payload)
 	}
 	return items
+}
+
+// The checked startup path must distinguish an empty queue from a failed
+// query. Preserve the historical best-effort snapshot API for legacy callers.
+func (q *postgresQueueCore) snapshotPayloadsChecked() ([]string, error) {
+	if err := q.ensureReady(); err != nil {
+		return nil, postgresRefuse("queue_unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), postgresOperationTimeout)
+	defer cancel()
+	query := fmt.Sprintf("SELECT payload FROM %s WHERE queue_key = $1 ORDER BY id ASC", q.tableReference())
+	rows, err := q.db.QueryContext(ctx, query, q.queueKey)
+	if err != nil {
+		return nil, postgresRefuse("queue_unavailable")
+	}
+	defer rows.Close()
+	items := make([]string, 0)
+	for rows.Next() {
+		var payload string
+		if rows.Scan(&payload) != nil {
+			return nil, postgresRefuse("queue_unavailable")
+		}
+		items = append(items, payload)
+	}
+	if rows.Err() != nil {
+		return nil, postgresRefuse("queue_unavailable")
+	}
+	return items, nil
 }
 
 func (q *postgresQueueCore) close() error {
@@ -426,6 +456,22 @@ func (q *PostgresEnvelopeQueue) SnapshotEnvelopeIDs() []string {
 		return nil
 	}
 	return q.core.snapshotPayloads()
+}
+
+func (q *PostgresEnvelopeQueue) SnapshotEnvelopeIDsChecked() ([]string, error) {
+	if q == nil || q.core == nil {
+		return nil, postgresRefuse("queue_unavailable")
+	}
+	items, err := q.core.snapshotPayloadsChecked()
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range items {
+		if strings.TrimSpace(id) == "" {
+			return nil, postgresRefuse("queue_payload_invalid")
+		}
+	}
+	return items, nil
 }
 
 func (q *PostgresEnvelopeQueue) Close() error {
@@ -516,6 +562,25 @@ func (q *PostgresWritebackQueue) SnapshotWritebacks() []WritebackQueueItem {
 	return items
 }
 
+func (q *PostgresWritebackQueue) SnapshotWritebacksChecked() ([]WritebackQueueItem, error) {
+	if q == nil || q.core == nil {
+		return nil, postgresRefuse("queue_unavailable")
+	}
+	payloads, err := q.core.snapshotPayloadsChecked()
+	if err != nil {
+		return nil, err
+	}
+	items := make([]WritebackQueueItem, 0, len(payloads))
+	for _, payload := range payloads {
+		var task WritebackQueueItem
+		if json.Unmarshal([]byte(payload), &task) != nil || strings.TrimSpace(task.OpID) == "" {
+			return nil, postgresRefuse("queue_payload_invalid")
+		}
+		items = append(items, task)
+	}
+	return items, nil
+}
+
 func (q *PostgresWritebackQueue) Close() error {
 	if q == nil || q.core == nil {
 		return nil
@@ -537,4 +602,17 @@ func postgresQueueLockKey(tableName, queueKey string) int64 {
 	_, _ = hasher.Write([]byte{0})
 	_, _ = hasher.Write([]byte(strings.TrimSpace(queueKey)))
 	return int64(hasher.Sum64())
+}
+
+func (b *PostgresStateBackend) tableReference() string {
+	if b.qualified {
+		return tableRef(b.tableName)
+	}
+	return postgresQuoteIdentifier(b.tableName)
+}
+func (q *postgresQueueCore) tableReference() string {
+	if q.qualified {
+		return tableRef(q.tableName)
+	}
+	return postgresQuoteIdentifier(q.tableName)
 }

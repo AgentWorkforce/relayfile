@@ -1,14 +1,16 @@
 # syntax=docker/dockerfile:1
 
-FROM golang:1.22-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS build
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
 WORKDIR /src
 
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/relayfile ./cmd/relayfile && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/relayfile-mount ./cmd/relayfile-mount
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/relayfile ./cmd/relayfile && \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/relayfile-mount ./cmd/relayfile-mount
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates curl bash
