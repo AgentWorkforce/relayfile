@@ -178,6 +178,29 @@ func TestIntrospectionHappyPathRequestShape(t *testing.T) {
 			wantTokenID:       "wk_tok_1",
 			wantScope:         "sync:trigger",
 		},
+		{
+			name:  "flows run credential",
+			token: "sh_fr_0123456789abcdefghijklmnopqrstuv",
+			response: map[string]any{
+				"sub":            "3f2c7f0e-8d6b-4a1e-9c2d-0b1a2c3d4e5f",
+				"email":          nil,
+				"machine_id":     nil,
+				"principal_type": "agent",
+				"agent_name":     "flows-run-run_123",
+				"scopes": []string{
+					"relayfile:fs:read:/workflows/runs/run_123",
+					"relayfile:fs:read:/workflows/runs/run_123/*",
+					"relayfile:fs:write:/workflows/runs/run_123",
+					"relayfile:fs:write:/workflows/runs/run_123/*",
+				},
+				"token_id": "3f2c7f0e-8d6b-4a1e-9c2d-0b1a2c3d4e5f",
+			},
+			wantWorkspace:     "ws_a",
+			wantAgentName:     "flows-run-run_123",
+			wantPrincipalType: "agent",
+			wantTokenID:       "3f2c7f0e-8d6b-4a1e-9c2d-0b1a2c3d4e5f",
+			wantScope:         "relayfile:fs:write:/workflows/runs/run_123/*",
+		},
 	}
 	for _, tt := range tests {
 		tt := tt

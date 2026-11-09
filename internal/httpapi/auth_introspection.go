@@ -55,12 +55,16 @@ const (
 // relaycontrol that relayfile routes to introspection in dual mode. Per
 // AgentWorkforce/relay-control src/auth/introspect.ts (main, v0.5.6):
 // `sh_at_` is the user access token prefix and `sh_wk_` the workspace API
-// token prefix (the `relayfile-agent` purpose). Introspection itself answers
+// token prefix (the `relayfile-agent` purpose). `sh_fr_` is the per-run
+// Flows worker credential (relay-control docs/flows-relayfile-credential.md):
+// principal `agent`, agent_name `flows-run-<runId>`, path-scoped
+// `relayfile:fs:<action>:<mount>` grants. Introspection itself answers
 // `wrong-kind` for every relaycontrol token it does not accept, so listing a
 // prefix here never widens authority.
 var relaycontrolTokenPrefixes = []string{
 	"sh_at_",
 	"sh_wk_",
+	"sh_fr_",
 }
 
 // knownInactiveReasons are the `reason` values relaycontrol publishes. Anything
