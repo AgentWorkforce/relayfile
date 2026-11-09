@@ -215,7 +215,9 @@ the envelope and writeback queues) in the Postgres database named by
 - **Dev escape hatch:** with `RELAYFILE_DEV_MODE=1` (or `true`) the server
   logs a loud warning and keeps running on empty in-memory state, and
   `GET /health` answers `503 {"status":"degraded","error":"state backend failed to load"}`
-  so probes still see it as not ready.
+  so probes still see it as not ready. Queue workers are not started in this
+  state, so entries already in a durable envelope or writeback queue are left
+  untouched for a healthy consumer or the next repaired start.
 
 ## Paid sync-definition boundary
 

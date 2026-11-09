@@ -1060,7 +1060,15 @@ func NewStoreWithOptions(opts StoreOptions) *Store {
 	// When ExternalWritebackMode is enabled, writeback workers are not
 	// started so items remain in the queue for external consumers to poll
 	// via /writeback/pending and ACK via /writeback/{id}/ack.
-	if !opts.DisableWorkers {
+	//
+	// #569: when the state backend failed to load, never start workers. A
+	// durable queue can still be readable while state is not (corrupt state
+	// file, Postgres state SELECT failing with queue tables reachable), and
+	// Dequeue persists the removal: a worker would pop an entry, fail to find
+	// its envelope/op in the empty in-memory state and drop it for good before
+	// cmd/relayfile has even seen LoadErr(). Leaving the queue untouched keeps
+	// the work for a healthy consumer or the next, repaired, start.
+	if !opts.DisableWorkers && s.loadErr == nil {
 		workerCount := envelopeWorkers
 		if !opts.ExternalWritebackMode {
 			workerCount += writebackWorkers
