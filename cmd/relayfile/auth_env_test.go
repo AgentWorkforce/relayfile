@@ -173,10 +173,73 @@ func TestAuthSettingsFromEnv(t *testing.T) {
 	})
 	t.Run("both secret sources is fatal", func(t *testing.T) {
 		clearAuthEnv(t)
+		t.Setenv("RELAYCONTROL_INTERNAL_URL", "http://relaycontrol.internal")
 		t.Setenv("RELAYCONTROL_INTROSPECT_SECRET", "a")
 		t.Setenv("RELAYCONTROL_INTROSPECT_SECRET_FILE", "/nonexistent")
 		if _, err := authSettingsFromEnv(); err == nil {
 			t.Fatalf("expected error")
+		}
+	})
+	t.Run("missing secret file is fatal only when introspection runs", func(t *testing.T) {
+		tests := []struct {
+			name    string
+			env     map[string]string
+			wantErr bool
+		}{
+			{
+				name: "explicit jwks ignores the stale secret file",
+				env: map[string]string{
+					"RELAYFILE_AUTH_MODE":                 "jwks",
+					"RELAYAUTH_JWKS_URL":                  "http://relayauth.internal/.well-known/jwks.json",
+					"RELAYCONTROL_INTROSPECT_SECRET_FILE": "/nonexistent",
+				},
+			},
+			{
+				name: "derived jwks ignores the stale secret file",
+				env: map[string]string{
+					"RELAYAUTH_JWKS_URL":                  "http://relayauth.internal/.well-known/jwks.json",
+					"RELAYCONTROL_INTROSPECT_SECRET_FILE": "/nonexistent",
+				},
+			},
+			{
+				name: "derived introspection still requires a readable secret file",
+				env: map[string]string{
+					"RELAYCONTROL_INTERNAL_URL":           "http://relaycontrol.internal",
+					"RELAYCONTROL_INTROSPECT_SECRET_FILE": "/nonexistent",
+				},
+				wantErr: true,
+			},
+			{
+				name: "explicit dual still requires a readable secret file",
+				env: map[string]string{
+					"RELAYFILE_AUTH_MODE":                 "dual",
+					"RELAYCONTROL_INTERNAL_URL":           "http://relaycontrol.internal",
+					"RELAYAUTH_JWKS_URL":                  "http://relayauth.internal/.well-known/jwks.json",
+					"RELAYCONTROL_INTROSPECT_SECRET_FILE": "/nonexistent",
+				},
+				wantErr: true,
+			},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				clearAuthEnv(t)
+				for name, value := range tt.env {
+					t.Setenv(name, value)
+				}
+				settings, err := authSettingsFromEnv()
+				if tt.wantErr {
+					if err == nil {
+						t.Fatalf("expected error, got settings %+v", settings)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if settings.mode != "jwks" || settings.introspectionSecret != "" {
+					t.Fatalf("mode=%s secret-set=%t, want jwks with no secret", settings.mode, settings.introspectionSecret != "")
+				}
+			})
 		}
 	})
 }

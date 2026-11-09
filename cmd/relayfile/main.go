@@ -163,9 +163,17 @@ func introspectionSecretFromEnv() (string, error) {
 
 func authSettingsFromEnv() (authSettings, error) {
 	relaycontrolURL := os.Getenv("RELAYCONTROL_INTERNAL_URL")
-	secret, err := introspectionSecretFromEnv()
-	if err != nil {
-		return authSettings{}, err
+	mode := deriveAuthMode(os.Getenv("RELAYFILE_AUTH_MODE"), relaycontrolURL, os.Getenv("RELAYAUTH_JWKS_URL"))
+	// The introspection secret only matters when introspection can run; a
+	// jwks-only deployment must not fail to start over a stale or missing
+	// RELAYCONTROL_INTROSPECT_SECRET_FILE.
+	secret := ""
+	if mode == httpapi.AuthModeIntrospection || mode == httpapi.AuthModeDual {
+		var err error
+		secret, err = introspectionSecretFromEnv()
+		if err != nil {
+			return authSettings{}, err
+		}
 	}
 	cacheTTL := durationEnv("RELAYFILE_INTROSPECTION_CACHE_TTL", 0)
 	if strings.TrimSpace(os.Getenv("RELAYFILE_INTROSPECTION_CACHE_TTL")) != "" && cacheTTL <= 0 {
@@ -174,7 +182,7 @@ func authSettingsFromEnv() (authSettings, error) {
 		cacheTTL = -1
 	}
 	return authSettings{
-		mode:                deriveAuthMode(os.Getenv("RELAYFILE_AUTH_MODE"), relaycontrolURL, os.Getenv("RELAYAUTH_JWKS_URL")),
+		mode:                mode,
 		introspectionURL:    introspectionEndpoint(relaycontrolURL),
 		introspectionSecret: secret,
 		audience:            strings.TrimSpace(os.Getenv("RELAYFILE_PUBLIC_ORIGIN")),

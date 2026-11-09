@@ -120,7 +120,7 @@ the introspection endpoint host are logged at startup; the secret never is.
 | `RELAYCONTROL_INTERNAL_URL` | relaycontrol's in-cluster base URL, e.g. `http://relaycontrol.relay.svc.cluster.local:8080`. `/internal/v1/auth/introspect` is appended unless already present. Must be `http`/`https`, without userinfo, query or fragment. |
 | `RELAYCONTROL_INTROSPECT_SECRET` | Service credential, sent as `Authorization: Bearer <secret>`. Must equal relaycontrol's `RELAYCONTROL_INTROSPECT_SECRET`. |
 | `RELAYCONTROL_INTROSPECT_SECRET_FILE` | Alternative to the above: path to a file holding the secret (contents trimmed). Setting both refuses to start. |
-| `RELAYFILE_PUBLIC_ORIGIN` | relayfile's public origin (for example `https://files.example.com`), sent as `aud`. relaycontrol must list it in its introspection audiences (`SELFHOST_INTROSPECT_AUDIENCES`); relaycontrol's `GET /readyz` reports the accepted origins under `introspection.audiences` so a mismatch can be checked before traffic (relay-control PR 20 @ 4075a08). Normalized to `scheme://host[:port]`, lowercase, default port dropped. |
+| `RELAYFILE_PUBLIC_ORIGIN` | relayfile's public origin (for example `https://files.example.com`), sent as `aud`. relaycontrol must list it in its introspection audiences (`SELFHOST_INTROSPECT_AUDIENCES`); relaycontrol's `GET /readyz` reports the accepted origins under `introspection.audiences` so a mismatch can be checked before traffic (see relay-control `docs/identity.md`). Normalized to `scheme://host[:port]`, lowercase, default port dropped. |
 | `RELAYFILE_INTROSPECTION_TIMEOUT` | Per-call timeout, Go duration (default `3s`). |
 | `RELAYFILE_INTROSPECTION_CACHE_TTL` | Positive-verdict cache TTL, Go duration (default `60s`, capped at `60s`; `0` disables the cache). |
 
@@ -129,9 +129,9 @@ origin are all set and valid.
 
 ### Contract
 
-Pinned to AgentWorkforce/relay-control PR #20 at `28e9d957` (introspection
-contract v1.2) plus the `relayfile-agent` token class from relay-control
-PR #22 at `bf529f8` (v1.3):
+Matches AgentWorkforce/relay-control `main` (`src/auth/introspect.ts` and
+`docs/identity.md`, verified against v0.5.6 at `901c9cd`), including the
+`relayfile-agent` token class:
 
 - Request: `POST {RELAYCONTROL_INTERNAL_URL}/internal/v1/auth/introspect` with
   `Content-Type: application/json` and body `{"token": "<bearer>", "aud":
@@ -177,7 +177,7 @@ path-scoped grant checks are identical for both verifiers.
 
 Filesystem authority for self-host agents comes from a relaycontrol
 workspace API token (`sh_wk_`) minted with purpose `relayfile-agent`
-(relay-control PR #22 @ `bf529f8`): `POST
+(relay-control `docs/identity.md`): `POST
 /api/v1/workspaces/{workspace}/deployment-api-tokens` with `purpose:
 "relayfile-agent"`, a `label`, an `agent_name` (unique per workspace while a
 live token exists; relaycontrol answers 409 `agent_name_conflict`) and `aud`

@@ -8,7 +8,11 @@ info:
     concurrency, async write-back operations, and event feeds.
 
     Security model:
-    - Agent and service access uses Bearer JWT with workspace and scope claims.
+    - Agent and service access uses a Bearer credential bound to a workspace
+      and scopes. In `jwks` mode (default) it is a relayauth-issued JWT; in
+      `introspection` and `dual` modes it is an opaque relaycontrol token
+      (`sh_at_` user access or `sh_wk_` workspace API token) verified by
+      relaycontrol's introspection endpoint. See `BearerAuth`.
     - Internal relay-cloud -> relayfile ingress uses HMAC-signed requests.
     - Correlation IDs are required for traceability and audit.
 servers:
@@ -121,7 +125,8 @@ paths:
       description: |
         Opens a WebSocket connection that streams filesystem events for the
         workspace in real time. Authentication is via a `token` query parameter
-        containing a valid JWT (same format as the Bearer token).
+        containing the same credential accepted as the Bearer token (a JWT in
+        `jwks` mode, an opaque relaycontrol token in `introspection`/`dual`).
 
         The server sends JSON messages with `eventId`, `type`, `path`,
         `revision`, `contentHash`, and `timestamp` fields. Current create/update
@@ -147,7 +152,7 @@ paths:
         - name: token
           in: query
           required: true
-          description: JWT token for authentication (same as Bearer token value)
+          description: Bearer credential for authentication (same value as the Authorization bearer; JWT or opaque relaycontrol token depending on the server auth mode)
           schema:
             type: string
         - name: from
@@ -2707,15 +2712,23 @@ components:
     BearerAuth:
       type: http
       scheme: bearer
-      bearerFormat: JWT
+      bearerFormat: JWT or opaque relaycontrol token (mode-dependent)
       description: |
-        JWT must include workspace and agent claims.
-        Required claims:
-        - workspace_id
-        - agent_name
-        - scopes
-        - exp
-        - aud=relayfile
+        The accepted credential depends on the server's `RELAYFILE_AUTH_MODE`:
+
+        - `jwks` (default): an RS256 JWT verified against `RELAYAUTH_JWKS_URL`.
+          Required claims: workspace_id, agent_name, scopes, exp, aud=relayfile.
+        - `introspection`: an opaque relaycontrol token (`sh_at_` user access
+          token or `sh_wk_` workspace API token). relayfile verifies it with
+          `POST /internal/v1/auth/introspect` on relaycontrol and takes
+          workspace, principal and scopes from the introspection response.
+          JWTs are not accepted in this mode.
+        - `dual`: `sh_at_`/`sh_wk_` tokens go to introspection, JWT-shaped
+          tokens to JWKS; there is no cross-fallback.
+
+        In every mode the credential must be bound to the requested workspace
+        and carry the scope the endpoint requires. An unreachable introspection
+        endpoint answers 503 with error code `unavailable`.
     InternalHmacAuth:
       type: apiKey
       in: header

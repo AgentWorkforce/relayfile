@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -140,53 +141,102 @@ func mustIntrospectionBearerVerifier(t *testing.T, cfg ServerConfig) *bearerVeri
 func TestIntrospectionHappyPathRequestShape(t *testing.T) {
 	t.Parallel()
 
-	now := time.Now().UTC()
-	fake := newFakeRelaycontrol(t, respondJSON(activeIntrospection(now, nil)))
-	verifier := mustIntrospectionBearerVerifier(t, introspectionTestConfig(fake.endpoint()))
+	tests := []struct {
+		name              string
+		token             string
+		response          map[string]any
+		wantWorkspace     string
+		wantAgentName     string
+		wantPrincipalType string
+		wantTokenID       string
+		wantScope         string
+	}{
+		{
+			name:              "desktop user access token",
+			token:             testUserAccessToken,
+			response:          nil, // activeIntrospection defaults
+			wantWorkspace:     "ws_a",
+			wantAgentName:     "usr_123",
+			wantPrincipalType: "desktop-user",
+			wantTokenID:       "tok_0123456789abcdef",
+			wantScope:         "fs:read",
+		},
+		{
+			name:  "relayfile-agent workspace token",
+			token: "sh_wk_0123456789abcdefghijklmnopqrstuv",
+			response: map[string]any{
+				"sub":            "wk_tok_1",
+				"email":          nil,
+				"principal_type": "agent",
+				"agent_name":     "builder",
+				"scopes":         []string{"fs:read", "fs:write", "sync:read", "sync:trigger"},
+				"token_id":       "wk_tok_1",
+			},
+			wantWorkspace:     "ws_a",
+			wantAgentName:     "builder",
+			wantPrincipalType: "agent",
+			wantTokenID:       "wk_tok_1",
+			wantScope:         "sync:trigger",
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	claims, authErr := parseBearer("Bearer "+testUserAccessToken, verifier, now)
-	if authErr != nil {
-		t.Fatalf("parseBearer returned auth error: %+v", authErr)
-	}
-	if fake.calls.Load() != 1 {
-		t.Fatalf("expected one introspection call, got %d", fake.calls.Load())
-	}
-	got := fake.lastRequest()
-	if got.method != http.MethodPost {
-		t.Fatalf("method = %q, want POST", got.method)
-	}
-	if got.path != "/internal/v1/auth/introspect" {
-		t.Fatalf("path = %q", got.path)
-	}
-	if got.authorization != "Bearer "+testIntrospectSecret {
-		t.Fatalf("authorization header does not carry the service secret as a plain bearer")
-	}
-	if got.contentType != "application/json" {
-		t.Fatalf("content-type = %q", got.contentType)
-	}
-	if len(got.body) != 2 {
-		t.Fatalf("expected exactly token and aud in body, got keys %v", mapKeys(got.body))
-	}
-	if got.body["token"] != testUserAccessToken {
-		t.Fatalf("body token does not match the presented bearer")
-	}
-	if got.body["aud"] != testIntrospectAudience {
-		t.Fatalf("body aud = %v, want %q", got.body["aud"], testIntrospectAudience)
-	}
-	for _, forbidden := range []string{"workspace", "machine"} {
-		if _, present := got.body[forbidden]; present {
-			t.Fatalf("request body must not include %q", forbidden)
-		}
-	}
+			now := time.Now().UTC()
+			fake := newFakeRelaycontrol(t, respondJSON(activeIntrospection(now, tt.response)))
+			verifier := mustIntrospectionBearerVerifier(t, introspectionTestConfig(fake.endpoint()))
 
-	if claims.WorkspaceID != "ws_a" || claims.AgentName != "usr_123" {
-		t.Fatalf("unexpected claims: workspace=%q agent=%q", claims.WorkspaceID, claims.AgentName)
-	}
-	if claims.TokenID != "tok_0123456789abcdef" || claims.PrincipalType != "desktop-user" {
-		t.Fatalf("unexpected token metadata: token_id=%q principal_type=%q", claims.TokenID, claims.PrincipalType)
-	}
-	if _, ok := claims.Scopes["fs:read"]; !ok {
-		t.Fatalf("expected fs:read scope, got %v", claims.Scopes)
+			claims, authErr := parseBearer(context.Background(), "Bearer "+tt.token, verifier, now)
+			if authErr != nil {
+				t.Fatalf("parseBearer returned auth error: %+v", authErr)
+			}
+			if fake.calls.Load() != 1 {
+				t.Fatalf("expected one introspection call, got %d", fake.calls.Load())
+			}
+
+			// Request shape: POST to the fixed path, service secret as a plain
+			// bearer, JSON body with exactly token and aud.
+			got := fake.lastRequest()
+			if got.method != http.MethodPost {
+				t.Fatalf("method = %q, want POST", got.method)
+			}
+			if got.path != "/internal/v1/auth/introspect" {
+				t.Fatalf("path = %q", got.path)
+			}
+			if got.authorization != "Bearer "+testIntrospectSecret {
+				t.Fatalf("authorization header does not carry the service secret as a plain bearer")
+			}
+			if got.contentType != "application/json" {
+				t.Fatalf("content-type = %q", got.contentType)
+			}
+			if len(got.body) != 2 {
+				t.Fatalf("expected exactly token and aud in body, got keys %v", mapKeys(got.body))
+			}
+			if got.body["token"] != tt.token {
+				t.Fatalf("body token does not match the presented bearer")
+			}
+			if got.body["aud"] != testIntrospectAudience {
+				t.Fatalf("body aud = %v, want %q", got.body["aud"], testIntrospectAudience)
+			}
+			for _, forbidden := range []string{"workspace", "machine"} {
+				if _, present := got.body[forbidden]; present {
+					t.Fatalf("request body must not include %q", forbidden)
+				}
+			}
+
+			// Claims come from the response, never from the token.
+			if claims.WorkspaceID != tt.wantWorkspace || claims.AgentName != tt.wantAgentName {
+				t.Fatalf("unexpected claims: workspace=%q agent=%q", claims.WorkspaceID, claims.AgentName)
+			}
+			if claims.TokenID != tt.wantTokenID || claims.PrincipalType != tt.wantPrincipalType {
+				t.Fatalf("unexpected token metadata: token_id=%q principal_type=%q", claims.TokenID, claims.PrincipalType)
+			}
+			if _, ok := claims.Scopes[tt.wantScope]; !ok {
+				t.Fatalf("expected %s scope, got %v", tt.wantScope, claims.Scopes)
+			}
+		})
 	}
 }
 
@@ -205,7 +255,7 @@ func TestIntrospectionInactiveReasonsAreUnauthorized(t *testing.T) {
 			fake := newFakeRelaycontrol(t, respondJSON(map[string]any{"active": false, "reason": reason}))
 			verifier := mustIntrospectionBearerVerifier(t, introspectionTestConfig(fake.endpoint()))
 
-			_, authErr := parseBearer("Bearer "+testUserAccessToken, verifier, time.Now().UTC())
+			_, authErr := parseBearer(context.Background(), "Bearer "+testUserAccessToken, verifier, time.Now().UTC())
 			if authErr == nil || authErr.status != http.StatusUnauthorized || authErr.message != "token inactive" {
 				t.Fatalf("expected 401 token inactive, got %+v", authErr)
 			}
@@ -246,7 +296,7 @@ func TestIntrospectionClaimMapping(t *testing.T) {
 			fake := newFakeRelaycontrol(t, respondJSON(activeIntrospection(now, tt.overrides)))
 			verifier := mustIntrospectionBearerVerifier(t, introspectionTestConfig(fake.endpoint()))
 
-			claims, authErr := parseBearer("Bearer "+testUserAccessToken, verifier, now)
+			claims, authErr := parseBearer(context.Background(), "Bearer "+testUserAccessToken, verifier, now)
 			if tt.wantStatus == 0 {
 				if authErr != nil {
 					t.Fatalf("unexpected auth error: %+v", authErr)
@@ -309,7 +359,7 @@ func TestIntrospectionUpstreamFailuresFailClosed(t *testing.T) {
 			})
 			verifier := mustIntrospectionBearerVerifier(t, introspectionTestConfig(fake.endpoint()))
 
-			claims, authErr := parseBearer("Bearer "+testUserAccessToken, verifier, now)
+			claims, authErr := parseBearer(context.Background(), "Bearer "+testUserAccessToken, verifier, now)
 			if authErr == nil {
 				t.Fatalf("expected fail-closed 503, got claims for workspace %q", claims.WorkspaceID)
 			}
@@ -340,7 +390,7 @@ func TestIntrospectionTimeoutFailsClosed(t *testing.T) {
 	verifier := mustIntrospectionBearerVerifier(t, cfg)
 
 	start := time.Now()
-	_, authErr := parseBearer("Bearer "+testUserAccessToken, verifier, now)
+	_, authErr := parseBearer(context.Background(), "Bearer "+testUserAccessToken, verifier, now)
 	if authErr == nil || authErr.status != http.StatusServiceUnavailable || authErr.message != "introspection unreachable" {
 		t.Fatalf("expected 503 introspection unreachable, got %+v", authErr)
 	}
@@ -357,7 +407,7 @@ func TestIntrospectionUnreachableEndpointFailsClosed(t *testing.T) {
 	fake.server.Close()
 	verifier := mustIntrospectionBearerVerifier(t, introspectionTestConfig(endpoint))
 
-	_, authErr := parseBearer("Bearer "+testUserAccessToken, verifier, time.Now().UTC())
+	_, authErr := parseBearer(context.Background(), "Bearer "+testUserAccessToken, verifier, time.Now().UTC())
 	if authErr == nil || authErr.status != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %+v", authErr)
 	}
@@ -378,14 +428,14 @@ func TestIntrospectionRejectsUnsendableTokensWithoutCalling(t *testing.T) {
 		"invalid utf8":   "sh_at_abc\xffdef",
 	}
 	for name, token := range tokens {
-		_, authErr := parseBearer("Bearer "+token, verifier, time.Now().UTC())
+		_, authErr := parseBearer(context.Background(), "Bearer "+token, verifier, time.Now().UTC())
 		if authErr == nil || authErr.status != http.StatusUnauthorized || authErr.message != "invalid token" {
 			t.Fatalf("%s: expected 401 invalid token, got %+v", name, authErr)
 		}
 	}
 	// A token of exactly the limit is still sent.
 	exact := "sh_at_" + strings.Repeat("a", maxIntrospectionTokenBytes-len("sh_at_"))
-	if _, authErr := parseBearer("Bearer "+exact, verifier, time.Now().UTC()); authErr != nil {
+	if _, authErr := parseBearer(context.Background(), "Bearer "+exact, verifier, time.Now().UTC()); authErr != nil {
 		t.Fatalf("token at the size limit rejected: %+v", authErr)
 	}
 	if got := fake.calls.Load(); got != 1 {
@@ -402,7 +452,7 @@ func TestIntrospectionCache(t *testing.T) {
 		fake := newFakeRelaycontrol(t, respondJSON(activeIntrospection(now, nil)))
 		verifier := mustIntrospectionBearerVerifier(t, introspectionTestConfig(fake.endpoint()))
 		for i := 0; i < 3; i++ {
-			if _, authErr := parseBearer("Bearer "+testUserAccessToken, verifier, now.Add(time.Duration(i)*10*time.Second)); authErr != nil {
+			if _, authErr := parseBearer(context.Background(), "Bearer "+testUserAccessToken, verifier, now.Add(time.Duration(i)*10*time.Second)); authErr != nil {
 				t.Fatalf("pass %d: %+v", i, authErr)
 			}
 		}
@@ -419,7 +469,7 @@ func TestIntrospectionCache(t *testing.T) {
 		cfg.IntrospectionCacheTTL = 30 * time.Second
 		verifier := mustIntrospectionBearerVerifier(t, cfg)
 		for _, offset := range []time.Duration{0, 29 * time.Second, 30 * time.Second} {
-			if _, authErr := parseBearer("Bearer "+testUserAccessToken, verifier, now.Add(offset)); authErr != nil {
+			if _, authErr := parseBearer(context.Background(), "Bearer "+testUserAccessToken, verifier, now.Add(offset)); authErr != nil {
 				t.Fatalf("offset %s: %+v", offset, authErr)
 			}
 		}
@@ -436,7 +486,7 @@ func TestIntrospectionCache(t *testing.T) {
 		cfg.IntrospectionCacheTTL = 10 * time.Minute
 		verifier := mustIntrospectionBearerVerifier(t, cfg)
 		for _, offset := range []time.Duration{0, 59 * time.Second, 60 * time.Second} {
-			if _, authErr := parseBearer("Bearer "+testUserAccessToken, verifier, now.Add(offset)); authErr != nil {
+			if _, authErr := parseBearer(context.Background(), "Bearer "+testUserAccessToken, verifier, now.Add(offset)); authErr != nil {
 				t.Fatalf("offset %s: %+v", offset, authErr)
 			}
 		}
@@ -451,12 +501,12 @@ func TestIntrospectionCache(t *testing.T) {
 		exp := now.Add(10 * time.Second).Unix()
 		fake := newFakeRelaycontrol(t, respondJSON(activeIntrospection(now, map[string]any{"exp": exp})))
 		verifier := mustIntrospectionBearerVerifier(t, introspectionTestConfig(fake.endpoint()))
-		if _, authErr := parseBearer("Bearer "+testUserAccessToken, verifier, now); authErr != nil {
+		if _, authErr := parseBearer(context.Background(), "Bearer "+testUserAccessToken, verifier, now); authErr != nil {
 			t.Fatalf("first call: %+v", authErr)
 		}
 		// After exp the cached entry must not be served; the refetch sees
 		// the same (now past) exp and rejects.
-		_, authErr := parseBearer("Bearer "+testUserAccessToken, verifier, time.Unix(exp, 0).Add(time.Second))
+		_, authErr := parseBearer(context.Background(), "Bearer "+testUserAccessToken, verifier, time.Unix(exp, 0).Add(time.Second))
 		if authErr == nil || authErr.status != http.StatusUnauthorized || authErr.message != "token expired" {
 			t.Fatalf("expected 401 token expired after exp, got %+v", authErr)
 		}
@@ -470,20 +520,20 @@ func TestIntrospectionCache(t *testing.T) {
 		now := time.Now().UTC()
 		fake := newFakeRelaycontrol(t, respondJSON(activeIntrospection(now, nil)))
 		verifier := mustIntrospectionBearerVerifier(t, introspectionTestConfig(fake.endpoint()))
-		if _, authErr := parseBearer("Bearer "+testUserAccessToken, verifier, now); authErr != nil {
+		if _, authErr := parseBearer(context.Background(), "Bearer "+testUserAccessToken, verifier, now); authErr != nil {
 			t.Fatalf("first call: %+v", authErr)
 		}
 		fake.setHandler(respondJSON(map[string]any{"active": false, "reason": "revoked"}))
 
-		if _, authErr := parseBearer("Bearer "+testUserAccessToken, verifier, now.Add(59*time.Second)); authErr != nil {
+		if _, authErr := parseBearer(context.Background(), "Bearer "+testUserAccessToken, verifier, now.Add(59*time.Second)); authErr != nil {
 			t.Fatalf("expected cached accept within TTL, got %+v", authErr)
 		}
-		_, authErr := parseBearer("Bearer "+testUserAccessToken, verifier, now.Add(60*time.Second))
+		_, authErr := parseBearer(context.Background(), "Bearer "+testUserAccessToken, verifier, now.Add(60*time.Second))
 		if authErr == nil || authErr.status != http.StatusUnauthorized || authErr.message != "token inactive" {
 			t.Fatalf("expected 401 token inactive after TTL, got %+v", authErr)
 		}
 		// Inactive verdicts are not cached.
-		_, _ = parseBearer("Bearer "+testUserAccessToken, verifier, now.Add(61*time.Second))
+		_, _ = parseBearer(context.Background(), "Bearer "+testUserAccessToken, verifier, now.Add(61*time.Second))
 		if got := fake.calls.Load(); got != 3 {
 			t.Fatalf("expected 3 upstream calls, got %d", got)
 		}
@@ -497,7 +547,7 @@ func TestIntrospectionCache(t *testing.T) {
 		cfg.IntrospectionCacheTTL = -1
 		verifier := mustIntrospectionBearerVerifier(t, cfg)
 		for i := 0; i < 3; i++ {
-			if _, authErr := parseBearer("Bearer "+testUserAccessToken, verifier, now); authErr != nil {
+			if _, authErr := parseBearer(context.Background(), "Bearer "+testUserAccessToken, verifier, now); authErr != nil {
 				t.Fatalf("pass %d: %+v", i, authErr)
 			}
 		}
@@ -511,11 +561,11 @@ func TestIntrospectionCache(t *testing.T) {
 		now := time.Now().UTC()
 		fake := newFakeRelaycontrol(t, respondStatus(500, ``))
 		verifier := mustIntrospectionBearerVerifier(t, introspectionTestConfig(fake.endpoint()))
-		if _, authErr := parseBearer("Bearer "+testUserAccessToken, verifier, now); authErr == nil {
+		if _, authErr := parseBearer(context.Background(), "Bearer "+testUserAccessToken, verifier, now); authErr == nil {
 			t.Fatalf("expected 503")
 		}
 		fake.setHandler(respondJSON(activeIntrospection(now, nil)))
-		if _, authErr := parseBearer("Bearer "+testUserAccessToken, verifier, now); authErr != nil {
+		if _, authErr := parseBearer(context.Background(), "Bearer "+testUserAccessToken, verifier, now); authErr != nil {
 			t.Fatalf("expected accept after recovery, got %+v", authErr)
 		}
 		if got := fake.calls.Load(); got != 2 {
@@ -532,7 +582,7 @@ func TestIntrospectionCache(t *testing.T) {
 
 		tokens := []string{"sh_at_one", "sh_at_two", "sh_at_three"}
 		for _, token := range tokens {
-			if _, authErr := parseBearer("Bearer "+token, verifier, now); authErr != nil {
+			if _, authErr := parseBearer(context.Background(), "Bearer "+token, verifier, now); authErr != nil {
 				t.Fatalf("%s: %+v", token, authErr)
 			}
 		}
@@ -540,7 +590,7 @@ func TestIntrospectionCache(t *testing.T) {
 			t.Fatalf("expected cache capped at 2 entries, got %d", got)
 		}
 		// The uncached third token still works, at the cost of a call.
-		if _, authErr := parseBearer("Bearer sh_at_three", verifier, now); authErr != nil {
+		if _, authErr := parseBearer(context.Background(), "Bearer sh_at_three", verifier, now); authErr != nil {
 			t.Fatalf("uncached token rejected: %+v", authErr)
 		}
 		if got := fake.calls.Load(); got != 4 {
@@ -548,7 +598,7 @@ func TestIntrospectionCache(t *testing.T) {
 		}
 		// Once the live entries expire, inserting sweeps them.
 		later := now.Add(2 * time.Minute)
-		if _, authErr := parseBearer("Bearer sh_at_four", verifier, later); authErr != nil {
+		if _, authErr := parseBearer(context.Background(), "Bearer sh_at_four", verifier, later); authErr != nil {
 			t.Fatalf("sh_at_four: %+v", authErr)
 		}
 		if got := len(verifier.introspection.cache); got != 1 {
@@ -680,19 +730,38 @@ func TestIntrospectionScopeEnforcementThroughServer(t *testing.T) {
 func TestIntrospectionBindsResponseWorkspace(t *testing.T) {
 	t.Parallel()
 
-	now := time.Now().UTC()
-	fake := newFakeRelaycontrol(t, respondJSON(activeIntrospection(now, nil)))
-	verifier := mustIntrospectionBearerVerifier(t, introspectionTestConfig(fake.endpoint()))
+	tests := []struct {
+		name          string
+		workspaceID   string
+		wantStatus    int // 0 means authorized
+		wantWorkspace string
+	}{
+		{name: "workspace from the response authorizes", workspaceID: "ws_a", wantWorkspace: "ws_a"},
+		{name: "other workspace is a 403 mismatch", workspaceID: "ws_b", wantStatus: http.StatusForbidden},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	if _, authErr := authorizeBearer("Bearer "+testUserAccessToken, verifier, "ws_b", "fs:read", "/", now); authErr == nil || authErr.status != http.StatusForbidden {
-		t.Fatalf("expected 403 workspace mismatch on ws_b, got %+v", authErr)
-	}
-	claims, authErr := authorizeBearer("Bearer "+testUserAccessToken, verifier, "ws_a", "fs:read", "/", now)
-	if authErr != nil {
-		t.Fatalf("expected ws_a to authorize, got %+v", authErr)
-	}
-	if claims.WorkspaceID != "ws_a" {
-		t.Fatalf("bound workspace = %q, want ws_a from the response", claims.WorkspaceID)
+			now := time.Now().UTC()
+			fake := newFakeRelaycontrol(t, respondJSON(activeIntrospection(now, nil)))
+			verifier := mustIntrospectionBearerVerifier(t, introspectionTestConfig(fake.endpoint()))
+
+			claims, authErr := authorizeBearer(context.Background(), "Bearer "+testUserAccessToken, verifier, tt.workspaceID, "fs:read", "/", now)
+			if tt.wantStatus != 0 {
+				if authErr == nil || authErr.status != tt.wantStatus {
+					t.Fatalf("expected %d on %s, got %+v", tt.wantStatus, tt.workspaceID, authErr)
+				}
+				return
+			}
+			if authErr != nil {
+				t.Fatalf("expected %s to authorize, got %+v", tt.workspaceID, authErr)
+			}
+			if claims.WorkspaceID != tt.wantWorkspace {
+				t.Fatalf("bound workspace = %q, want %q from the response", claims.WorkspaceID, tt.wantWorkspace)
+			}
+		})
 	}
 }
 
@@ -745,7 +814,7 @@ func TestDualModeRouting(t *testing.T) {
 			cfg.JWKSFetchTimeout = time.Second
 			verifier := mustIntrospectionBearerVerifier(t, cfg)
 
-			claims, authErr := parseBearer("Bearer "+tt.token, verifier, now)
+			claims, authErr := parseBearer(context.Background(), "Bearer "+tt.token, verifier, now)
 			if tt.wantStatus == 0 {
 				if authErr != nil {
 					t.Fatalf("unexpected auth error: %+v", authErr)
@@ -782,7 +851,7 @@ func TestDualModeIntrospectionFailureDoesNotFallBackToJWKS(t *testing.T) {
 	cfg.JWKSURL = jwksServer.URL
 	verifier := mustIntrospectionBearerVerifier(t, cfg)
 
-	if _, authErr := parseBearer("Bearer "+testUserAccessToken, verifier, time.Now().UTC()); authErr == nil || authErr.status != http.StatusServiceUnavailable {
+	if _, authErr := parseBearer(context.Background(), "Bearer "+testUserAccessToken, verifier, time.Now().UTC()); authErr == nil || authErr.status != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %+v", authErr)
 	}
 	if jwksHits.Load() != 0 {
@@ -793,30 +862,145 @@ func TestDualModeIntrospectionFailureDoesNotFallBackToJWKS(t *testing.T) {
 func TestIntrospectionModeSendsJWTShapedTokensToIntrospection(t *testing.T) {
 	t.Parallel()
 
-	var jwksHits atomic.Int32
-	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		jwksHits.Add(1)
-	}))
-	defer jwksServer.Close()
+	tests := []struct {
+		name  string
+		token string
+	}{
+		{name: "relay_pa_ prefixed JWT", token: "relay_pa_eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln"},
+		{name: "bare JWT", token: "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln"},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	fake := newFakeRelaycontrol(t, respondJSON(map[string]any{"active": false, "reason": "wrong-kind"}))
-	cfg := introspectionTestConfig(fake.endpoint())
-	cfg.JWKSURL = jwksServer.URL // ignored in introspection mode
-	verifier := mustIntrospectionBearerVerifier(t, cfg)
+			var jwksHits atomic.Int32
+			jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				jwksHits.Add(1)
+			}))
+			defer jwksServer.Close()
 
-	token := "relay_pa_eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln"
-	_, authErr := parseBearer("Bearer "+token, verifier, time.Now().UTC())
-	if authErr == nil || authErr.status != http.StatusUnauthorized || authErr.message != "token inactive" {
-		t.Fatalf("expected 401 token inactive, got %+v", authErr)
+			fake := newFakeRelaycontrol(t, respondJSON(map[string]any{"active": false, "reason": "wrong-kind"}))
+			cfg := introspectionTestConfig(fake.endpoint())
+			cfg.JWKSURL = jwksServer.URL // ignored in introspection mode
+			verifier := mustIntrospectionBearerVerifier(t, cfg)
+
+			_, authErr := parseBearer(context.Background(), "Bearer "+tt.token, verifier, time.Now().UTC())
+			if authErr == nil || authErr.status != http.StatusUnauthorized || authErr.message != "token inactive" {
+				t.Fatalf("expected 401 token inactive, got %+v", authErr)
+			}
+			if fake.calls.Load() != 1 {
+				t.Fatalf("expected one introspection call, got %d", fake.calls.Load())
+			}
+			if got := fake.lastRequest().body["token"]; got != tt.token {
+				t.Fatalf("token was altered before introspection (prefix must not be stripped)")
+			}
+			if jwksHits.Load() != 0 {
+				t.Fatalf("introspection mode fetched JWKS")
+			}
+		})
 	}
-	if fake.calls.Load() != 1 {
-		t.Fatalf("expected one introspection call, got %d", fake.calls.Load())
+}
+
+func TestIntrospectionExpIsJudgedAtAnswerTime(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		expOffset   time.Duration // exp relative to the request timestamp
+		clockOffset time.Duration // wall clock when the answer arrives
+		wantStatus  int           // 0 means authorized
+		wantMessage string
+	}{
+		{name: "answer before exp authorizes", expOffset: 10 * time.Second, clockOffset: 5 * time.Second},
+		{name: "exp passed while relaycontrol was slow", expOffset: time.Second, clockOffset: 2 * time.Second, wantStatus: http.StatusUnauthorized, wantMessage: "token expired"},
+		{name: "clock behind the request timestamp keeps the request time", expOffset: time.Second, clockOffset: -time.Hour},
 	}
-	if got := fake.lastRequest().body["token"]; got != token {
-		t.Fatalf("token was altered before introspection (relay_ prefix must not be stripped)")
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			now := time.Now().UTC()
+			fake := newFakeRelaycontrol(t, respondJSON(activeIntrospection(now, map[string]any{"exp": now.Add(tt.expOffset).Unix()})))
+			verifier := mustIntrospectionBearerVerifier(t, introspectionTestConfig(fake.endpoint()))
+			answeredAt := now.Add(tt.clockOffset)
+			verifier.introspection.clock = func() time.Time { return answeredAt }
+
+			claims, authErr := parseBearer(context.Background(), "Bearer "+testUserAccessToken, verifier, now)
+			if tt.wantStatus != 0 {
+				if authErr == nil || authErr.status != tt.wantStatus || authErr.message != tt.wantMessage {
+					t.Fatalf("expected %d %q, got %+v", tt.wantStatus, tt.wantMessage, authErr)
+				}
+				// A stale answer must not seed the cache: the next request
+				// goes upstream again.
+				_, _ = parseBearer(context.Background(), "Bearer "+testUserAccessToken, verifier, now)
+				if got := fake.calls.Load(); got != 2 {
+					t.Fatalf("expired answer was cached: expected 2 upstream calls, got %d", got)
+				}
+				return
+			}
+			if authErr != nil {
+				t.Fatalf("expected authorization, got %+v", authErr)
+			}
+			if claims.WorkspaceID != "ws_a" {
+				t.Fatalf("unexpected workspace %q", claims.WorkspaceID)
+			}
+		})
 	}
-	if jwksHits.Load() != 0 {
-		t.Fatalf("introspection mode fetched JWKS")
+}
+
+func TestIntrospectionHonorsCallerContext(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		prepare func() (context.Context, context.CancelFunc)
+	}{
+		{
+			name: "canceled before the call",
+			prepare: func() (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx, cancel
+			},
+		},
+		{
+			name: "deadline shorter than the introspection timeout",
+			prepare: func() (context.Context, context.CancelFunc) {
+				return context.WithTimeout(context.Background(), 50*time.Millisecond)
+			},
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			release := make(chan struct{})
+			t.Cleanup(func() { close(release) })
+			fake := newFakeRelaycontrol(t, func(w http.ResponseWriter, r *http.Request, _ map[string]any) {
+				select {
+				case <-release:
+				case <-r.Context().Done():
+				}
+			})
+			cfg := introspectionTestConfig(fake.endpoint())
+			cfg.IntrospectionTimeout = 5 * time.Second
+			verifier := mustIntrospectionBearerVerifier(t, cfg)
+
+			ctx, cancel := tt.prepare()
+			defer cancel()
+			started := time.Now()
+			_, authErr := parseBearer(ctx, "Bearer "+testUserAccessToken, verifier, time.Now().UTC())
+			elapsed := time.Since(started)
+			if authErr == nil || authErr.status != http.StatusServiceUnavailable || authErr.code != "unavailable" {
+				t.Fatalf("expected 503 unavailable, got %+v", authErr)
+			}
+			if elapsed > time.Second {
+				t.Fatalf("caller context ignored: took %s", elapsed)
+			}
+		})
 	}
 }
 
@@ -840,7 +1024,7 @@ func TestIntrospectionLogsNeverContainTokenOrSecret(t *testing.T) {
 	for _, handler := range handlers {
 		fake := newFakeRelaycontrol(t, handler)
 		verifier := mustIntrospectionBearerVerifier(t, introspectionTestConfig(fake.endpoint()))
-		_, _ = parseBearer("Bearer "+testUserAccessToken, verifier, now)
+		_, _ = parseBearer(context.Background(), "Bearer "+testUserAccessToken, verifier, now)
 	}
 	output := buf.String()
 	for _, secret := range []string{testUserAccessToken, testIntrospectSecret} {
@@ -992,10 +1176,10 @@ func mapKeys(m map[string]any) []string {
 	return keys
 }
 
-// Pinned to relay-control selfhost/relayfile-agent-tokens @ bf529f8 (draft
-// PR #22, v1.3): a `sh_wk_` workspace API token minted with purpose
-// `relayfile-agent` introspects as principal_type "agent" with sub =
-// token_id, email/machine_id null, agent_name set, the published scope list
+// Per AgentWorkforce/relay-control src/auth/introspect.ts (main, v0.5.6): a
+// `sh_wk_` workspace API token minted with purpose `relayfile-agent`
+// introspects as principal_type "agent" with sub = token_id,
+// email/machine_id null, agent_name set, the published scope list
 // fs:read fs:write sync:read sync:trigger, and a numeric exp (expires_at, or
 // now+3600 recomputed per call for neverExpires tokens).
 func TestIntrospectionRelayfileAgentTokenClass(t *testing.T) {
@@ -1024,7 +1208,7 @@ func TestIntrospectionRelayfileAgentTokenClass(t *testing.T) {
 		fake := newFakeRelaycontrol(t, respondJSON(agentResponse(nil)))
 		verifier := mustIntrospectionBearerVerifier(t, introspectionTestConfig(fake.endpoint()))
 
-		claims, authErr := parseBearer("Bearer "+agentToken, verifier, now)
+		claims, authErr := parseBearer(context.Background(), "Bearer "+agentToken, verifier, now)
 		if authErr != nil {
 			t.Fatalf("unexpected auth error: %+v", authErr)
 		}
@@ -1052,16 +1236,16 @@ func TestIntrospectionRelayfileAgentTokenClass(t *testing.T) {
 		cfg.IntrospectionCacheTTL = 30 * time.Second
 		verifier := mustIntrospectionBearerVerifier(t, cfg)
 
-		if _, authErr := parseBearer("Bearer "+agentToken, verifier, now); authErr != nil {
+		if _, authErr := parseBearer(context.Background(), "Bearer "+agentToken, verifier, now); authErr != nil {
 			t.Fatalf("unexpected auth error: %+v", authErr)
 		}
-		if _, authErr := parseBearer("Bearer "+agentToken, verifier, now.Add(29*time.Second)); authErr != nil {
+		if _, authErr := parseBearer(context.Background(), "Bearer "+agentToken, verifier, now.Add(29*time.Second)); authErr != nil {
 			t.Fatalf("unexpected auth error on cached call: %+v", authErr)
 		}
 		if got := fake.calls.Load(); got != 1 {
 			t.Fatalf("expected one upstream call within the cache TTL, got %d", got)
 		}
-		if _, authErr := parseBearer("Bearer "+agentToken, verifier, now.Add(31*time.Second)); authErr != nil {
+		if _, authErr := parseBearer(context.Background(), "Bearer "+agentToken, verifier, now.Add(31*time.Second)); authErr != nil {
 			t.Fatalf("unexpected auth error after TTL: %+v", authErr)
 		}
 		if got := fake.calls.Load(); got != 2 {
@@ -1077,7 +1261,7 @@ func TestIntrospectionRelayfileAgentTokenClass(t *testing.T) {
 				t.Parallel()
 				fake := newFakeRelaycontrol(t, respondJSON(map[string]any{"active": false, "reason": reason}))
 				verifier := mustIntrospectionBearerVerifier(t, introspectionTestConfig(fake.endpoint()))
-				_, authErr := parseBearer("Bearer "+agentToken, verifier, now)
+				_, authErr := parseBearer(context.Background(), "Bearer "+agentToken, verifier, now)
 				if authErr == nil || authErr.status != http.StatusUnauthorized || authErr.message != "token inactive" {
 					t.Fatalf("expected 401 token inactive for %s, got %+v", reason, authErr)
 				}

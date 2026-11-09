@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -51,18 +52,18 @@ const (
 )
 
 // relaycontrolTokenPrefixes are the token-class prefixes minted by
-// relaycontrol that relayfile routes to introspection in dual mode.
-// Pinned to AgentWorkforce/relay-control 28e9d95 (PR #20, contract v1.2):
+// relaycontrol that relayfile routes to introspection in dual mode. Per
+// AgentWorkforce/relay-control src/auth/introspect.ts (main, v0.5.6):
 // `sh_at_` is the user access token prefix and `sh_wk_` the workspace API
-// token prefix (the proposed `relayfile-agent` purpose). Introspection itself
-// answers `wrong-kind` for every relaycontrol token it does not accept, so
-// listing a prefix here never widens authority.
+// token prefix (the `relayfile-agent` purpose). Introspection itself answers
+// `wrong-kind` for every relaycontrol token it does not accept, so listing a
+// prefix here never widens authority.
 var relaycontrolTokenPrefixes = []string{
 	"sh_at_",
 	"sh_wk_",
 }
 
-// knownInactiveReasons are the `reason` values of contract v1.2. Anything
+// knownInactiveReasons are the `reason` values relaycontrol publishes. Anything
 // else is logged as "other" so upstream text never reaches our logs.
 var knownInactiveReasons = map[string]struct{}{
 	"expired":                    {},
@@ -206,8 +207,8 @@ func normalizeAuthConfig(cfg *ServerConfig) error {
 }
 
 // introspectionVerifier verifies bearer tokens by calling relaycontrol's
-// POST /internal/v1/auth/introspect (contract v1.2, relay-control PR #20 @
-// 28e9d957). Every failure fails closed: only a well-formed 200
+// POST /internal/v1/auth/introspect (AgentWorkforce/relay-control
+// src/auth/introspect.ts). Every failure fails closed: only a well-formed 200
 // {"active":true,...} response produces claims.
 //
 // Successful verdicts are cached for at most IntrospectionCacheTTL (hard cap
@@ -220,6 +221,9 @@ type introspectionVerifier struct {
 	audience string // normalized origin
 	client   *http.Client
 	cacheTTL time.Duration // <= 0 disables the cache
+	// clock supplies the time the upstream answer is evaluated at; nil means
+	// time.Now. Tests inject it.
+	clock func() time.Time
 
 	mu         sync.Mutex
 	cache      map[string]introspectionCacheEntry
@@ -331,8 +335,10 @@ func (v *introspectionVerifier) cachePut(key string, claims tokenClaims, now tim
 }
 
 // verify introspects raw (the bearer exactly as presented, without any
-// prefix stripping). It never logs the token, the secret, or bodies.
-func (v *introspectionVerifier) verify(raw string, now time.Time) (tokenClaims, *authError) {
+// prefix stripping). It never logs the token, the secret, or bodies. ctx is
+// the caller's request context: when the client goes away the upstream call
+// is abandoned instead of running to IntrospectionTimeout.
+func (v *introspectionVerifier) verify(ctx context.Context, raw string, now time.Time) (tokenClaims, *authError) {
 	if !validIntrospectionToken(raw) {
 		return tokenClaims{}, introspectionUnauthorized("invalid token")
 	}
@@ -341,16 +347,31 @@ func (v *introspectionVerifier) verify(raw string, now time.Time) (tokenClaims, 
 		return claims, nil
 	}
 
-	payload, err := v.call(raw)
+	payload, err := v.call(ctx, raw)
 	if err != nil {
 		return tokenClaims{}, err
 	}
-	claims, authErr := v.claimsFromResponse(payload, now)
+	// The answer is judged at the time it arrived, never at the earlier
+	// request timestamp: a token whose exp passed while relaycontrol was
+	// slow is expired, not accepted once. The cache entry below still
+	// starts its TTL at the request timestamp, which only shortens it.
+	answeredAt := now
+	if at := v.now(); at.After(now) {
+		answeredAt = at
+	}
+	claims, authErr := v.claimsFromResponse(payload, answeredAt)
 	if authErr != nil {
 		return tokenClaims{}, authErr
 	}
 	v.cachePut(key, claims, now)
 	return claims, nil
+}
+
+func (v *introspectionVerifier) now() time.Time {
+	if v.clock != nil {
+		return v.clock()
+	}
+	return time.Now().UTC()
 }
 
 func (v *introspectionVerifier) endpointHost() string {
@@ -362,12 +383,15 @@ func (v *introspectionVerifier) endpointHost() string {
 
 // call performs the HTTP exchange and returns the decoded JSON object of a
 // 200 response. Every other outcome is a 503.
-func (v *introspectionVerifier) call(raw string) (map[string]any, *authError) {
+func (v *introspectionVerifier) call(ctx context.Context, raw string) (map[string]any, *authError) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	body, err := json.Marshal(introspectionRequestBody{Token: raw, Aud: v.audience})
 	if err != nil {
 		return nil, introspectionUnavailable("introspection unreachable")
 	}
-	req, err := http.NewRequest(http.MethodPost, v.endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, v.endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, introspectionUnavailable("introspection unreachable")
 	}
@@ -426,7 +450,9 @@ func describeTransportError(err error) string {
 	switch {
 	case errors.Is(err, errIntrospectionRedirect):
 		return "redirect refused"
-	case errors.As(err, &netErr) && netErr.Timeout():
+	case errors.Is(err, context.Canceled):
+		return "canceled by caller"
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &netErr) && netErr.Timeout():
 		return "timeout"
 	default:
 		return "transport error"

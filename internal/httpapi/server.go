@@ -378,7 +378,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			scopePath = "/"
 		}
 	}
-	claims, authErr := authorizeBearer(r.Header.Get("Authorization"), s.bearerVerifier, workspaceID, requiredScope, scopePath, time.Now().UTC())
+	claims, authErr := authorizeBearer(r.Context(), r.Header.Get("Authorization"), s.bearerVerifier, workspaceID, requiredScope, scopePath, time.Now().UTC())
 	if authErr != nil {
 		writeError(w, authErr.status, authErr.code, authErr.message, getCorrelationID(r))
 		return
@@ -551,7 +551,7 @@ func (s *Server) handleAdminReplay(w http.ResponseWriter, r *http.Request, parts
 		writeError(w, http.StatusNotFound, "not_found", "route not found", getCorrelationID(r))
 		return
 	}
-	if _, authErr := authorizeBearer(r.Header.Get("Authorization"), s.bearerVerifier, "", "admin:replay", "", time.Now().UTC()); authErr != nil {
+	if _, authErr := authorizeBearer(r.Context(), r.Header.Get("Authorization"), s.bearerVerifier, "", "admin:replay", "", time.Now().UTC()); authErr != nil {
 		writeError(w, authErr.status, authErr.code, authErr.message, getCorrelationID(r))
 		return
 	}
@@ -590,7 +590,7 @@ func (s *Server) handleAdminReplay(w http.ResponseWriter, r *http.Request, parts
 }
 
 func (s *Server) handleAdminBackends(w http.ResponseWriter, r *http.Request) {
-	claims, authErr := authorizeBearer(r.Header.Get("Authorization"), s.bearerVerifier, "", "", "", time.Now().UTC())
+	claims, authErr := authorizeBearer(r.Context(), r.Header.Get("Authorization"), s.bearerVerifier, "", "", "", time.Now().UTC())
 	if authErr != nil {
 		writeError(w, authErr.status, authErr.code, authErr.message, getCorrelationID(r))
 		return
@@ -608,7 +608,7 @@ func (s *Server) handleAdminBackends(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminCheckpointSeals(w http.ResponseWriter, r *http.Request) {
-	claims, authErr := authorizeBearer(r.Header.Get("Authorization"), s.bearerVerifier, "", "", "", time.Now().UTC())
+	claims, authErr := authorizeBearer(r.Context(), r.Header.Get("Authorization"), s.bearerVerifier, "", "", "", time.Now().UTC())
 	if authErr != nil {
 		writeError(w, authErr.status, authErr.code, authErr.message, getCorrelationID(r))
 		return
@@ -630,7 +630,7 @@ func (s *Server) handleAdminCheckpointSealReconcile(w http.ResponseWriter, r *ht
 		writeError(w, http.StatusNotFound, "not_found", "route not found", getCorrelationID(r))
 		return
 	}
-	if _, authErr := authorizeBearer(r.Header.Get("Authorization"), s.bearerVerifier, "", "admin:replay", "", time.Now().UTC()); authErr != nil {
+	if _, authErr := authorizeBearer(r.Context(), r.Header.Get("Authorization"), s.bearerVerifier, "", "admin:replay", "", time.Now().UTC()); authErr != nil {
 		writeError(w, authErr.status, authErr.code, authErr.message, getCorrelationID(r))
 		return
 	}
@@ -665,7 +665,7 @@ func (s *Server) handleAdminCheckpointSealReconcile(w http.ResponseWriter, r *ht
 }
 
 func (s *Server) handleAdminIngress(w http.ResponseWriter, r *http.Request) {
-	claims, authErr := authorizeBearer(r.Header.Get("Authorization"), s.bearerVerifier, "", "", "", time.Now().UTC())
+	claims, authErr := authorizeBearer(r.Context(), r.Header.Get("Authorization"), s.bearerVerifier, "", "", "", time.Now().UTC())
 	if authErr != nil {
 		writeError(w, authErr.status, authErr.code, authErr.message, getCorrelationID(r))
 		return
@@ -1004,7 +1004,7 @@ func (s *Server) handleAdminIngress(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminSync(w http.ResponseWriter, r *http.Request) {
-	claims, authErr := authorizeBearer(r.Header.Get("Authorization"), s.bearerVerifier, "", "", "", time.Now().UTC())
+	claims, authErr := authorizeBearer(r.Context(), r.Header.Get("Authorization"), s.bearerVerifier, "", "", "", time.Now().UTC())
 	if authErr != nil {
 		writeError(w, authErr.status, authErr.code, authErr.message, getCorrelationID(r))
 		return

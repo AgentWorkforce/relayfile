@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto"
 	"crypto/hmac"
 	"crypto/rsa"
@@ -98,8 +99,11 @@ func newBearerVerifier(cfg ServerConfig) *bearerVerifier {
 	return verifier
 }
 
-func authorizeBearer(authHeader string, verifier *bearerVerifier, workspaceID, requiredScope, requiredPath string, now time.Time) (tokenClaims, *authError) {
-	claims, err := parseBearer(authHeader, verifier, now)
+// authorizeBearer verifies the bearer and applies the workspace/scope/path
+// checks. ctx is the caller's request context and bounds any upstream
+// introspection call.
+func authorizeBearer(ctx context.Context, authHeader string, verifier *bearerVerifier, workspaceID, requiredScope, requiredPath string, now time.Time) (tokenClaims, *authError) {
+	claims, err := parseBearer(ctx, authHeader, verifier, now)
 	if err != nil {
 		return tokenClaims{}, err
 	}
@@ -171,7 +175,7 @@ func stripRelayauthTokenPrefix(raw string) string {
 	return raw
 }
 
-func parseBearer(authHeader string, verifier *bearerVerifier, now time.Time) (tokenClaims, *authError) {
+func parseBearer(ctx context.Context, authHeader string, verifier *bearerVerifier, now time.Time) (tokenClaims, *authError) {
 	if !strings.HasPrefix(authHeader, "Bearer ") {
 		return tokenClaims{}, &authError{
 			status:  401,
@@ -184,12 +188,12 @@ func parseBearer(authHeader string, verifier *bearerVerifier, now time.Time) (to
 	case AuthModeIntrospection:
 		// Every bearer goes to relaycontrol as presented: no relay_ prefix
 		// stripping, and JWKS is never consulted.
-		return verifier.introspect(raw, now)
+		return verifier.introspect(ctx, raw, now)
 	case AuthModeDual:
 		// No cross-fallback: a relaycontrol token never triggers a JWKS
 		// fetch and a JWT is never sent to introspection.
 		if hasRelaycontrolTokenPrefix(raw) {
-			return verifier.introspect(raw, now)
+			return verifier.introspect(ctx, raw, now)
 		}
 		if len(strings.Split(stripRelayauthTokenPrefix(raw), ".")) != 3 {
 			return tokenClaims{}, &authError{status: 401, code: "unauthorized", message: "invalid token"}
@@ -198,11 +202,11 @@ func parseBearer(authHeader string, verifier *bearerVerifier, now time.Time) (to
 	return parseJWTBearer(raw, verifier, now)
 }
 
-func (v *bearerVerifier) introspect(raw string, now time.Time) (tokenClaims, *authError) {
+func (v *bearerVerifier) introspect(ctx context.Context, raw string, now time.Time) (tokenClaims, *authError) {
 	if v.introspection == nil {
 		return tokenClaims{}, introspectionUnavailable("introspection unreachable")
 	}
-	return v.introspection.verify(raw, now)
+	return v.introspection.verify(ctx, raw, now)
 }
 
 // parseJWTBearer verifies raw (the bearer without the "Bearer " prefix) as
