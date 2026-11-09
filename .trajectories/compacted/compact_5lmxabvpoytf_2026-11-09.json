@@ -1,0 +1,48 @@
+{
+  "id": "compact_5lmxabvpoytf",
+  "version": 1,
+  "type": "compacted",
+  "compactedAt": "2026-11-09T17:00:40.609Z",
+  "sourceTrajectories": [
+    "traj_h1x5cqr1ixoz"
+  ],
+  "dateRange": {
+    "start": "2026-11-09T16:16:55.146Z",
+    "end": "2026-11-09T17:00:36.423Z"
+  },
+  "summary": {
+    "totalDecisions": 2,
+    "totalEvents": 2,
+    "uniqueAgents": [
+      "default"
+    ]
+  },
+  "decisionGroups": [
+    {
+      "category": "architecture",
+      "decisions": [
+        {
+          "question": "Validate persisted snapshot structure only for verified PostgreSQL startup",
+          "chosen": "Validate persisted snapshot structure only for verified PostgreSQL startup",
+          "reasoning": "A missing row is a fresh store; existing null or partial JSON must not start empty and overwrite saved state. Required fields follow the actual Store serializer, while legacy decoding and optional fields remain compatible.",
+          "fromTrajectory": "traj_h1x5cqr1ixoz"
+        }
+      ]
+    },
+    {
+      "category": "api",
+      "decisions": [
+        {
+          "question": "Keep verified startup fail-closed without repairing stored state or privileges",
+          "chosen": "Keep verified startup fail-closed without repairing stored state or privileges",
+          "reasoning": "Validate serialized snapshot fields and queued identity coherence before workers, preserve shared pool lifetime through worker completion, reject unsafe runtime schema or sequence state, and capture the verified CA bytes in an injected PostgreSQL TLS dialer. Legacy startup and generic queue APIs keep their existing behavior.",
+          "fromTrajectory": "traj_h1x5cqr1ixoz"
+        }
+      ]
+    }
+  ],
+  "keyLearnings": [],
+  "keyFindings": [],
+  "filesAffected": [],
+  "commits": []
+}

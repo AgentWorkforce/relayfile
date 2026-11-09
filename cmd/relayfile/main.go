@@ -16,6 +16,16 @@ import (
 )
 
 func main() {
+	postgres, err := parsePostgresCommand(os.Args[1:], os.Stdin)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if postgres != nil && postgres.action != "serve" {
+		if err := executePostgresCommand(postgres, os.Stdout); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	addrEnv := strings.TrimSpace(os.Getenv("RELAYFILE_ADDR"))
 	addr := addrEnv
 	if addr == "" {
@@ -39,12 +49,19 @@ func main() {
 		log.Println("WARNING: RELAYFILE_DEV_MODE enabled with the built-in internal HMAC secret — local development only, do not use in production")
 	}
 
-	stateBackend, envelopeQueue, writebackQueue, err := buildStorageBackendsFromEnv()
+	var stateBackend relayfile.StateBackend
+	var envelopeQueue relayfile.EnvelopeQueue
+	var writebackQueue relayfile.WritebackQueue
+	if postgres != nil {
+		stateBackend, envelopeQueue, writebackQueue, err = buildVerifiedStorage(postgres)
+	} else {
+		stateBackend, envelopeQueue, writebackQueue, err = buildStorageBackendsFromEnv()
+	}
 	if err != nil {
 		log.Fatalf("failed to initialize storage backends: %v", err)
 	}
 
-	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{
+	storeOptions := relayfile.StoreOptions{
 		StateBackend:           stateBackend,
 		StateFile:              os.Getenv("RELAYFILE_STATE_FILE"),
 		MaxWritebackAttempts:   intEnv("RELAYFILE_MAX_WRITEBACK_ATTEMPTS", 0),
@@ -63,7 +80,17 @@ func main() {
 		Adapters:               buildAdaptersFromEnv(),
 		BackendProfile:         strings.TrimSpace(os.Getenv("RELAYFILE_BACKEND_PROFILE")),
 		ExternalWritebackMode:  boolEnv("RELAYFILE_EXTERNAL_WRITEBACK", true),
-	})
+	}
+	var store *relayfile.Store
+	if postgres != nil {
+		storeOptions.BackendProfile = "production"
+		store, err = relayfile.NewStoreWithOptionsChecked(storeOptions)
+		if err != nil {
+			log.Fatal("postgres_" + err.Error())
+		}
+	} else {
+		store = relayfile.NewStoreWithOptions(storeOptions)
+	}
 	auth, err := authSettingsFromEnv()
 	if err != nil {
 		log.Fatalf("invalid relayfile auth config: %v", err)

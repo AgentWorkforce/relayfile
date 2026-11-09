@@ -552,39 +552,41 @@ type eventSubscriber struct {
 }
 
 type Store struct {
-	mu                      sync.RWMutex
-	queueMu                 sync.Mutex
-	subscriberMu            sync.RWMutex
-	workspaces              map[string]*workspaceState
-	forks                   map[string]*forkState
-	forkByWorkspaceProposal map[string]string
-	forkByProposal          map[string]string
-	expiredForks            map[string]time.Time
-	forkTimers              map[string]*time.Timer
-	revCounter              uint64
-	opCounter               uint64
-	eventCounter            uint64
-	envelopesByID           map[string]WebhookEnvelopeRequest
-	deliveryIndex           map[string]string
-	processedEnvs           map[string]bool
-	processingEnvs          map[string]bool
-	stateBackend            StateBackend
-	writebackQueue          WritebackQueue
-	envelopeQueue           EnvelopeQueue
-	queuedWritebacks        map[string]struct{}
-	queuedEnvelopes         map[string]struct{}
-	ingressByWS             map[string]ingressCounter
-	coalesceIndex           map[string]string
-	envelopeAttempts        map[string]int
-	envelopeNextAttempt     map[string]time.Time
-	deadLetters             map[string]EnvelopeDeadLetter
-	checkpointSeals         map[string]checkpointSealRecord
-	checkpointGenerations   map[string]uint64
-	checkpointConsumerKeys  map[string]checkpointConsumerBinding
-	providerWrite           ProviderWriteFunc
-	providerWriteConfigured bool
-	providerWriteAction     ProviderWriteActionFunc
-	adapters                map[string]ProviderAdapter
+	mu                        sync.RWMutex
+	queueMu                   sync.Mutex
+	subscriberMu              sync.RWMutex
+	workspaces                map[string]*workspaceState
+	forks                     map[string]*forkState
+	forkByWorkspaceProposal   map[string]string
+	forkByProposal            map[string]string
+	expiredForks              map[string]time.Time
+	forkTimers                map[string]*time.Timer
+	revCounter                uint64
+	opCounter                 uint64
+	eventCounter              uint64
+	envelopesByID             map[string]WebhookEnvelopeRequest
+	deliveryIndex             map[string]string
+	processedEnvs             map[string]bool
+	processingEnvs            map[string]bool
+	stateBackend              StateBackend
+	startupStateLoaded        bool
+	closeBackendsAfterWorkers bool
+	writebackQueue            WritebackQueue
+	envelopeQueue             EnvelopeQueue
+	queuedWritebacks          map[string]struct{}
+	queuedEnvelopes           map[string]struct{}
+	ingressByWS               map[string]ingressCounter
+	coalesceIndex             map[string]string
+	envelopeAttempts          map[string]int
+	envelopeNextAttempt       map[string]time.Time
+	deadLetters               map[string]EnvelopeDeadLetter
+	checkpointSeals           map[string]checkpointSealRecord
+	checkpointGenerations     map[string]uint64
+	checkpointConsumerKeys    map[string]checkpointConsumerBinding
+	providerWrite             ProviderWriteFunc
+	providerWriteConfigured   bool
+	providerWriteAction       ProviderWriteActionFunc
+	adapters                  map[string]ProviderAdapter
 	// revisionProvenance is an in-memory-only, bounded ledger of
 	// (workspaceID, path, revision) -> content hash, used by MergeFile to
 	// verify a caller-supplied merge base actually matches what was really
@@ -904,6 +906,18 @@ func NewStore() *Store {
 }
 
 func NewStoreWithOptions(opts StoreOptions) *Store {
+	store, _ := newStoreWithOptions(opts, false)
+	return store
+}
+
+// NewStoreWithOptionsChecked refuses a failed persisted-state load before boot
+// maintenance, timers or queue workers can start. The caller owns backend
+// cleanup on failure. Existing callers retain the historical constructor.
+func NewStoreWithOptionsChecked(opts StoreOptions) (*Store, error) {
+	return newStoreWithOptions(opts, true)
+}
+
+func newStoreWithOptions(opts StoreOptions, checked bool) (*Store, error) {
 	maxAttempts := opts.MaxWritebackAttempts
 	if maxAttempts <= 0 {
 		maxAttempts = 3
@@ -968,6 +982,10 @@ func NewStoreWithOptions(opts StoreOptions) *Store {
 	if stateBackend == nil && strings.TrimSpace(opts.StateFile) != "" {
 		stateBackend = NewJSONFileStateBackend(opts.StateFile)
 	}
+	closeBackendsAfterWorkers := checked
+	if postgres, ok := stateBackend.(*PostgresStateBackend); ok && postgres.qualified {
+		closeBackendsAfterWorkers = true
+	}
 	queueCtx, queueCancel := context.WithCancel(context.Background())
 
 	adapters := map[string]ProviderAdapter{}
@@ -983,56 +1001,72 @@ func NewStoreWithOptions(opts StoreOptions) *Store {
 	}
 
 	s := &Store{
-		workspaces:              map[string]*workspaceState{},
-		forks:                   map[string]*forkState{},
-		forkByWorkspaceProposal: map[string]string{},
-		forkByProposal:          map[string]string{},
-		expiredForks:            map[string]time.Time{},
-		forkTimers:              map[string]*time.Timer{},
-		envelopesByID:           map[string]WebhookEnvelopeRequest{},
-		deliveryIndex:           map[string]string{},
-		processedEnvs:           map[string]bool{},
-		processingEnvs:          map[string]bool{},
-		stateBackend:            stateBackend,
-		writebackQueue:          writebackQueue,
-		envelopeQueue:           envelopeQueue,
-		queuedWritebacks:        map[string]struct{}{},
-		queuedEnvelopes:         map[string]struct{}{},
-		ingressByWS:             map[string]ingressCounter{},
-		coalesceIndex:           map[string]string{},
-		envelopeAttempts:        map[string]int{},
-		envelopeNextAttempt:     map[string]time.Time{},
-		deadLetters:             map[string]EnvelopeDeadLetter{},
-		checkpointSeals:         map[string]checkpointSealRecord{},
-		checkpointGenerations:   map[string]uint64{},
-		checkpointConsumerKeys:  map[string]checkpointConsumerBinding{},
-		revisionProvenance:      map[string][]revisionProvenanceEntry{},
-		providerWrite:           writer,
-		providerWriteConfigured: legacyWriterConfigured,
-		providerWriteAction:     actionWriter,
-		adapters:                adapters,
-		backendProfile:          backendProfile,
-		maxAttempts:             maxAttempts,
-		retryDelay:              retryDelay,
-		maxEnvelopeAttempts:     maxEnvelopeAttempts,
-		envelopeRetryDelay:      envelopeRetryDelay,
-		suppressionWindow:       suppressionWindow,
-		coalesceWindow:          coalesceWindow,
-		suppressions:            map[string]time.Time{},
-		maxStoredEnvelopes:      maxStoredEnvelopes,
-		providerMaxConcurrency:  providerMaxConcurrency,
-		providerSemaphores:      map[string]chan struct{}{},
-		subscribers:             map[string]map[uint64]*eventSubscriber{},
-		deleteStormThreshold:    opts.DeleteStormThreshold,
-		deleteStormWindow:       opts.DeleteStormWindow,
-		deleteStormAdmissions:   map[string][]time.Time{},
-		staleRunningOpThreshold: opts.StaleRunningOpThreshold,
-		closed:                  make(chan struct{}),
-		queueCtx:                queueCtx,
-		queueCancel:             queueCancel,
+		workspaces:                map[string]*workspaceState{},
+		forks:                     map[string]*forkState{},
+		forkByWorkspaceProposal:   map[string]string{},
+		forkByProposal:            map[string]string{},
+		expiredForks:              map[string]time.Time{},
+		forkTimers:                map[string]*time.Timer{},
+		envelopesByID:             map[string]WebhookEnvelopeRequest{},
+		deliveryIndex:             map[string]string{},
+		processedEnvs:             map[string]bool{},
+		processingEnvs:            map[string]bool{},
+		stateBackend:              stateBackend,
+		closeBackendsAfterWorkers: closeBackendsAfterWorkers,
+		writebackQueue:            writebackQueue,
+		envelopeQueue:             envelopeQueue,
+		queuedWritebacks:          map[string]struct{}{},
+		queuedEnvelopes:           map[string]struct{}{},
+		ingressByWS:               map[string]ingressCounter{},
+		coalesceIndex:             map[string]string{},
+		envelopeAttempts:          map[string]int{},
+		envelopeNextAttempt:       map[string]time.Time{},
+		deadLetters:               map[string]EnvelopeDeadLetter{},
+		checkpointSeals:           map[string]checkpointSealRecord{},
+		checkpointGenerations:     map[string]uint64{},
+		checkpointConsumerKeys:    map[string]checkpointConsumerBinding{},
+		revisionProvenance:        map[string][]revisionProvenanceEntry{},
+		providerWrite:             writer,
+		providerWriteConfigured:   legacyWriterConfigured,
+		providerWriteAction:       actionWriter,
+		adapters:                  adapters,
+		backendProfile:            backendProfile,
+		maxAttempts:               maxAttempts,
+		retryDelay:                retryDelay,
+		maxEnvelopeAttempts:       maxEnvelopeAttempts,
+		envelopeRetryDelay:        envelopeRetryDelay,
+		suppressionWindow:         suppressionWindow,
+		coalesceWindow:            coalesceWindow,
+		suppressions:              map[string]time.Time{},
+		maxStoredEnvelopes:        maxStoredEnvelopes,
+		providerMaxConcurrency:    providerMaxConcurrency,
+		providerSemaphores:        map[string]chan struct{}{},
+		subscribers:               map[string]map[uint64]*eventSubscriber{},
+		deleteStormThreshold:      opts.DeleteStormThreshold,
+		deleteStormWindow:         opts.DeleteStormWindow,
+		deleteStormAdmissions:     map[string][]time.Time{},
+		staleRunningOpThreshold:   opts.StaleRunningOpThreshold,
+		closed:                    make(chan struct{}),
+		queueCtx:                  queueCtx,
+		queueCancel:               queueCancel,
 	}
-	s.seedQueuedIndexesFromQueues()
-	_ = s.loadFromDisk()
+	// In checked startup load before even reading queue snapshots; otherwise a
+	// broken persistence connection could look like an empty new workspace.
+	if checked {
+		if err := s.loadFromDisk(); err != nil {
+			queueCancel()
+			return nil, errors.New("persistent_state_load_failed")
+		}
+	}
+	if checked {
+		if err := s.seedQueuedIndexesChecked(); err != nil {
+			queueCancel()
+			return nil, errors.New("persistent_queue_load_failed")
+		}
+	} else {
+		s.seedQueuedIndexesFromQueues()
+		_ = s.loadFromDisk()
+	}
 	// #249: quarantine rehydrated delete storms BEFORE the boot re-enqueue
 	// scan below — a deploy is a restart, and the scan would otherwise hand
 	// a pending file_delete burst to the new executor.
@@ -1138,7 +1172,7 @@ func NewStoreWithOptions(opts StoreOptions) *Store {
 			})
 		}
 	}
-	return s
+	return s, nil
 }
 
 func (s *Store) seedQueuedIndexesFromQueues() {
@@ -1164,6 +1198,53 @@ func (s *Store) seedQueuedIndexesFromQueues() {
 	}
 }
 
+func (s *Store) seedQueuedIndexesChecked() error {
+	var ids []string
+	if snapshotter, ok := s.envelopeQueue.(interface{ SnapshotEnvelopeIDsChecked() ([]string, error) }); ok {
+		var err error
+		ids, err = snapshotter.SnapshotEnvelopeIDsChecked()
+		if err != nil {
+			return err
+		}
+	} else if snapshotter, ok := s.envelopeQueue.(envelopeQueueSnapshotter); ok {
+		ids = snapshotter.SnapshotEnvelopeIDs()
+	} else if s.envelopeQueue != nil && s.envelopeQueue.Depth() != 0 {
+		return errors.New("persistent_queue_state_mismatch")
+	}
+	for _, id := range ids {
+		if _, present := s.envelopesByID[id]; !s.startupStateLoaded || !present || strings.TrimSpace(id) == "" {
+			return errors.New("persistent_queue_state_mismatch")
+		}
+		s.queuedEnvelopes[id] = struct{}{}
+	}
+	var tasks []WritebackQueueItem
+	if snapshotter, ok := s.writebackQueue.(interface {
+		SnapshotWritebacksChecked() ([]WritebackQueueItem, error)
+	}); ok {
+		var err error
+		tasks, err = snapshotter.SnapshotWritebacksChecked()
+		if err != nil {
+			return err
+		}
+	} else if snapshotter, ok := s.writebackQueue.(writebackQueueSnapshotter); ok {
+		tasks = snapshotter.SnapshotWritebacks()
+	} else if s.writebackQueue != nil && s.writebackQueue.Depth() != 0 {
+		return errors.New("persistent_queue_state_mismatch")
+	}
+	for _, task := range tasks {
+		workspace := s.workspaces[task.WorkspaceID]
+		if !s.startupStateLoaded || strings.TrimSpace(task.WorkspaceID) == "" || strings.TrimSpace(task.OpID) == "" || workspace == nil {
+			return errors.New("persistent_queue_state_mismatch")
+		}
+		operation, present := workspace.Ops[task.OpID]
+		if !present || (task.Path != "" && task.Path != operation.Path) || (task.Revision != "" && task.Revision != operation.Revision) {
+			return errors.New("persistent_queue_state_mismatch")
+		}
+		s.queuedWritebacks[task.OpID] = struct{}{}
+	}
+	return nil
+}
+
 func (s *Store) Close() {
 	s.closeOnce.Do(func() {
 		close(s.closed)
@@ -1179,16 +1260,23 @@ func (s *Store) Close() {
 		if s.queueCancel != nil {
 			s.queueCancel()
 		}
+		// Close receives before waiting, including supplied queues which only
+		// unblock Dequeue on Close. Verified queues do not own the shared pool.
 		if s.envelopeQueue != nil {
 			_ = s.envelopeQueue.Close()
 		}
 		if s.writebackQueue != nil {
 			_ = s.writebackQueue.Close()
 		}
+		if s.closeBackendsAfterWorkers {
+			s.wg.Wait()
+		}
 		if closer, ok := s.stateBackend.(stateBackendCloser); ok && closer != nil {
 			_ = closer.Close()
 		}
-		s.wg.Wait()
+		if !s.closeBackendsAfterWorkers {
+			s.wg.Wait()
+		}
 	})
 }
 
@@ -4850,6 +4938,7 @@ func (s *Store) loadFromDisk() error {
 	if snapshot == nil {
 		return nil
 	}
+	s.startupStateLoaded = true
 	if snapshot.Workspaces != nil {
 		s.workspaces = snapshot.Workspaces
 		for _, ws := range s.workspaces {

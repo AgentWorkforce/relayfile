@@ -1,0 +1,37 @@
+{
+  "id": "compact_d956vrmjjwsu",
+  "version": 1,
+  "type": "compacted",
+  "compactedAt": "2026-11-09T18:01:28.281Z",
+  "sourceTrajectories": [
+    "traj_lxw7p5jfy1r7"
+  ],
+  "dateRange": {
+    "start": "2026-11-09T17:35:45.550Z",
+    "end": "2026-11-09T18:01:21.341Z"
+  },
+  "summary": {
+    "totalDecisions": 1,
+    "totalEvents": 1,
+    "uniqueAgents": [
+      "default"
+    ]
+  },
+  "decisionGroups": [
+    {
+      "category": "database",
+      "decisions": [
+        {
+          "question": "Make the state backend the sole owner of verified shared pools",
+          "chosen": "Make the state backend the sole owner of verified shared pools",
+          "reasoning": "Close queue receives before waiting so supplied queues can unblock, while verified queues leave shared database cleanup to the state backend after workers persist. Validate authoritative snapshot object names and workspace maps before load, require generated operation counters to cover stored identities, and compare nonempty queued writeback fields without changing supported replay omissions.",
+          "fromTrajectory": "traj_lxw7p5jfy1r7"
+        }
+      ]
+    }
+  ],
+  "keyLearnings": [],
+  "keyFindings": [],
+  "filesAffected": [],
+  "commits": []
+}
