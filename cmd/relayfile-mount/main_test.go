@@ -1724,3 +1724,72 @@ func stringSlicesEqual(a, b []string) bool {
 	}
 	return true
 }
+
+func writeCredsFileAtomically(t *testing.T, path, payload string) {
+	t.Helper()
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInstallCredsFileRefreshUsesPushedAccessTokenOnNextRequest(t *testing.T) {
+	credsFile := filepath.Join(t.TempDir(), "access.json")
+	future := time.Now().Add(15 * time.Minute).UTC().Format(time.RFC3339)
+	writeCredsFileAtomically(t, credsFile, fmt.Sprintf(`{"token":"first-token","expiresAt":%q}`, future))
+
+	var seen []string
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"path":"/slack","entries":[],"nextCursor":null}`))
+	}))
+	defer server.Close()
+
+	client := mountsync.NewHTTPClient(server.URL, "first-token", server.Client())
+	installCredsFileRefresh(client, mountConfig{credsFile: credsFile})
+
+	if _, err := client.ListTree(context.Background(), "ws_auth", "/slack", 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	writeCredsFileAtomically(t, credsFile, fmt.Sprintf(`{"token":"pushed-token","expiresAt":%q}`, future))
+	if _, err := client.ListTree(context.Background(), "ws_auth", "/slack", 1, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"Bearer first-token", "Bearer pushed-token"}
+	if len(seen) != len(want) || seen[0] != want[0] || seen[1] != want[1] {
+		t.Fatalf("expected requests %v without a 401 round trip, got %v", want, seen)
+	}
+}
+
+func TestCredsFileTokenSourceIgnoresExpiredAccessOnlyToken(t *testing.T) {
+	credsFile := filepath.Join(t.TempDir(), "access.json")
+	future := time.Now().Add(15 * time.Minute).UTC().Format(time.RFC3339)
+	past := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
+	writeCredsFileAtomically(t, credsFile, fmt.Sprintf(`{"token":"live-token","expiresAt":%q}`, future))
+
+	source := newCredsFileTokenSource(credsFile)
+	if _, changed := source.poll(); changed {
+		t.Fatal("startup file must not count as a rotation")
+	}
+	writeCredsFileAtomically(t, credsFile, fmt.Sprintf(`{"token":"expired-token","expiresAt":%q}`, past))
+	if token, changed := source.poll(); changed {
+		t.Fatalf("expired access-only token must not be installed, got changed token of length %d", len(token))
+	}
+	writeCredsFileAtomically(t, credsFile, fmt.Sprintf(`{"token":"next-token","expiresAt":%q}`, future))
+	if token, changed := source.poll(); !changed || token != "next-token" {
+		t.Fatalf("expected next-token rotation, got changed=%v", changed)
+	}
+	if _, changed := source.poll(); changed {
+		t.Fatal("unchanged file must not report a rotation")
+	}
+}

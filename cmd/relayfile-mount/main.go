@@ -874,6 +874,7 @@ type mountCredsFile struct {
 	RefreshURL              string `json:"refreshUrl,omitempty"`
 	AccessTokenExpiresAt    string `json:"accessTokenExpiresAt,omitempty"`
 	RelayfileTokenExpiresAt string `json:"relayfileTokenExpiresAt,omitempty"`
+	ExpiresAt               string `json:"expiresAt,omitempty"`
 }
 
 func readMountCredsToken(path string) (string, error) {
@@ -910,6 +911,7 @@ func installCredsFileRefresh(client *mountsync.HTTPClient, cfg mountConfig) {
 	if client == nil || credsFile == "" {
 		return
 	}
+	client.SetTokenSourceFunc(newCredsFileTokenSource(credsFile).poll)
 	client.SetTokenRefreshFunc(func(currentToken string) (string, bool, error) {
 		bundle, loadErr := delegatedauth.Load(credsFile)
 		if loadErr == nil {
@@ -940,6 +942,50 @@ func installCredsFileRefresh(client *mountsync.HTTPClient, cfg mountConfig) {
 		changed := token != strings.TrimSpace(currentToken)
 		return token, changed, nil
 	})
+}
+
+// credsFileTokenSource lets a credential supervisor (for example Cloud's
+// system-held refresh worker, which atomically renames an access-only file into
+// place) rotate the mount's bearer without waiting for a 401. It stats the file
+// on every token use and re-parses it only when the file changed.
+type credsFileTokenSource struct {
+	path string
+	mu   sync.Mutex
+	last os.FileInfo
+}
+
+// newCredsFileTokenSource records the file as already consumed: startup reads
+// the bearer from it, so only a later replacement counts as a rotation.
+func newCredsFileTokenSource(path string) *credsFileTokenSource {
+	source := &credsFileTokenSource{path: path}
+	if info, err := os.Stat(path); err == nil {
+		source.last = info
+	}
+	return source
+}
+
+func (s *credsFileTokenSource) poll() (string, bool) {
+	info, err := os.Stat(s.path)
+	if err != nil {
+		return "", false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.last != nil && os.SameFile(s.last, info) &&
+		info.ModTime().Equal(s.last.ModTime()) && info.Size() == s.last.Size() {
+		return "", false
+	}
+	bundle, err := delegatedauth.Load(s.path)
+	if err != nil {
+		// A partially written file is retried on the next use.
+		return "", false
+	}
+	s.last = info
+	token := strings.TrimSpace(bundle.BearerToken())
+	if token == "" || !delegatedBearerUsable(bundle, time.Now()) {
+		return "", false
+	}
+	return token, true
 }
 
 func delegatedBearerUsable(bundle delegatedauth.Bundle, now time.Time) bool {
