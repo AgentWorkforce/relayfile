@@ -63,6 +63,13 @@ relaycontrol v1 desktop-user tokens carry no `fs:*` scopes, so relayfile
 answers them with 403 until the relayfile-scoped token class exists. Details:
 [`docs/integrations/SELF-HOST.md`](../docs/integrations/SELF-HOST.md#auth-without-relayauth-relaycontrol-introspection).
 
+For a Postgres state backend (`RELAYFILE_BACKEND_PROFILE=production` with
+`RELAYFILE_PRODUCTION_DSN`), note that `lib/pq` defaults to `sslmode=require`:
+a non-TLS Postgres needs `?sslmode=disable` in the DSN. relayfile refuses to
+start when the state backend cannot load, unless `RELAYFILE_DEV_MODE=1`, in
+which case `/health` returns 503 `degraded`. Details:
+[`docs/integrations/SELF-HOST.md`](../docs/integrations/SELF-HOST.md#postgres-state-backend).
+
 ## Teardown
 
 ```bash

@@ -37,7 +37,12 @@ paths:
       tags: [Admin]
       operationId: healthCheck
       summary: Health check endpoint
-      description: Returns a simple status indicator for load balancers and monitoring.
+      description: >-
+        Returns a simple status indicator for load balancers and monitoring.
+        Returns 503 when the configured state backend failed to load at
+        startup (the server is running on empty in-memory state, which only
+        happens with RELAYFILE_DEV_MODE enabled). The 503 body never includes
+        the underlying backend error.
       security: []
       responses:
         '200':
@@ -56,6 +61,21 @@ paths:
                     type: array
                     items:
                       type: string
+        '503':
+          description: State backend failed to load; the service is not ready
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status, error]
+                properties:
+                  status:
+                    type: string
+                    enum: [degraded]
+                  error:
+                    type: string
+                    enum: ['state backend failed to load']
 
   /v1/workspaces/{workspaceId}/fs/tree:
     get:

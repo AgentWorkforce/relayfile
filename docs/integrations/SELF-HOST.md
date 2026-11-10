@@ -198,6 +198,27 @@ from `SELFHOST_INTROSPECT_AUDIENCES` turn the token inactive (`revoked`,
 `packages/durable-actors` has its own JWT verification and does not use this
 mode; it still needs a JWKS or its own configuration.
 
+## Postgres state backend
+
+With `RELAYFILE_BACKEND_PROFILE=production`, relayfile keeps its state (and
+the envelope and writeback queues) in the Postgres database named by
+`RELAYFILE_PRODUCTION_DSN`.
+
+- **TLS:** the `lib/pq` driver defaults to `sslmode=require`. A Postgres
+  without TLS (for example an in-cluster dev database) needs
+  `?sslmode=disable` in the DSN, e.g.
+  `postgres://relayfile:<password>@postgres:5432/relayfile?sslmode=disable`.
+- **Fail closed:** if the state backend cannot load at startup (unreachable
+  host, TLS mismatch, bad credentials, `CREATE TABLE` failure), relayfile logs
+  `relayfile: state backend failed to load: ...` (DSN values redacted) and
+  exits instead of serving an empty in-memory store.
+- **Dev escape hatch:** with `RELAYFILE_DEV_MODE=1` (or `true`) the server
+  logs a loud warning and keeps running on empty in-memory state, and
+  `GET /health` answers `503 {"status":"degraded","error":"state backend failed to load"}`
+  so probes still see it as not ready. Queue workers are not started in this
+  state, so entries already in a durable envelope or writeback queue are left
+  untouched for a healthy consumer or the next repaired start.
+
 ## Paid sync-definition boundary
 
 The plumbing is OSS; the sync definitions are scoped work. A Nango/Composio sync definition decides *which objects, fields, depth, cadence, and deletion semantics* become files — choices that are customer-specific, so this repo ships the ingest scaffolding and examples, not a universal drop-in sync.

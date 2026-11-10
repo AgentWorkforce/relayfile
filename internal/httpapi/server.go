@@ -175,6 +175,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.URL.Path == "/health" && r.Method == http.MethodGet {
+		// #569: a store whose state backend failed to load is serving empty
+		// in-memory state, so report it as not ready. Never echo the load
+		// error itself: backend errors can carry hostnames or DSN fragments.
+		if s.store.LoadErr() != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "degraded", "error": "state backend failed to load"})
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "features": []string{"symlink-v1"}})
 		return
 	}
