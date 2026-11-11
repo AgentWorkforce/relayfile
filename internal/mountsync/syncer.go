@@ -4719,6 +4719,11 @@ func (s *Syncer) scheduleOutboxReceiptSettlements(records []outboxRecord) {
 			ctx, cancel := context.WithTimeout(root, timeout)
 			op, opErr := s.client.GetOperation(ctx, s.workspace, opID)
 			cancel()
+			// Owner shutdown leaves the durable receipt pending for the next
+			// mount; it must not consume retries or affect cloud health.
+			if root.Err() != nil {
+				return
+			}
 
 			s.mu.Lock()
 			current, readErr := s.readOutboxRecord(s.pendingOutboxPath(record.CommandID))
