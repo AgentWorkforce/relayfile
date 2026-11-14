@@ -190,6 +190,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleInternalWebhookEnvelope(w, r)
 		return
 	}
+	if r.URL.Path == "/v1/internal/provider-writes" && r.Method == http.MethodPost {
+		s.handleInternalProviderWrite(w, r)
+		return
+	}
 	if r.URL.Path == "/v1/admin/backends" && r.Method == http.MethodGet {
 		s.handleAdminBackends(w, r)
 		return
@@ -502,15 +506,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleInternalWebhookEnvelope(w http.ResponseWriter, r *http.Request) {
-	correlationID := getCorrelationID(r)
+// authenticateInternalRequest runs the shared internal-ingress prelude used by
+// the webhook-envelope and provider-write routes: X-Correlation-Id is
+// required, the body is read under MaxBodyBytes (413), the HMAC signature and
+// timestamp skew are verified (401) and a re-sent (timestamp, signature) pair
+// is rejected as a replay (401). On failure the response has been written and
+// ok is false.
+func (s *Server) authenticateInternalRequest(w http.ResponseWriter, r *http.Request) (correlationID string, body []byte, ok bool) {
+	correlationID = getCorrelationID(r)
 	if correlationID == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "missing X-Correlation-Id header", "")
-		return
+		return "", nil, false
 	}
-	body, ok := s.readRequestBody(w, r, correlationID)
+	body, ok = s.readRequestBody(w, r, correlationID)
 	if !ok {
-		return
+		return correlationID, nil, false
 	}
 	now := time.Now().UTC()
 	if authErr := verifyInternalHMAC(
@@ -522,16 +532,29 @@ func (s *Server) handleInternalWebhookEnvelope(w http.ResponseWriter, r *http.Re
 		s.cfg.InternalMaxSkew,
 	); authErr != nil {
 		writeError(w, authErr.status, authErr.code, authErr.message, correlationID)
-		return
+		return correlationID, nil, false
 	}
 	if !s.markInternalReplaySeen(r.Header.Get("X-Relay-Timestamp"), r.Header.Get("X-Relay-Signature"), now) {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "internal request replay detected", correlationID)
+		return correlationID, nil, false
+	}
+	return correlationID, body, true
+}
+
+func (s *Server) handleInternalWebhookEnvelope(w http.ResponseWriter, r *http.Request) {
+	correlationID, body, ok := s.authenticateInternalRequest(w, r)
+	if !ok {
 		return
 	}
 
 	var req relayfile.WebhookEnvelopeRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid json body", correlationID)
+		return
+	}
+	if req.Kind != "" {
+		// kind is assigned by the server (provider writes use their own route).
+		writeError(w, http.StatusBadRequest, "bad_request", "kind is reserved and must not be set on webhook envelopes", correlationID)
 		return
 	}
 	if req.CorrelationID == "" {
@@ -547,6 +570,45 @@ func (s *Server) handleInternalWebhookEnvelope(w http.ResponseWriter, r *http.Re
 			writeError(w, http.StatusTooManyRequests, "queue_full", err.Error(), correlationID)
 		default:
 			writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), correlationID)
+		}
+		return
+	}
+	writeJSON(w, http.StatusAccepted, queued)
+}
+
+// handleInternalProviderWrite implements POST /v1/internal/provider-writes:
+// the cloud provider-writes body on the OSS internal HMAC surface. The write
+// is queued (202) and applied asynchronously as provider_sync file events;
+// entitlement is the caller's responsibility (relayfile-control), only the
+// HMAC gates this route.
+func (s *Server) handleInternalProviderWrite(w http.ResponseWriter, r *http.Request) {
+	correlationID, body, ok := s.authenticateInternalRequest(w, r)
+	if !ok {
+		return
+	}
+
+	var req relayfile.ProviderWriteRequest
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_input", "invalid JSON: "+err.Error(), correlationID)
+		return
+	}
+	if decoder.More() {
+		writeError(w, http.StatusBadRequest, "invalid_input", "invalid JSON: trailing data after body", correlationID)
+		return
+	}
+	req.CorrelationID = correlationID
+	queued, err := s.store.IngestProviderWrite(req)
+	if err != nil {
+		switch {
+		case errors.Is(err, relayfile.ErrInvalidInput):
+			writeError(w, http.StatusBadRequest, "invalid_input", err.Error(), correlationID)
+		case errors.Is(err, relayfile.ErrQueueFull):
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusTooManyRequests, "queue_full", err.Error(), correlationID)
+		default:
+			writeError(w, http.StatusInternalServerError, "internal_error", "provider write failed", correlationID)
 		}
 		return
 	}
