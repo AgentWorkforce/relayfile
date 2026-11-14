@@ -1948,6 +1948,9 @@ type Syncer struct {
 	// real-time state lock. Production uses readLocalSnapshot directly.
 	readLocalSnapshotFn func(string, bool) (localSnapshot, error)
 	checkpointTestHook  func(string)
+	// checkpointDeferred records a coalesced checkpoint that could not be
+	// scheduled because shutdown already began; Close flushes it synchronously.
+	checkpointDeferred bool
 	// credExpiresAt is the RFC3339 expiry of the delegated access token,
 	// set by the CLI layer via SetCredentialExpiry and included in the
 	// public state as credExpiresInSecs so operators get advance warning.
@@ -2808,12 +2811,30 @@ func (s *Syncer) Close() {
 	s.checkpointVersion++
 	if s.checkpointTimer != nil && s.checkpointTimer.Stop() {
 		s.backgroundWG.Done()
+		s.checkpointDeferred = true
 	}
 	s.checkpointTimer = nil
 	s.checkpointStarted = time.Time{}
 	s.checkpointMu.Unlock()
 
 	s.backgroundWG.Wait()
+
+	// A coalesced checkpoint that was still pending (or was requested while
+	// workers drained) must not be discarded: it carries private recovery
+	// state the next mount reads before its first reconcile. Flush it once,
+	// synchronously, now that no background writer remains.
+	s.checkpointMu.Lock()
+	flush := s.checkpointDeferred
+	s.checkpointDeferred = false
+	s.checkpointMu.Unlock()
+	if flush {
+		s.mu.Lock()
+		err := s.savePrivateState()
+		s.mu.Unlock()
+		if err != nil {
+			s.logf("final local-write checkpoint failed during shutdown: %v", err)
+		}
+	}
 }
 
 func (s *Syncer) startBackground(run func(context.Context)) bool {
@@ -4785,6 +4806,7 @@ func (s *Syncer) scheduleLocalWriteCheckpoint() {
 		s.backgroundMu.Unlock()
 		s.checkpointTimer = nil
 		s.checkpointStarted = time.Time{}
+		s.checkpointDeferred = true
 		return
 	}
 	s.backgroundWG.Add(1)

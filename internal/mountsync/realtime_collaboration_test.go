@@ -540,10 +540,14 @@ func TestSyncerCloseJoinsRunningCheckpointWriter(t *testing.T) {
 		syncer.Close()
 		close(closed)
 	}()
+	// Establish that Close has actually begun (it marks the syncer closed
+	// before joining) so the no-return check below cannot pass vacuously
+	// just because the goroutine has not been scheduled yet.
+	waitForSyncerClosing(t, syncer)
 	select {
 	case <-closed:
 		t.Fatal("syncer Close returned while checkpoint writer was running")
-	default:
+	case <-time.After(50 * time.Millisecond):
 	}
 	close(release)
 	select {
@@ -555,6 +559,73 @@ func TestSyncerCloseJoinsRunningCheckpointWriter(t *testing.T) {
 	if err := os.RemoveAll(localDir); err != nil {
 		t.Fatalf("remove mount after Close: %v", err)
 	}
+	if _, err := os.Stat(localDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("mount root recreated after Close: %v", err)
+	}
+}
+
+// waitForSyncerClosing blocks until Close has marked the syncer closed.
+func waitForSyncerClosing(t *testing.T, syncer *Syncer) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		syncer.backgroundMu.Lock()
+		closing := syncer.backgroundClosed
+		syncer.backgroundMu.Unlock()
+		if closing {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("syncer Close did not begin")
+}
+
+func TestSyncerCloseFlushesPendingCheckpoint(t *testing.T) {
+	localDir := t.TempDir()
+	syncer, err := NewSyncer(&fakeClient{files: map[string]RemoteFile{}}, SyncerOptions{
+		WorkspaceID: "ws_checkpoint_flush",
+		RemoteRoot:  "/",
+		LocalRoot:   localDir,
+	})
+	if err != nil {
+		t.Fatalf("new syncer: %v", err)
+	}
+	if err := syncer.savePrivateState(); err != nil {
+		t.Fatalf("seed private state: %v", err)
+	}
+
+	// Arm a coalesced checkpoint whose quiet period will not elapse before
+	// Close, then change private state the checkpoint is supposed to carry.
+	syncer.checkpointTestHook = func(stage string) {
+		if stage == "local-write-checkpoint-before-save" {
+			t.Fatal("pending checkpoint timer fired before Close stopped it")
+		}
+	}
+	syncer.mu.Lock()
+	syncer.state.EventsCursor = "cursor-before-close"
+	syncer.mu.Unlock()
+	syncer.scheduleLocalWriteCheckpoint()
+	syncer.Close()
+
+	data, err := os.ReadFile(syncer.stateFile)
+	if err != nil {
+		t.Fatalf("read private state after Close: %v", err)
+	}
+	var persisted mountState
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatalf("decode private state: %v", err)
+	}
+	if persisted.EventsCursor != "cursor-before-close" {
+		t.Fatalf("Close discarded the pending checkpoint: eventsCursor=%q", persisted.EventsCursor)
+	}
+
+	// A checkpoint requested after shutdown began must not recreate a writer;
+	// Close already flushed and the mount root must stay removable.
+	syncer.scheduleLocalWriteCheckpoint()
+	if err := os.RemoveAll(localDir); err != nil {
+		t.Fatalf("remove mount after Close: %v", err)
+	}
+	time.Sleep(2 * localWriteCheckpointMaxWait)
 	if _, err := os.Stat(localDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("mount root recreated after Close: %v", err)
 	}
