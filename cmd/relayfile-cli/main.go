@@ -427,7 +427,10 @@ type integrationCatalogEntry struct {
 }
 
 type cloudIntegrationListEntry struct {
-	Provider       string `json:"provider"`
+	Provider string `json:"provider"`
+	// Name is the service-account slot name; empty for the default
+	// connection. Older Cloud deployments omit it entirely.
+	Name           string `json:"name,omitempty"`
 	Status         string `json:"status,omitempty"`
 	LagSeconds     int    `json:"lagSeconds,omitempty"`
 	LastEventAt    string `json:"lastEventAt,omitempty"`
@@ -843,7 +846,7 @@ func printIntegrationUsage(w io.Writer, subcommand string) {
 	case "list":
 		fmt.Fprintf(w, "Usage: %s integration list [--workspace NAME] [--json]\n", programName())
 	case "disconnect":
-		fmt.Fprintf(w, "Usage: %s integration disconnect PROVIDER [--workspace NAME] [--yes]\n", programName())
+		fmt.Fprintf(w, "Usage: %s integration disconnect PROVIDER [--workspace NAME] [--name SLOT] [--yes]\n", programName())
 	case "adopt":
 		fmt.Fprintf(w, "Usage: %s integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]\n", programName())
 	case "set-metadata":
@@ -862,7 +865,7 @@ func printIntegrationUsage(w io.Writer, subcommand string) {
   %[1]s integration events PROVIDER [--subscribable] [--json] [--refresh]
   %[1]s integration describe PROVIDER [--event EVENT] [--subscribable] [--json] [--refresh]
   %[1]s integration list [--workspace NAME] [--json]
-  %[1]s integration disconnect PROVIDER [--workspace NAME] [--yes]
+  %[1]s integration disconnect PROVIDER [--workspace NAME] [--name SLOT] [--yes]
   %[1]s integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]
   %[1]s integration set-metadata PROVIDER (KEY=VALUE... | --metadata-file FILE) [--workspace NAME] [--yes]
   %[1]s integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN
@@ -952,7 +955,7 @@ Usage:
   %[1]s integration events PROVIDER [--subscribable] [--json] [--refresh]
   %[1]s integration describe PROVIDER [--event EVENT] [--subscribable] [--json] [--refresh]
   %[1]s integration list [--workspace NAME] [--json]
-  %[1]s integration disconnect PROVIDER [--workspace NAME] [--yes]
+  %[1]s integration disconnect PROVIDER [--workspace NAME] [--name SLOT] [--yes]
   %[1]s integration adopt PROVIDER --connection-id ID [--workspace NAME] [--provider-config-key KEY] [--yes]
   %[1]s integration set-metadata PROVIDER (KEY=VALUE... | --metadata-file FILE) [--workspace NAME] [--yes]
   %[1]s integration bind PROVIDER RESOURCE_OR_PATH_GLOB --channel CHANNEL --webhook ID --webhook-token TOKEN
@@ -4194,24 +4197,45 @@ func runIntegrationDisconnect(args []string, stdin io.Reader, stdout io.Writer) 
 	fs.SetOutput(io.Discard)
 	workspaceName := fs.String("workspace", "", "workspace name or id")
 	cloudAPIURL := fs.String("cloud-api-url", envOrDefault("RELAYFILE_CLOUD_API_URL", defaultCloudAPIURL), "Relayfile Cloud API URL")
+	slotName := fs.String("name", "", "named service-account connection slot to disconnect (default: the provider's default connection)")
 	yes := fs.Bool("yes", false, "skip confirmation")
 	if err := fs.Parse(normalizeFlagArgs(args, map[string]bool{
 		"workspace":     true,
 		"cloud-api-url": true,
+		"name":          true,
 		"yes":           false,
 	})); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: %s integration disconnect PROVIDER [--workspace NAME] [--yes]", programName())
+		return fmt.Errorf("usage: %s integration disconnect PROVIDER [--workspace NAME] [--name SLOT] [--yes]", programName())
 	}
 	provider := normalizeProviderID(fs.Arg(0))
+	// Only an omitted --name selects the default connection. An explicitly
+	// supplied empty value (--name "" or --name=, e.g. an unset variable in
+	// automation) is a usage error and must fail before credentials, Cloud
+	// or local state are touched; otherwise --yes would silently send an
+	// unscoped DELETE for the default row.
+	nameProvided := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "name" {
+			nameProvided = true
+		}
+	})
+	slot := strings.TrimSpace(*slotName)
+	if nameProvided && slot == "" {
+		return errors.New("--name requires a non-empty connection slot name")
+	}
 	record, err := resolveWorkspaceRecord(strings.TrimSpace(*workspaceName))
 	if err != nil {
 		return err
 	}
 	if !*yes {
-		answer, err := promptLine(stdin, stdout, fmt.Sprintf("Disconnect %q from workspace %q? [y/N]: ", provider, record.Name))
+		prompt := fmt.Sprintf("Disconnect %q from workspace %q? [y/N]: ", provider, record.Name)
+		if slot != "" {
+			prompt = fmt.Sprintf("Disconnect %q connection %q from workspace %q? [y/N]: ", provider, slot, record.Name)
+		}
+		answer, err := promptLine(stdin, stdout, prompt)
 		if err != nil {
 			return err
 		}
@@ -4229,13 +4253,18 @@ func runIntegrationDisconnect(args []string, stdin io.Reader, stdout io.Writer) 
 	if err != nil {
 		return err
 	}
-	if _, _, err := client.do(context.Background(), http.MethodDelete, fmt.Sprintf("/api/v1/workspaces/%s/integrations/%s/status", url.PathEscape(record.ID), url.PathEscape(provider)), nil); err != nil {
+	outcome, err := disconnectCloudIntegration(context.Background(), client, record.ID, provider, slot)
+	if err != nil {
 		return err
 	}
-	if err := markProviderDisconnected(record.LocalDir, provider, record.LocalLayout); err != nil {
-		return err
+	// A named slot is one connection among several; the local mirror for the
+	// provider belongs to the default connection and stays as it is.
+	if slot == "" {
+		if err := markProviderDisconnected(record.LocalDir, provider, record.LocalLayout); err != nil {
+			return err
+		}
 	}
-	fmt.Fprintf(stdout, "%s disconnected from workspace %s\n", provider, record.Name)
+	fmt.Fprint(stdout, formatIntegrationDisconnectOutcome(outcome, record.Name))
 	return nil
 }
 
