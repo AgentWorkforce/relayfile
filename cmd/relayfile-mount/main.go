@@ -615,6 +615,7 @@ func runSinglePollingMount(rootCtx context.Context, cfg mountConfig) error {
 	if err != nil {
 		return fmt.Errorf("initialize mount syncer: %w", err)
 	}
+	defer syncer.Close()
 	if _, err := mountsync.StartDiagnostics(rootCtx, cfg.pprofAddr, cfg.memlogInterval, log.Default()); err != nil {
 		return fmt.Errorf("start diagnostics: %w", err)
 	}
