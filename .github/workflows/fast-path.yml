@@ -1,0 +1,448 @@
+# Fast path: run the CI checks and build every release artifact on Blacksmith
+# runners, outside the shared GitHub-hosted queue. Anyone with write access
+# (people or agents) may start it; nothing runs until Khaliq approves the
+# fast-path environment.
+#
+# What it publishes, and what it only builds:
+# - Actors images (relayfile-actors, relayfile-actors-workspace) are pushed to
+#   GHCR tagged fast-<sha> only. It never pushes a version tag or the sha-<short>
+#   tags that publish-actors-images.yml reserves for main and release tags;
+#   deployments pin the digest printed in the run summary.
+# - npm: publish.yml uses trusted publishing (OIDC bound to that file), so the
+#   fast path does not publish. It packs all 16 @relayfile/* packages (with the
+#   mount and CLI platform binaries inside) and uploads the tarballs.
+# - The relayfile-mount release binaries and the Python SDK distributions are
+#   uploaded as workflow artifacts. Nothing goes to PyPI or a GitHub Release.
+# No npm dist-tag, git tag, image channel tag or release is created or moved.
+name: fast-path
+run-name: fast-path ${{ inputs.ref }} (${{ inputs.reason }})
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit to build (a PR branch is fine)
+        required: true
+        default: main
+      reason:
+        description: Why this needs the fast path
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: fast-path-${{ inputs.ref }}
+  cancel-in-progress: false
+env:
+  GO_VERSION: "1.22"
+  NODE_VERSION: "22"
+  NPM_CONFIG_FUND: false
+jobs:
+  gate:
+    name: Approve and resolve ref
+    environment: fast-path
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    outputs:
+      sha: ${{ steps.sha.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - id: sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  go:
+    name: Go Test & Build
+    needs: gate
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: go test ./...
+      - name: Build binaries
+        run: |
+          mkdir -p bin
+          go build -o bin/relayfile ./cmd/relayfile
+          go build -o bin/relayfile-mount ./cmd/relayfile-mount
+          go build -o bin/relayfile-cli ./cmd/relayfile-cli
+
+  sdk-typecheck:
+    name: SDK Typecheck
+    needs: gate
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: packages/sdk/typescript/package-lock.json
+      - name: Install SDK dependencies
+        working-directory: packages/sdk/typescript
+        run: npm ci
+      - name: Build core
+        run: npm run build --workspace=packages/core
+      - name: Build SDK
+        working-directory: packages/sdk/typescript
+        run: npm run build
+      - name: Typecheck SDK
+        working-directory: packages/sdk/typescript
+        run: npx tsc --noEmit
+      - name: Test SDK
+        working-directory: packages/sdk/typescript
+        run: npm run test
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+      - name: Test compiled Bun SDK entry point
+        run: npm run test:bundle:bun --workspace=packages/sdk/typescript
+
+  client-typecheck:
+    name: Client Typecheck
+    needs: gate
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - name: Check generated control-plane types
+        run: |
+          npm run codegen --workspace=@relayfile/client
+          git diff --exit-code -- packages/client/src/generated/control-plane.ts
+      - run: npm run build --workspace=@relayfile/client
+      - run: npm run typecheck --workspace=@relayfile/client
+      - run: npm run test --workspace=@relayfile/client
+
+  e2e:
+    name: E2E
+    needs: gate
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Build binaries
+        run: |
+          mkdir -p bin
+          go build -o bin/relayfile ./cmd/relayfile
+          go build -o bin/relayfile-mount ./cmd/relayfile-mount
+          go build -o bin/relayfile-cli ./cmd/relayfile-cli
+      - run: npm ci
+      - name: Run E2E suite
+        env:
+          CI: "true"
+        run: npx tsx scripts/e2e.ts --ci
+
+  backend-conformance:
+    name: Backend Conformance (Go oracle)
+    needs: gate
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - name: Run deterministic conformance gates
+        env:
+          CI: "true"
+          E2E_TELEMETRY_DISABLED: "1"
+          RELAYFILE_CONFORMANCE_SEED: fast-${{ github.run_id }}-${{ github.run_attempt }}
+        run: npm run test:conformance:local
+
+  release-tooling:
+    name: Release Tooling & Contract
+    needs: gate
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Test release scripts
+        run: npm run test:release
+      - name: Install SDK deps
+        working-directory: packages/sdk/typescript
+        run: npm ci
+      - name: Build core
+        run: npm run build --workspace=packages/core
+      - name: Build SDK
+        working-directory: packages/sdk/typescript
+        run: npm run build
+      - name: Validate contract surface
+        run: ./scripts/check-contract-surface.sh
+      - name: Validate mount qualification producer contract
+        run: |
+          node --test scripts/validate-mount-qualification-workflow.test.mjs
+          node scripts/validate-mount-qualification-workflow.mjs
+      - name: Validate protected release workflows
+        run: |
+          ./scripts/check-publish-workflow.sh
+          ./scripts/check-publish-workflow.sh .github/workflows/publish-python.yml
+          ./scripts/test-check-publish-workflow.sh
+      - name: Check SDK parity
+        run: node scripts/check-sdk-parity.mjs
+
+  python-sdk:
+    name: Python SDK Test & Build
+    needs: gate
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: packages/sdk/python
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          uv lock
+          uv sync --all-extras --locked
+      - run: uv run python -m pytest
+      - run: uv build
+      - run: uvx twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-sdk-${{ needs.gate.outputs.sha }}
+          path: packages/sdk/python/dist/*
+          if-no-files-found: error
+
+  npm-pack:
+    name: Pack npm packages and mount binaries
+    needs: [gate, go, sdk-typecheck, client-typecheck, e2e, backend-conformance, release-tooling]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: npm ci
+      - name: Build packages
+        run: |
+          # Same order as publish.yml. packages/cli cross-compiles every relayfile-cli target into packages/cli/bin.
+          npm run build --workspace=packages/core
+          npm run build --workspace=packages/sdk/typescript
+          npm run build --workspace=@relayfile/client
+          npm run build --workspace=packages/agents
+          npm run build --workspace=packages/cli
+          npm run build --workspace=packages/local-mount
+      - name: Build relayfile-mount release binaries
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          mkdir -p mount-bin
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            goos="${target%/*}"; goarch="${target#*/}"
+            out="mount-bin/relayfile-mount-${goos}-${goarch}"
+            GOOS="$goos" GOARCH="$goarch" go build \
+              -ldflags="-s -w -X main.relayfileMountVersion=${VERSION}" \
+              -o "$out" ./cmd/relayfile-mount
+            size=$(stat -c%s "$out")
+            echo "Built $out ($size bytes, v${VERSION})"
+            if [ "$size" -lt 1048576 ]; then
+              echo "ERROR: binary is suspiciously small (< 1MB)" >&2
+              exit 1
+            fi
+          done
+          ./mount-bin/relayfile-mount-linux-amd64 --help | head -20
+      - name: Place platform binaries
+        run: |
+          set -euo pipefail
+          chmod 755 packages/cli/bin/relayfile-cli-*
+          for pair in darwin-arm64:darwin-arm64 darwin-x64:darwin-amd64 linux-arm64:linux-arm64 linux-x64:linux-amd64; do
+            pkg="${pair%%:*}"; bin="${pair#*:}"
+            mkdir -p "packages/mount-$pkg/bin"
+            cp "mount-bin/relayfile-mount-$bin" "packages/mount-$pkg/bin/relayfile-mount"
+            chmod 755 "packages/mount-$pkg/bin/relayfile-mount"
+          done
+          for pair in darwin-arm64:darwin-arm64 darwin-x64:darwin-amd64 linux-arm64:linux-arm64 linux-x64:linux-amd64 win32-arm64:windows-arm64.exe win32-x64:windows-amd64.exe; do
+            pkg="${pair%%:*}"; bin="${pair#*:}"
+            name=relayfile-cli
+            case "$bin" in *.exe) name=relayfile-cli.exe ;; esac
+            test -f "packages/cli/bin/relayfile-cli-$bin"
+            mkdir -p "packages/cli-$pkg/bin"
+            cp "packages/cli/bin/relayfile-cli-$bin" "packages/cli-$pkg/bin/$name"
+            chmod 755 "packages/cli-$pkg/bin/$name"
+          done
+      - name: Pack packages
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/fast-path-packs"
+          for dir in core sdk/typescript client agents cli local-mount \
+            mount-darwin-arm64 mount-darwin-x64 mount-linux-arm64 mount-linux-x64 \
+            cli-darwin-arm64 cli-darwin-x64 cli-linux-arm64 cli-linux-x64 cli-win32-arm64 cli-win32-x64; do
+            (cd "packages/$dir" && npm pack --ignore-scripts --pack-destination "$GITHUB_WORKSPACE/fast-path-packs")
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-packages-${{ needs.gate.outputs.sha }}
+          path: fast-path-packs/*.tgz
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: relayfile-mount-binaries-${{ needs.gate.outputs.sha }}
+          path: mount-bin/*
+          if-no-files-found: error
+      - name: Summary
+        env:
+          REF: ${{ inputs.ref }}
+          SHA: ${{ needs.gate.outputs.sha }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          {
+            echo "### relayfile fast path: npm packages and binaries"
+            echo "- ref: \`$REF\` at \`$SHA\`"
+            echo "- reason: $REASON"
+            echo "- artifact: \`npm-packages-$SHA\` (not published to npm; trusted publishing is bound to publish.yml)"
+            for f in fast-path-packs/*.tgz; do echo "  - \`$(basename "$f")\`"; done
+            echo "- artifact: \`relayfile-mount-binaries-$SHA\`"
+            echo "- artifact: \`python-sdk-$SHA\` (not published to PyPI)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  images:
+    name: Publish actors images
+    needs: [gate, go, sdk-typecheck, client-typecheck, e2e, backend-conformance, release-tooling]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+      - id: meta
+        run: echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Build and push relayfile-actors
+        id: gateway
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/actors.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          sbom: true
+          provenance: mode=max
+          tags: ghcr.io/${{ steps.meta.outputs.owner }}/relayfile-actors:fast-${{ needs.gate.outputs.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.gate.outputs.sha }}
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.description=relayfile gateway and session-broker for durable-actors
+      - name: Build and push relayfile-actors-workspace
+        id: workspace
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/actors-workspace.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          sbom: true
+          provenance: mode=max
+          tags: ghcr.io/${{ steps.meta.outputs.owner }}/relayfile-actors-workspace:fast-${{ needs.gate.outputs.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.gate.outputs.sha }}
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.description=relayfile Workspace actor and deployer for durable-actors
+      - name: Attest relayfile-actors
+        continue-on-error: ${{ github.event.repository.private }}
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/${{ steps.meta.outputs.owner }}/relayfile-actors
+          subject-digest: ${{ steps.gateway.outputs.digest }}
+          push-to-registry: true
+      - name: Attest relayfile-actors-workspace
+        continue-on-error: ${{ github.event.repository.private }}
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/${{ steps.meta.outputs.owner }}/relayfile-actors-workspace
+          subject-digest: ${{ steps.workspace.outputs.digest }}
+          push-to-registry: true
+      - name: Summary
+        env:
+          OWNER: ${{ steps.meta.outputs.owner }}
+          REF: ${{ inputs.ref }}
+          SHA: ${{ needs.gate.outputs.sha }}
+          REASON: ${{ inputs.reason }}
+          GATEWAY_DIGEST: ${{ steps.gateway.outputs.digest }}
+          WORKSPACE_DIGEST: ${{ steps.workspace.outputs.digest }}
+        run: |
+          {
+            echo "### relayfile fast path: actors images"
+            echo "- ref: \`$REF\` at \`$SHA\`"
+            echo "- reason: $REASON"
+            echo "- \`ghcr.io/${OWNER}/relayfile-actors@${GATEWAY_DIGEST}\` (tag \`fast-$SHA\`)"
+            echo "- \`ghcr.io/${OWNER}/relayfile-actors-workspace@${WORKSPACE_DIGEST}\` (tag \`fast-$SHA\`)"
+            echo "- platforms: linux/amd64, linux/arm64"
+          } >> "$GITHUB_STEP_SUMMARY"
