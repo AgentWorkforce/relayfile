@@ -7,7 +7,9 @@
 # - Actors images (relayfile-actors, relayfile-actors-workspace) are pushed to
 #   GHCR tagged fast-<sha> only. It never pushes a version tag or the sha-<short>
 #   tags that publish-actors-images.yml reserves for main and release tags;
-#   deployments pin the digest printed in the run summary.
+#   deployments pin the digest printed in the run summary. The images carry
+#   BuildKit provenance (mode=max), which records the commit actually built; no
+#   GitHub attestation is issued, because it would name the dispatch commit.
 # - npm: publish.yml uses trusted publishing (OIDC bound to that file), so the
 #   fast path does not publish. It packs all 16 @relayfile/* packages (with the
 #   mount and CLI platform binaries inside) and uploads the tarballs.
@@ -188,6 +190,14 @@ jobs:
           E2E_TELEMETRY_DISABLED: "1"
           RELAYFILE_CONFORMANCE_SEED: fast-${{ github.run_id }}-${{ github.run_attempt }}
         run: npm run test:conformance:local
+      - name: Upload conformance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-conformance-${{ needs.gate.outputs.sha }}-${{ github.run_attempt }}
+          path: artifacts/conformance/
+          if-no-files-found: warn
+          retention-days: 14
 
   release-tooling:
     name: Release Tooling & Contract
@@ -258,7 +268,7 @@ jobs:
 
   npm-pack:
     name: Pack npm packages and mount binaries
-    needs: [gate, go, sdk-typecheck, client-typecheck, e2e, backend-conformance, release-tooling]
+    needs: [gate, go, sdk-typecheck, client-typecheck, e2e, backend-conformance, release-tooling, python-sdk]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     steps:
@@ -361,31 +371,29 @@ jobs:
 
   images:
     name: Publish actors images
-    needs: [gate, go, sdk-typecheck, client-typecheck, e2e, backend-conformance, release-tooling]
+    needs: [gate, go, sdk-typecheck, client-typecheck, e2e, backend-conformance, release-tooling, python-sdk]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 60
     permissions:
       contents: read
       packages: write
-      id-token: write
-      attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.gate.outputs.sha }}
           persist-credentials: false
       - id: meta
         run: echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
       - name: Build and push relayfile-actors
         id: gateway
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: docker/actors.Dockerfile
@@ -401,7 +409,7 @@ jobs:
             org.opencontainers.image.description=relayfile gateway and session-broker for durable-actors
       - name: Build and push relayfile-actors-workspace
         id: workspace
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: docker/actors-workspace.Dockerfile
@@ -415,20 +423,6 @@ jobs:
             org.opencontainers.image.revision=${{ needs.gate.outputs.sha }}
             org.opencontainers.image.licenses=Apache-2.0
             org.opencontainers.image.description=relayfile Workspace actor and deployer for durable-actors
-      - name: Attest relayfile-actors
-        continue-on-error: ${{ github.event.repository.private }}
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-name: ghcr.io/${{ steps.meta.outputs.owner }}/relayfile-actors
-          subject-digest: ${{ steps.gateway.outputs.digest }}
-          push-to-registry: true
-      - name: Attest relayfile-actors-workspace
-        continue-on-error: ${{ github.event.repository.private }}
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-name: ghcr.io/${{ steps.meta.outputs.owner }}/relayfile-actors-workspace
-          subject-digest: ${{ steps.workspace.outputs.digest }}
-          push-to-registry: true
       - name: Summary
         env:
           OWNER: ${{ steps.meta.outputs.owner }}
