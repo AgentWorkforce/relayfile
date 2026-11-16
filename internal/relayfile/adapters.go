@@ -16,10 +16,13 @@ const (
 )
 
 type ApplyAction struct {
-	Type             ActionType
-	Path             string
-	Content          string
-	ContentType      string
+	Type        ActionType
+	Path        string
+	Content     string
+	ContentType string
+	// Encoding is "" (UTF-8 text) or "base64"; adapters that leave it empty
+	// keep the historical text behaviour.
+	Encoding         string
 	ProviderObjectID string
 	Semantics        FileSemantics
 }
