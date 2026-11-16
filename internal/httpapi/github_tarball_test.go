@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,8 +20,11 @@ import (
 )
 
 type tarballTestEntry struct {
-	path    string
-	content []byte
+	path     string
+	content  []byte
+	mode     int64
+	linkname string
+	typeflag byte
 }
 
 func buildTestGithubTarball(t *testing.T, entries []tarballTestEntry) []byte {
@@ -29,16 +33,27 @@ func buildTestGithubTarball(t *testing.T, entries []tarballTestEntry) []byte {
 	gzw := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gzw)
 	for _, entry := range entries {
+		typeflag := entry.typeflag
+		if typeflag == 0 {
+			typeflag = tar.TypeReg
+		}
+		mode := entry.mode
+		if mode == 0 {
+			mode = 0o644
+		}
 		if err := tw.WriteHeader(&tar.Header{
 			Name:     entry.path,
-			Mode:     0o644,
+			Mode:     mode,
 			Size:     int64(len(entry.content)),
-			Typeflag: tar.TypeReg,
+			Typeflag: typeflag,
+			Linkname: entry.linkname,
 		}); err != nil {
 			t.Fatalf("write tar header: %v", err)
 		}
-		if _, err := tw.Write(entry.content); err != nil {
-			t.Fatalf("write tar content: %v", err)
+		if typeflag == tar.TypeReg && len(entry.content) > 0 {
+			if _, err := tw.Write(entry.content); err != nil {
+				t.Fatalf("write tar content: %v", err)
+			}
 		}
 	}
 	if err := tw.Close(); err != nil {
@@ -711,6 +726,194 @@ func TestGithubTarballFetchDeduplicatesActiveJob(t *testing.T) {
 	job := pollGithubTarballJob(t, server, "ws_tarball_dedupe", "job-dedupe-a", token)
 	if job["status"] != "completed" {
 		t.Fatalf("expected completed job after release, got %+v", job)
+	}
+}
+
+func TestGithubTarballFetchCompleteProfilePreservesWorkingTreeMetadata(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", "ws_tarball_complete", "Worker1", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+
+	archive := buildTestGithubTarball(t, []tarballTestEntry{
+		{path: "octo-demo-abc123/.env.example", content: []byte("A=1\n"), mode: 0o644},
+		{path: "octo-demo-abc123/node_modules/kept.js", content: []byte("module.exports = 1\n"), mode: 0o644},
+		{path: "octo-demo-abc123/bin/run.sh", content: []byte("#!/bin/sh\n"), mode: 0o755},
+		{path: "octo-demo-abc123/link", typeflag: tar.TypeSymlink, linkname: "bin/run.sh", mode: 0o777},
+	})
+	tarballServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/gzip")
+		_, _ = w.Write(archive)
+	}))
+	t.Cleanup(tarballServer.Close)
+
+	startResp := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_tarball_complete/fs/import/github-tarball/fetch",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_tarball_complete",
+			"X-GitHub-Token":   "gh-token",
+		},
+		body: map[string]any{
+			"owner":         "octo",
+			"repo":          "demo",
+			"ref":           "main",
+			"headSha":       "abc123",
+			"jobId":         "job-complete-1",
+			"tarballUrl":    tarballServer.URL + "/repos/octo/demo/tarball/main",
+			"sourceProfile": "complete-v1",
+		},
+	})
+	if startResp.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 on complete fetch start, got %d (%s)", startResp.Code, startResp.Body.String())
+	}
+	job := pollGithubTarballJob(t, server, "ws_tarball_complete", "job-complete-1", token)
+	if job["status"] != "completed" {
+		t.Fatalf("expected completed job, got %+v", job)
+	}
+	if job["sourceProfile"] != "complete-v1" || int(job["filesExpected"].(float64)) != 4 || int(job["imported"].(float64)) != 4 {
+		t.Fatalf("unexpected complete-v1 accounting: %+v", job)
+	}
+	for _, path := range []string{
+		"/github/repos/octo/demo/contents/.env.example",
+		"/github/repos/octo/demo/contents/node_modules/kept.js",
+	} {
+		resp := doRequest(t, server, request{
+			method: http.MethodGet,
+			path:   "/v1/workspaces/ws_tarball_complete/fs/file?path=" + url.QueryEscape(path),
+			headers: map[string]string{
+				"Authorization":    "Bearer " + token,
+				"X-Correlation-Id": "corr_tarball_complete_read",
+			},
+		})
+		if resp.Code != http.StatusOK {
+			t.Fatalf("expected 200 reading %s, got %d (%s)", path, resp.Code, resp.Body.String())
+		}
+	}
+	linkResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_tarball_complete/fs/file?path=" + url.QueryEscape("/github/repos/octo/demo/contents/link"),
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_tarball_complete_link",
+		},
+	})
+	if linkResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 reading symlink, got %d (%s)", linkResp.Code, linkResp.Body.String())
+	}
+	var link relayfile.File
+	if err := json.NewDecoder(linkResp.Body).Decode(&link); err != nil {
+		t.Fatalf("decode symlink: %v", err)
+	}
+	if link.Type != "symlink" || link.Target != "bin/run.sh" || link.Mode != 0o777 {
+		t.Fatalf("unexpected symlink metadata: %+v", link)
+	}
+	runResp := doRequest(t, server, request{
+		method: http.MethodGet,
+		path:   "/v1/workspaces/ws_tarball_complete/fs/file?path=" + url.QueryEscape("/github/repos/octo/demo/contents/bin/run.sh"),
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_tarball_complete_mode",
+		},
+	})
+	if runResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 reading executable, got %d (%s)", runResp.Code, runResp.Body.String())
+	}
+	var executable relayfile.File
+	if err := json.NewDecoder(runResp.Body).Decode(&executable); err != nil {
+		t.Fatalf("decode executable: %v", err)
+	}
+	if executable.Mode != 0o755 {
+		t.Fatalf("expected executable mode 0755, got %#o", executable.Mode)
+	}
+}
+
+func TestGithubTarballFetchExpiresStaleActiveJob(t *testing.T) {
+	store := relayfile.NewStoreWithOptions(relayfile.StoreOptions{DisableWorkers: true})
+	t.Cleanup(store.Close)
+	server := NewServer(store)
+	token := mustTestJWT(t, "dev-secret", "ws_tarball_stale", "Worker1", []string{"fs:read", "fs:write"}, time.Now().Add(time.Hour))
+
+	release := make(chan struct{})
+	tarballServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		_, _ = w.Write(buildTestGithubTarball(t, []tarballTestEntry{{path: "octo-demo-abc123/a.txt", content: []byte("a")}}))
+	}))
+	t.Cleanup(tarballServer.Close)
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+
+	body := map[string]any{
+		"owner":         "octo",
+		"repo":          "demo",
+		"ref":           "main",
+		"headSha":       "abc123",
+		"jobId":         "job-stale-a",
+		"tarballUrl":    tarballServer.URL + "/tarball",
+		"sourceProfile": "complete-v1",
+	}
+	first := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_tarball_stale/fs/import/github-tarball/fetch",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_stale_a",
+			"X-GitHub-Token":   "gh-token",
+		},
+		body: body,
+	})
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 on first fetch start, got %d (%s)", first.Code, first.Body.String())
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		server.githubTarJobsMu.Lock()
+		job := server.githubTarJobs[githubTarballJobKey("ws_tarball_stale", "job-stale-a")]
+		status := ""
+		if job != nil {
+			status = job.Status
+		}
+		server.githubTarJobsMu.Unlock()
+		if status == "fetching" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("job-stale-a did not enter fetching, status=%q", status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	server.githubTarJobsMu.Lock()
+	if job := server.githubTarJobs[githubTarballJobKey("ws_tarball_stale", "job-stale-a")]; job != nil {
+		job.UpdatedAt = time.Now().UTC().Add(-githubTarballActiveJobTTL - time.Second).Format(time.RFC3339Nano)
+	}
+	server.githubTarJobsMu.Unlock()
+
+	body["jobId"] = "job-stale-b"
+	second := doRequest(t, server, request{
+		method: http.MethodPost,
+		path:   "/v1/workspaces/ws_tarball_stale/fs/import/github-tarball/fetch",
+		headers: map[string]string{
+			"Authorization":    "Bearer " + token,
+			"X-Correlation-Id": "corr_stale_b",
+			"X-GitHub-Token":   "gh-token",
+		},
+		body: body,
+	})
+	if second.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 on replacement fetch start, got %d (%s)", second.Code, second.Body.String())
+	}
+	var replacement map[string]any
+	if err := json.NewDecoder(second.Body).Decode(&replacement); err != nil {
+		t.Fatalf("decode replacement response: %v", err)
+	}
+	if replacement["jobId"] != "job-stale-b" {
+		t.Fatalf("expected stale active job to be replaced by job-stale-b, got %+v", replacement)
 	}
 }
 
