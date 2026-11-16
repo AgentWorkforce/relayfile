@@ -1,204 +1,34 @@
-<!-- prpm:snippet:start @agent-workforce/trail-snippet@1.1.2 -->
-# Trail
+# Working in relayfile
 
-Record your work as a trajectory for future agents and humans to follow.
-
-For this repository, use `npm run trail -- ...` for trajectory commands. The
-wrapper pins `TRAJECTORIES_PROJECT` to `AgentWorkforce/relayfile` so artifacts
-do not record local workstation paths.
-
-## Usage
-
-If `trail` is installed globally, run commands directly:
-```bash
-trail start "Task description"
+```sh
+go test ./...
+npm ci
+npm run typecheck
+npm run test
+npm run build
+scripts/check-contract-surface.sh
 ```
 
-If not globally installed, use npx to run from local installation:
-```bash
-npx trail start "Task description"
-```
+- `openapi/relayfile-v1.openapi.yaml` is authoritative; update it with HTTP changes and run `scripts/check-contract-surface.sh`.
+- Provider mutations emit filesystem events and refresh today and yesterday digests. Digest writes still emit events but cannot recursively regenerate digests.
+- Terminal provider state is a readable record; delete it only for an actual upstream delete. Cover events and resulting digest artifacts.
+- Read scoped SDK guides when touching exports or parity, and `.claude/rules/go-httpapi-tests.md` for HTTP server proof.
 
-## When Starting Work
+## Agency and guidance
 
-Start a trajectory when beginning a task:
+- Act autonomously on routine assigned work; ask forgiveness rather than permission. Preserve explicit production, release and credential gates.
+- For guidance, ask the engineering leads, the agent that spawned you, or the layered owner on Agent Relay.
+- Only a truly pressing or blocking question goes to `khaliq-gant` or `will-washburn` (CODEOWNERS) on Agent Relay.
 
-```bash
-trail start "Implement user authentication"
-```
+## Cross-repo context
 
-With external task reference:
-```bash
-trail start "Fix login bug" --task "ENG-123"
-```
+- Before and during changes, understand how this repo fits the wider system; consult its repo map and related-repo docs where available.
+- Check relevant agents’ summaries on Agent Relay and proactively contact owning agents about dependencies, adjacent changes and work in flight.
 
-## Recording Decisions
+## Pull requests
 
-Record key decisions as you work:
-
-```bash
-trail decision "Chose JWT over sessions" \
-  --reasoning "Stateless scaling requirements"
-```
-
-For minor decisions, reasoning is optional:
-```bash
-trail decision "Used existing auth middleware"
-```
-
-**Record decisions when you:**
-- Choose between alternatives
-- Make architectural trade-offs
-- Decide on an approach after investigation
-
-## Recording Reflections
-
-Periodically step back and synthesize progress:
-
-```bash
-trail reflect "Workers aligned on auth approach, API layer progressing well" \
-  --confidence 0.8
-```
-
-With focal points and adjustments:
-```bash
-trail reflect "Frontend and backend duplicating validation logic" \
-  --focal-points "duplication,ownership" \
-  --adjustments "Reassigning validation to backend team" \
-  --confidence 0.7
-```
-
-**Record reflections when you:**
-- Have received several updates and need to synthesize the big picture
-- Notice workers or tasks diverging from the plan
-- Want to course-correct before continuing
-- Are coordinating multiple agents and need to assess overall progress
-
-Reflections differ from decisions: decisions record a specific choice,
-reflections record a higher-level synthesis of what's happening and whether
-the current approach is working.
-
-## Completing Work
-
-When done, complete with a retrospective:
-
-```bash
-trail complete --summary "Added JWT auth with refresh tokens" --confidence 0.85
-```
-
-After completing work, compact the finished trajectory or merged PR into a
-durable summary. When the compacted summary is sufficient, discard the raw
-source trajectories so `.trajectories/index.json` and list output stay focused:
-
-```bash
-trail compact --discard-sources
-# or after a PR merge:
-trail compact --pr 42 --discard-sources
-```
-
-`--discard-sources` removes the source trajectory JSON/Markdown/trace files and
-updates the index. Use it after confirming the compacted artifact is the record
-you want to keep.
-
-**Confidence levels:**
-- 0.9+ : High confidence, well-tested
-- 0.7-0.9 : Good confidence, standard implementation
-- 0.5-0.7 : Some uncertainty, edge cases possible
-- <0.5 : Significant uncertainty, needs review
-
-## Abandoning Work
-
-If you need to stop without completing:
-
-```bash
-trail abandon --reason "Blocked by missing API credentials"
-```
-
-## Checking Status
-
-View current trajectory:
-```bash
-trail status
-```
-
-## Listing and Viewing Trajectories
-
-List all trajectories:
-```bash
-trail list
-```
-
-View a specific trajectory:
-```bash
-trail show <trajectory-id>
-```
-
-Export a trajectory (markdown, json, timeline, html):
-```bash
-trail export <trajectory-id> --format markdown
-```
-
-## Compacting Trajectories
-
-After a PR merge, compact related trajectories into a single summary and prune
-raw source trajectories when the summary should replace them:
-
-```bash
-trail compact --pr 42 --discard-sources
-```
-
-Compact by branch (finds trajectories with commits not in the specified base branch):
-```bash
-trail compact --branch main --discard-sources
-```
-
-Compact by specific commits:
-```bash
-trail compact --commits abc123,def456 --discard-sources
-```
-
-Compaction consolidates decisions and creates a grouped summary. Adding
-`--discard-sources` makes the compacted artifact the durable record by removing
-the raw trajectories and their index entries.
-
-## Why Trail?
-
-Your trajectory helps others understand:
-- **What** you built (commits show this)
-- **Why** you built it this way (trajectory shows this)
-- **What alternatives** you considered
-- **What challenges** you faced
-
-Future agents can query past trajectories to learn from your decisions.
-<!-- prpm:snippet:end @agent-workforce/trail-snippet@1.1.2 -->
-
-# OpenAPI Spec
-
-`openapi/relayfile-v1.openapi.yaml` is the authoritative HTTP contract for this service.
-
-Keep it in sync with `internal/httpapi/server.go` at all times:
-
-- Adding a handler → add the path entry to the spec.
-- Adding a query parameter → add it to the endpoint or to `components/parameters`.
-- Adding a request/response field → update `components/schemas`.
-- Adding a new status code → add it to the endpoint's `responses` map.
-
-After server changes, run `scripts/check-contract-surface.sh` to check for drift.
-
-# Digest Runtime Contract
-
-Relayfile runtime changes that write provider records must keep
-`/digests/today.md` and `/digests/yesterday.md` current.
-
-- Any new ingest, sync, bulk-write, or provider mutation path must emit
-  filesystem events and trigger digest regeneration for non-digest paths.
-- Digest regeneration must not recurse on `/digests/*` writes, but digest file
-  updates must still emit normal file events so mounted workspaces receive the
-  changed digest files.
-- Preserve terminal provider state as data. Do not represent `closed`,
-  `merged`, `archived`, `completed`, `canceled`, or `resolved` as a file delete
-  unless the upstream object was actually deleted.
-- Add tests for both the event path and the digest artifact path when changing
-  ingest behavior.
-
-Full rule: `.claude/rules/relayfile-integration-digests.md`.
+- Open PRs ready for review, never as drafts. If merging requires Khaliq’s OK, use `merge-train:hold`.
+- Immediately subscribe to PR feedback through Agent Relay using [this skill](https://github.com/AgentWorkforce/skills/blob/main/skills/subscribing-relay-webhooks-and-writebacks/SKILL.md), and verify the subscription.
+- Evaluate every finding. Address applicable feedback and explain declined changes; a PR with unaddressed feedback or conflicts is not ready.
+- When ready, loudly alert the CODEOWNERS and the agent that spawned you on Agent Relay.
+- Keep related older PRs moving by contacting their author agent; if unavailable, escalate to the CODEOWNERS or layered owner.
