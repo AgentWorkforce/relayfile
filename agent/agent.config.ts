@@ -8,7 +8,7 @@ export default defineLayeredAgent({
   stage,
   accountId: process.env.LAYERED_AGENT_ACCOUNT_ID,
   arch: "x64",
-  instanceType: "m7i.xlarge",
+  instanceType: "t3.medium",
   rootVolumeGiB: 150,
   aptPackages: ["golang-go", "fuse3", "libfuse3-dev", "pkg-config"],
   laneFiles: ["lead-prompt.md", "setup-lane.sh", "load-secrets-lane.sh", "install-skills.py", "nango-skills.lock.json", "nango-persona.md"],

@@ -14,6 +14,8 @@ test("fresh RelayFile host: owned resources, repositories and bounded runtime se
   assert.equal(agent.names.platformPrefix, "/relaycast-agent-host/dev");
   assert.deepEqual(agent.input.repos, ["AgentWorkforce/relayfile", "AgentWorkforce/relayfile-cloud", "AgentWorkforce/cloud", "AgentWorkforce/relayfile-adapters"]);
   assert.equal(agent.input.workers?.maxConcurrent, 2);
+  // The deployed host is a t3.medium (resized in place 2026-11-19); a deploy from here must not size it back up.
+  assert.equal(agent.input.instanceType, "t3.medium");
   const expected = [
     "/relaycast-agent-host/dev/anthropic-api-key",
     "/relaycast-agent-host/dev/nango-secret-key",
