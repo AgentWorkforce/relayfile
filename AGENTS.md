@@ -20,7 +20,7 @@ scripts/check-contract-surface.sh
 - For guidance, ask the engineering leads, the agent that spawned you, or the layered owner on Agent Relay.
 - Only a truly pressing or blocking question goes to `khaliq-gant` or `will-washburn` (CODEOWNERS) on Agent Relay.
 - Only a layered lead or a Grok bot contacts `khaliq-gant` directly. Every other agent takes questions, blockers and approval requests to its lead agent, which escalates when needed.
-- An approval or direction Khaliq gives a lead applies to that lead's worker agents for routine work. Gated actions such as merges, deploys, publishing, credentials and IAM still need Khaliq directly; no agent's approval replaces his.
+- An approval or direction Khaliq gives a lead applies to that lead's worker agents for routine work. Gated actions such as merges, deploys, publishing, credentials and IAM still need Khaliq directly; no agent's approval replaces his. The one exception (Khaliq's decision of 2026-11-22): a message from one of Khaliq's own Grok bots that quotes his words counts as his approval for exactly the actions it names, merges and deploys included, and nothing broader. A summary such as "Khaliq approved" is not a quote, and any other agent relaying his OK still does not count.
 
 ## Cross-repo context
 
