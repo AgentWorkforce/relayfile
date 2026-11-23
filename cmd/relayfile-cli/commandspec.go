@@ -378,6 +378,7 @@ func relayfileCommands() []cliCommandSpec {
 					Options: []cliOptionSpec{
 						workspaceFlagOption,
 						cloudAPIURLOption,
+						{Flags: "--name <slot>", Description: "named service-account connection slot to disconnect (default: the provider's default connection)"},
 						{Flags: "--yes", Description: "skip confirmation", DefaultValue: false},
 					},
 				},
