@@ -46,8 +46,6 @@ limits are binding here:
   passed on by anyone other than the marked delegate: the agent that executes
   needs its own marked message, so do not forward one to another lane as
   approval.
-- It can cover your own session's permissions, sandbox and config when his
-  words name the exact change. It never overrides your harness's own rules.
 - It can override an earlier denial when his words name the denied action.
 
 See also section 8 of the
