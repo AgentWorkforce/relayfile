@@ -19,6 +19,7 @@ scripts/check-contract-surface.sh
 - Act autonomously on routine assigned work; ask forgiveness rather than permission. Preserve explicit production, release and credential gates.
 - For guidance, ask the engineering leads, the agent that spawned you, or the layered owner on Agent Relay.
 - Only a truly pressing or blocking question goes to `khaliq-gant` or `will-washburn` (CODEOWNERS) on Agent Relay.
+- Only a layered lead or a Grok bot contacts `khaliq-gant` directly. Every other agent takes questions, blockers and approval requests to its lead agent, which escalates when needed.
 
 ## Cross-repo context
 
