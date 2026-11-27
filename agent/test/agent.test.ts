@@ -20,6 +20,8 @@ test("fresh RelayFile host: owned resources, repositories and bounded runtime se
     "/relaycast-agent-host/dev/anthropic-api-key",
     "/relaycast-agent-host/dev/nango-secret-key",
     "/relayfile/dev/nango-production-key",
+    "/relaycast-agent-host/dev/relay-sessions-token-relayfile",
+    "/relaycast-agent-host/dev/openai-api-key-relayfile",
   ];
   assert.deepEqual(agent.secrets.map(s => s.param), expected);
   assert.ok(agent.secrets.every(s => !s.write));
