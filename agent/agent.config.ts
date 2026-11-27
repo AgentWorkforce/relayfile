@@ -14,7 +14,7 @@ export default defineLayeredAgent({
   rootVolumeGiB: 150,
   aptPackages: ["golang-go", "fuse3", "libfuse3-dev", "pkg-config"],
   laneFiles: ["lead-prompt.md", "setup-lane.sh", "load-secrets-lane.sh", "install-skills.py", "nango-skills.lock.json", "nango-persona.md"],
-  repos: ["AgentWorkforce/relayfile", "AgentWorkforce/relayfile-cloud", "AgentWorkforce/cloud", "AgentWorkforce/relayfile-adapters"],
+  repos: ["AgentWorkforce/relayfile", "AgentWorkforce/relayfile-cloud", "AgentWorkforce/cloud", "AgentWorkforce/relayfile-adapters", "AgentWorkforce/relayfile-control"],
   relayDescription: "RelayFile and RelayFile Cloud layered lead",
   names: { platformPrefix: `/relaycast-agent-host/${stage}` },
   workers: { maxConcurrent: 2, harness: "codex", model: "gpt-6.2-astra" },

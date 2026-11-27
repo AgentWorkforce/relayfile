@@ -12,7 +12,7 @@ const read = fileReader(fileURLToPath(new URL("..", import.meta.url)));
 test("fresh RelayFile host: owned resources, repositories and bounded runtime secrets", () => {
   assert.equal(agent.names.computeStack, "layered-agent-relayfile-dev");
   assert.equal(agent.names.platformPrefix, "/relaycast-agent-host/dev");
-  assert.deepEqual(agent.input.repos, ["AgentWorkforce/relayfile", "AgentWorkforce/relayfile-cloud", "AgentWorkforce/cloud", "AgentWorkforce/relayfile-adapters"]);
+  assert.deepEqual(agent.input.repos, ["AgentWorkforce/relayfile", "AgentWorkforce/relayfile-cloud", "AgentWorkforce/cloud", "AgentWorkforce/relayfile-adapters", "AgentWorkforce/relayfile-control"]);
   assert.equal(agent.input.workers?.maxConcurrent, 2);
   // The deployed host is a t3.medium (resized in place 2026-11-19); a deploy from here must not size it back up.
   assert.equal(agent.input.instanceType, "t3.medium");
